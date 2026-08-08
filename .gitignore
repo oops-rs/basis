@@ -1,0 +1,6 @@
+/target
+Cargo.lock
+.mcp.json
+.claude/
+.codex/
+.opencode/

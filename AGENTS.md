@@ -1,0 +1,45 @@
+# AGENTS
+
+lan follows the same conventions as [mentra](https://github.com/oops-rs/mentra). The sections
+below are the operative rules; when in doubt, mentra's AGENTS.md is the reference.
+
+## Philosophy: First Principles
+
+Agents must reason from first principles. Do not rely on conventions, copied patterns, or
+assumptions without verification. Identify the fundamental facts, constraints, and invariants;
+decompose problems to irreducible components; derive solutions logically from those facts.
+Prefer the simplest design that satisfies all constraints, and explicitly verify assumptions
+using available evidence. Solutions should be the result of facts → constraints → reasoning →
+implementation.
+
+## Project Rules
+
+- The design doc at `docs/design.md` is the source of truth for scope and layering. The core
+  principle: **the core has no opinions** — no task-specific types, pipelines, or vocabulary.
+- **mentra/lan split**: capabilities generic enough for any harness (session branching,
+  compaction lifecycle, hook points, MCP client) belong in mentra, not here. lan keeps
+  conventions and protocol: context discovery, ACP mapping, scheduling, packaging. When lan
+  hits a mentra gap, file a mentra issue even if fixing it immediately.
+
+## Workflow Discipline
+
+- Commit each completed step before starting the next step. Do not batch multiple distinct
+  steps into one uncommitted working state.
+
+## Commit Style
+
+- Use Conventional Commits: `<type>(<scope>): <summary>`.
+- Types: `feat`, `fix`, `docs`, `refactor`, `chore`, `test`.
+- Prefer narrow, concrete scopes matching the actual files or feature area. Avoid generic
+  scopes like `core` when they do not name a real, specific area of this repository.
+- Write summaries in the imperative mood; describe the change, not the activity.
+
+## Rust Programming
+
+- Prefer `foo.rs` plus `foo/` over `foo/mod.rs`.
+- Prefer current edition idioms (edition 2024, MSRV 1.85).
+- Run `cargo fmt` after Rust edits.
+- Use `cargo check` for fast feedback, `cargo test` for verification, and
+  `cargo clippy --all-targets --all-features -- -D warnings` for lint-clean changes.
+- Keep modules focused; split large files by responsibility.
+- Use the type system to model domain constraints instead of comments or unchecked conventions.

@@ -1,0 +1,14 @@
+[workspace]
+members = ["lan"]
+resolver = "3"
+
+[workspace.package]
+edition = "2024"
+rust-version = "1.85"
+license = "MIT"
+repository = "https://github.com/oops-rs/lan"
+homepage = "https://github.com/oops-rs/lan"
+
+[workspace.dependencies]
+mentra = "0.11"
+mentra-provider = "0.4"

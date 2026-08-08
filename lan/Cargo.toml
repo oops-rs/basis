@@ -1,0 +1,19 @@
+[package]
+name = "lan"
+version = "0.1.0"
+description = "A full-functional, embeddable agent harness built on Mentra. Library first, binary second."
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+homepage.workspace = true
+keywords = ["agent", "llm", "acp", "harness", "mentra"]
+categories = ["development-tools"]
+
+[dependencies]
+mentra.workspace = true
+mentra-provider.workspace = true
+
+[[bin]]
+name = "lan"
+path = "src/main.rs"
