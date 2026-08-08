@@ -11,3 +11,10 @@
 //! The core has no opinions: task-specific behavior enters through data — the
 //! prompt, the workspace (AGENTS.md, skills, templates, `.mcp.json`), and
 //! config — never through code in this crate.
+
+pub mod context;
+
+pub use context::{
+    ContextConfig, ContextDocument, ContextError, ContextScope, DEFAULT_CONTEXT_FILE,
+    WorkspaceContext,
+};
