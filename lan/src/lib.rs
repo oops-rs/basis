@@ -13,8 +13,10 @@
 //! config — never through code in this crate.
 
 pub mod context;
+pub mod event;
 
 pub use context::{
     ContextConfig, ContextDocument, ContextError, ContextScope, DEFAULT_CONTEXT_FILE,
     WorkspaceContext,
 };
+pub use event::{EVENT_SCHEMA_VERSION, Event, EventLine, JsonlWriter, RunOutcome};
