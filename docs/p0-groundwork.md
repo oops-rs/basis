@@ -76,6 +76,43 @@ Rule (from AGENTS.md): generic-for-any-harness → mentra; conventions and proto
 4. `feat(runtime)`: tool profiles / runtime presets (zentox priority #1).
 5. `feat(test)`: assembly-level test harness in `test-utils` (zentox priority #2).
 
+### 4a. Re-verification against mentra 0.12 (2026-08-08, before filing)
+
+§3 and the list above were written against mentra **0.11**. Re-reading the public API at
+**0.12.0** before filing found two of the five already shipped and two narrower than
+recorded. Filed three issues, not five.
+
+| # | Verdict at 0.12 | Evidence | Issue |
+|---|---|---|---|
+| 1 Session branching | **Real, unchanged** — `session` exposes `Session`/`SessionId`/`SessionMetadata` and no fork, branch, or `parent_id` anywhere | — | [mentra#6](https://github.com/oops-rs/mentra/issues/6) |
+| 2 Compaction checkpoints | **Mostly shipped; narrowed to two properties** | see below | [mentra#7](https://github.com/oops-rs/mentra/issues/7) |
+| 3 Public skills API | **Partly shipped; narrowed** — `Runtime::register_skills_dir` is public (`runtime.rs:127`) | see below | [mentra#8](https://github.com/oops-rs/mentra/issues/8) |
+| 4 Tool profiles | **Closed** — `mentra::agent::ToolProfile` is public with `all`/`only`/`hide`/`allows`, is an `AgentConfig` field (`agent/config.rs:257`), enforced at `agent.rs:529`; `examples/cli_runtime.rs` uses it exactly as zentox asked. Also `FileToolProfile` + `RuntimeBuilder::with_file_tools` | — | none |
+| 5 Assembly test harness | **Closed** — `mentra::test::MockRuntime` behind the `test-utils` feature: scripted turns (`text`/`stream_text`/`tool_calls`/`failure`), `with_policy`, `with_store` | — | none |
+
+**#2, what already exists** (so lan does not re-file it): `CompactionOutcome` returns a
+*replacement* transcript with the tail materialized verbatim — that **is** the
+`retainedTail` checkpoint property, plus a pre-compaction `.jsonl` snapshot at
+`transcript_path` and a documented `details` preservation guarantee (mentra ADR-0001 §6).
+Cut-point safety is also handled: `required_tail_start_for_continuation`
+(`compaction.rs:609`) refuses to cut between an assistant tool call and its result. What
+remains is (a) a single over-budget turn is uncompactable — `preserve_from == 0` returns
+`Ok(None)`, so there is no split-turn path; (b) `extract_context`'s `files_touched` only
+scans `TranscriptKind::ToolExchange` items and `CompactionSummary` has no field to hold
+it (`transcript.rs:253`), so the list survives repeated compactions only as prose the
+model chose to keep.
+
+**#3, what remains:** `register_skill_loader` *replaces* rather than merges
+(`runtime/handle/tooling.rs:103`), so a second `register_skills_dir` silently discards
+the first root — lan needs workspace-over-global precedence; and loaded skills cannot be
+enumerated (`SkillLoader`/`SkillEntry` are `pub(crate)`), which lan needs to surface
+skills as ACP commands.
+
+**Consequence for lan:** P1 no longer needs to hand-roll tool profiles — use
+`agent::ToolProfile` directly — and lan's own assembly tests should build on
+`mentra::test::MockRuntime` rather than a bespoke harness. §5's "profiles can be
+hand-rolled then migrated" is obsolete.
+
 **lan builds (harness-specific):**
 1. AGENTS.md discovery: workspace + parent-dir walk + global; injection into system context.
 2. Prompt templates: markdown + args → ACP commands.
@@ -88,8 +125,11 @@ Rule (from AGENTS.md): generic-for-any-harness → mentra; conventions and proto
 
 ## 5. P1 implications
 
-- P1 (`lan run`) needs mentra gaps #3 (skills API) and benefits from #4 (profiles); neither
-  blocks a first cut — skills can wait, profiles can be hand-rolled then migrated.
+- P1 (`lan run`) wants mentra gap #3 (skills enumeration + multi-root, [mentra#8]) for
+  surfacing skills, but nothing blocks a first cut — skills can wait. Profiles are no
+  longer a gap: use `agent::ToolProfile` directly (see §4a).
+
+[mentra#8]: https://github.com/oops-rs/mentra/issues/8
 - The `SessionEvent` broadcast channel is the single spine: `run --json`, ACP, and any future
   UI all consume the same stream. Design the JSONL schema once, version it in the first line
   (pi's header-version lesson).
