@@ -1,6 +1,7 @@
 # lan
 
-> **lan** — **L**an **A**in't a **N**etwork. Named for Lan, Aeon of the Hunt.
+> **lan** — **L**ightweight **A**gent **N**ucleus.
+> A LAN connects machines; lan connects agents to your codebase.
 
 A full-functional, embeddable agent harness built on [Mentra](https://github.com/oops-rs/mentra).
 

@@ -1,6 +1,6 @@
 # lan — Design
 
-> rev 5 · 2026-08-08 · **lan** — **L**an **A**in't a **N**etwork (GNU-style), named for Lan, Aeon of the Hunt (Honkai: Star Rail)
+> rev 5 · 2026-08-08 · **lan** — **L**ightweight **A**gent **N**ucleus
 > Reference bar: [pi](https://github.com/earendil-works/pi) (earendil-works) — minimal core, complete harness.
 > General-purpose: no domain assumptions. Periodic bug-checking is one use case, never a design input.
 
@@ -174,4 +174,5 @@ periodic check — so no single use case bends the API toward itself.
 - **Compaction quality.** Mentra has the primitive; behavior under long sessions is unproven.
   pi's compaction doc is the reference to study in P0.
 - **Name collision.** `lan` collides with the networking acronym; searchability will be poor.
-  Accepted trade-off; `akivili` is the fallback if it ever grates.
+  Accepted trade-off — the expansion (Lightweight Agent Nucleus) leans into it rather than
+  fighting it.
