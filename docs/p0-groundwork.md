@@ -1,7 +1,7 @@
 # P0 Groundwork
 
-> 2026-08-08 · outputs of design.md §6 P0: zentox feedback distilled, pi prior art, and the
-> concrete mentra-vs-lan split. Supersedes the provisional table in design.md §1 where they
+> 2026-08-08 · outputs of ARCHITECTURE.md §6 P0: zentox feedback distilled, pi prior art, and the
+> concrete mentra-vs-lan split. Supersedes the provisional table in ARCHITECTURE.md §1 where they
 > disagree — this one is based on reading mentra's actual public API.
 
 ## 1. Requirements from zentox feedback (`mentra/docs/mentra-api-feedback.md`)
@@ -49,11 +49,11 @@ store, but adopt the **tree-of-entries model and checkpoint semantics** on top o
 
 ## 3. Mentra reality check (read 2026-08-08, v0.11)
 
-Mentra's public API already covers more than design.md §1 assumed:
+Mentra's public API already covers more than ARCHITECTURE.md §1 assumed:
 
 | Capability | Status in mentra | Note |
 |---|---|---|
-| MCP client + tool bridge | **exists**: `McpManager`, `McpServerConfig`, stdio client, `McpBridgedTool` | design.md said "build" — wrong; lan only wires `.mcp.json` discovery to it |
+| MCP client + tool bridge | **exists**: `McpManager`, `McpServerConfig`, stdio client, `McpBridgedTool` | ARCHITECTURE.md said "build" — wrong; lan only wires `.mcp.json` discovery to it |
 | Compaction engine | **exists**: `CompactionEngine` trait, `StandardCompactionEngine`, modes, diagnostics | gap vs pi: checkpoint semantics (`retainedTail`), split turns, cumulative file tracking — verify, then extend in mentra |
 | Skills loader | **exists but `pub(crate)`**: `runtime/skill.rs` (frontmatter, dedup, recursive discovery) | mentra gap: make public or expose via runtime builder config |
 | Permissions | **exists**: `PermissionRequest/Decision`, `RuleStore`, `RememberedRule`, `SessionPermissionHandle` | maps directly onto ACP `session/request_permission` |

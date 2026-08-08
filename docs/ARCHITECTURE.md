@@ -1,6 +1,9 @@
-# lan — Design
+# lan — Architecture
 
-> rev 5 · 2026-08-08 · **lan** — **L**ightweight **A**gent **N**ucleus
+> rev 6 · 2026-08-08 · **lan** — **L**ightweight **A**gent **N**ucleus
+> The *how*. For the *why* — problem, idea, bets — see [`PROPOSAL.md`](PROPOSAL.md);
+> locked decisions live in [`adr/`](adr/); deferred ideas in [`proposals/`](proposals/);
+> research grounding in [`p0-groundwork.md`](p0-groundwork.md).
 > Reference bar: [pi](https://github.com/earendil-works/pi) (earendil-works) — minimal core, complete harness.
 > General-purpose: no domain assumptions. Periodic bug-checking is one use case, never a design input.
 

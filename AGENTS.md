@@ -14,8 +14,14 @@ implementation.
 
 ## Project Rules
 
-- The design doc at `docs/design.md` is the source of truth for scope and layering. The core
-  principle: **the core has no opinions** — no task-specific types, pipelines, or vocabulary.
+- Documentation layout follows nous: `docs/PROPOSAL.md` is the why (bets with
+  reasons), `docs/ARCHITECTURE.md` is the how and the source of truth for scope and
+  layering, `docs/adr/` holds locked decisions (numbered, Context/Decision/
+  Consequences), `docs/proposals/` holds deferred ideas (numbered, with Status line,
+  trigger conditions, and the properties any implementation must preserve). New
+  significant decisions get an ADR; deferred ideas get a proposal, not a TODO.
+- The core principle: **the core has no opinions** — no task-specific types,
+  pipelines, or vocabulary (PROPOSAL.md Bet 4).
 - **mentra/lan split**: capabilities generic enough for any harness (session branching,
   compaction lifecycle, hook points, MCP client) belong in mentra, not here. lan keeps
   conventions and protocol: context discovery, ACP mapping, scheduling, packaging. When lan

@@ -22,7 +22,9 @@ lan watch "<prompt>" --every 30m      # recurring headless runs
 The core has no opinions: task-specific behavior enters through data — the prompt, the
 workspace (AGENTS.md, skills, prompt templates, `.mcp.json`), and config — never through code.
 
-Status: design phase. See [docs/design.md](docs/design.md).
+Status: design phase. Docs follow the nous layout: [docs/PROPOSAL.md](docs/PROPOSAL.md)
+(why) · [docs/ARCHITECTURE.md](docs/ARCHITECTURE.md) (how) · [docs/adr/](docs/adr/)
+(locked decisions) · [docs/proposals/](docs/proposals/) (deferred ideas).
 
 ## License
 
