@@ -14,6 +14,16 @@ categories = ["development-tools"]
 mentra.workspace = true
 mentra-provider.workspace = true
 
+clap.workspace = true
+serde.workspace = true
+serde_json.workspace = true
+thiserror.workspace = true
+tokio.workspace = true
+
+[dev-dependencies]
+mentra = { workspace = true, features = ["test-utils"] }
+tempfile.workspace = true
+
 [[bin]]
 name = "lan"
 path = "src/main.rs"
