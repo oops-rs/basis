@@ -1,6 +1,6 @@
 //! Rendering discovered context into a single system-prompt block.
 
-use super::{ContextDocument, ContextScope};
+use super::ContextDocument;
 
 /// Joins documents in the order given — weakest precedence first — labelling
 /// each with the path it came from so the model can attribute a rule, and so a
@@ -19,7 +19,7 @@ pub(super) fn render(documents: &[ContextDocument]) -> Option<String> {
             format!(
                 "<context path=\"{}\" scope=\"{}\">\n{}\n</context>",
                 document.path.display(),
-                scope_label(&document.scope),
+                document.scope.label(),
                 document.content.trim_end(),
             )
         })
@@ -32,19 +32,11 @@ pub(super) fn render(documents: &[ContextDocument]) -> Option<String> {
     ))
 }
 
-fn scope_label(scope: &ContextScope) -> String {
-    match scope {
-        ContextScope::Global => "global".to_string(),
-        ContextScope::Ancestor { depth } => format!("ancestor:{depth}"),
-        ContextScope::Workspace => "workspace".to_string(),
-    }
-}
-
 #[cfg(test)]
 mod tests {
     use std::path::PathBuf;
 
-    use super::*;
+    use super::{super::ContextScope, *};
 
     fn document(path: &str, scope: ContextScope, content: &str) -> ContextDocument {
         ContextDocument {

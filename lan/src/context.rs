@@ -33,6 +33,19 @@ pub enum ContextScope {
     Workspace,
 }
 
+impl ContextScope {
+    /// Stable wire label. Used both in the rendered system prompt and in the
+    /// event stream's header, so a client and the model name a scope the same
+    /// way.
+    pub fn label(&self) -> String {
+        match self {
+            Self::Global => "global".to_string(),
+            Self::Ancestor { depth } => format!("ancestor:{depth}"),
+            Self::Workspace => "workspace".to_string(),
+        }
+    }
+}
+
 /// One discovered context file, with the text as it was on disk.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct ContextDocument {
@@ -101,6 +114,7 @@ pub enum ContextError {
 /// The context files that apply to one workspace, ordered weakest-first.
 #[derive(Debug, Clone, PartialEq, Eq, Default)]
 pub struct WorkspaceContext {
+    root: Option<PathBuf>,
     documents: Vec<ContextDocument>,
 }
 
@@ -118,14 +132,27 @@ impl WorkspaceContext {
         workspace: impl AsRef<Path>,
         config: &ContextConfig,
     ) -> Result<Self, ContextError> {
-        let documents = discovery::discover(workspace.as_ref(), config)?;
-        Ok(Self { documents })
+        let (root, documents) = discovery::discover(workspace.as_ref(), config)?;
+        Ok(Self {
+            root: Some(root),
+            documents,
+        })
     }
 
     /// Builds a context from documents already in hand, for hosts that source
     /// them from somewhere other than the filesystem.
     pub fn from_documents(documents: Vec<ContextDocument>) -> Self {
-        Self { documents }
+        Self {
+            root: None,
+            documents,
+        }
+    }
+
+    /// The workspace root as lan resolved it — symlinks followed, so it names
+    /// the same directory the discovered paths are relative to. `None` when
+    /// the context did not come from a filesystem walk.
+    pub fn root(&self) -> Option<&Path> {
+        self.root.as_deref()
     }
 
     /// The discovered documents, weakest precedence first.

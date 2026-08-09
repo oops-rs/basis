@@ -11,10 +11,14 @@ use super::{ContextConfig, ContextDocument, ContextError, ContextScope};
 
 /// Finds every context file that applies to `workspace`, weakest precedence
 /// first: global, then ancestors outermost-inward, then the workspace root.
+///
+/// Returns the resolved workspace root alongside the documents, because
+/// resolution follows symlinks and a caller reporting what was loaded should
+/// report the root those paths actually sit under.
 pub(super) fn discover(
     workspace: &Path,
     config: &ContextConfig,
-) -> Result<Vec<ContextDocument>, ContextError> {
+) -> Result<(PathBuf, Vec<ContextDocument>), ContextError> {
     let workspace = validate_workspace(workspace)?;
 
     let mut seen = HashSet::new();
@@ -55,7 +59,7 @@ pub(super) fn discover(
         &mut documents,
     )?;
 
-    Ok(documents)
+    Ok((workspace, documents))
 }
 
 /// Rejects a workspace that is missing or is not a directory, and resolves it
