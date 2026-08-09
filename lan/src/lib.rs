@@ -16,6 +16,7 @@ pub mod context;
 pub mod event;
 pub mod provider;
 pub mod run;
+pub mod skills;
 
 pub use context::{
     ContextConfig, ContextDocument, ContextError, ContextScope, DEFAULT_CONTEXT_FILE,
@@ -26,3 +27,4 @@ pub use run::{
     CollectingSink, EventSink, FnSink, NullSink, PreparedRun, RunConfig, RunContext, RunError,
     RunReport, run,
 };
+pub use skills::{SkillsConfig, SkillsSource};

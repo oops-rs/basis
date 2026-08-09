@@ -29,6 +29,8 @@ pub struct RunContext {
     pub provider: String,
     pub model: String,
     pub context: WorkspaceContext,
+    /// The skills directory registered on the runtime, if any.
+    pub skills_dir: Option<PathBuf>,
 }
 
 /// A session and the prompt to send it. Nothing has been sent yet.
@@ -132,6 +134,7 @@ fn header_for(session_id: &str, run: &RunContext) -> Event {
                 scope: document.scope.label(),
             })
             .collect(),
+        skills_dir: run.skills_dir.clone(),
     }
 }
 

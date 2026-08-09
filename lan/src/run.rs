@@ -19,6 +19,7 @@ use std::path::{Path, PathBuf};
 use mentra::{
     BuiltinProvider, ModelSelector, ProviderId, Runtime, RuntimePolicy, Session,
     agent::{AgentConfig, WorkspaceConfig},
+    provider_core::{StaticCredentialSource, responses, responses::ResponsesProvider},
 };
 use thiserror::Error;
 
@@ -26,6 +27,7 @@ use crate::{
     context::{ContextConfig, ContextError, WorkspaceContext},
     event::RunOutcome,
     provider::{self, ProviderError},
+    skills::{self, SkillsConfig},
 };
 
 pub use prepared::{PreparedRun, RunContext};
@@ -43,8 +45,12 @@ pub struct RunConfig {
     pub prompt: String,
     /// `None` auto-detects from the environment.
     pub provider: Option<BuiltinProvider>,
+    /// An OpenAI-compatible endpoint to use instead of the provider's own
+    /// service. `None` falls back to `LAN_BASE_URL` / `OPENAI_BASE_URL`.
+    pub base_url: Option<String>,
     pub model: ModelSelector,
     pub context: ContextConfig,
+    pub skills: SkillsConfig,
     pub session_name: String,
 }
 
@@ -54,8 +60,10 @@ impl RunConfig {
             workspace: workspace.into(),
             prompt: prompt.into(),
             provider: None,
+            base_url: None,
             model: ModelSelector::NewestAvailable,
             context: ContextConfig::default(),
+            skills: SkillsConfig::default(),
             session_name: DEFAULT_SESSION_NAME.to_string(),
         }
     }
@@ -67,12 +75,25 @@ impl RunConfig {
         }
     }
 
+    /// Points the run at an OpenAI-compatible endpoint. A trailing `/v1` is
+    /// stripped during resolution — paste the URL a gateway publishes.
+    pub fn with_base_url(self, base_url: impl Into<String>) -> Self {
+        Self {
+            base_url: Some(base_url.into()),
+            ..self
+        }
+    }
+
     pub fn with_model(self, model: ModelSelector) -> Self {
         Self { model, ..self }
     }
 
     pub fn with_context(self, context: ContextConfig) -> Self {
         Self { context, ..self }
+    }
+
+    pub fn with_skills(self, skills: SkillsConfig) -> Self {
+        Self { skills, ..self }
     }
 
     pub fn with_session_name(self, session_name: impl Into<String>) -> Self {
@@ -120,6 +141,13 @@ pub enum RunError {
 
     #[error("event forwarding task failed: {0}")]
     Forwarder(#[from] tokio::task::JoinError),
+
+    /// Carried as text because `SkillLoadError` is `pub` inside a private
+    /// module, so `register_skills_dir`'s error type cannot be named by a
+    /// caller (oops-rs/mentra#8). Becomes a typed `#[from]` variant when that
+    /// lands.
+    #[error("failed to load skills from {path}: {message}")]
+    Skills { path: PathBuf, message: String },
 }
 
 /// Runs one prompt to completion, streaming events into `sink`.
@@ -140,18 +168,28 @@ pub async fn prepare(config: RunConfig) -> Result<PreparedRun, RunError> {
     }
 
     let context = WorkspaceContext::discover_with(&config.workspace, &config.context)?;
-    let choice = provider::resolve(config.provider)?;
+    let choice = provider::resolve(config.provider, config.base_url.as_deref())?;
 
-    let runtime = Runtime::builder()
-        .with_provider(choice.provider, choice.api_key)
+    let builder = Runtime::builder()
         // The in-process boundary. Per ADR-0004 this is hygiene, not the
         // security boundary — that is the kernel's job (Docker in P4).
-        .with_policy(RuntimePolicy::workspace_bounded(&config.workspace))
-        .build()?;
+        .with_policy(RuntimePolicy::workspace_bounded(&config.workspace));
+
+    let runtime = match &choice.base_url {
+        Some(base_url) => {
+            builder.with_registered_provider(compatible_provider(base_url, &choice.api_key))
+        }
+        None => builder.with_provider(choice.provider, choice.api_key.clone()),
+    }
+    .build()?;
 
     let model = runtime
         .resolve_model(choice.provider, config.model.clone())
         .await?;
+
+    // Skills must be registered on the runtime before the session spawns, so
+    // the agent's tool roster includes `load_skill`.
+    let skills_dir = register_skills(&runtime, &config)?;
 
     let session = runtime.create_session_with_config(
         config.session_name.clone(),
@@ -167,8 +205,41 @@ pub async fn prepare(config: RunConfig) -> Result<PreparedRun, RunError> {
             provider: ProviderId::from(choice.provider).to_string(),
             model: model.id,
             context,
+            skills_dir,
         },
     ))
+}
+
+/// Registers the most specific skills directory that exists.
+///
+/// Only one, because `register_skills_dir` replaces rather than merges
+/// (oops-rs/mentra#8). When several exist, the extras are reported rather than
+/// silently ignored — a user who put skills in two places should learn that
+/// only one is live.
+fn register_skills(runtime: &Runtime, config: &RunConfig) -> Result<Option<PathBuf>, RunError> {
+    let sources = skills::discover(&config.workspace, &config.skills);
+    let Some(active) = sources.first() else {
+        return Ok(None);
+    };
+
+    runtime
+        .register_skills_dir(&active.path)
+        .map_err(|error| RunError::Skills {
+            path: active.path.clone(),
+            message: error.to_string(),
+        })?;
+
+    for ignored in sources.iter().skip(1) {
+        eprintln!(
+            "lan: using skills from {} ({}); ignoring {} — one directory at a \
+             time until oops-rs/mentra#8 lands",
+            active.path.display(),
+            active.scope.label(),
+            ignored.path.display(),
+        );
+    }
+
+    Ok(Some(active.path.clone()))
 }
 
 /// Prepares a run against a session the caller already built, so a host with
@@ -194,8 +265,24 @@ pub fn prepare_with_session(
             provider: provider.into(),
             model: model.into(),
             context,
+            // The caller owns the runtime, so it owns skill registration too.
+            skills_dir: None,
         },
     ))
+}
+
+/// Builds a provider aimed at an OpenAI-compatible endpoint.
+///
+/// mentra's OpenAI preset is the right shape — the Responses wire format and
+/// bearer auth — so lan takes that definition and swaps only the base URL,
+/// rather than describing a provider from scratch and drifting from whatever
+/// mentra's preset learns next.
+fn compatible_provider(base_url: &str, api_key: &str) -> ResponsesProvider<StaticCredentialSource> {
+    let mut definition = responses::openai_definition();
+    definition.base_url = Some(base_url.to_string());
+    definition.descriptor.display_name = Some(format!("OpenAI-compatible ({base_url})"));
+
+    ResponsesProvider::new(definition, StaticCredentialSource::new(api_key))
 }
 
 /// The workspace as discovery resolved it, falling back to what was asked for.

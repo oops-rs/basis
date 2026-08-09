@@ -57,6 +57,13 @@ struct RunArgs {
     #[arg(long, value_name = "NAME")]
     provider: Option<String>,
 
+    /// An OpenAI-compatible endpoint, e.g. http://127.0.0.1:3455/v1. Paste the
+    /// URL as published; a trailing /v1 is handled. Falls back to
+    /// LAN_BASE_URL or OPENAI_BASE_URL; the key comes from LAN_API_KEY or
+    /// OPENAI_API_KEY.
+    #[arg(long, value_name = "URL")]
+    base_url: Option<String>,
+
     /// Model id. Defaults to the provider's newest available.
     #[arg(long, value_name = "ID")]
     model: Option<String>,
@@ -95,6 +102,9 @@ async fn execute_run(args: RunArgs) -> Result<ExitCode, String> {
 
     if let Some(name) = &args.provider {
         config = config.with_provider(provider::parse(name).map_err(|error| error.to_string())?);
+    }
+    if let Some(base_url) = args.base_url {
+        config = config.with_base_url(base_url);
     }
     if let Some(model) = args.model {
         config = config.with_model(ModelSelector::Id(model));

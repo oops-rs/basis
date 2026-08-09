@@ -137,6 +137,10 @@ pub enum Event {
         provider: String,
         /// Context files discovered for this run, weakest precedence first.
         context_files: Vec<ContextFile>,
+        /// The skills directory in effect, when one was found. Absent rather
+        /// than null so a stream without skills stays quiet about them.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        skills_dir: Option<PathBuf>,
     },
 
     UserMessage {
@@ -291,6 +295,7 @@ mod tests {
                     path: PathBuf::from("/repo/AGENTS.md"),
                     scope: "workspace".to_string(),
                 }],
+                skills_dir: None,
             },
         );
         let json = serde_json::to_value(&line).expect("serializes");
@@ -298,6 +303,30 @@ mod tests {
         assert_eq!(json["type"], "run_started");
         assert_eq!(json["schema"], EVENT_SCHEMA_VERSION);
         assert_eq!(json["context_files"][0]["scope"], "workspace");
+        assert!(
+            json.get("skills_dir").is_none(),
+            "a run without skills must not mention them"
+        );
+    }
+
+    #[test]
+    fn a_skills_directory_is_reported_when_there_is_one() {
+        let line = EventLine::new(
+            0,
+            Event::RunStarted {
+                schema: EVENT_SCHEMA_VERSION,
+                lan: "0.1.0".to_string(),
+                session_id: "s1".to_string(),
+                workspace: PathBuf::from("/repo"),
+                model: "gpt-5".to_string(),
+                provider: "openai".to_string(),
+                context_files: Vec::new(),
+                skills_dir: Some(PathBuf::from("/repo/.lan/skills")),
+            },
+        );
+        let json = serde_json::to_value(&line).expect("serializes");
+
+        assert_eq!(json["skills_dir"], "/repo/.lan/skills");
     }
 
     #[test]
