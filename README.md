@@ -32,6 +32,17 @@ lan run "summarize what changed in the last three commits"
 lan run -C ../other-repo --json "find the slowest test and explain why"
 ```
 
+By default the agent can read and write files inside the workspace but **cannot run
+commands** — a path check inside the process cannot confine a process once it starts, so
+that authority has to be granted deliberately:
+
+```sh
+lan run --allow-shell "run the test suite and summarize the failures"
+```
+
+On a bare host that grant is real and lan says so. The container below is where it is
+sound, and where it is on by default.
+
 Any OpenAI-compatible endpoint works too — a gateway, a proxy, or a local
 server. Paste the URL as published; the trailing `/v1` is handled:
 
@@ -71,14 +82,48 @@ they arrive (`cargo run -p lan --example embed -- "<prompt>"`).
   directory. The model loads one by name when it needs it, so only the descriptions cost
   context.
 - **Confinement** — the agent is scoped to the workspace; a write above it is refused.
-  Per [ADR-0004](docs/adr/0004-kernel-enforced-confinement.md) this is hygiene, not a
-  security boundary — that arrives with Docker in P4.
+  In-process this is hygiene, not a boundary
+  ([ADR-0004](docs/adr/0004-kernel-enforced-confinement.md)). The boundary is the
+  container's.
+
+## Container
+
+The image is where the workspace guarantee is real: a read-only root filesystem with the
+workspace as the only writable mount, enforced by the kernel rather than by lan. Commands
+are enabled there without a flag for exactly that reason
+([ADR-0006](docs/adr/0006-shell-requires-an-explicit-grant.md)).
+
+```sh
+docker build -t oops/lan:latest .
+
+docker run --rm \
+  --read-only --tmpfs /tmp \
+  --security-opt no-new-privileges \
+  -v "$PWD":/workspace:rw \
+  -v lan-state:/state \
+  -e ANTHROPIC_API_KEY \
+  oops/lan:latest run "run the tests and tell me what broke"
+```
+
+Inside it, a command that reaches past the workspace is refused by the kernel:
+
+```
+/bin/sh: 1: cannot create /etc/breach.txt: Read-only file system
+```
+
+`-v lan-state:/state` keeps session state across runs; without it `--rm` and `--read-only`
+leave the agent nowhere to write its store.
 
 ## Status
 
-**P1** — the crate and `lan run` work; ACP (P2), extension points (P3), and `watch` plus
-Docker (P4) are next. See [docs/ARCHITECTURE.md](docs/ARCHITECTURE.md) §6 for the phase
-plan.
+**P1 complete, plus the container from P4.** What works today: one prompt against a
+workspace, in prose or JSONL, in-process or as a subprocess, with AGENTS.md discovery,
+skills, command execution, and kernel-enforced confinement in the image.
+
+Not built yet, though this README's synopsis names them: the **ACP server** (the default
+`lan` with no subcommand — P2) and **`lan watch`** (P4). Runs are also single-turn today:
+there is no conversation or resume. MCP wiring, prompt templates, and subprocess hooks are
+P3. See [docs/ARCHITECTURE.md](docs/ARCHITECTURE.md) §6.
 
 Docs follow the nous layout: [docs/PROPOSAL.md](docs/PROPOSAL.md)
 (why) · [docs/ARCHITECTURE.md](docs/ARCHITECTURE.md) (how) · [docs/adr/](docs/adr/)

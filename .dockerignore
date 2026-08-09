@@ -1,0 +1,14 @@
+# Build artifacts dwarf the sources and are rebuilt inside the image anyway.
+/target
+
+# Nothing in the image needs history, and sending it slows every build.
+/.git
+
+# Local agent configuration, never part of a released image.
+.mcp.json
+.claude/
+.codex/
+.opencode/
+
+# Docs are for humans reading the repo, not for the runtime.
+/docs
