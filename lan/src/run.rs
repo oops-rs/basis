@@ -27,6 +27,7 @@ use crate::{
     context::{ContextConfig, ContextError, WorkspaceContext},
     event::RunOutcome,
     provider::{self, ProviderError},
+    shell::ShellAccess,
     skills::{self, SkillsConfig},
 };
 
@@ -51,6 +52,9 @@ pub struct RunConfig {
     pub model: ModelSelector,
     pub context: ContextConfig,
     pub skills: SkillsConfig,
+    /// Whether the agent may run commands. Denied unless granted; see
+    /// ADR-0006.
+    pub shell: ShellAccess,
     pub session_name: String,
 }
 
@@ -64,6 +68,10 @@ impl RunConfig {
             model: ModelSelector::NewestAvailable,
             context: ContextConfig::default(),
             skills: SkillsConfig::default(),
+            // Not read from the environment here: a library default must not
+            // depend on ambient state. The binary reads LAN_ALLOW_SHELL and
+            // calls `with_shell` explicitly.
+            shell: ShellAccess::Denied,
             session_name: DEFAULT_SESSION_NAME.to_string(),
         }
     }
@@ -94,6 +102,15 @@ impl RunConfig {
 
     pub fn with_skills(self, skills: SkillsConfig) -> Self {
         Self { skills, ..self }
+    }
+
+    /// Grants or denies command execution.
+    ///
+    /// Granting asserts that something outside this process confines the
+    /// workspace — a container, or a per-command sandbox. lan takes the
+    /// caller's word for it and never infers it (ADR-0006).
+    pub fn with_shell(self, shell: ShellAccess) -> Self {
+        Self { shell, ..self }
     }
 
     pub fn with_session_name(self, session_name: impl Into<String>) -> Self {
@@ -167,9 +184,14 @@ pub async fn prepare(config: RunConfig) -> Result<PreparedRun, RunError> {
     let choice = provider::resolve(config.provider, config.base_url.as_deref())?;
 
     let builder = Runtime::builder()
-        // The in-process boundary. Per ADR-0004 this is hygiene, not the
-        // security boundary — that is the kernel's job (Docker in P4).
-        .with_policy(RuntimePolicy::workspace_bounded(&config.workspace));
+        // Path roots are hygiene, not a boundary: per ADR-0004 that is the
+        // kernel's job. Commands are the case where the difference bites, so
+        // they stay off unless the caller has granted them (ADR-0006).
+        .with_policy(
+            RuntimePolicy::workspace_bounded(&config.workspace)
+                .allow_shell_commands(config.shell.is_granted())
+                .allow_background_commands(config.shell.is_granted()),
+        );
 
     let runtime = match &choice.base_url {
         Some(base_url) => {
@@ -343,6 +365,23 @@ mod tests {
                 .contains("house rules")
         );
         assert_eq!(agent.workspace.base_dir, PathBuf::from("/repo"));
+    }
+
+    #[test]
+    fn commands_are_denied_unless_granted() {
+        let config = RunConfig::new("/repo", "prompt");
+
+        assert_eq!(config.shell, ShellAccess::Denied);
+        assert!(!config.shell.is_granted());
+    }
+
+    #[test]
+    fn granting_shell_returns_a_new_config() {
+        let base = RunConfig::new("/repo", "prompt");
+        let granted = base.clone().with_shell(ShellAccess::Granted);
+
+        assert_eq!(base.shell, ShellAccess::Denied, "the original is untouched");
+        assert_eq!(granted.shell, ShellAccess::Granted);
     }
 
     #[test]

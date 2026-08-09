@@ -16,6 +16,7 @@ pub mod context;
 pub mod event;
 pub mod provider;
 pub mod run;
+pub mod shell;
 pub mod skills;
 
 pub use context::{
@@ -27,4 +28,5 @@ pub use run::{
     CollectingSink, EventSink, FnSink, NullSink, PreparedRun, RunConfig, RunContext, RunError,
     RunReport, run,
 };
+pub use shell::ShellAccess;
 pub use skills::{SkillsConfig, SkillsSource};

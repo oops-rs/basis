@@ -17,8 +17,9 @@ use std::{
 
 use clap::{Parser, Subcommand};
 use lan::{
-    Event, JsonlWriter, RunConfig, RunOutcome, RunReport, provider,
+    Event, JsonlWriter, RunConfig, RunOutcome, RunReport, ShellAccess, provider,
     run::{EventSink, FnSink},
+    shell,
 };
 use mentra::ModelSelector;
 
@@ -67,6 +68,16 @@ struct RunArgs {
     /// Model id. Defaults to the provider's newest available.
     #[arg(long, value_name = "ID")]
     model: Option<String>,
+
+    /// Let the agent run commands (shell, background tasks).
+    ///
+    /// Denied by default: an in-process path check cannot confine a process
+    /// once it is running, so this grants real authority over anything your
+    /// user account can reach. Sound when something outside the process is
+    /// confining the workspace — the container image sets it for that reason.
+    /// Also settable with LAN_ALLOW_SHELL=1.
+    #[arg(long)]
+    allow_shell: bool,
 }
 
 #[tokio::main]
@@ -108,6 +119,18 @@ async fn execute_run(args: RunArgs) -> Result<ExitCode, String> {
     }
     if let Some(model) = args.model {
         config = config.with_model(ModelSelector::Id(model));
+    }
+
+    // The flag grants; the variable grants; neither can revoke the other.
+    let shell = if args.allow_shell {
+        ShellAccess::Granted
+    } else {
+        ShellAccess::from_env()
+    };
+    config = config.with_shell(shell);
+
+    if let Some(warning) = shell::unconfined_warning(shell) {
+        eprintln!("lan: warning: {warning}");
     }
 
     if args.json {
