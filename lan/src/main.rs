@@ -163,10 +163,9 @@ fn prose_sink() -> impl EventSink {
                 summary,
                 is_error,
             } if is_error => {
-                // mentra leaves `tool_name` empty on completion
-                // (oops-rs/mentra#9); fall back to the id rather than
-                // printing a blank. Nothing to remove when that lands — the
-                // name simply starts arriving.
+                // The name normally arrives; it is empty only for a result
+                // whose call this session never saw. Fall back to the id
+                // rather than printing a blank label.
                 let label = if tool_name.is_empty() {
                     &tool_call_id
                 } else {

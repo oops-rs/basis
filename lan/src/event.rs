@@ -113,6 +113,14 @@ pub enum RunOutcome {
     Error { message: String },
 }
 
+/// A skill the run can load by name. Bodies stay out of the stream — they are
+/// what `load_skill` is for, and keeping them out is what makes skills cheap.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct SkillSummary {
+    pub name: String,
+    pub description: String,
+}
+
 /// A context file that was in effect for the run.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct ContextFile {
@@ -137,10 +145,14 @@ pub enum Event {
         provider: String,
         /// Context files discovered for this run, weakest precedence first.
         context_files: Vec<ContextFile>,
-        /// The skills directory in effect, when one was found. Absent rather
-        /// than null so a stream without skills stays quiet about them.
-        #[serde(default, skip_serializing_if = "Option::is_none")]
-        skills_dir: Option<PathBuf>,
+        /// Skills directories in effect, most specific first. Omitted rather
+        /// than empty so a stream without skills stays quiet about them.
+        #[serde(default, skip_serializing_if = "Vec::is_empty")]
+        skills_dirs: Vec<PathBuf>,
+        /// The skills those directories produced, after layering — what the
+        /// model can actually load by name.
+        #[serde(default, skip_serializing_if = "Vec::is_empty")]
+        skills: Vec<SkillSummary>,
     },
 
     UserMessage {
@@ -245,6 +257,15 @@ pub enum Event {
         recoverable: bool,
     },
 
+    /// The session returned to an earlier entry; later turns continue from
+    /// there along a different path.
+    Branched {
+        entry_id: String,
+        /// How many entries left the active path. They stay in the transcript
+        /// and remain reachable.
+        abandoned_entries: usize,
+    },
+
     /// Always the last line.
     RunFinished {
         #[serde(flatten)]
@@ -295,7 +316,8 @@ mod tests {
                     path: PathBuf::from("/repo/AGENTS.md"),
                     scope: "workspace".to_string(),
                 }],
-                skills_dir: None,
+                skills_dirs: Vec::new(),
+                skills: Vec::new(),
             },
         );
         let json = serde_json::to_value(&line).expect("serializes");
@@ -304,13 +326,13 @@ mod tests {
         assert_eq!(json["schema"], EVENT_SCHEMA_VERSION);
         assert_eq!(json["context_files"][0]["scope"], "workspace");
         assert!(
-            json.get("skills_dir").is_none(),
+            json.get("skills_dirs").is_none() && json.get("skills").is_none(),
             "a run without skills must not mention them"
         );
     }
 
     #[test]
-    fn a_skills_directory_is_reported_when_there_is_one() {
+    fn skills_are_reported_when_there_are_any() {
         let line = EventLine::new(
             0,
             Event::RunStarted {
@@ -321,12 +343,24 @@ mod tests {
                 model: "gpt-5".to_string(),
                 provider: "openai".to_string(),
                 context_files: Vec::new(),
-                skills_dir: Some(PathBuf::from("/repo/.lan/skills")),
+                skills_dirs: vec![PathBuf::from("/repo/.lan/skills")],
+                skills: vec![SkillSummary {
+                    name: "review".to_string(),
+                    description: "house review style".to_string(),
+                }],
             },
         );
         let json = serde_json::to_value(&line).expect("serializes");
 
-        assert_eq!(json["skills_dir"], "/repo/.lan/skills");
+        assert_eq!(json["skills_dirs"][0], "/repo/.lan/skills");
+        assert_eq!(json["skills"][0]["name"], "review");
+        assert!(
+            !json["skills"][0]
+                .as_object()
+                .expect("an object")
+                .contains_key("path"),
+            "the stream carries what the model can load, not where it lives on this machine"
+        );
     }
 
     #[test]

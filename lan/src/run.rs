@@ -30,7 +30,7 @@ use crate::{
     skills::{self, SkillsConfig},
 };
 
-pub use prepared::{PreparedRun, RunContext};
+pub use prepared::{LoadedSkill, PreparedRun, RunContext};
 pub use sink::{CollectingSink, EventSink, FnSink, NullSink};
 
 /// Default name for the session a run creates. Sessions are named so a client
@@ -142,12 +142,8 @@ pub enum RunError {
     #[error("event forwarding task failed: {0}")]
     Forwarder(#[from] tokio::task::JoinError),
 
-    /// Carried as text because `SkillLoadError` is `pub` inside a private
-    /// module, so `register_skills_dir`'s error type cannot be named by a
-    /// caller (oops-rs/mentra#8). Becomes a typed `#[from]` variant when that
-    /// lands.
-    #[error("failed to load skills from {path}: {message}")]
-    Skills { path: PathBuf, message: String },
+    #[error("failed to load skills: {0}")]
+    Skills(#[from] mentra::SkillLoadError),
 }
 
 /// Runs one prompt to completion, streaming events into `sink`.
@@ -189,7 +185,8 @@ pub async fn prepare(config: RunConfig) -> Result<PreparedRun, RunError> {
 
     // Skills must be registered on the runtime before the session spawns, so
     // the agent's tool roster includes `load_skill`.
-    let skills_dir = register_skills(&runtime, &config)?;
+    let skills_dirs = register_skills(&runtime, &config)?;
+    let skills = runtime.skills();
 
     let session = runtime.create_session_with_config(
         config.session_name.clone(),
@@ -205,41 +202,17 @@ pub async fn prepare(config: RunConfig) -> Result<PreparedRun, RunError> {
             provider: ProviderId::from(choice.provider).to_string(),
             model: model.id,
             context,
-            skills_dir,
+            skills_dirs,
+            skills: skills
+                .into_iter()
+                .map(|skill| LoadedSkill {
+                    name: skill.name,
+                    description: skill.description,
+                    path: skill.path,
+                })
+                .collect(),
         },
     ))
-}
-
-/// Registers the most specific skills directory that exists.
-///
-/// Only one, because `register_skills_dir` replaces rather than merges
-/// (oops-rs/mentra#8). When several exist, the extras are reported rather than
-/// silently ignored — a user who put skills in two places should learn that
-/// only one is live.
-fn register_skills(runtime: &Runtime, config: &RunConfig) -> Result<Option<PathBuf>, RunError> {
-    let sources = skills::discover(&config.workspace, &config.skills);
-    let Some(active) = sources.first() else {
-        return Ok(None);
-    };
-
-    runtime
-        .register_skills_dir(&active.path)
-        .map_err(|error| RunError::Skills {
-            path: active.path.clone(),
-            message: error.to_string(),
-        })?;
-
-    for ignored in sources.iter().skip(1) {
-        eprintln!(
-            "lan: using skills from {} ({}); ignoring {} — one directory at a \
-             time until oops-rs/mentra#8 lands",
-            active.path.display(),
-            active.scope.label(),
-            ignored.path.display(),
-        );
-    }
-
-    Ok(Some(active.path.clone()))
 }
 
 /// Prepares a run against a session the caller already built, so a host with
@@ -266,9 +239,23 @@ pub fn prepare_with_session(
             model: model.into(),
             context,
             // The caller owns the runtime, so it owns skill registration too.
-            skills_dir: None,
+            skills_dirs: Vec::new(),
+            skills: Vec::new(),
         },
     ))
+}
+
+/// Registers every skills directory that exists, most specific first.
+///
+/// Roots layer rather than replace, so a workspace skill shadows a personal
+/// one of the same name and everything else from the global root still loads.
+fn register_skills(runtime: &Runtime, config: &RunConfig) -> Result<Vec<PathBuf>, RunError> {
+    let sources = skills::discover(&config.workspace, &config.skills);
+    let paths: Vec<PathBuf> = sources.iter().map(|source| source.path.clone()).collect();
+
+    runtime.register_skills_dirs(&paths)?;
+
+    Ok(paths)
 }
 
 /// Builds a provider aimed at an OpenAI-compatible endpoint.

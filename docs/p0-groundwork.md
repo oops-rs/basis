@@ -113,6 +113,25 @@ skills as ACP commands.
 `mentra::test::MockRuntime` rather than a bespoke harness. §5's "profiles can be
 hand-rolled then migrated" is obsolete.
 
+### 4b. All four issues fixed and closed (2026-08-09, mentra 0.13.0)
+
+Fixed upstream rather than worked around, per ADR-0005. lan now depends on
+mentra 0.13 and carries no skills workaround.
+
+| Issue | Landed as | What lan gained |
+|---|---|---|
+| [#9](https://github.com/oops-rs/mentra/issues/9) | `ToolNameIndex` correlates a call from queue/start to result | `tool_completed` names its tool; lan's test asserts it |
+| [#8](https://github.com/oops-rs/mentra/issues/8) | `register_skills_dir` additive, `register_skills_dirs`, `Runtime::skills()`, `SkillLoadError` re-exported | Workspace **and** global skill roots both register with correct precedence; the header reports every skill; `RunError::Skills` is a typed `#[from]` again |
+| [#7](https://github.com/oops-rs/mentra/issues/7) | `CompactionSummary::files_touched` accumulates; a tool-pinned turn is summarized as a unit | Long runs stop losing their file history |
+| [#6](https://github.com/oops-rs/mentra/issues/6) | `EntryId`/`parent_id` on transcript entries, `Session::branch_from`/`children`, `SessionEvent::Branched` | P5 branching is unblocked; lan maps `Branched` onto its stream today |
+
+**Deliberately not done upstream, recorded on the issues:** branch
+summarization on leaving a branch (policy on top of the tree, wants the
+compaction pipeline); a session-header `version` field (migration is currently
+structural — missing parent links are inferred on load); and two-part
+summarization of a long history whose final turn is separately over budget
+(needs a total-budget signal in `CompactionRequest`).
+
 **lan builds (harness-specific):**
 1. AGENTS.md discovery: workspace + parent-dir walk + global; injection into system context.
 2. Prompt templates: markdown + args → ACP commands.

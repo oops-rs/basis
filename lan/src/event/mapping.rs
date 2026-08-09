@@ -177,6 +177,13 @@ pub(super) fn from_session_event(event: &SessionEvent) -> Option<Event> {
             max_attempts: *max_attempts,
             next_delay_ms: *next_delay_ms,
         },
+        SessionEvent::Branched {
+            entry_id,
+            abandoned_entries,
+        } => Event::Branched {
+            entry_id: entry_id.clone(),
+            abandoned_entries: *abandoned_entries,
+        },
         SessionEvent::Error {
             message,
             recoverable,

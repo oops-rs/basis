@@ -18,7 +18,7 @@ use tokio::sync::{
 use super::{EventSink, RunError, RunReport};
 use crate::{
     context::WorkspaceContext,
-    event::{ContextFile, EVENT_SCHEMA_VERSION, Event, NoticeSeverity, RunOutcome},
+    event::{ContextFile, EVENT_SCHEMA_VERSION, Event, NoticeSeverity, RunOutcome, SkillSummary},
 };
 
 /// What a run is about, once the runtime questions are settled.
@@ -29,8 +29,18 @@ pub struct RunContext {
     pub provider: String,
     pub model: String,
     pub context: WorkspaceContext,
-    /// The skills directory registered on the runtime, if any.
-    pub skills_dir: Option<PathBuf>,
+    /// Skills directories registered on the runtime, most specific first.
+    pub skills_dirs: Vec<PathBuf>,
+    /// The skills those directories actually produced, after layering.
+    pub skills: Vec<LoadedSkill>,
+}
+
+/// A skill available to the run, without its body.
+#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+pub struct LoadedSkill {
+    pub name: String,
+    pub description: String,
+    pub path: PathBuf,
 }
 
 /// A session and the prompt to send it. Nothing has been sent yet.
@@ -49,6 +59,7 @@ impl std::fmt::Debug for PreparedRun {
             .field("provider", &self.run.provider)
             .field("model", &self.run.model)
             .field("context_files", &self.run.context.documents().len())
+            .field("skills", &self.run.skills.len())
             .finish_non_exhaustive()
     }
 }
@@ -134,7 +145,15 @@ fn header_for(session_id: &str, run: &RunContext) -> Event {
                 scope: document.scope.label(),
             })
             .collect(),
-        skills_dir: run.skills_dir.clone(),
+        skills_dirs: run.skills_dirs.clone(),
+        skills: run
+            .skills
+            .iter()
+            .map(|skill| SkillSummary {
+                name: skill.name.clone(),
+                description: skill.description.clone(),
+            })
+            .collect(),
     }
 }
 

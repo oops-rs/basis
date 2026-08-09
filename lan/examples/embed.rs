@@ -41,15 +41,15 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
                 Event::RunStarted {
                     model,
                     context_files,
-                    skills_dir,
+                    skills,
                     ..
                 } => {
                     println!("model: {model}");
                     for file in &context_files {
                         println!("context: {} ({})", file.path.display(), file.scope);
                     }
-                    if let Some(dir) = skills_dir {
-                        println!("skills: {}", dir.display());
+                    for skill in &skills {
+                        println!("skill: {} — {}", skill.name, skill.description);
                     }
                     println!("---");
                 }

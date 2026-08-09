@@ -10,7 +10,10 @@ repository = "https://github.com/oops-rs/lan"
 homepage = "https://github.com/oops-rs/lan"
 
 [workspace.dependencies]
-mentra = "0.12"
+# Path until 0.13 is published: lan needs the branching, layered skills,
+# and compaction work (oops-rs/mentra#6–#9). The version keeps the manifest
+# publishable — cargo prefers the registry once 0.13 is there.
+mentra = { version = "0.13", path = "../mentra/mentra" }
 mentra-provider = "0.4"
 
 clap = { version = "4.6", features = ["derive"] }

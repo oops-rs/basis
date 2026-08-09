@@ -246,24 +246,25 @@ async fn tool_calls_appear_on_the_stream_with_parsed_input() {
         "tool input must arrive as JSON, not a JSON-encoded string"
     );
 
-    // Correlation is by id, not by name: mentra leaves `tool_name` empty on
-    // completion (oops-rs/mentra#9) and lan passes that through faithfully
-    // rather than reconstructing it here. When the upstream fix lands, the
-    // name arrives for free and this assertion can tighten.
     let completed = events
         .iter()
         .find_map(|event| match event {
             Event::ToolCompleted {
                 tool_call_id,
+                tool_name,
                 is_error,
                 ..
-            } => Some((tool_call_id.as_str(), *is_error)),
+            } => Some((tool_call_id.as_str(), tool_name.as_str(), *is_error)),
             _ => None,
         })
         .expect("the call must also be reported as completed");
 
     assert_eq!(completed.0, "tool-1");
-    assert!(!completed.1, "the scripted call should succeed");
+    assert_eq!(
+        completed.1, "files",
+        "completion must name its tool (oops-rs/mentra#9)"
+    );
+    assert!(!completed.2, "the scripted call should succeed");
 }
 
 #[tokio::test]
