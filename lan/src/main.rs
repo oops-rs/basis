@@ -17,7 +17,8 @@ use std::{
 
 use clap::{Parser, Subcommand};
 use lan::{
-    Event, JsonlWriter, RunConfig, RunOutcome, RunReport, ShellAccess, provider,
+    ApprovalPolicy, Event, JsonlWriter, RunConfig, RunOutcome, RunReport, ShellAccess,
+    TerminalApprover, provider,
     run::{EventSink, FnSink},
     shell,
 };
@@ -78,6 +79,32 @@ struct RunArgs {
     /// Also settable with LAN_ALLOW_SHELL=1.
     #[arg(long)]
     allow_shell: bool,
+
+    /// When to ask before the agent changes anything: always allow, ask each
+    /// time, or refuse. Asking needs a terminal on stdin; without one, a
+    /// request is denied rather than silently granted.
+    #[arg(long, value_name = "MODE", default_value = "always")]
+    approve: ApproveMode,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, clap::ValueEnum)]
+enum ApproveMode {
+    /// Never ask. Right for a confined or unattended run.
+    Always,
+    /// Ask before each consequential call.
+    Prompt,
+    /// Refuse anything that changes state outside the process.
+    Never,
+}
+
+impl From<ApproveMode> for ApprovalPolicy {
+    fn from(mode: ApproveMode) -> Self {
+        match mode {
+            ApproveMode::Always => Self::Always,
+            ApproveMode::Prompt => Self::Prompt,
+            ApproveMode::Never => Self::Never,
+        }
+    }
 }
 
 #[tokio::main]
@@ -133,8 +160,15 @@ async fn execute_run(args: RunArgs) -> Result<ExitCode, String> {
         eprintln!("lan: warning: {warning}");
     }
 
+    let approval = ApprovalPolicy::from(args.approve);
+    config = config.with_approval(approval);
+
+    // Prompting writes the question to stderr and reads stdin, so it works
+    // alongside either renderer.
+    let approver = TerminalApprover::new();
+
     if args.json {
-        let report = lan::run(config, JsonlWriter::new(io::stdout()))
+        let report = lan::run_with_approver(config, JsonlWriter::new(io::stdout()), approver)
             .await
             .map_err(|error| error.to_string())?;
         return Ok(exit_code(&report));
@@ -143,7 +177,7 @@ async fn execute_run(args: RunArgs) -> Result<ExitCode, String> {
     // Without --json the run is still driven by the same event stream; only
     // the rendering differs. Streaming the assistant's text as it arrives is
     // what makes an interactive invocation feel live.
-    let report = lan::run(config, prose_sink())
+    let report = lan::run_with_approver(config, prose_sink(), approver)
         .await
         .map_err(|error| error.to_string())?;
 

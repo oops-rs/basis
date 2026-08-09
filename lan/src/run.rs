@@ -24,6 +24,7 @@ use mentra::{
 use thiserror::Error;
 
 use crate::{
+    approval::{ApprovalPolicy, Approver, PolicyAuthorizer},
     context::{ContextConfig, ContextError, WorkspaceContext},
     event::RunOutcome,
     provider::{self, ProviderError},
@@ -55,6 +56,8 @@ pub struct RunConfig {
     /// Whether the agent may run commands. Denied unless granted; see
     /// ADR-0006.
     pub shell: ShellAccess,
+    /// When the agent must ask before doing something consequential.
+    pub approval: ApprovalPolicy,
     pub session_name: String,
 }
 
@@ -72,6 +75,7 @@ impl RunConfig {
             // depend on ambient state. The binary reads LAN_ALLOW_SHELL and
             // calls `with_shell` explicitly.
             shell: ShellAccess::Denied,
+            approval: ApprovalPolicy::default(),
             session_name: DEFAULT_SESSION_NAME.to_string(),
         }
     }
@@ -111,6 +115,14 @@ impl RunConfig {
     /// caller's word for it and never infers it (ADR-0006).
     pub fn with_shell(self, shell: ShellAccess) -> Self {
         Self { shell, ..self }
+    }
+
+    /// Sets when the agent must ask before acting.
+    ///
+    /// [`ApprovalPolicy::Prompt`] only means anything if the run is given an
+    /// approver — see [`PreparedRun::execute_with_approver`].
+    pub fn with_approval(self, approval: ApprovalPolicy) -> Self {
+        Self { approval, ..self }
     }
 
     pub fn with_session_name(self, session_name: impl Into<String>) -> Self {
@@ -173,6 +185,21 @@ pub async fn run<S: EventSink>(config: RunConfig, sink: S) -> Result<RunReport<S
     prepare(config).await?.execute(sink).await
 }
 
+/// Runs one prompt, routing approval requests to `approver`.
+///
+/// Only meaningful with [`ApprovalPolicy::Prompt`]; under the other policies
+/// nothing is ever asked.
+pub async fn run_with_approver<S: EventSink, A: Approver>(
+    config: RunConfig,
+    sink: S,
+    approver: A,
+) -> Result<RunReport<S>, RunError> {
+    prepare(config)
+        .await?
+        .execute_with_approver(sink, approver)
+        .await
+}
+
 /// Resolves everything a run needs — context, credential, runtime, model,
 /// session — without sending the prompt.
 pub async fn prepare(config: RunConfig) -> Result<PreparedRun, RunError> {
@@ -191,7 +218,10 @@ pub async fn prepare(config: RunConfig) -> Result<PreparedRun, RunError> {
             RuntimePolicy::workspace_bounded(&config.workspace)
                 .allow_shell_commands(config.shell.is_granted())
                 .allow_background_commands(config.shell.is_granted()),
-        );
+        )
+        // Without an authorizer mentra allows every call unconditionally, and
+        // no permission request can ever be raised.
+        .with_tool_authorizer(PolicyAuthorizer::new(config.approval));
 
     let runtime = match &choice.base_url {
         Some(base_url) => {

@@ -15,8 +15,14 @@ use tokio::sync::{
     oneshot,
 };
 
+use mentra::{
+    SessionPermissionHandle,
+    session::{PermissionDecision, PermissionRuleScope},
+};
+
 use super::{EventSink, RunError, RunReport};
 use crate::{
+    approval::{AllowAll, ApprovalDecision, ApprovalRequest, Approver},
     context::WorkspaceContext,
     event::{ContextFile, EVENT_SCHEMA_VERSION, Event, NoticeSeverity, RunOutcome, SkillSummary},
 };
@@ -80,7 +86,22 @@ impl PreparedRun {
     /// with [`Event::RunFinished`], including when the turn fails: by then the
     /// stream has content a client needs to be able to finish reading.
     pub async fn execute<S: EventSink>(self, sink: S) -> Result<RunReport<S>, RunError> {
+        self.execute_with_approver(sink, AllowAll).await
+    }
+
+    /// Sends the prompt, streaming into `sink` and routing any approval
+    /// request to `approver`.
+    ///
+    /// The approver runs on the forwarding task while the turn is blocked
+    /// waiting on it, which is what makes an interactive answer possible at
+    /// all — and what means an approver must answer rather than defer.
+    pub async fn execute_with_approver<S: EventSink, A: Approver>(
+        self,
+        sink: S,
+        approver: A,
+    ) -> Result<RunReport<S>, RunError> {
         let Self { mut session, run } = self;
+        let permissions = session.permission_handle();
 
         let session_id = session.id().to_string();
         let receiver = session.subscribe();
@@ -89,7 +110,13 @@ impl PreparedRun {
         sink.emit(header_for(&session_id, &run))?;
 
         let (done_tx, done_rx) = oneshot::channel();
-        let forwarder = tokio::spawn(forward_events(receiver, sink, done_rx));
+        let forwarder = tokio::spawn(forward_events(
+            receiver,
+            sink,
+            done_rx,
+            approver,
+            permissions,
+        ));
 
         let turn = session
             .append_turn(vec![ContentBlock::text(run.prompt.clone())])
@@ -159,10 +186,12 @@ fn header_for(session_id: &str, run: &RunContext) -> Event {
 
 /// Drains the session's event stream into the sink until the turn is done,
 /// then drains whatever is still queued and hands the sink back.
-async fn forward_events<S: EventSink>(
+async fn forward_events<S: EventSink, A: Approver>(
     mut receiver: SessionEventReceiver,
     mut sink: S,
     done: oneshot::Receiver<()>,
+    mut approver: A,
+    permissions: SessionPermissionHandle,
 ) -> S {
     tokio::pin!(done);
 
@@ -175,6 +204,7 @@ async fn forward_events<S: EventSink>(
             received = receiver.recv() => {
                 match received {
                     Ok(event) => {
+                        resolve_if_permission(&event, &mut approver, &permissions);
                         if !emit_session_event(&mut sink, &event) {
                             return sink;
                         }
@@ -192,7 +222,7 @@ async fn forward_events<S: EventSink>(
                 }
             }
             _ = &mut done => {
-                drain(&mut receiver, &mut sink);
+                drain(&mut receiver, &mut sink, &mut approver, &permissions);
                 return sink;
             }
         }
@@ -200,10 +230,16 @@ async fn forward_events<S: EventSink>(
 }
 
 /// Empties whatever the broadcast channel still holds.
-fn drain<S: EventSink>(receiver: &mut SessionEventReceiver, sink: &mut S) {
+fn drain<S: EventSink, A: Approver>(
+    receiver: &mut SessionEventReceiver,
+    sink: &mut S,
+    approver: &mut A,
+    permissions: &SessionPermissionHandle,
+) {
     loop {
         match receiver.try_recv() {
             Ok(event) => {
+                resolve_if_permission(&event, approver, permissions);
                 if !emit_session_event(sink, &event) {
                     return;
                 }
@@ -214,6 +250,53 @@ fn drain<S: EventSink>(receiver: &mut SessionEventReceiver, sink: &mut S) {
                 }
             }
             Err(TryRecvError::Empty | TryRecvError::Closed) => return,
+        }
+    }
+}
+
+/// Answers a pending permission request.
+///
+/// The turn is blocked inside mentra waiting for this, so failing to resolve
+/// would hang the run — which is what happened before lan answered at all.
+fn resolve_if_permission<A: Approver>(
+    event: &SessionEvent,
+    approver: &mut A,
+    permissions: &SessionPermissionHandle,
+) {
+    let SessionEvent::PermissionRequested {
+        request_id,
+        tool_call_id,
+        tool_name,
+        description,
+        preview,
+    } = event
+    else {
+        return;
+    };
+
+    let decision = approver.approve(&ApprovalRequest {
+        request_id: request_id.clone(),
+        tool_call_id: tool_call_id.clone(),
+        tool_name: tool_name.clone(),
+        description: description.clone(),
+        input: serde_json::from_str(preview)
+            .unwrap_or_else(|_| serde_json::Value::String(preview.clone())),
+    });
+
+    // A failure here means the request was already resolved or withdrawn;
+    // there is nothing useful left to do about it.
+    let _ = permissions.resolve_permission(request_id, permission_decision(decision));
+}
+
+fn permission_decision(decision: ApprovalDecision) -> PermissionDecision {
+    match decision {
+        ApprovalDecision::Allow => PermissionDecision::allow(),
+        ApprovalDecision::Deny => PermissionDecision::deny(),
+        ApprovalDecision::AllowForSession => {
+            PermissionDecision::allow_and_remember(PermissionRuleScope::Session)
+        }
+        ApprovalDecision::DenyForSession => {
+            PermissionDecision::deny_and_remember(PermissionRuleScope::Session)
         }
     }
 }

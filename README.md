@@ -43,6 +43,18 @@ lan run --allow-shell "run the test suite and summarize the failures"
 On a bare host that grant is real and lan says so. The container below is where it is
 sound, and where it is on by default.
 
+Independently of that, you can decide when the agent has to ask:
+
+```sh
+lan run --approve prompt "tidy up the imports"   # ask before each change
+lan run --approve never  "what does this crate do?"   # look, don't touch
+```
+
+Read-only calls are never queued for approval — prompting for them just trains you to
+approve without reading. Asking needs a terminal on stdin; without one a request is
+denied rather than silently granted, so an unattended run fails visibly instead of
+quietly doing as it pleases.
+
 Any OpenAI-compatible endpoint works too — a gateway, a proxy, or a local
 server. Paste the URL as published; the trailing `/v1` is handled:
 
@@ -81,6 +93,9 @@ they arrive (`cargo run -p lan --example embed -- "<prompt>"`).
 - **Skills** — `.lan/skills/` in the workspace, else `skills/` in the global config
   directory. The model loads one by name when it needs it, so only the descriptions cost
   context.
+- **Approval** — `--approve prompt` puts every consequential call to you first, with the
+  command or the changed keys shown; `always` (the default) and `never` are the other two
+  settings. Embedders implement `Approver` to answer however they like.
 - **Confinement** — the agent is scoped to the workspace; a write above it is refused.
   In-process this is hygiene, not a boundary
   ([ADR-0004](docs/adr/0004-kernel-enforced-confinement.md)). The boundary is the

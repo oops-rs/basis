@@ -126,6 +126,38 @@ Verified end to end against it:
 registry — no path dependency, no sibling checkout needed. The layered-skills run above
 was re-verified against the published crate and gave the identical result.
 
+**Shell and the container landed after that** (ADR-0006, `docs/adr/0006-*`). P1 could not
+run a single command — `RuntimePolicy::workspace_bounded` leaves mentra's
+`allow_shell_commands` false, correctly, so `lan run` could read and write files but not
+run `cargo test` or `git`. Now:
+
+- `--allow-shell` / `LAN_ALLOW_SHELL=1` grants it; the crate defaults to `Denied` so no
+  embedder inherits command execution. `RunConfig` does not read the env itself.
+- lan never *infers* the boundary. `detect_environment()` can tell it is inside a
+  container but not that the container was run with constrained mounts, so detection only
+  warns (granting on a bare `Host` prints what authority was handed over).
+- The **Dockerfile** is where the grant is sound and is on by default. Verified live:
+  `git log` works inside; writes to `/etc` and `/usr/local/bin` are refused by the kernel
+  with `Read-only file system`, not by a lan check. That is ADR-0004 finally delivered.
+- Two gotchas the image had to solve: mentra's SQLite store defaults under `$HOME`
+  (unwritable under `--read-only`) so `XDG_DATA_HOME=/state`; and `Cargo.lock` is now
+  committed, needed for `--locked` and standard for a crate shipping a binary.
+
+Still **not** built, despite the README synopsis naming them: the ACP server (default
+`lan`, P2) and `lan watch` (P4). Runs are single-turn — no conversation, no resume,
+`execute` consumes the session and mentra's `resume_session` is never called. No MCP
+wiring, templates, or hooks (P3). No CI. lan is unpublished.
+
+**The permission gate is now closed** (`lan/src/approval.rs`). lan installs a
+`PolicyAuthorizer`, so `permission_requested` can actually fire, and the event forwarder
+answers it through an `Approver` — previously nothing resolved, which would have hung the
+turn, since mentra blocks on a oneshot. `--approve always|prompt|never`; read-only calls
+are never queued (prompting for reads trains people to approve blind). `TerminalApprover`
+asks on stderr and reads stdin, denying when there is no TTY so an unattended run fails
+visibly. `lan/tests/approval.rs` wraps every case in a 10s timeout — those tests fail by
+hanging, which is the regression worth catching. **P2 supplies an ACP `Approver` and gets
+the whole flow for free.**
+
 Then **P2 (ACP)**: `Event` is already the normalized spine, so the server maps `Event` →
 `session/update` rather than touching `SessionEvent` again. `PermissionRequested` /
 `PermissionResolved` map onto `session/request_permission`, and mentra's

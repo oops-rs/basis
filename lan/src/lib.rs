@@ -12,6 +12,7 @@
 //! prompt, the workspace (AGENTS.md, skills, templates, `.mcp.json`), and
 //! config — never through code in this crate.
 
+pub mod approval;
 pub mod context;
 pub mod event;
 pub mod provider;
@@ -19,6 +20,7 @@ pub mod run;
 pub mod shell;
 pub mod skills;
 
+pub use approval::{ApprovalDecision, ApprovalPolicy, ApprovalRequest, Approver, TerminalApprover};
 pub use context::{
     ContextConfig, ContextDocument, ContextError, ContextScope, DEFAULT_CONTEXT_FILE,
     WorkspaceContext,
@@ -26,7 +28,7 @@ pub use context::{
 pub use event::{EVENT_SCHEMA_VERSION, Event, EventLine, JsonlWriter, RunOutcome};
 pub use run::{
     CollectingSink, EventSink, FnSink, NullSink, PreparedRun, RunConfig, RunContext, RunError,
-    RunReport, run,
+    RunReport, run, run_with_approver,
 };
 pub use shell::ShellAccess;
 pub use skills::{SkillsConfig, SkillsSource};
