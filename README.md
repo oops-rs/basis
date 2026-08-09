@@ -32,6 +32,15 @@ lan run "summarize what changed in the last three commits"
 lan run -C ../other-repo --json "find the slowest test and explain why"
 ```
 
+Any OpenAI-compatible endpoint works too — a gateway, a proxy, or a local
+server. Paste the URL as published; the trailing `/v1` is handled:
+
+```sh
+export LAN_BASE_URL=http://127.0.0.1:3455/v1
+export LAN_API_KEY=…
+lan run --model gpt-5.6 "explain the module layout"
+```
+
 `--json` emits the event stream as newline-delimited JSON. The first line is always
 `run_started` and carries the schema version; the last is always `run_finished`:
 
@@ -50,9 +59,20 @@ let report = lan::run(
 ).await?;
 ```
 
-`AGENTS.md` is discovered from a global config directory, then each ancestor of the
-workspace outermost-inward, then the workspace root — later files are more specific and
-take precedence.
+See [`lan/examples/embed.rs`](lan/examples/embed.rs) for a host that reacts to events as
+they arrive (`cargo run -p lan --example embed -- "<prompt>"`).
+
+## What the workspace contributes
+
+- **`AGENTS.md`** — discovered from a global config directory, then each ancestor of the
+  workspace outermost-inward, then the workspace root. Later files are more specific and
+  take precedence; all of them are named in the `run_started` event.
+- **Skills** — `.lan/skills/` in the workspace, else `skills/` in the global config
+  directory. The model loads one by name when it needs it, so only the descriptions cost
+  context.
+- **Confinement** — the agent is scoped to the workspace; a write above it is refused.
+  Per [ADR-0004](docs/adr/0004-kernel-enforced-confinement.md) this is hygiene, not a
+  security boundary — that arrives with Docker in P4.
 
 ## Status
 
