@@ -3,5 +3,6 @@
 .claude/
 .codex/
 .opencode/
+.fuli
 .env*
 docs/HANDOFF.md
