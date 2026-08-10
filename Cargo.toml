@@ -4,17 +4,17 @@ resolver = "3"
 
 [workspace.package]
 edition = "2024"
-rust-version = "1.85"
+rust-version = "1.88"
 license = "MIT"
 repository = "https://github.com/oops-rs/lan"
 homepage = "https://github.com/oops-rs/lan"
 
 [workspace.dependencies]
-# TEMPORARY: use the sibling checkout for the unreleased Responses state fix.
+# TEMPORARY: use the sibling checkout for unreleased Mentra changes.
 # Restore registry-only dependencies before publishing; standalone checkouts
 # need the same sibling layout while this override is present.
-mentra = { version = "0.17", path = "../mentra/mentra" }
-mentra-provider = { version = "0.4", path = "../mentra/mentra-provider" }
+mentra = { version = "0.18", path = "../mentra/mentra" }
+mentra-provider = { version = "0.5", path = "../mentra/mentra-provider" }
 
 async-trait = "0.1"
 clap = { version = "4.6", features = ["derive"] }

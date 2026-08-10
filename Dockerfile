@@ -18,7 +18,7 @@
 #     -e ANTHROPIC_API_KEY \
 #     oops/lan:latest run "explain the module layout"
 
-FROM rust:1.85-slim-bookworm AS build
+FROM rust:1.88-slim-bookworm AS build
 
 WORKDIR /src
 

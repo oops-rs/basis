@@ -43,7 +43,7 @@ implementation.
 ## Rust Programming
 
 - Prefer `foo.rs` plus `foo/` over `foo/mod.rs`.
-- Prefer current edition idioms (edition 2024, MSRV 1.85).
+- Prefer current edition idioms (edition 2024, MSRV 1.88).
 - Run `cargo fmt` after Rust edits.
 - Use `cargo check` for fast feedback, `cargo test` for verification, and
   `cargo clippy --all-targets --all-features -- -D warnings` for lint-clean changes.

@@ -22,14 +22,14 @@ env:
 
 jobs:
   msrv:
-    name: Minimum supported Rust (1.85)
+    name: Minimum supported Rust (1.88)
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
 
       - uses: dtolnay/rust-toolchain@stable
         with:
-          toolchain: "1.85.0"
+          toolchain: "1.88.0"
 
       - name: Check the workspace against the MSRV
         run: cargo check --workspace --all-targets --all-features
