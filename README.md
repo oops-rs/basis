@@ -82,8 +82,40 @@ let report = lan::run(
 ).await?;
 ```
 
+For a conversation rather than a one-shot, keep the prepared run and send again — the
+session survives the turn, so the model sees everything said so far:
+
+```rust
+let mut run = lan::run::prepare(config).await?;
+run.execute(lan::NullSink).await?;
+run.send("and which of those is riskiest?", sink, lan::AllowAll).await?;
+```
+
+`run.agent_id()` is the handle `lan::run::resume` takes, so a later process can pick the
+same conversation back up.
+
 See [`lan/examples/embed.rs`](lan/examples/embed.rs) for a host that reacts to events as
-they arrive (`cargo run -p lan --example embed -- "<prompt>"`).
+they arrive, and [`lan/examples/conversation.rs`](lan/examples/conversation.rs) for the
+two-turn version (`cargo run -p lan --example embed -- "<prompt>"`).
+
+## ACP
+
+`lan` with no subcommand speaks the [Agent Client Protocol](https://agentclientprotocol.com)
+on stdio, so any ACP client drives it with no lan-specific client code:
+
+```sh
+lan                                    # what an editor spawns
+lan acp --model gpt-5.6 --allow-shell  # same thing, configured
+```
+
+The client supplies the workspace (`cwd` on `session/new`) and the prompt, so the flags
+here are only what a client cannot say. Sessions are mentra agents, which means
+`session/load` resumes a conversation from a previous process, and `session/cancel` stops a
+turn in flight. Permission requests become `session/request_permission`, so approval is the
+client's UI rather than lan's ([ADR-0007](docs/adr/0007-acp-sessions-and-the-dispatch-loop.md)).
+
+[`scripts/acp-smoke.py`](scripts/acp-smoke.py) drives it by hand if you want to watch the
+wire.
 
 ## What the workspace contributes
 
@@ -131,14 +163,15 @@ leave the agent nowhere to write its store.
 
 ## Status
 
-**P1 complete, plus the container from P4.** What works today: one prompt against a
-workspace, in prose or JSONL, in-process or as a subprocess, with AGENTS.md discovery,
-skills, command execution, and kernel-enforced confinement in the image.
+**P0–P2 complete, plus the container from P4.** What works today: the ACP server on stdio
+(the default mode), multi-turn conversation and resume, and one-shot `lan run` in prose or
+JSONL — all with AGENTS.md discovery, skills, command execution, approval, and
+kernel-enforced confinement in the image.
 
-Not built yet, though this README's synopsis names them: the **ACP server** (the default
-`lan` with no subcommand — P2) and **`lan watch`** (P4). Runs are also single-turn today:
-there is no conversation or resume. MCP wiring, prompt templates, and subprocess hooks are
-P3. See [docs/ARCHITECTURE.md](docs/ARCHITECTURE.md) §6.
+Still to come: **`lan watch`** (P4), and MCP wiring, prompt templates, subprocess hooks, and
+the ws↔stdio bridge that puts [acp-ui](https://github.com/formulahendry/acp-ui) in front of
+lan (P3). Session branching exists in mentra but is not yet exposed (P5). See
+[docs/ARCHITECTURE.md](docs/ARCHITECTURE.md) §6.
 
 Docs follow the nous layout: [docs/PROPOSAL.md](docs/PROPOSAL.md)
 (why) · [docs/ARCHITECTURE.md](docs/ARCHITECTURE.md) (how) · [docs/adr/](docs/adr/)

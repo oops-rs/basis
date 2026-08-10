@@ -111,8 +111,10 @@ flowchart LR
   binary is a thin shell over it.
 - **ACP is the default mode** — running `lan` with no subcommand serves the protocol, because
   the embedded case is the primary case.
-- **Sessions**: ACP session ↔ Mentra session; resume and fork ride on SQLite + snapshots;
-  compaction wired to context-pressure events.
+- **Sessions**: an ACP session *is* a mentra agent — lan uses the persisted agent id as the
+  protocol's session id, so `session/load` is `Runtime::resume_session` and lan stores no
+  mapping of its own (ADR-0007). A session outlives a turn, which is what makes conversation
+  and resume possible at all; compaction wires to context-pressure events.
 - **The mentra/lan split** (same author owns both): anything a *different* harness could also
   want — session branching, compaction lifecycle, hook points, MCP client — belongs in mentra.
   lan keeps conventions and protocol: AGENTS.md/skills/template discovery, ACP mapping, the
@@ -154,8 +156,8 @@ docker run --rm \
 |---|---|---|
 | P0 Groundwork | Mine `mentra/docs/mentra-api-feedback.md`; read pi session-format + compaction docs; decide mentra-vs-lan split per capability | ~half a day |
 | P1 Crate + `run` | Mentra wiring, AGENTS.md loader, skills discovery, worktree hygiene, JSONL event stream. Acceptance: arbitrary prompts on arbitrary repos, in-process and as subprocess | 3–5 days |
-| P2 ACP server | `agent-client-protocol` crate; session mapping, permission surfacing, template commands; ws bridge. Acceptance: driven from Zed and acp-ui | 2–3 days |
-| P3 Extension points | MCP client honoring `.mcp.json`; subprocess hooks; prompt templates | 2–3 days |
+| **P2 ACP server** ✅ | `agent-client-protocol` crate; session mapping, permission surfacing, ws bridge. Sessions survive turns, so conversation and resume work independent of protocol. Template commands deferred to P3 with the rest of the template work; the ws bridge deferred until the stdio server is proven | done |
+| P3 Extension points | MCP client honoring `.mcp.json`; subprocess hooks; prompt templates (and their exposure as ACP commands); ws↔stdio bridge for acp-ui | 2–3 days |
 | P4 Loop + Docker | `watch` scheduler, Dockerfile, state volume, policy carve-outs | 1–2 days |
 | P5 Depth | Session branching/tree, compaction tuning, packages convention, provider OAuth | ongoing |
 
