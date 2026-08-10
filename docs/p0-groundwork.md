@@ -137,9 +137,13 @@ summarization of a long history whose final turn is separately over budget
 2. Prompt templates: markdown + args → ACP commands.
 3. ACP server: `agent-client-protocol` crate ↔ `SessionEvent`/`PermissionRequest` mapping.
 4. `run --json`: JSONL rendering of the `SessionEvent` stream.
-5. `watch`: interval scheduler, skip-if-unchanged.
+5. `watch`: interval scheduler, skip-if-unchanged. *(Built in P4, retired by
+   ADR-0014 — the bounds moved onto `run`, the fingerprint became
+   `lan fingerprint`, the interval went back to the host.)*
 6. Subprocess hooks: exec-a-command JSON in/out, layered on mentra's `RuntimeHook`.
-7. Docker packaging + `.git/hooks` write-deny policy preset.
+7. Docker packaging + `.git/hooks` write-deny policy preset. *(The carve-out is
+   built and kept; the shipped image was withdrawn by ADR-0013 in favor of
+   [`containerization.md`](containerization.md).)*
 8. `.mcp.json` discovery → `McpManager` wiring.
 
 ## 5. P1 implications

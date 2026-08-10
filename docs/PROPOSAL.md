@@ -75,10 +75,12 @@ case that "needs" core code is an extension-seam gap to close generically.
 
 ### Bet 5 — Confinement is the kernel's job
 **Believe:** prompts and in-process policy are not security boundaries; the workspace
-guarantee must come from the OS. **Buys:** Docker with the workspace as the sole rw
-mount gives the guarantee at near-zero cost today; codex's per-command native sandbox
-is the proven v2 path. **Refuse:** to sell in-process path checks as safety (they
-remain as *hygiene* — `.git/hooks` write-deny — not as the boundary). [ADR-0004]
+guarantee must come from the OS. **Buys:** the read-only-root Docker pattern gives the
+guarantee at near-zero cost today; codex's per-command native sandbox is the proven v2
+path. **Refuse:** to sell in-process path checks as safety (they remain as *hygiene* —
+`.git/hooks` write-deny — not as the boundary). [ADR-0004], amended by [ADR-0013]: the
+belief stands, but lan documents the patterns ([`containerization.md`](containerization.md))
+rather than shipping an image, and commands are on by default.
 
 ### Bet 6 — Co-evolve with mentra, keep the seam honest
 **Believe:** same author on both sides is leverage, and a trap: gaps can be fixed
@@ -111,8 +113,8 @@ the consumer's seat — the zentox feedback loop, made permanent.
   workspace data, never lan features.
 - **Not a runtime.** The loop, tools, and persistence are mentra; lan does not
   duplicate them.
-- **Not a security product.** The boundary is the kernel's (Docker, later native
-  sandbox); lan's own checks are hygiene.
+- **Not a security product.** The boundary is the OS's (a container you run, later a
+  native sandbox); lan's own checks are hygiene, and lan ships no boundary of its own.
 
 ## 6. Why this shape ages well
 

@@ -1,11 +1,12 @@
 # lan — Redesign plan
 
-> rev 1 · 2026-08-11 · The transition from the P0–P4 harness to the SDK-first
+> rev 2 · 2026-08-11 · The transition from the P0–P4 harness to the SDK-first
 > shape decided in [ADR-0010](adr/0010-the-crate-is-the-workflow-surface.md)
 > through [ADR-0015](adr/0015-cli-grammar.md). This document is the honest
 > ledger of that transition: what exists, what is in between, what is not
 > started. `README.md` and `ARCHITECTURE.md` describe the *shipped* state and
 > are updated per phase as work lands — never ahead of it.
+> **Phase A has landed** (rev 2); B, C, and D are open.
 
 ## 1. The target in one paragraph
 
@@ -22,17 +23,20 @@ host's code, the client's UI, or the OS's job.
 ## 2. Status ledger
 
 Honesty matters here: several decided items are *partially* present today.
+Phase A landed in three commits — `4fbe1fd` (watch), `35c9ccb` (shell posture
+and CLI grammar), `a246722` (containerization) — and its rows carry them.
 
 | Piece | Decided in | Status today |
 |---|---|---|
-| Shell default-on | 0013 | **Flip needed** — code has `ShellAccess::Denied` default, `--allow-shell`, `LAN_ALLOW_SHELL`, image grant |
-| Docker image removal + containerization doc | 0013 | **Not started** — Dockerfile ships; doc does not exist |
+| Shell default-on | 0013 | **Built** (`35c9ccb`) — `ShellAccess::Granted` is the default, `--no-shell` disables |
+| `--allow-shell` / `LAN_ALLOW_SHELL` retirement | 0013 | **Built** (`35c9ccb`) — both refused with a migration message; the bare-host warning is gone |
+| Docker image removal + containerization doc | 0013 | **Built** (`a246722`) — Dockerfile and `.dockerignore` deleted; `docs/containerization.md` written |
 | `.git` carve-out kept as hygiene | 0013 | **Built** — no change |
-| `watch` deletion | 0014 | **Not started** — `watch.rs`, `watch_cli.rs`, CLI subcommand all live |
-| Bounds on `RunConfig` / `lan run` | 0014 | **In between** — mentra `RunOptions` carries deadline/tool/token + cancellation; lan plumbs them only through the watch path |
-| `Workspace::fingerprint()` + `lan fingerprint` | 0014 | **In between** — fingerprint logic built inside watch; needs extraction, subcommand does not exist |
-| Exit-code contract | 0015 | **Not started** |
-| `lan "<prompt>"` shorthand, `run -`, ACP first-line signpost | 0015 | **Not started** |
+| `watch` deletion | 0014 | **Built** (`4fbe1fd`) — `watch.rs`, `watch/`, `watch_cli.rs`, the subcommand, and its tests are gone |
+| Bounds on `RunConfig` / `lan run` | 0014 | **Built** (`4fbe1fd`) — `with_deadline` / `with_tool_budget` / `with_token_budget` and the three `lan run` flags, all defaulting to unset |
+| `Workspace::fingerprint()` + `lan fingerprint` | 0014 | **Built** (`4fbe1fd`) — `fingerprint.rs` with ADR-0008's semantics intact, plus the subcommand. Named `Workspace::fingerprint()` once Phase C mints a `Workspace` |
+| Exit-code contract | 0015 | **Built** (`35c9ccb`) — 0 ok / 1 failed / 2 usage / 3 bound tripped, with `RunReport::stopped_by` carrying the same distinction in-process |
+| `lan "<prompt>"` shorthand, `run -`, ACP first-line signpost | 0015 | **Built** (`35c9ccb`) — a positional naming no subcommand is a prompt, `--` escapes, `run -` reads stdin, and a first line that is not JSON-RPC exits with the signpost |
 | Crate split (`lan-core` / `lan-acp` / binary) | 0011 | **Not started** — one crate |
 | MCP behind a feature | 0011/0012 | **Not started** — always compiled |
 | Approval enum → trait impls | 0010 | **In between** — both `ApprovalPolicy` and `Approver` exist; enum must dissolve, terminal approver moves to binary |
@@ -58,21 +62,23 @@ Ordering rule: honesty first (cheap deletions and default flips, so docs stop
 describing a shape we've decided against), then structure (crate split, so SDK
 work lands in its final home), then the SDK, then bindings.
 
-### Phase A — Posture and pruning (small, mostly deletions)
+### Phase A — Posture and pruning (small, mostly deletions) — **landed**
 
-1. Delete `watch` (`watch.rs`, `watch_cli.rs`, subcommand, docs). Move
+1. ✅ Delete `watch` (`watch.rs`, `watch_cli.rs`, subcommand, docs). Move
    `--deadline` / `--tool-budget` / `--token-budget` onto `lan run` and
-   `RunConfig`, defaults unset.
-2. Extract `fingerprint()` from the watch module; add `lan fingerprint`.
-3. Flip the shell default; retire `--allow-shell` / `LAN_ALLOW_SHELL`; add
-   the disable knob.
-4. Remove the Dockerfile; write `docs/containerization.md`.
-5. CLI grammar: prompt shorthand, `run -`, ACP first-line signpost, exit
-   codes.
-6. Update `README.md` (two-mode story, posture) and `ARCHITECTURE.md` §2/§6.
+   `RunConfig`, defaults unset. — `4fbe1fd`
+2. ✅ Extract `fingerprint()` from the watch module; add `lan fingerprint`.
+   — `4fbe1fd`
+3. ✅ Flip the shell default; retire `--allow-shell` / `LAN_ALLOW_SHELL`; add
+   the disable knob. — `35c9ccb`
+4. ✅ Remove the Dockerfile; write `docs/containerization.md`. — `a246722`
+5. ✅ CLI grammar: prompt shorthand, `run -`, ACP first-line signpost, exit
+   codes. — `35c9ccb`
+6. ✅ Update `README.md` (two-mode story, posture) and `ARCHITECTURE.md` §2/§6.
 
-Acceptance: the shell one-liner watch recipe works against the released
-binary; `README` contains no sentence describing deleted machinery.
+Acceptance: met. The shell recipe in `README.md` runs against the built binary
+— `lan fingerprint` prints the hash, a bounded `lan run --json` exits `0`/`1`/`3`
+by the contract — and no sentence in `README.md` describes deleted machinery.
 
 ### Phase B — Structure
 

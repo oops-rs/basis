@@ -20,11 +20,14 @@ implementation.
   Consequences), `docs/proposals/` holds deferred ideas (numbered, with Status line,
   trigger conditions, and the properties any implementation must preserve). New
   significant decisions get an ADR; deferred ideas get a proposal, not a TODO.
+  `docs/REDESIGN.md` is the ledger of the ADR-0010…0015 transition: what is built,
+  what is in between, what is not started. `README.md` and `ARCHITECTURE.md` describe
+  the *shipped* state and are updated as phases land, never ahead of them.
 - The core principle: **the core has no opinions** — no task-specific types,
   pipelines, or vocabulary (PROPOSAL.md Bet 4).
 - **mentra/lan split**: capabilities generic enough for any harness (session branching,
   compaction lifecycle, hook points, MCP client) belong in mentra, not here. lan keeps
-  conventions and protocol: context discovery, ACP mapping, scheduling, packaging. When lan
+  conventions and protocol: context discovery, ACP mapping, the CLI grammar. When lan
   hits a mentra gap, file a mentra issue even if fixing it immediately.
 
 ## Workflow Discipline

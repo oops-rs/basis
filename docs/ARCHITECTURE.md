@@ -1,14 +1,16 @@
 # lan — Architecture
 
-> rev 6 · 2026-08-08 · **lan** — **L**ightweight **A**gent **N**ucleus
+> rev 7 · 2026-08-11 · **lan** — **L**ightweight **A**gent **N**ucleus
 > The *how*. For the *why* — problem, idea, bets — see [`PROPOSAL.md`](PROPOSAL.md);
 > locked decisions live in [`adr/`](adr/); deferred ideas in [`proposals/`](proposals/);
 > research grounding in [`p0-groundwork.md`](p0-groundwork.md).
 > **Note (2026-08-11):** ADR-0010…0015 redirect the design toward an SDK-first
-> shape (watch retired, shell default flipped, crate split, no shipped
-> container). This document still describes the *built* P0–P4 state; the
-> transition ledger and phases are in [`REDESIGN.md`](REDESIGN.md), and
-> sections here are rewritten as phases land.
+> shape. **Phase A of that transition has landed** — watch retired, bounds moved
+> onto runs, shell default flipped, no shipped container, the CLI grammar of
+> ADR-0015 — and §2 and §4 below describe the state after it. The crate split
+> (Phase B) and the SDK work (Phase C) are not built; where this document still
+> describes the P0–P4 shape it says so. The ledger and phases are in
+> [`REDESIGN.md`](REDESIGN.md).
 > Reference bar: [pi](https://github.com/earendil-works/pi) (earendil-works) — minimal core, complete harness.
 > General-purpose: no domain assumptions. Periodic bug-checking is one use case, never a design input.
 
@@ -26,7 +28,8 @@ navigation, context compaction, unified multi-provider access, RPC headless mode
 hot-reloadable extensions. Two pi decisions independently validate ours:
 
 - **No built-in permission system.** pi ships none and says "containerize or sandbox pi" —
-  exactly the Docker boundary we chose.
+  the posture we arrived at independently and adopted knowingly in ADR-0013: the boundary is
+  the OS's, documented rather than shipped.
 - **Embedding via protocol.** pi's RPC mode is a bespoke JSONL protocol over stdio. We take the
   same architecture but adopt the *standard* — ACP — so every existing client works without a
   custom client library.
@@ -57,10 +60,16 @@ nightly dependency bump, an interactive refactor are all the same to the binary.
 seems to need core changes, close the gap generically or push it to an extension point.
 
 ```
-lan                                   # default: ACP server on stdio (the front door)
-lan run "<prompt>" [--json]           # headless one-shot, JSONL event stream
-lan watch "<prompt>" --every 30m      # recurring headless runs, skip-if-unchanged
+lan                                # ACP server on stdio (the front door)
+lan "<prompt>"                     # shorthand: exactly `lan run "<prompt>"`
+lan run "<prompt>" [--json]        # headless one-shot, JSONL event stream
+lan bridge                         # the same server on a websocket, for a browser
+lan fingerprint                    # the workspace's hash, for a caller's own loop
 ```
+
+The grammar is ADR-0015's and is the whole CLI. Recurrence is not in it: an interval is the
+host's (cron, systemd, CI, a tokio task), and the two pieces that are easy to get wrong — the
+fingerprint and per-run bounds — are a subcommand and three flags on `run` (ADR-0014).
 
 ## 3. Extension model (without embedding a scripting language)
 
@@ -88,7 +97,7 @@ flowchart LR
   end
   subgraph bin["lan binary"]
     acp["ACP server"]
-    headless["run / watch"]
+    headless["run"]
   end
   subgraph lib["lan crate (the SDK)"]
     sess["sessions · branching · compaction"]
@@ -96,8 +105,8 @@ flowchart LR
     ext["hooks · MCP client"]
     rt["Mentra runtime"]
   end
-  subgraph box["Docker container"]
-    wsp[("/workspace  rw")]
+  subgraph box["host OS — isolation, if any, is the operator's"]
+    wsp[("workspace  rw")]
   end
   llm[("providers")]
   zed -- stdio --> acp
@@ -123,21 +132,17 @@ flowchart LR
 - **The mentra/lan split** (same author owns both): anything a *different* harness could also
   want — session branching, compaction lifecycle, hook points, MCP client — belongs in mentra.
   lan keeps conventions and protocol: AGENTS.md/skills/template discovery, ACP mapping, the
-  scheduler, Docker packaging.
-- **Confinement**: Docker with workspace as sole rw mount; a policy hook keeps `.git/hooks` and
-  agent config read-only inside it (codex's anti-escape carve-out). Native per-command sandbox
-  (Seatbelt on macOS, bubblewrap+seccomp on Linux, codex `workspace-write` design) is v2 for
-  Docker-free installs.
-
-```sh
-docker run --rm \
-  --read-only --tmpfs /tmp \
-  --security-opt no-new-privileges \
-  -v "$REPO":/workspace:rw \
-  -v lan-state:/state \
-  -e ANTHROPIC_API_KEY \
-  oops/lan:latest watch "<prompt>" --every 30m
-```
+  CLI grammar.
+- **Confinement**: the boundary is the OS's and lan ships no instance of it (ADR-0013,
+  amending ADR-0004). Shell and background execution are on by default; a run holds the
+  authority of the account that starts it, and lan never claims otherwise. In-process there
+  is hygiene only — workspace path roots, and a policy that keeps `.git/hooks` and agent
+  config read-only to the *file tools* (codex's anti-escape carve-out), which a shell
+  redirect walks past. [`containerization.md`](containerization.md) documents the
+  read-only-root pattern lan used to ship; a native per-command sandbox (Seatbelt on macOS,
+  bubblewrap+seccomp on Linux, codex's `workspace-write` design) stays parked in
+  [`proposals/0002`](proposals/0002-native-sandbox.md) as an *optional* later layer, not a
+  return to denying commands by default.
 
 ## 5. Research notes (2026-08-08)
 
@@ -163,8 +168,12 @@ docker run --rm \
 | P1 Crate + `run` | Mentra wiring, AGENTS.md loader, skills discovery, worktree hygiene, JSONL event stream. Acceptance: arbitrary prompts on arbitrary repos, in-process and as subprocess | done |
 | **P2 ACP server** ✅ | `agent-client-protocol` crate; session mapping, permission surfacing, modes, listing, history replay. Sessions survive turns, so conversation and resume work independent of protocol | done |
 | **P3 Extension points** ✅ | MCP client honoring `.mcp.json` *and* the servers an ACP client sends; subprocess hooks (allow/deny/modify); prompt templates surfaced as ACP commands; ws↔stdio bridge for acp-ui | done |
-| **P4 Loop + Docker** ✅ | `watch` scheduler with skip-if-unchanged, Dockerfile, state volume, shell grant | done |
+| **P4 Loop + Docker** ✅ | `watch` scheduler with skip-if-unchanged — retired by ADR-0014, its bounds and fingerprint kept; Dockerfile, state volume, shell grant — withdrawn by ADR-0013 for [`containerization.md`](containerization.md) | done |
 | P5 Depth | Branching ✅ — two-way since mentra 0.16, so an abandoned line of work can be returned to; compaction tuning, packages convention, provider OAuth remain | ongoing |
+
+This table is the record of how lan was built, not the current plan. What follows P5 is the
+SDK-first transition of ADR-0010…0015, phased in [`REDESIGN.md`](REDESIGN.md) §3: Phase A
+(posture and pruning) has landed; B (crate split), C (the SDK), and D (bindings) are open.
 
 Validation stays deliberately varied — a refactor, a doc task, a test-writing task, *and* a
 periodic check — so no single use case bends the API toward itself.

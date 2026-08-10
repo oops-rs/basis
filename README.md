@@ -13,11 +13,20 @@ Library first, binary second. No TUI — embedding is the front door:
    ([acp-ui](https://github.com/formulahendry/acp-ui)).
 3. **Subprocess** — `lan run --json` streams JSONL events for scripts and CI.
 
+There are two modes and two utilities, and the whole CLI is five lines
+([ADR-0015](docs/adr/0015-cli-grammar.md)):
+
 ```
-lan                                   # ACP server on stdio (default)
-lan run "<prompt>" [--json]           # headless one-shot
-lan watch "<prompt>" --every 30m      # recurring headless runs
+lan                                # ACP server on stdio — what an editor spawns
+lan "<prompt>"                     # shorthand: exactly `lan run "<prompt>"`
+lan run "<prompt>" [--json]        # headless one-shot; `-` reads the prompt from stdin
+lan bridge                         # the same ACP server on a websocket, for a browser
+lan fingerprint                    # the workspace's hash, for a loop you write yourself
 ```
+
+A positional argument that names no subcommand is a prompt, so the human path carries no
+ceremony and the editor path is untouched. `--` escapes a prompt that collides with a
+subcommand name (`lan -- run`).
 
 The core has no opinions: task-specific behavior enters through data — the prompt, the
 workspace (AGENTS.md, skills, prompt templates, `.mcp.json`), and config — never through code.
@@ -28,7 +37,7 @@ Set a provider key — `ANTHROPIC_API_KEY`, `OPENAI_API_KEY`, `GEMINI_API_KEY`, 
 `OPENROUTER_API_KEY` — and run a prompt against a repository:
 
 ```sh
-lan run "summarize what changed in the last three commits"
+lan "summarize what changed in the last three commits"
 lan run -C ../other-repo --json "find the slowest test and explain why"
 ```
 
@@ -39,28 +48,48 @@ adaptive thinking only on models that support it. Provider/model combinations
 without a requested tier fail explicitly instead of silently lowering it;
 omitting the flag leaves the provider default unchanged.
 
-By default the agent can read and write files inside the workspace but **cannot run
-commands** — a path check inside the process cannot confine a process once it starts, so
-that authority has to be granted deliberately:
+The agent can read and write files in the workspace and **run commands** — shell and
+background tasks — because a harness that cannot run the test suite does very little real
+work. `--no-shell` shuts the command tools for a run meant to read and report:
 
 ```sh
-lan run --allow-shell "run the test suite and summarize the failures"
+lan --no-shell "explain how the event stream is assembled"
 ```
 
-On a bare host that grant is real and lan says so. The container below is where it is
-sound, and where it is on by default.
+Be clear on what that flag is. A run holds whatever authority the user account that started
+it holds; nothing inside the process narrows that, and lan claims no sandbox anywhere. The
+path roots and the `.git` carve-out below are hygiene — they shut the route a model reaches
+for first — and a shell redirect walks straight past them. `--no-shell` narrows what *this
+run* does; it does not confine the process, because an in-process check cannot confine a
+command once it has started ([ADR-0013](docs/adr/0013-the-host-owns-the-boundary.md)).
+Isolation, where you want it, is the OS's job:
+[docs/containerization.md](docs/containerization.md) has the read-only-root pattern, what
+it protects, and what it does not.
 
 Independently of that, you can decide when the agent has to ask:
 
 ```sh
-lan run --approve prompt "tidy up the imports"   # ask before each change
-lan run --approve never  "what does this crate do?"   # look, don't touch
+lan --approve prompt "tidy up the imports"        # ask before each change
+lan --approve never  "what does this crate do?"   # look, don't touch
 ```
 
 Read-only calls are never queued for approval — prompting for them just trains you to
 approve without reading. Asking needs a terminal on stdin; without one a request is
 denied rather than silently granted, so an unattended run fails visibly instead of
 quietly doing as it pleases.
+
+A run nobody is watching should say so itself, with bounds — all unset by default, since an
+attended run has a person who tells "thinking hard" from "stuck" in a way no timer can
+([ADR-0014](docs/adr/0014-watch-retired-runs-are-boundable.md)):
+
+```sh
+lan run --deadline 10m --tool-budget 40 --token-budget 200000 "bump the deps and fix the fallout"
+```
+
+Every bound ends the run *gracefully* rather than discarding it: the event stream closes the
+way it always does, and whatever the model committed is kept. `--token-budget` is soft by
+construction — usage is only known once a round has streamed in full, so the round that
+crosses the line finishes and the run ends having succeeded.
 
 Any OpenAI-compatible endpoint works too — a gateway, a proxy, or a local
 server. Paste the URL as published; the trailing `/v1` is handled:
@@ -85,6 +114,19 @@ chaining.
 {"seq":2,"type":"run_finished","status":"ok"}
 ```
 
+Exit codes are contract, so a caller branches without parsing anything:
+
+| Code | Meaning |
+|---|---|
+| `0` | the run finished |
+| `1` | the run failed, or lan could not start it |
+| `2` | the invocation was wrong |
+| `3` | a bound tripped (`--deadline`, `--tool-budget`); committed work was kept |
+
+`3` is deliberately not `1`: "the model ran out of the time you gave it" and "the provider
+refused the request" call for different reactions. A crossed `--token-budget` is absent from
+that row on purpose — it ends the run gracefully, so the run succeeded and exits `0`.
+
 In-process, the same run is one call — the binary is a thin shell over this:
 
 ```rust
@@ -92,6 +134,17 @@ let report = lan::run(
     lan::RunConfig::new("/repo", "summarize the recent changes"),
     lan::CollectingSink::new(),
 ).await?;
+```
+
+The bounds are builders on the same config, and `report.stopped_by` carries the distinction
+the exit code makes — `Some(lan::Bound::Deadline)`, `Some(lan::Bound::ToolBudget)`, or
+`None` when the work is what ended the run:
+
+```rust
+let config = lan::RunConfig::new("/repo", "bump the deps and fix the fallout")
+    .with_deadline(Duration::from_secs(600))
+    .with_tool_budget(40)
+    .with_token_budget(200_000);
 ```
 
 For a conversation rather than a one-shot, keep the prepared run and send again — the
@@ -116,8 +169,8 @@ two-turn version (`cargo run -p lan --example embed -- "<prompt>"`).
 on stdio, so any ACP client drives it with no lan-specific client code:
 
 ```sh
-lan                                    # what an editor spawns
-lan acp --model gpt-5.6 --allow-shell  # same thing, configured
+lan                                # what an editor spawns
+lan acp --model gpt-5.6 --no-shell # same thing, configured
 ```
 
 The client supplies the workspace (`cwd` on `session/new`) and the prompt, so the flags
@@ -125,6 +178,15 @@ here are only what a client cannot say. Sessions are mentra agents, which means
 `session/load` resumes a conversation from a previous process, and `session/cancel` stops a
 turn in flight. Permission requests become `session/request_permission`, so approval is the
 client's UI rather than lan's ([ADR-0007](docs/adr/0007-acp-sessions-and-the-dispatch-loop.md)).
+
+An editor spawning lan and a shell pipe look identical from inside the process — both are a
+non-TTY stdin with no arguments — so `cat prompt.txt | lan` cannot be detected as a prompt
+without breaking every editor. Instead of waiting silently on prose, the server answers once
+the input proves it was never a client:
+
+```
+lan: expected an ACP client on stdio; did you mean 'lan run -'?
+```
 
 [`scripts/acp-smoke.py`](scripts/acp-smoke.py) drives it by hand if you want to watch the
 wire.
@@ -142,31 +204,42 @@ exempt from the same-origin policy, so any page you visit could otherwise dial
 `ws://127.0.0.1` and drive an agent with write access to your workspace; the `Origin`
 allowlist is what stops that, and it starts empty.
 
-## Watching
+## Recurring runs
 
-`lan watch` runs the same prompt on an interval and skips an iteration whose workspace has
-not changed, so an idle repository costs nothing:
-
-```sh
-lan watch "check for newly introduced TODOs and summarize them" --every 30m
-```
-
-"Changed" is a fingerprint over `git ls-files` — path, length, mtime, plus `HEAD` — so
-`.gitignore` is honored and `.git`'s own churn is ignored. Every uncertain case runs rather
-than skips: a false "changed" costs tokens, while a false "unchanged" would silently stop
-the watch working ([ADR-0008](docs/adr/0008-the-watch-baseline.md)). `--always` opts out
-when the answer depends on something the workspace cannot show.
-
-Every iteration is **bounded**, because nobody is watching one:
+lan ships no scheduler: an interval belongs to whatever already runs things on your machine
+— cron, systemd, CI, a tokio task in your own binary. What lan ships instead are the two
+pieces that are easy to get wrong, and the loop is composition
+([ADR-0014](docs/adr/0014-watch-retired-runs-are-boundable.md)):
 
 ```sh
-lan watch "..." --every 30m --deadline 10m --tool-budget 40 --token-budget 200000
+last=""
+while :; do
+  now=$(lan fingerprint)
+  if [ "$now" != "$last" ]; then
+    lan run --json --deadline 10m --tool-budget 40 \
+        "check for newly introduced TODOs and summarize them" > run.jsonl
+    case $? in
+      0) last=$now ;;                          # only a clean run moves the baseline
+      3) echo "bound tripped; retry next tick" >&2 ;;
+      *) echo "run failed" >&2 ;;
+    esac
+  fi
+  sleep 1800
+done
 ```
 
-`--deadline` defaults to the interval — a turn outliving its own period is not
-converging, and the next tick is already due. The budgets default to unset, since a useful
-value depends on the prompt. A tripped bound fails that iteration and the watch carries on
-([ADR-0009](docs/adr/0009-bounded-iterations.md)).
+`lan fingerprint` prints a digest over `git ls-files` — path, length, mtime, plus `HEAD` —
+so `.gitignore` is honored and `.git`'s own churn is ignored:
+
+```
+$ lan fingerprint
+cea476f305ecf3f5
+```
+
+Every uncertain case reports *changed* rather than unchanged: a false "changed" costs tokens,
+while a false "unchanged" would silently stop the loop doing anything at all. Recording the
+baseline only after a run you consider successful is the caller's policy, because the caller
+is where the definition of "successful" lives — above, that is the `0` arm.
 
 ## What the workspace contributes
 
@@ -189,65 +262,51 @@ value depends on the prompt. A tripped bound fails that iteration and the watch 
   replacement input. Any language, process-isolated. A hook that breaks denies by default,
   because a guard that fails open is a guard nobody knows is gone.
 - **Approval** — `--approve prompt` puts every consequential call to you first, with the
-  command or the changed keys shown; `always` (the default) and `never` are the other two
-  settings. Embedders implement `Approver` to answer however they like.
+  command or the changed keys shown; `always` (the default on the CLI) and `never` are the
+  other two settings. Over ACP the default is `prompt`, since there is a client to ask.
+  Embedders implement `Approver` to answer however they like.
 - **`.git` carve-out** — `.git/hooks` and `.git/config` are denied to the file tools by
   default: a file written there runs on the next commit, which turns an edit into code
   execution outside anything approval covers. The rest of `.git` stays writable, since git
   needs it. This binds the file tools, **not the shell** — a redirect inside `sh -c` still
   lands, because nothing parses shell. Hygiene, not a boundary.
-- **Confinement** — the agent is scoped to the workspace; a write above it is refused.
-  In-process this is hygiene, not a boundary
-  ([ADR-0004](docs/adr/0004-kernel-enforced-confinement.md)). The boundary is the
-  container's.
-
-## Container
-
-The image is where the workspace guarantee is real: a read-only root filesystem with the
-workspace as the only writable mount, enforced by the kernel rather than by lan. Commands
-are enabled there without a flag for exactly that reason
-([ADR-0006](docs/adr/0006-shell-requires-an-explicit-grant.md)).
-
-```sh
-docker build -t oops/lan:latest .
-
-docker run --rm \
-  --read-only --tmpfs /tmp \
-  --security-opt no-new-privileges \
-  -v "$PWD":/workspace:rw \
-  -v lan-state:/state \
-  -e ANTHROPIC_API_KEY \
-  oops/lan:latest run "run the tests and tell me what broke"
-```
-
-Inside it, a command that reaches past the workspace is refused by the kernel:
-
-```
-/bin/sh: 1: cannot create /etc/breach.txt: Read-only file system
-```
-
-`-v lan-state:/state` keeps session state across runs; without it `--rm` and `--read-only`
-leave the agent nowhere to write its store.
+- **Confinement** — the agent is scoped to the workspace; a write above it is refused by the
+  file tools. This is hygiene, not a boundary
+  ([ADR-0004](docs/adr/0004-kernel-enforced-confinement.md),
+  [ADR-0013](docs/adr/0013-the-host-owns-the-boundary.md)). The boundary, if you want one,
+  is the OS's — see [docs/containerization.md](docs/containerization.md).
 
 ## Status
 
-**P0–P4 complete.** Everything the plan called a phase is built: the ACP server on stdio
-(the default mode) with modes, session listing and history replay; multi-turn conversation
-and resume; one-shot `lan run` in prose or JSONL; `lan watch` on an interval, skipping a
-workspace nothing has touched; MCP servers from `.mcp.json` and from the client; prompt
-templates surfaced as commands; subprocess hooks that allow, deny, or rewrite a tool call;
-a websocket bridge for [acp-ui](https://github.com/formulahendry/acp-ui); and branching.
-All with AGENTS.md discovery, skills, approval, and kernel-enforced confinement in the
-image.
+**P0–P4 complete.** Everything the original plan called a phase is built: the ACP server on
+stdio (the default mode) with modes, session listing and history replay; multi-turn
+conversation and resume; one-shot `lan run` in prose or JSONL; MCP servers from `.mcp.json`
+and from the client; prompt templates surfaced as commands; subprocess hooks that allow,
+deny, or rewrite a tool call; a websocket bridge for
+[acp-ui](https://github.com/formulahendry/acp-ui); and branching. All with AGENTS.md
+discovery, skills, and approval.
+
+**The redesign is underway.** [ADR-0010](docs/adr/0010-the-crate-is-the-workflow-surface.md)
+through [ADR-0015](docs/adr/0015-cli-grammar.md) point lan at an SDK-first shape: the crate
+is the workflow surface, the host owns the boundary, and the binary keeps only the grammar
+above. [docs/REDESIGN.md](docs/REDESIGN.md) is the honest ledger of that transition.
+**Phase A has landed** — `watch` retired with its bounds moved onto `RunConfig` and
+`lan run`, the fingerprint kept as a utility, shell on by default, the shipped container
+replaced by documented patterns, and the CLI grammar with its exit codes. Phases B (crate
+split), C (the SDK proper) and D (bindings) are open, and this README describes only what
+is built.
 
 Still open, and named honestly: compaction tuning, the packages convention, and provider
-OAuth remain (P5), and **nobody has driven this from Zed or JetBrains yet** — it is verified
-against the protocol and its official client library, not against the ecosystem. There is no
-CI, and lan itself is unpublished. See [docs/ARCHITECTURE.md](docs/ARCHITECTURE.md) §6.
+OAuth remain, and **nobody has driven this from Zed or JetBrains yet** — it is verified
+against the protocol and its official client library, not against the ecosystem. lan itself
+is unpublished. CI runs `cargo fmt --all --check`, clippy at `-D warnings`, and the full
+suite on Linux, macOS, and Windows, plus an MSRV job. See
+[docs/ARCHITECTURE.md](docs/ARCHITECTURE.md) §6.
 
-Docs follow the nous layout: [docs/PROPOSAL.md](docs/PROPOSAL.md)
-(why) · [docs/ARCHITECTURE.md](docs/ARCHITECTURE.md) (how) · [docs/adr/](docs/adr/)
-(locked decisions) · [docs/proposals/](docs/proposals/) (deferred ideas).
+Docs follow the nous layout: [docs/PROPOSAL.md](docs/PROPOSAL.md) (why) ·
+[docs/ARCHITECTURE.md](docs/ARCHITECTURE.md) (how) · [docs/REDESIGN.md](docs/REDESIGN.md)
+(the transition) · [docs/adr/](docs/adr/) (locked decisions) ·
+[docs/proposals/](docs/proposals/) (deferred ideas).
 
 ## License
 
