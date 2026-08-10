@@ -50,8 +50,8 @@ pub use mcp::{
     DEFAULT_GLOBAL_MCP_FILE, DEFAULT_WORKSPACE_MCP_FILE, McpConfig, McpError, McpServer, McpSource,
 };
 pub use run::{
-    CollectingSink, EventSink, FnSink, NullSink, PreparedRun, RunConfig, RunContext, RunError,
-    RunReport, TurnOptions, resume, run, run_with_approver,
+    CollectingSink, Effort, EventSink, FnSink, NullSink, PreparedRun, RunConfig, RunContext,
+    RunError, RunReport, TurnOptions, resume, run, run_with_approver,
 };
 pub use shell::ShellAccess;
 pub use skills::{SkillsConfig, SkillsSource};
@@ -64,6 +64,6 @@ pub use templates::{Template, TemplateError, TemplateSource, TemplatesConfig};
 // `watch` the function sits beside `watch` the module the same way `run` does:
 // the scheduler is one call, and everything it is built from stays namespaced.
 pub use watch::{
-    CollectingWatchSink, Interval, IntervalError, Shutdown, WATCH_SCHEMA_VERSION, WatchConfig,
-    WatchError, WatchEvent, WatchJsonlWriter, WatchSink, WatchSummary, watch,
+    CollectingWatchSink, Interval, IntervalError, IterationBounds, Shutdown, WATCH_SCHEMA_VERSION,
+    WatchConfig, WatchError, WatchEvent, WatchJsonlWriter, WatchSink, WatchSummary, watch,
 };

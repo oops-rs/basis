@@ -23,6 +23,7 @@ use async_trait::async_trait;
 use mentra::runtime::CancellationToken;
 use tokio::sync::watch as watch_channel;
 
+use super::IterationBounds;
 use super::{
     ApproverSource, RunSource, WatchError,
     change::{self, Fingerprint, Snapshot},
@@ -200,6 +201,7 @@ pub(crate) struct Plan {
     /// the workspace is not looked at at all.
     pub always: bool,
     pub max_iterations: Option<u64>,
+    pub bounds: IterationBounds,
 }
 
 /// The collaborators, so `drive`'s signature stays readable.
@@ -261,7 +263,13 @@ pub(crate) async fn drive(
                 counters.ran += 1;
                 emit(&sink, WatchEvent::IterationStarted { iteration, reason })?;
 
-                let outcome = run_once(&sink, iteration, &parts).await?;
+                let outcome = run_once(
+                    &sink,
+                    iteration,
+                    &parts,
+                    plan.bounds.turn_options(plan.every),
+                )
+                .await?;
 
                 if outcome.succeeded() {
                     // Fingerprint *after* the run, and only after one that
@@ -367,6 +375,7 @@ async fn run_once(
     sink: &SharedSink,
     iteration: u64,
     parts: &Collaborators,
+    bounds: TurnOptions,
 ) -> Result<IterationOutcome, WatchError> {
     let mut prepared = match parts.source.prepare(iteration).await {
         Ok(prepared) => prepared,
@@ -387,7 +396,7 @@ async fn run_once(
         // turn still ends through the normal path, so the iteration's stream
         // closes with its `run_finished` line before the watch reports.
         cancel: Some(parts.shutdown.token()),
-        ..TurnOptions::default()
+        ..bounds
     };
 
     let turn = prepared

@@ -19,6 +19,7 @@ use std::path::{Path, PathBuf};
 use mentra::{
     BuiltinProvider, ModelSelector, ProviderId, Runtime, RuntimePolicy, Session,
     agent::{AgentConfig, WorkspaceConfig},
+    provider::{ReasoningEffort, ReasoningOptions},
     provider_core::{StaticCredentialSource, responses, responses::ResponsesProvider},
 };
 use thiserror::Error;
@@ -41,6 +42,29 @@ pub use sink::{CollectingSink, EventSink, FnSink, NullSink};
 /// Default name for the session a run creates. Sessions are named so a client
 /// can tell them apart; the name carries no behavior.
 const DEFAULT_SESSION_NAME: &str = "lan run";
+
+/// How hard the model should think before answering.
+///
+/// lan's own enum rather than a re-export, for the reason [`Event`] and
+/// [`TurnOptions`] are: the surface lan promises should not move when mentra's
+/// does. Only providers with a reasoning control honor it; the rest ignore it,
+/// which is why there is no "unsupported" error to handle.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Effort {
+    Low,
+    Medium,
+    High,
+}
+
+impl From<Effort> for ReasoningEffort {
+    fn from(effort: Effort) -> Self {
+        match effort {
+            Effort::Low => Self::Low,
+            Effort::Medium => Self::Medium,
+            Effort::High => Self::High,
+        }
+    }
+}
 
 /// Everything a run needs. Task-specific behavior lives in `prompt` and in the
 /// workspace, never in this struct.
@@ -69,6 +93,8 @@ pub struct RunConfig {
     pub shell: ShellAccess,
     /// When the agent must ask before doing something consequential.
     pub approval: ApprovalPolicy,
+    /// How hard the model should think. `None` leaves the provider's default.
+    pub effort: Option<Effort>,
     pub session_name: String,
 }
 
@@ -90,6 +116,7 @@ impl RunConfig {
             // calls `with_shell` explicitly.
             shell: ShellAccess::Denied,
             approval: ApprovalPolicy::default(),
+            effort: None,
             session_name: DEFAULT_SESSION_NAME.to_string(),
         }
     }
@@ -159,6 +186,14 @@ impl RunConfig {
     /// approver — see [`PreparedRun::execute_with_approver`].
     pub fn with_approval(self, approval: ApprovalPolicy) -> Self {
         Self { approval, ..self }
+    }
+
+    /// Asks the model to think harder, where the provider supports it.
+    pub fn with_effort(self, effort: Effort) -> Self {
+        Self {
+            effort: Some(effort),
+            ..self
+        }
     }
 
     pub fn with_session_name(self, session_name: impl Into<String>) -> Self {
@@ -271,11 +306,12 @@ pub async fn prepare(config: RunConfig) -> Result<PreparedRun, RunError> {
 pub async fn prepare_without_prompt(config: RunConfig) -> Result<PreparedRun, RunError> {
     let resolved = resolve(&config).await?;
 
-    let session = resolved.runtime.create_session_with_config(
+    let mut session = resolved.runtime.create_session_with_config(
         config.session_name.clone(),
         resolved.model.clone(),
         agent_config(&config, &resolved.context),
     )?;
+    apply_effort(&mut session, config.effort)?;
 
     Ok(PreparedRun::new(
         session,
@@ -295,7 +331,8 @@ pub async fn prepare_without_prompt(config: RunConfig) -> Result<PreparedRun, Ru
 pub async fn resume(agent_id: &str, config: RunConfig) -> Result<PreparedRun, RunError> {
     let resolved = resolve(&config).await?;
 
-    let session = resolved.runtime.resume_session(agent_id)?;
+    let mut session = resolved.runtime.resume_session(agent_id)?;
+    apply_effort(&mut session, config.effort)?;
 
     Ok(PreparedRun::new(
         session,
@@ -348,9 +385,12 @@ async fn resolve(config: &RunConfig) -> Result<Resolved, RunError> {
         // kernel's job. Commands are the case where the difference bites, so
         // they stay off unless the caller has granted them (ADR-0006).
         .with_policy(
-            RuntimePolicy::workspace_bounded(&config.workspace)
-                .allow_shell_commands(config.shell.is_granted())
-                .allow_background_commands(config.shell.is_granted()),
+            git_protected(
+                RuntimePolicy::workspace_bounded(&config.workspace),
+                &config.workspace,
+            )
+            .allow_shell_commands(config.shell.is_granted())
+            .allow_background_commands(config.shell.is_granted()),
         )
         // Without an authorizer mentra allows every call unconditionally, and
         // no permission request can ever be raised.
@@ -537,6 +577,45 @@ fn resolved_workspace(requested: &Path, context: &WorkspaceContext) -> PathBuf {
         .unwrap_or_else(|| requested.to_path_buf())
 }
 
+/// Asks the model for a reasoning effort, when one was requested.
+///
+/// A provider without a reasoning control ignores the request rather than
+/// failing, so this is safe to call unconditionally — which is why `None`
+/// leaves the session untouched instead of sending a default nobody asked for.
+fn apply_effort(session: &mut Session, effort: Option<Effort>) -> Result<(), RunError> {
+    let Some(effort) = effort else {
+        return Ok(());
+    };
+
+    session.set_reasoning(Some(ReasoningOptions {
+        effort: Some(effort.into()),
+        summary: None,
+    }))?;
+
+    Ok(())
+}
+
+/// Keeps the parts of `.git` that decide what *runs* out of reach.
+///
+/// `.git/hooks` holds programs git executes on ordinary operations, and
+/// `.git/config` can name more of them (`core.hooksPath`, and the `filter`/
+/// `diff` drivers that run on checkout). Writing either turns a file edit into
+/// code execution outside anything lan's policy or approval covers, which is
+/// why they are singled out rather than denying `.git` wholesale — an agent
+/// legitimately reads `.git`, and `git` itself must keep writing objects and
+/// refs underneath it.
+///
+/// **This binds the builtin file tools, not the shell.** A command like
+/// `sh -c 'echo … > .git/hooks/pre-commit'` still reaches the path, because
+/// nothing here parses shell. It closes the route a model actually takes and
+/// remains hygiene; per ADR-0004 the boundary is the container's.
+fn git_protected(policy: RuntimePolicy, workspace: &Path) -> RuntimePolicy {
+    let git = workspace.join(".git");
+    policy
+        .with_denied_write_root(git.join("hooks"))
+        .with_denied_write_root(git.join("config"))
+}
+
 /// Turns discovered context into the agent's system prompt, and scopes the
 /// agent to the workspace. Everything else stays at mentra's defaults —
 /// opinions belong in the prompt and the workspace, not here.
@@ -621,6 +700,18 @@ mod tests {
         let agent = agent_config(&config, &WorkspaceContext::default());
 
         assert_eq!(agent.system, None);
+    }
+
+    #[test]
+    fn asking_for_no_effort_leaves_the_provider_default() {
+        let config = RunConfig::new("/repo", "prompt");
+
+        assert_eq!(config.effort, None);
+        assert_eq!(
+            config.clone().with_effort(Effort::High).effort,
+            Some(Effort::High)
+        );
+        assert_eq!(config.effort, None, "the original is untouched");
     }
 
     #[tokio::test]

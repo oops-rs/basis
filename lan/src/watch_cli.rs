@@ -47,6 +47,30 @@ pub(crate) struct WatchArgs {
     #[arg(long)]
     json: bool,
 
+    /// How hard the model should think: low, medium, or high.
+    #[arg(long, value_name = "LEVEL")]
+    effort: Option<crate::EffortArg>,
+
+    /// Give up on an iteration after this long: 90s, 30m, 2h.
+    ///
+    /// Defaults to the interval. A turn that outlives its own period is not
+    /// converging, and the next tick is already due — so bounding it there
+    /// costs a healthy run nothing and stops a stuck one from running until
+    /// somebody notices.
+    #[arg(long, value_name = "DURATION")]
+    deadline: Option<Interval>,
+
+    /// Cap how many tool calls one iteration may make.
+    #[arg(long, value_name = "N")]
+    tool_budget: Option<usize>,
+
+    /// Cap the tokens one iteration may report using, input plus output.
+    ///
+    /// Soft: the round that crosses the line finishes, then the turn ends
+    /// gracefully and keeps what it has. This is the bound that maps to money.
+    #[arg(long, value_name = "N")]
+    token_budget: Option<u64>,
+
     /// Run every interval even when the workspace has not changed.
     ///
     /// The default skips an iteration whose workspace is identical to what the
@@ -143,10 +167,19 @@ fn build(args: WatchArgs) -> Result<WatchConfig, String> {
 
     let mut config = WatchConfig::new(run, args.every)
         .with_always(args.always)
+        .with_bounds(lan::watch::IterationBounds {
+            deadline: args.deadline.map(|deadline| deadline.duration()),
+            tool_budget: args.tool_budget,
+            token_budget: args.token_budget,
+        })
         // A terminal approver on every iteration. Under any policy but
         // `prompt` it is never consulted; under `prompt` it is what stops the
         // library refusing to start.
         .with_approver(TerminalApprover::new);
+
+    if let Some(effort) = args.effort {
+        config.run = config.run.with_effort(effort.into());
+    }
 
     if let Some(max) = args.max_iterations {
         config = config.with_max_iterations(max);

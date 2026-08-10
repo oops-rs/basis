@@ -380,3 +380,74 @@ async fn a_missing_workspace_is_refused() {
 
     assert!(prepare_with_session(session, &config, "openai", "mock-model").is_err());
 }
+
+/// The `.git` carve-out, proven where it matters: through a real runtime, on a
+/// tool call the model actually makes.
+///
+/// A file under `.git/hooks` is a program git runs on the next commit, so an
+/// agent that can write one executes code outside anything lan's approval or
+/// policy governs. lan denies those paths by default; this asserts the denial
+/// reaches the tool rather than living only in a config field.
+#[tokio::test]
+async fn a_write_into_git_hooks_is_refused() {
+    let workspace = workspace_with_context("rules");
+    std::fs::create_dir_all(workspace.path().join(".git").join("hooks")).expect("hooks dir");
+
+    let policy = mentra::RuntimePolicy::workspace_bounded(workspace.path())
+        .with_denied_write_root(workspace.path().join(".git").join("hooks"));
+
+    let mock = MockRuntime::builder()
+        .model("mock-model", "openai")
+        .with_policy(policy)
+        .tool_calls(vec![MockToolCall::new(
+            "files",
+            serde_json::json!({
+                "operations": [{
+                    "op": "create",
+                    "path": ".git/hooks/pre-commit",
+                    "content": "#!/bin/sh\nexfiltrate\n"
+                }]
+            }),
+        )])
+        .text("could not")
+        .build()
+        .expect("mock runtime builds");
+
+    let session = mock
+        .runtime()
+        .create_session_with_config(
+            "test",
+            mock.model(),
+            mentra::agent::AgentConfig {
+                workspace: mentra::agent::WorkspaceConfig {
+                    base_dir: workspace.path().to_path_buf(),
+                    ..Default::default()
+                },
+                ..Default::default()
+            },
+        )
+        .expect("session");
+
+    let config = config(workspace.path(), "install a hook");
+    let report = prepare_with_session(session, &config, "openai", "mock-model")
+        .expect("prepared")
+        .execute(CollectingSink::new())
+        .await
+        .expect("the run reports rather than erroring");
+
+    let failed = report
+        .sink
+        .events()
+        .iter()
+        .find_map(|event| match event {
+            Event::ToolCompleted { is_error, .. } => Some(*is_error),
+            _ => None,
+        })
+        .expect("the write was attempted");
+
+    assert!(failed, "writing a git hook must fail");
+    assert!(
+        !workspace.path().join(".git/hooks/pre-commit").exists(),
+        "and must not reach the disk"
+    );
+}

@@ -49,14 +49,17 @@ mod event;
 mod interval;
 mod schedule;
 
-use std::sync::{Arc, Mutex};
+use std::{
+    sync::{Arc, Mutex},
+    time::Duration,
+};
 
 use async_trait::async_trait;
 use thiserror::Error;
 
 use crate::{
     approval::{AllowAll, ApprovalPolicy, Approver},
-    run::{PreparedRun, RunConfig, RunError},
+    run::{PreparedRun, RunConfig, RunError, TurnOptions},
 };
 
 pub use change::{Fingerprint, Snapshot, snapshot};
@@ -133,6 +136,44 @@ where
 ///
 /// Task-specific behaviour lives in `run.prompt` and in the workspace, never
 /// in this struct.
+/// What one iteration may spend.
+///
+/// A `lan run` is watched by the person who typed it; a watch is not. So the
+/// bound that a person would otherwise supply — noticing, and pressing ctrl-C —
+/// has to be written down in advance, and the sensible place is here.
+///
+/// The deadline defaults to the interval. A turn that outlives its own period
+/// is pathological by definition: the next tick is already due, and whatever
+/// the model is doing it is not converging. Bounding it there costs a correct
+/// run nothing, because a correct run finishes long before its own interval,
+/// and it stops the failure that actually happens — one stuck iteration
+/// running until somebody looks.
+///
+/// Tool and token budgets default to unset, because a sensible value for
+/// either depends on the prompt in a way a default cannot guess. Set them when
+/// the work is unattended and the bill matters.
+#[derive(Debug, Clone, Default)]
+pub struct IterationBounds {
+    /// `None` means the interval. `Some` overrides it, including with a value
+    /// larger than the interval, which is a deliberate choice to allow a long
+    /// turn to overlap the next tick.
+    pub deadline: Option<Duration>,
+    pub tool_budget: Option<usize>,
+    pub token_budget: Option<u64>,
+}
+
+impl IterationBounds {
+    /// The options one iteration runs under, given the interval it belongs to.
+    pub fn turn_options(&self, every: Interval) -> TurnOptions {
+        TurnOptions {
+            deadline: Some(self.deadline.unwrap_or_else(|| every.duration())),
+            tool_budget: self.tool_budget,
+            token_budget: self.token_budget,
+            ..TurnOptions::default()
+        }
+    }
+}
+
 pub struct WatchConfig {
     /// The run each iteration performs. Cloned per iteration, because every
     /// iteration is a fresh run.
@@ -147,6 +188,12 @@ pub struct WatchConfig {
     /// Stop after this many iterations. Counts ticks, not runs: a skipped
     /// iteration is still an iteration, so a bound always terminates.
     pub max_iterations: Option<u64>,
+    /// What one iteration may spend before it is stopped.
+    ///
+    /// An unattended watch is the case where an unbounded turn hurts: nobody
+    /// is watching a model work a hard problem, and the interval arrives again
+    /// regardless. See [`IterationBounds`].
+    pub bounds: IterationBounds,
     /// Trips to stop the watch. See [`Shutdown`].
     pub shutdown: Shutdown,
 
@@ -164,6 +211,7 @@ impl std::fmt::Debug for WatchConfig {
             .field("every", &self.every)
             .field("always", &self.always)
             .field("max_iterations", &self.max_iterations)
+            .field("bounds", &self.bounds)
             .finish_non_exhaustive()
     }
 }
@@ -175,6 +223,7 @@ impl WatchConfig {
             every,
             always: false,
             max_iterations: None,
+            bounds: IterationBounds::default(),
             shutdown: Shutdown::new(),
             source: None,
             approver: None,
@@ -192,6 +241,11 @@ impl WatchConfig {
             max_iterations: Some(max_iterations),
             ..self
         }
+    }
+
+    /// Sets what one iteration may spend.
+    pub fn with_bounds(self, bounds: IterationBounds) -> Self {
+        Self { bounds, ..self }
     }
 
     pub fn with_shutdown(self, shutdown: Shutdown) -> Self {
@@ -290,6 +344,7 @@ pub async fn watch<S: WatchSink>(config: WatchConfig, sink: S) -> Result<WatchSu
         every: config.every,
         always: config.always,
         max_iterations: config.max_iterations,
+        bounds: config.bounds.clone(),
     };
 
     let parts = Collaborators {
@@ -417,5 +472,55 @@ mod tests {
             sink.records().is_empty(),
             "a refused watch must not open a stream it never closes"
         );
+    }
+}
+
+#[cfg(test)]
+mod bounds_tests {
+    use super::*;
+
+    fn every(seconds: u64) -> Interval {
+        Interval::from_duration(Duration::from_secs(seconds))
+    }
+
+    #[test]
+    fn the_deadline_defaults_to_the_interval() {
+        let options = IterationBounds::default().turn_options(every(1800));
+
+        // An unbounded turn is the failure an unattended watch actually has,
+        // so the default has to be a bound rather than `None`.
+        assert_eq!(options.deadline, Some(Duration::from_secs(1800)));
+    }
+
+    #[test]
+    fn an_explicit_deadline_wins_including_a_longer_one() {
+        let bounds = IterationBounds {
+            deadline: Some(Duration::from_secs(3600)),
+            ..IterationBounds::default()
+        };
+
+        // Longer than the interval on purpose: overlapping the next tick is a
+        // choice a caller is allowed to make.
+        assert_eq!(
+            bounds.turn_options(every(1800)).deadline,
+            Some(Duration::from_secs(3600))
+        );
+    }
+
+    #[test]
+    fn the_budgets_reach_the_turn_unset_by_default() {
+        let plain = IterationBounds::default().turn_options(every(60));
+        assert_eq!(plain.tool_budget, None);
+        assert_eq!(plain.token_budget, None);
+
+        let bounded = IterationBounds {
+            tool_budget: Some(12),
+            token_budget: Some(50_000),
+            ..IterationBounds::default()
+        }
+        .turn_options(every(60));
+
+        assert_eq!(bounded.tool_budget, Some(12));
+        assert_eq!(bounded.token_budget, Some(50_000));
     }
 }

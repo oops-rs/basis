@@ -83,6 +83,24 @@ struct BridgeArgs {
     acp: AcpArgs,
 }
 
+/// How hard the model should think, where the provider supports it.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, clap::ValueEnum)]
+enum EffortArg {
+    Low,
+    Medium,
+    High,
+}
+
+impl From<EffortArg> for lan::Effort {
+    fn from(effort: EffortArg) -> Self {
+        match effort {
+            EffortArg::Low => Self::Low,
+            EffortArg::Medium => Self::Medium,
+            EffortArg::High => Self::High,
+        }
+    }
+}
+
 /// Knobs for the ACP server.
 ///
 /// Deliberately fewer than `run` has: an ACP client names the workspace itself
@@ -106,6 +124,11 @@ struct AcpArgs {
     /// applies, and here the client is asking on someone's behalf.
     #[arg(long)]
     allow_shell: bool,
+
+    /// How hard the model should think: low, medium, or high. Providers
+    /// without a reasoning control ignore it.
+    #[arg(long, value_name = "LEVEL")]
+    effort: Option<EffortArg>,
 
     /// When to ask before the agent changes anything. Defaults to asking the
     /// ACP client, which is the point of a protocol with a permission request
@@ -151,6 +174,11 @@ struct RunArgs {
     /// Also settable with LAN_ALLOW_SHELL=1.
     #[arg(long)]
     allow_shell: bool,
+
+    /// How hard the model should think: low, medium, or high. Providers
+    /// without a reasoning control ignore it.
+    #[arg(long, value_name = "LEVEL")]
+    effort: Option<EffortArg>,
 
     /// When to ask before the agent changes anything: always allow, ask each
     /// time, or refuse. Asking needs a terminal on stdin; without one, a
@@ -309,6 +337,10 @@ fn acp_config(args: AcpArgs) -> Result<lan::acp::ServeConfig, String> {
         .with_shell(shell)
         .with_approval(ApprovalPolicy::from(args.approve));
 
+    if let Some(effort) = args.effort {
+        config = config.with_effort(effort.into());
+    }
+
     if let Some(warning) = shell::unconfined_warning(shell) {
         eprintln!("lan: warning: {warning}");
     }
@@ -350,6 +382,10 @@ async fn execute_run(args: RunArgs) -> Result<ExitCode, String> {
 
     let approval = ApprovalPolicy::from(args.approve);
     config = config.with_approval(approval);
+
+    if let Some(effort) = args.effort {
+        config = config.with_effort(effort.into());
+    }
 
     // Prompting writes the question to stderr and reads stdin, so it works
     // alongside either renderer.

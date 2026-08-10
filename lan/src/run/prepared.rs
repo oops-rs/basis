@@ -86,6 +86,14 @@ pub struct TurnOptions {
     pub deadline: Option<Duration>,
     /// Caps how many tool calls one turn may make.
     pub tool_budget: Option<usize>,
+    /// Caps the tokens one turn may report using, input plus output.
+    ///
+    /// Soft by construction: usage is only known once a round has streamed in
+    /// full, so the round that crosses the line is always allowed to finish.
+    /// It ends the turn *gracefully* at the next boundary — what the model
+    /// already committed is kept, so the work is not thrown away for being one
+    /// round too long.
+    pub token_budget: Option<u64>,
 }
 
 impl TurnOptions {
@@ -115,12 +123,20 @@ impl TurnOptions {
         }
     }
 
+    pub fn with_token_budget(self, token_budget: u64) -> Self {
+        Self {
+            token_budget: Some(token_budget),
+            ..self
+        }
+    }
+
     fn into_run_options(self) -> RunOptions {
         RunOptions {
             cancellation: self.cancel,
             stop: self.stop,
             deadline: self.deadline.map(|after| SystemTime::now() + after),
             tool_budget: self.tool_budget,
+            token_budget: self.token_budget,
             ..RunOptions::default()
         }
     }
