@@ -146,6 +146,7 @@ impl TurnOptions {
 pub struct PreparedRun {
     session: Session,
     run: RunContext,
+    bounds: TurnOptions,
 }
 
 /// Hand-written because mentra's `Session` is not `Debug`, and because the
@@ -161,13 +162,33 @@ impl std::fmt::Debug for PreparedRun {
             .field("skills", &self.run.skills.len())
             .field("templates", &self.run.templates.len())
             .field("mcp_servers", &self.run.mcp_servers.len())
+            .field("bounds", &self.bounds)
             .finish_non_exhaustive()
     }
 }
 
 impl PreparedRun {
     pub fn new(session: Session, run: RunContext) -> Self {
-        Self { session, run }
+        Self {
+            session,
+            run,
+            bounds: TurnOptions::default(),
+        }
+    }
+
+    /// Sets what every turn on this run may spend.
+    ///
+    /// [`prepare`](super::prepare) installs [`RunConfig`](super::RunConfig)'s
+    /// bounds here; a host that built its own session says so itself. Only the
+    /// limits are read — a cancellation token belongs to one call, not to the
+    /// run, and arrives through [`send_with_options`](Self::send_with_options).
+    pub fn with_bounds(self, bounds: TurnOptions) -> Self {
+        Self { bounds, ..self }
+    }
+
+    /// What every turn on this run may spend.
+    pub const fn bounds(&self) -> &TurnOptions {
+        &self.bounds
     }
 
     /// The header line this run will open with, before anything is sent.
@@ -262,6 +283,11 @@ impl PreparedRun {
     /// This is what a protocol server's stop button needs: ACP's
     /// `session/cancel` trips the token, and the turn ends rather than running
     /// to completion unheard.
+    ///
+    /// A bound left unset here falls back to the run's own
+    /// ([`bounds`](Self::bounds)). Attaching a token is a statement about
+    /// stopping, not about limits, and reading it as "no deadline after all"
+    /// would quietly unbound a run its caller had configured.
     pub async fn send_with_options<S: EventSink, A: Approver>(
         &mut self,
         prompt: impl Into<String>,
@@ -302,7 +328,10 @@ impl PreparedRun {
 
         let turn = self
             .session
-            .append_turn_with_options(vec![ContentBlock::text(prompt)], options.into_run_options())
+            .append_turn_with_options(
+                vec![ContentBlock::text(prompt)],
+                bounded(options, &self.bounds).into_run_options(),
+            )
             .await;
 
         // The forwarder stops on this signal rather than on the channel
@@ -333,6 +362,20 @@ impl PreparedRun {
             outcome,
             sink,
         })
+    }
+}
+
+/// Fills in whatever `options` left unset from the run's configured bounds.
+///
+/// A caller that passes options in order to attach a cancellation token has
+/// said nothing about limits, and reading that silence as "no deadline" would
+/// unbound a run whose config asked for one.
+fn bounded(options: TurnOptions, bounds: &TurnOptions) -> TurnOptions {
+    TurnOptions {
+        deadline: options.deadline.or(bounds.deadline),
+        tool_budget: options.tool_budget.or(bounds.tool_budget),
+        token_budget: options.token_budget.or(bounds.token_budget),
+        ..options
     }
 }
 
@@ -561,5 +604,43 @@ mod tests {
 
         assert_eq!(files[0].scope, "ancestor:2");
         assert_eq!(files[1].scope, "workspace");
+    }
+
+    #[test]
+    fn attaching_a_token_does_not_unbound_a_configured_run() {
+        // What ACP does on every turn: options exist only to carry a stop
+        // button. Reading that as "and no deadline either" would silently
+        // remove the bound an unattended caller asked for.
+        let configured = TurnOptions::default()
+            .with_deadline(Duration::from_secs(600))
+            .with_tool_budget(12);
+        let (options, token) = TurnOptions::cancellable();
+
+        let merged = bounded(options, &configured);
+
+        assert_eq!(merged.deadline, Some(Duration::from_secs(600)));
+        assert_eq!(merged.tool_budget, Some(12));
+        assert!(merged.cancel.is_some(), "the token still arrives");
+        assert!(!token.is_cancelled());
+    }
+
+    #[test]
+    fn an_explicit_bound_wins_over_the_configured_one() {
+        let configured = TurnOptions::default().with_deadline(Duration::from_secs(600));
+        let explicit = TurnOptions::default().with_deadline(Duration::from_secs(30));
+
+        assert_eq!(
+            bounded(explicit, &configured).deadline,
+            Some(Duration::from_secs(30))
+        );
+    }
+
+    #[test]
+    fn a_prepared_run_is_unbounded_until_it_is_bounded() {
+        let unset = TurnOptions::default();
+
+        assert_eq!(bounded(TurnOptions::default(), &unset).deadline, None);
+        assert_eq!(bounded(TurnOptions::default(), &unset).tool_budget, None);
+        assert_eq!(bounded(TurnOptions::default(), &unset).token_budget, None);
     }
 }

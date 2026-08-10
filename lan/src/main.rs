@@ -7,26 +7,28 @@
 //! lan                       -> ACP server on stdio (P2)
 //! lan bridge                -> the same server on a websocket, for a browser
 //! lan run "<prompt>"        -> headless one-shot, JSONL events with --json
-//! lan watch "<prompt>"      -> recurring headless runs, skip-if-unchanged
+//! lan fingerprint           -> the workspace's hash, for a caller's own loop
 //! ```
 
-mod watch_cli;
+mod duration_arg;
 
 use std::{
     io::{self, IsTerminal, Write},
     net::SocketAddr,
-    path::PathBuf,
+    path::{Path, PathBuf},
     process::ExitCode,
 };
 
 use clap::{Parser, Subcommand};
 use lan::{
-    ApprovalPolicy, Event, JsonlWriter, RunConfig, RunOutcome, RunReport, ShellAccess,
+    ApprovalPolicy, Event, JsonlWriter, RunConfig, RunOutcome, RunReport, ShellAccess, Snapshot,
     TerminalApprover, provider,
     run::{EventSink, FnSink},
     shell,
 };
 use mentra::ModelSelector;
+
+use crate::duration_arg::DurationArg;
 
 #[derive(Debug, Parser)]
 #[command(
@@ -44,9 +46,8 @@ struct Cli {
 enum Command {
     /// Run one prompt against a workspace and exit.
     Run(RunArgs),
-    /// Run one prompt against a workspace on a schedule, skipping an
-    /// iteration whose workspace has not changed.
-    Watch(watch_cli::WatchArgs),
+    /// Print a hash of everything in the workspace a run could see.
+    Fingerprint(FingerprintArgs),
     /// Serve the Agent Client Protocol on stdio. Same as no subcommand.
     Acp(AcpArgs),
     /// Serve the same protocol on a websocket, for a client that cannot spawn
@@ -192,6 +193,33 @@ struct RunArgs {
     /// request is denied rather than silently granted.
     #[arg(long, value_name = "MODE", default_value = "always")]
     approve: ApproveMode,
+
+    /// Give up on the run after this long: 90s, 30m, 2h.
+    ///
+    /// Unset by default. An attended run has a person watching, and a person
+    /// tells "thinking hard" from "stuck" in a way no timer can — so this is
+    /// for the run nobody is watching, which has to say so itself.
+    #[arg(long, value_name = "DURATION")]
+    deadline: Option<DurationArg>,
+
+    /// Cap how many tool calls the run may make.
+    #[arg(long, value_name = "N")]
+    tool_budget: Option<usize>,
+
+    /// Cap the tokens the run may report using, input plus output.
+    ///
+    /// Soft: the round that crosses the line finishes, then the run ends
+    /// gracefully and keeps what it has. This is the bound that maps to money.
+    #[arg(long, value_name = "N")]
+    token_budget: Option<u64>,
+}
+
+/// Knobs for the fingerprint, which is only ever asked about one directory.
+#[derive(Debug, clap::Args)]
+struct FingerprintArgs {
+    /// Workspace root. Defaults to the current directory.
+    #[arg(short = 'C', long, value_name = "DIR")]
+    workspace: Option<PathBuf>,
 }
 
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq, clap::ValueEnum)]
@@ -228,7 +256,7 @@ async fn main() -> ExitCode {
                 ExitCode::FAILURE
             }
         },
-        Some(Command::Watch(args)) => match watch_cli::execute(args).await {
+        Some(Command::Fingerprint(args)) => match execute_fingerprint(args) {
             Ok(code) => code,
             Err(message) => {
                 eprintln!("lan: {message}");
@@ -394,6 +422,19 @@ async fn execute_run(args: RunArgs) -> Result<ExitCode, String> {
         config = config.with_effort(effort.into());
     }
 
+    // A bound that trips ends the run gracefully — the stream closes the way
+    // it always does and committed work is kept — so setting one costs a
+    // healthy run nothing.
+    if let Some(deadline) = args.deadline {
+        config = config.with_deadline(deadline.duration());
+    }
+    if let Some(tool_budget) = args.tool_budget {
+        config = config.with_tool_budget(tool_budget);
+    }
+    if let Some(token_budget) = args.token_budget {
+        config = config.with_token_budget(token_budget);
+    }
+
     // Prompting writes the question to stderr and reads stdin, so it works
     // alongside either renderer.
     let approver = TerminalApprover::new();
@@ -417,6 +458,34 @@ async fn execute_run(args: RunArgs) -> Result<ExitCode, String> {
     }
 
     Ok(exit_code(&report))
+}
+
+/// Prints the workspace fingerprint, or says why there is none.
+///
+/// The point is two lines of somebody else's loop: keep the last hash, compare
+/// it to this one, and skip the model when they match. So a workspace that
+/// cannot be fingerprinted prints *nothing* and exits nonzero — an empty string
+/// compared against a previous empty string is the false "unchanged" that stops
+/// such a loop working with nothing in the output to say so.
+fn execute_fingerprint(args: FingerprintArgs) -> Result<ExitCode, String> {
+    let workspace = match args.workspace {
+        Some(path) => path,
+        None => {
+            std::env::current_dir().map_err(|error| format!("no working directory: {error}"))?
+        }
+    };
+
+    println!("{}", fingerprint_line(&workspace)?);
+
+    Ok(ExitCode::SUCCESS)
+}
+
+/// The one line stdout gets, or the reason stdout gets nothing.
+fn fingerprint_line(workspace: &Path) -> Result<String, String> {
+    match lan::fingerprint::snapshot(workspace) {
+        Snapshot::Known(fingerprint) => Ok(fingerprint.hex()),
+        Snapshot::Unknown { reason } => Err(reason),
+    }
 }
 
 /// Renders events as prose on stdout: assistant text streams through, tool
@@ -519,5 +588,110 @@ mod tests {
             };
             assert_eq!(args.effort, Some(expected));
         }
+    }
+
+    fn run_args(args: &[&str]) -> RunArgs {
+        let mut argv = vec!["lan", "run", "prompt"];
+        argv.extend_from_slice(args);
+
+        let Some(Command::Run(parsed)) = Cli::try_parse_from(argv).expect("parses").command else {
+            panic!("run command should parse");
+        };
+        parsed
+    }
+
+    #[test]
+    fn a_run_states_its_own_bounds_or_has_none() {
+        // ADR-0014: nothing here defaults a bound on an operator's behalf,
+        // because there is no interval left to guess one from.
+        let plain = run_args(&[]);
+
+        assert_eq!(plain.deadline, None);
+        assert_eq!(plain.tool_budget, None);
+        assert_eq!(plain.token_budget, None);
+    }
+
+    #[test]
+    fn the_three_bounds_parse_off_the_command_line() {
+        let bounded = run_args(&[
+            "--deadline",
+            "10m",
+            "--tool-budget",
+            "40",
+            "--token-budget",
+            "200000",
+        ]);
+
+        assert_eq!(
+            bounded.deadline.map(DurationArg::duration),
+            Some(std::time::Duration::from_secs(600))
+        );
+        assert_eq!(bounded.tool_budget, Some(40));
+        assert_eq!(bounded.token_budget, Some(200_000));
+    }
+
+    #[test]
+    fn a_deadline_without_a_unit_is_refused_at_the_command_line() {
+        let error =
+            Cli::try_parse_from(["lan", "run", "prompt", "--deadline", "30"]).expect_err("refused");
+
+        assert!(
+            error.to_string().contains("30m"),
+            "the message must show an accepted form: {error}"
+        );
+    }
+
+    #[test]
+    fn fingerprint_defaults_to_the_current_directory() {
+        let Some(Command::Fingerprint(args)) = Cli::try_parse_from(["lan", "fingerprint"])
+            .expect("parses")
+            .command
+        else {
+            panic!("fingerprint command should parse");
+        };
+
+        assert_eq!(args.workspace, None);
+    }
+
+    #[test]
+    fn fingerprint_takes_a_workspace_the_same_way_run_does() {
+        let Some(Command::Fingerprint(args)) =
+            Cli::try_parse_from(["lan", "fingerprint", "-C", "/repo"])
+                .expect("parses")
+                .command
+        else {
+            panic!("fingerprint command should parse");
+        };
+
+        assert_eq!(args.workspace, Some(PathBuf::from("/repo")));
+    }
+
+    #[test]
+    fn a_workspace_that_cannot_be_fingerprinted_prints_nothing() {
+        // The failure this guards against is a shell loop comparing one empty
+        // string against another and concluding "unchanged" forever. There is
+        // no `Ok` here to print, so nothing reaches stdout.
+        let reason = fingerprint_line(Path::new("/definitely/not/a/real/path"))
+            .expect_err("an absent workspace has no fingerprint");
+
+        assert!(
+            reason.contains("/definitely/not/a/real/path"),
+            "the reason must name the workspace: {reason}"
+        );
+    }
+
+    #[test]
+    fn a_fingerprintable_workspace_prints_one_stable_hash() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        std::fs::write(dir.path().join("a.txt"), "one").expect("write");
+
+        let printed = fingerprint_line(dir.path()).expect("a workspace with a file in it");
+
+        assert_eq!(printed.len(), 16);
+        assert_eq!(
+            printed,
+            fingerprint_line(dir.path()).expect("still fingerprints"),
+            "a workspace nobody touched must print the same line twice"
+        );
     }
 }

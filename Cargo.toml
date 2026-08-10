@@ -47,10 +47,10 @@ agent-client-protocol = "=2.0.0"
 # from 24MB to 8.9MB with no behavioral change.
 #
 # Deliberately absent, and worth saying why so nobody adds it for the 1.3MB:
-# `panic = "abort"`. lan is a supervisor — `watch` survives a failed iteration
-# and the ACP server survives a failed turn — and aborting converts any panic,
-# including one inside a dependency, into killing the whole process. That is
-# exactly the property those features exist to provide.
+# `panic = "abort"`. The ACP server outlives a failed turn, and a host embedding
+# the crate outlives a failed run — aborting converts any panic, including one
+# inside a dependency, into killing the whole process. That is exactly the
+# property those surfaces exist to provide.
 [profile.release]
 # ~5MB of the original 24MB was symbols nobody reads in a shipped binary.
 strip = true

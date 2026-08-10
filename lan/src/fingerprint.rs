@@ -1,29 +1,57 @@
-//! Deciding whether the workspace has moved since the last successful run.
+//! A cheap stand-in for everything in the workspace a run could see.
 //!
-//! # What "unchanged" has to mean
+//! # What it answers
 //!
-//! A run is a function of three things: the prompt, the configuration, and the
-//! workspace. The first two are fixed for the life of a watch, so if the
-//! workspace is identical to what the last successful run saw, running again
-//! asks the same question of the same material and pays for the same answer.
-//! That — and only that — is what this module calls unchanged.
+//! One question: *is this workspace identical to the one some earlier
+//! fingerprint was taken of?* A run is a function of three things — the prompt,
+//! the configuration, and the workspace — so with the first two held fixed, an
+//! identical workspace means an identical question, and a caller that has
+//! already paid for that answer can skip paying again.
+//!
+//! This module only computes. Which fingerprint to compare against, when to
+//! record a new one, and what to do about the answer all belong to the caller's
+//! loop, where the definition of a run worth remembering lives. The one policy
+//! worth repeating there: record a baseline *after* a run and only after one
+//! that succeeded — after, so a run's own edits are not mistaken for new work,
+//! and only after success, so one transient failure does not write off an
+//! unchanged workspace forever.
+//!
+//! ```no_run
+//! use lan::fingerprint::{Fingerprint, Snapshot, snapshot};
+//!
+//! let mut baseline: Option<Fingerprint> = None;
+//! loop {
+//!     // Only a fingerprint that is both known and equal may skip. Anything
+//!     // else — a different one, or none at all — runs.
+//!     if let Snapshot::Known(observed) = snapshot("/repo".as_ref())
+//!         && Some(observed) == baseline
+//!     {
+//!         continue;
+//!     }
+//!
+//!     // ... run, and on success only:
+//!     baseline = snapshot("/repo".as_ref()).fingerprint();
+//! }
+//! ```
 //!
 //! # The invariant
 //!
 //! **A false "changed" costs tokens; a false "unchanged" silently stops the
-//! feature working.** They are not symmetric, so every uncertain case here
-//! resolves to changed: an unreadable directory, an enumeration that produced
-//! nothing, a workspace that is not there. [`Snapshot::Unknown`] is the shape
-//! that carries "I cannot claim unchanged", and the scheduler runs on it.
+//! caller's loop working.** They are not symmetric, so every uncertain case
+//! here resolves to changed: an unreadable directory, an enumeration that
+//! produced nothing, a workspace that is not there. [`Snapshot::Unknown`] is
+//! the shape that carries "I cannot claim unchanged", and a caller must run on
+//! it rather than skip. There is no path by which this module concludes
+//! "unchanged" from a question it could not answer.
 //!
 //! # Why a fingerprint and not a hash of the contents
 //!
-//! Reading every byte of a repository on a timer is the thing a scheduler
-//! exists to avoid. What is cheap is one `stat` per file, so the fingerprint
-//! is a digest over `(path, length, mtime)` for every file the run could see,
-//! plus git's `HEAD`. That is the trade every build system makes, and it
-//! catches everything except an edit that preserves both length and modified
-//! time — which requires deliberately forging a timestamp.
+//! Reading every byte of a repository is the work a skip is supposed to save.
+//! What is cheap is one `stat` per file, so the fingerprint is a digest over
+//! `(path, length, mtime)` for every file the run could see, plus git's `HEAD`.
+//! That is the trade every build system makes, and it catches everything except
+//! an edit that preserves both length and modified time — which requires
+//! deliberately forging a timestamp.
 //!
 //! Note that it is a *fingerprint*, compared for equality, never for order.
 //! An mtime that moves backwards — a checkout of an older file, an rsync that
@@ -35,16 +63,28 @@
 //! `git ls-files --cached --others --exclude-standard` when the workspace is
 //! inside a work tree: it is one process, it honours `.gitignore` without lan
 //! inventing an ignore convention of its own, and it keeps `.git`'s constant
-//! internal churn — which would make every iteration look changed — out of the
-//! answer. `HEAD` joins the digest so a commit, a merge, or a branch switch
+//! internal churn — which would make every observation look changed — out of
+//! the answer. `HEAD` joins the digest so a commit, a merge, or a branch switch
 //! registers even when it leaves no file's mtime behind.
 //!
 //! Otherwise a plain walk, skipping `.git` and following no symlinks.
 //!
 //! lan runs `git` here as itself, not on the agent's behalf: this is lan
-//! reading the workspace to decide its own schedule, the same as reading
-//! `AGENTS.md`. It is unrelated to the shell grant of ADR-0006, which governs
-//! what the *agent* may execute.
+//! reading the workspace the same way it reads `AGENTS.md`. It is unrelated to
+//! the shell grant of ADR-0006, which governs what the *agent* may execute.
+//!
+//! # A digest for comparing, not for keeping
+//!
+//! The 64 bits are sized for comparison against one remembered value, so the
+//! collision probability is per-comparison rather than birthday-bound. A caller
+//! that accumulated a set of fingerprints and searched it for any match would
+//! need a wider digest first.
+//!
+//! The hash is not promised to be stable across builds either — the standard
+//! library's default hasher may change between Rust releases. Two fingerprints
+//! are therefore comparable when they came from the same binary, and comparing
+//! across an upgrade yields a false "changed": a wasted run, which is the
+//! direction the invariant above says to fail in.
 
 use std::{
     collections::hash_map::DefaultHasher,
@@ -73,7 +113,7 @@ impl Fingerprint {
         self.files
     }
 
-    /// The digest, as it appears on the event stream.
+    /// The digest, in the form `lan fingerprint` prints.
     pub fn hex(self) -> String {
         format!("{:016x}", self.digest)
     }
@@ -82,10 +122,10 @@ impl Fingerprint {
 /// What one look at the workspace produced.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum Snapshot {
-    /// A fingerprint two iterations can be compared by.
+    /// A fingerprint two observations can be compared by.
     Known(Fingerprint),
     /// The workspace could not be fingerprinted, so nothing may be concluded
-    /// from it. The scheduler runs — see the invariant above.
+    /// from it. The caller runs — see the invariant above.
     Unknown { reason: String },
 }
 
@@ -101,8 +141,8 @@ impl Snapshot {
 
 /// Fingerprints `workspace` right now.
 ///
-/// Blocking: it spawns `git` and stats files. The scheduler calls it on a
-/// blocking thread.
+/// Blocking: it spawns `git` and stats files. An async caller belongs on a
+/// blocking thread — `tokio::task::spawn_blocking`, or the equivalent.
 pub fn snapshot(workspace: &Path) -> Snapshot {
     if !workspace.is_dir() {
         return Snapshot::Unknown {
@@ -251,7 +291,7 @@ fn git_bytes(workspace: &Path, args: &[&str]) -> Option<Vec<u8>> {
         .arg(workspace)
         .args(args)
         // Nothing here is interactive, and a git that decides to ask a
-        // question must fail rather than hang a scheduler on stdin.
+        // question must fail rather than block a caller on stdin.
         .stdin(Stdio::null())
         .stderr(Stdio::null())
         .output()
@@ -273,7 +313,7 @@ fn walk_listing(workspace: &Path) -> Listing {
         let Ok(entries) = std::fs::read_dir(&directory) else {
             // Unreadable to lan means unreadable to the agent as well — same
             // process, same user. Record the directory so the digest stays
-            // steady instead of flapping between iterations.
+            // steady instead of flapping between observations.
             if let Some(relative) = relative(workspace, &directory) {
                 paths.push(relative);
             }

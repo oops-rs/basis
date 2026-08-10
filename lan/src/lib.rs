@@ -18,6 +18,7 @@ pub mod branch;
 pub mod bridge;
 pub mod context;
 pub mod event;
+pub mod fingerprint;
 pub mod hooks;
 pub mod mcp;
 mod paths;
@@ -27,7 +28,6 @@ pub mod shell;
 pub mod skills;
 pub mod store;
 pub mod templates;
-pub mod watch;
 
 pub use approval::{
     AllowAll, ApprovalDecision, ApprovalPolicy, ApprovalRequest, Approver, DenyAll,
@@ -42,6 +42,10 @@ pub use context::{
 pub use event::{
     EVENT_SCHEMA_VERSION, Event, EventLine, JsonlWriter, RunOutcome, SkillSummary, TemplateSummary,
 };
+// `fingerprint::snapshot` keeps its module: at the crate root `snapshot` would
+// not say a snapshot of what, and the two types beside it are only meaningful
+// as its result.
+pub use fingerprint::{Fingerprint, Snapshot};
 pub use hooks::{
     HOOK_SCHEMA_VERSION, HookCall, HookConfigError, HookOutcome, HookRequest, HookResponse,
     HookRunner, HookSpec, HooksConfig, HooksSource, OnFailure,
@@ -61,9 +65,3 @@ pub use store::PersistedSession;
 // `available_commands` stays at `templates::available_commands`: at the crate
 // root the name would not say available commands of *what*.
 pub use templates::{Template, TemplateError, TemplateSource, TemplatesConfig};
-// `watch` the function sits beside `watch` the module the same way `run` does:
-// the scheduler is one call, and everything it is built from stays namespaced.
-pub use watch::{
-    CollectingWatchSink, Interval, IntervalError, IterationBounds, Shutdown, WATCH_SCHEMA_VERSION,
-    WatchConfig, WatchError, WatchEvent, WatchJsonlWriter, WatchSink, WatchSummary, watch,
-};

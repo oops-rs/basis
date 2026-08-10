@@ -14,7 +14,10 @@
 mod prepared;
 mod sink;
 
-use std::path::{Path, PathBuf};
+use std::{
+    path::{Path, PathBuf},
+    time::Duration,
+};
 
 use mentra::{
     BuiltinProvider, ModelSelector, ProviderId, Runtime, RuntimePolicy, Session,
@@ -104,6 +107,22 @@ pub struct RunConfig {
     /// How hard the model should think. `None` leaves the provider's default;
     /// unsupported provider/model levels fail instead of being downgraded.
     pub effort: Option<Effort>,
+    /// Gives up on the run after this long.
+    ///
+    /// Unset by default, and unset for an unattended caller too. An attended
+    /// `lan run` has a person watching, who can tell "thinking hard" from
+    /// "stuck" in a way no timer can; a caller nobody is watching has to write
+    /// the bound down in advance, and with no scheduler shipped there is no
+    /// period for lan to guess one from (ADR-0014).
+    pub deadline: Option<Duration>,
+    /// Caps how many tool calls the run may make.
+    pub tool_budget: Option<usize>,
+    /// Caps the tokens the run may report using, input plus output.
+    ///
+    /// Soft by construction: usage is only known once a round has streamed in
+    /// full, so the round that crosses the line always finishes. This is the
+    /// bound that maps to money.
+    pub token_budget: Option<u64>,
     pub session_name: String,
 }
 
@@ -126,6 +145,9 @@ impl RunConfig {
             shell: ShellAccess::Denied,
             approval: ApprovalPolicy::default(),
             effort: None,
+            deadline: None,
+            tool_budget: None,
+            token_budget: None,
             session_name: DEFAULT_SESSION_NAME.to_string(),
         }
     }
@@ -211,6 +233,54 @@ impl RunConfig {
         Self {
             session_name: session_name.into(),
             ..self
+        }
+    }
+
+    /// Gives up on the run after `deadline`.
+    ///
+    /// Every bound here is a *graceful* end rather than a discarded run: the
+    /// event stream closes the way it always does, and whatever the model
+    /// committed before the bound tripped is kept. That is what makes bounding
+    /// an unattended run safe to do — the alternative, throwing the work away
+    /// for being one round too long, would make callers reluctant to set one.
+    pub fn with_deadline(self, deadline: Duration) -> Self {
+        Self {
+            deadline: Some(deadline),
+            ..self
+        }
+    }
+
+    /// Caps how many tool calls the run may make.
+    pub fn with_tool_budget(self, tool_budget: usize) -> Self {
+        Self {
+            tool_budget: Some(tool_budget),
+            ..self
+        }
+    }
+
+    /// Caps the tokens the run may report using, input plus output.
+    ///
+    /// Soft: the round that crosses the line is allowed to finish, because
+    /// usage is only known once a round has streamed in full.
+    pub fn with_token_budget(self, token_budget: u64) -> Self {
+        Self {
+            token_budget: Some(token_budget),
+            ..self
+        }
+    }
+
+    /// The bounds this config puts on every turn the run performs.
+    ///
+    /// Limits only. Cancellation and the graceful stop signal are per-call
+    /// things a caller holds a token for, not configuration, so they stay at
+    /// their defaults here and arrive through
+    /// [`send_with_options`](PreparedRun::send_with_options).
+    pub fn turn_options(&self) -> TurnOptions {
+        TurnOptions {
+            deadline: self.deadline,
+            tool_budget: self.tool_budget,
+            token_budget: self.token_budget,
+            ..TurnOptions::default()
         }
     }
 }
@@ -316,6 +386,7 @@ pub async fn prepare(config: RunConfig) -> Result<PreparedRun, RunError> {
 /// through [`PreparedRun::send`], which does its own checking.
 pub async fn prepare_without_prompt(config: RunConfig) -> Result<PreparedRun, RunError> {
     let resolved = resolve(&config).await?;
+    let bounds = config.turn_options();
 
     let mut session = resolved.runtime.create_session_with_config(
         config.session_name.clone(),
@@ -327,7 +398,8 @@ pub async fn prepare_without_prompt(config: RunConfig) -> Result<PreparedRun, Ru
     Ok(PreparedRun::new(
         session,
         resolved.into_context(config.prompt, &config.workspace),
-    ))
+    )
+    .with_bounds(bounds))
 }
 
 /// Picks up a conversation a previous process left behind.
@@ -341,6 +413,7 @@ pub async fn prepare_without_prompt(config: RunConfig) -> Result<PreparedRun, Ru
 /// history, or to send a prompt chosen later, has nothing to say yet.
 pub async fn resume(agent_id: &str, config: RunConfig) -> Result<PreparedRun, RunError> {
     let resolved = resolve(&config).await?;
+    let bounds = config.turn_options();
 
     let mut session = resolved.runtime.resume_session(agent_id)?;
     apply_effort(&mut session, config.effort)?;
@@ -348,7 +421,8 @@ pub async fn resume(agent_id: &str, config: RunConfig) -> Result<PreparedRun, Ru
     Ok(PreparedRun::new(
         session,
         resolved.into_context(config.prompt.clone(), &config.workspace),
-    ))
+    )
+    .with_bounds(bounds))
 }
 
 /// A runtime and everything resolved alongside it, before a session exists.
@@ -532,7 +606,8 @@ pub fn prepare_with_session(
             mcp_files: Vec::new(),
             mcp_servers: Vec::new(),
         },
-    ))
+    )
+    .with_bounds(config.turn_options()))
 }
 
 /// Registers every skills directory that exists, most specific first.
@@ -888,5 +963,53 @@ mod tests {
             error,
             RunError::Context(ContextError::WorkspaceMissing { .. })
         ));
+    }
+
+    #[test]
+    fn a_run_is_unbounded_unless_the_caller_asks_for_a_bound() {
+        let options = RunConfig::new("/repo", "prompt").turn_options();
+
+        // ADR-0014: with no scheduler shipped there is no period to default a
+        // deadline from, so bounding is explicit everywhere. An attended run
+        // has a person, and a timer that interrupted someone mid-thought would
+        // be a worse harness rather than a safer one.
+        assert_eq!(options.deadline, None);
+        assert_eq!(options.tool_budget, None);
+        assert_eq!(options.token_budget, None);
+    }
+
+    #[test]
+    fn every_bound_reaches_the_turn_as_configured() {
+        let options = RunConfig::new("/repo", "prompt")
+            .with_deadline(Duration::from_secs(3_600))
+            .with_tool_budget(12)
+            .with_token_budget(50_000)
+            .turn_options();
+
+        assert_eq!(options.deadline, Some(Duration::from_secs(3_600)));
+        assert_eq!(options.tool_budget, Some(12));
+        assert_eq!(options.token_budget, Some(50_000));
+    }
+
+    #[test]
+    fn bounding_a_config_returns_a_new_value() {
+        let base = RunConfig::new("/repo", "prompt");
+        let bounded = base.clone().with_deadline(Duration::from_secs(600));
+
+        assert_eq!(base.deadline, None, "the original must be untouched");
+        assert_eq!(bounded.deadline, Some(Duration::from_secs(600)));
+    }
+
+    #[test]
+    fn a_config_carries_no_stop_signal_of_its_own() {
+        // Cancellation belongs to whoever holds the token for one call, so a
+        // config that could carry one would be handing every turn built from
+        // it the same stop button.
+        let options = RunConfig::new("/repo", "prompt")
+            .with_deadline(Duration::from_secs(60))
+            .turn_options();
+
+        assert!(options.cancel.is_none());
+        assert!(options.stop.is_none());
     }
 }

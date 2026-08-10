@@ -1,10 +1,13 @@
-//! How long the scheduler waits between iterations.
+//! How a duration is spelled on the command line.
 //!
-//! Parsing is deliberately strict. An interval is the one number that decides
-//! how often a watch spends money, so a typo must be a refusal rather than a
-//! silent fallback: `30` could mean seconds or minutes, `30M` could mean
-//! minutes or months, and guessing either would be a bill the operator did not
-//! agree to.
+//! Parsing is deliberately strict. These durations bound what a run may spend,
+//! so a typo must be a refusal rather than a silent fallback: `30` could mean
+//! seconds or minutes, `30M` could mean minutes or months, and guessing either
+//! would be a bill nobody agreed to.
+//!
+//! The library takes a plain [`Duration`]. This lives in the binary because it
+//! is a spelling convention, not a harness concern — a Rust host writing
+//! `Duration::from_secs(600)` has already said what it means.
 
 use std::{fmt, str::FromStr, time::Duration};
 
@@ -14,41 +17,24 @@ use thiserror::Error;
 /// message alone is enough to fix the input.
 const ACCEPTED: &str = "a positive number followed by s, m, h, or d — e.g. 90s, 30m, 2h, 1d";
 
-/// Milliseconds is the wire unit, so an interval that cannot be expressed in
-/// `u64` milliseconds is rejected at the boundary rather than truncated later.
-const MAX_SECONDS: u64 = u64::MAX / 1_000;
+/// About 136 years: long past any bound anyone means, and far enough from the
+/// end of `SystemTime`'s range that "now plus this" cannot overflow when the
+/// deadline is turned into an instant.
+const MAX_SECONDS: u64 = u32::MAX as u64;
 
-/// A wait between iterations.
+/// A duration as typed on the command line.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
-pub struct Interval(Duration);
+pub(crate) struct DurationArg(Duration);
 
-impl Interval {
-    /// An interval of exactly `duration`.
-    ///
-    /// Unlike parsing, this does not reject zero: a caller writing a
-    /// `Duration` in code has said what it means, and a zero-length wait is
-    /// how a test drives the loop without waiting. Text comes from a person
-    /// who may have typed it by accident, which is why [`FromStr`] is stricter.
-    pub const fn from_duration(duration: Duration) -> Self {
-        Self(duration)
-    }
-
-    pub const fn duration(self) -> Duration {
+impl DurationArg {
+    pub(crate) const fn duration(self) -> Duration {
         self.0
-    }
-
-    /// The interval in milliseconds, which is what the event stream carries.
-    pub fn as_millis(self) -> u64 {
-        // Saturating, not truncating: parsing rejects anything this cannot
-        // hold, but `from_duration` accepts any `Duration`, and a truncated
-        // interval on the wire would read as a much shorter one.
-        u64::try_from(self.0.as_millis()).unwrap_or(u64::MAX)
     }
 }
 
-impl fmt::Display for Interval {
-    /// Renders in the largest unit that divides evenly, so an interval read
-    /// back from a config looks like the one that was typed.
+impl fmt::Display for DurationArg {
+    /// Renders in the largest unit that divides evenly, so a duration read back
+    /// looks like the one that was typed.
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         let seconds = self.0.as_secs();
 
@@ -62,13 +48,13 @@ impl fmt::Display for Interval {
     }
 }
 
-impl FromStr for Interval {
-    type Err = IntervalError;
+impl FromStr for DurationArg {
+    type Err = DurationArgError;
 
     fn from_str(text: &str) -> Result<Self, Self::Err> {
         let input = text.trim();
         if input.is_empty() {
-            return Err(IntervalError::Empty);
+            return Err(DurationArgError::Empty);
         }
 
         // Splitting on the first non-digit rather than on the last character
@@ -80,12 +66,12 @@ impl FromStr for Interval {
         let (count, unit) = input.split_at(boundary);
 
         if count.is_empty() {
-            return Err(IntervalError::NotANumber {
+            return Err(DurationArgError::NotANumber {
                 input: input.to_string(),
             });
         }
         if unit.is_empty() {
-            return Err(IntervalError::MissingUnit {
+            return Err(DurationArgError::MissingUnit {
                 input: input.to_string(),
             });
         }
@@ -96,24 +82,24 @@ impl FromStr for Interval {
             "h" => 3_600,
             "d" => 86_400,
             _ => {
-                return Err(IntervalError::UnknownUnit {
+                return Err(DurationArgError::UnknownUnit {
                     unit: unit.to_string(),
                 });
             }
         };
 
         // Only overflow can fail here: every character is already a digit.
-        let count: u64 = count.parse().map_err(|_| IntervalError::TooLarge {
+        let count: u64 = count.parse().map_err(|_| DurationArgError::TooLarge {
             input: input.to_string(),
         })?;
         if count == 0 {
-            return Err(IntervalError::Zero);
+            return Err(DurationArgError::Zero);
         }
 
         let seconds = count
             .checked_mul(per_second)
             .filter(|seconds| *seconds <= MAX_SECONDS)
-            .ok_or_else(|| IntervalError::TooLarge {
+            .ok_or_else(|| DurationArgError::TooLarge {
                 input: input.to_string(),
             })?;
 
@@ -121,11 +107,11 @@ impl FromStr for Interval {
     }
 }
 
-/// Why an interval could not be read. Each variant names the input and the
+/// Why a duration could not be read. Each variant names the input and the
 /// accepted forms, because the person seeing it is fixing a command line.
 #[derive(Debug, Clone, PartialEq, Eq, Error)]
-pub enum IntervalError {
-    #[error("an interval is required: {ACCEPTED}")]
+pub(crate) enum DurationArgError {
+    #[error("a duration is required: {ACCEPTED}")]
     Empty,
 
     #[error("`{input}` has no unit: {ACCEPTED}")]
@@ -137,10 +123,10 @@ pub enum IntervalError {
     #[error("`{input}` does not start with a number: {ACCEPTED}")]
     NotANumber { input: String },
 
-    #[error("an interval of zero would busy-loop rather than schedule: {ACCEPTED}")]
+    #[error("a bound of zero would trip before any work happened: {ACCEPTED}")]
     Zero,
 
-    #[error("`{input}` is longer than a schedule can represent: {ACCEPTED}")]
+    #[error("`{input}` is longer than a bound can represent: {ACCEPTED}")]
     TooLarge { input: String },
 }
 
@@ -148,28 +134,20 @@ pub enum IntervalError {
 mod tests {
     use super::*;
 
-    fn parse(text: &str) -> Result<Interval, IntervalError> {
+    fn parse(text: &str) -> Result<DurationArg, DurationArgError> {
         text.parse()
+    }
+
+    fn secs(seconds: u64) -> DurationArg {
+        DurationArg(Duration::from_secs(seconds))
     }
 
     #[test]
     fn every_unit_is_understood() {
-        assert_eq!(
-            parse("90s").expect("seconds"),
-            Interval::from_duration(Duration::from_secs(90))
-        );
-        assert_eq!(
-            parse("30m").expect("minutes"),
-            Interval::from_duration(Duration::from_secs(1_800))
-        );
-        assert_eq!(
-            parse("2h").expect("hours"),
-            Interval::from_duration(Duration::from_secs(7_200))
-        );
-        assert_eq!(
-            parse("1d").expect("days"),
-            Interval::from_duration(Duration::from_secs(86_400))
-        );
+        assert_eq!(parse("90s").expect("seconds"), secs(90));
+        assert_eq!(parse("30m").expect("minutes"), secs(1_800));
+        assert_eq!(parse("2h").expect("hours"), secs(7_200));
+        assert_eq!(parse("1d").expect("days"), secs(86_400));
     }
 
     #[test]
@@ -179,11 +157,11 @@ mod tests {
 
     #[test]
     fn a_bare_number_is_refused_rather_than_guessed() {
-        // The whole point: `--every 30` must not quietly become 30 of
+        // The whole point: `--deadline 30` must not quietly become 30 of
         // whichever unit the implementer happened to prefer.
         assert_eq!(
             parse("30"),
-            Err(IntervalError::MissingUnit {
+            Err(DurationArgError::MissingUnit {
                 input: "30".to_string()
             })
         );
@@ -193,22 +171,22 @@ mod tests {
     fn unknown_units_name_themselves() {
         assert_eq!(
             parse("30x"),
-            Err(IntervalError::UnknownUnit {
+            Err(DurationArgError::UnknownUnit {
                 unit: "x".to_string()
             })
         );
         // Uppercase is refused too: `M` means minutes in some tools and months
-        // in others, and a scheduler must not pick one silently.
+        // in others, and a bound must not pick one silently.
         assert_eq!(
             parse("30M"),
-            Err(IntervalError::UnknownUnit {
+            Err(DurationArgError::UnknownUnit {
                 unit: "M".to_string()
             })
         );
         // Long forms would be a guess about which unit was meant.
         assert_eq!(
             parse("30min"),
-            Err(IntervalError::UnknownUnit {
+            Err(DurationArgError::UnknownUnit {
                 unit: "min".to_string()
             })
         );
@@ -218,7 +196,7 @@ mod tests {
     fn internal_whitespace_is_refused() {
         assert_eq!(
             parse("30 m"),
-            Err(IntervalError::UnknownUnit {
+            Err(DurationArgError::UnknownUnit {
                 unit: " m".to_string()
             })
         );
@@ -226,43 +204,49 @@ mod tests {
 
     #[test]
     fn nonsense_is_refused() {
-        assert_eq!(parse(""), Err(IntervalError::Empty));
-        assert_eq!(parse("   "), Err(IntervalError::Empty));
+        assert_eq!(parse(""), Err(DurationArgError::Empty));
+        assert_eq!(parse("   "), Err(DurationArgError::Empty));
         assert_eq!(
             parse("soon"),
-            Err(IntervalError::NotANumber {
+            Err(DurationArgError::NotANumber {
                 input: "soon".to_string()
             })
         );
         assert_eq!(
             parse("-5m"),
-            Err(IntervalError::NotANumber {
+            Err(DurationArgError::NotANumber {
                 input: "-5m".to_string()
             })
         );
         assert_eq!(
             parse("1.5h"),
-            Err(IntervalError::UnknownUnit {
+            Err(DurationArgError::UnknownUnit {
                 unit: ".5h".to_string()
             })
         );
     }
 
     #[test]
-    fn zero_is_refused_because_it_is_not_a_schedule() {
-        assert_eq!(parse("0s"), Err(IntervalError::Zero));
-        assert_eq!(parse("0d"), Err(IntervalError::Zero));
+    fn zero_is_refused_because_it_is_not_a_bound() {
+        assert_eq!(parse("0s"), Err(DurationArgError::Zero));
+        assert_eq!(parse("0d"), Err(DurationArgError::Zero));
     }
 
     #[test]
-    fn an_interval_too_large_to_carry_is_refused() {
+    fn a_duration_too_large_to_carry_is_refused() {
+        // Absurd on its face, and worth refusing rather than truncating: a
+        // deadline is turned into "now plus this", which panics on overflow.
         assert!(matches!(
             parse("99999999999999999999d"),
-            Err(IntervalError::TooLarge { .. })
+            Err(DurationArgError::TooLarge { .. })
         ));
         assert!(matches!(
             parse("999999999999999999d"),
-            Err(IntervalError::TooLarge { .. })
+            Err(DurationArgError::TooLarge { .. })
+        ));
+        assert!(matches!(
+            parse("100000d"),
+            Err(DurationArgError::TooLarge { .. })
         ));
     }
 
@@ -280,11 +264,11 @@ mod tests {
     #[test]
     fn display_round_trips_through_parsing() {
         for text in ["45s", "30m", "2h", "1d", "90s"] {
-            let interval = parse(text).expect("parses");
-            let printed = interval.to_string();
+            let parsed = parse(text).expect("parses");
+            let printed = parsed.to_string();
             assert_eq!(
                 parse(&printed).expect("re-parses"),
-                interval,
+                parsed,
                 "`{text}` printed as `{printed}`"
             );
         }
@@ -299,17 +283,8 @@ mod tests {
     }
 
     #[test]
-    fn milliseconds_are_what_the_stream_carries() {
-        assert_eq!(parse("30m").unwrap().as_millis(), 1_800_000);
-        assert_eq!(parse("90s").unwrap().as_millis(), 90_000);
-    }
-
-    #[test]
-    fn an_unparseably_long_duration_saturates_rather_than_wrapping() {
-        // Unreachable through parsing, which is why it is worth pinning: a
-        // truncating cast here would turn a century into a few seconds.
-        let absurd = Interval::from_duration(Duration::from_secs(u64::MAX));
-
-        assert_eq!(absurd.as_millis(), u64::MAX);
+    fn what_is_parsed_is_what_reaches_the_run() {
+        assert_eq!(parse("30m").unwrap().duration(), Duration::from_secs(1_800));
+        assert_eq!(parse("90s").unwrap().duration(), Duration::from_secs(90));
     }
 }
