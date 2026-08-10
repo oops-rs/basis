@@ -10,16 +10,29 @@ repository = "https://github.com/oops-rs/lan"
 homepage = "https://github.com/oops-rs/lan"
 
 [workspace.dependencies]
-mentra = "0.14"
+mentra = "0.15"
 mentra-provider = "0.4"
 
 async-trait = "0.1"
 clap = { version = "4.6", features = ["derive"] }
+# `Sink`/`Stream` adapters for the websocket bridge. Already in the tree via
+# agent-client-protocol, whose transports are defined in terms of these traits.
+futures = "0.3"
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
+# The same YAML implementation mentra parses skill frontmatter with, so a
+# template's frontmatter and a skill's are read by one dialect rather than two.
+serde_yaml_ng = "0.10"
 tempfile = "3"
 thiserror = "2"
-tokio = { version = "1", features = ["macros", "rt-multi-thread", "sync"] }
+tokio = { version = "1", features = ["macros", "net", "rt-multi-thread", "signal", "sync", "time"] }
+
+# Server side only: the bridge accepts websocket connections, it never dials
+# one. Already in the tree via mentra-provider, so this names what lan itself
+# needs rather than adding a dependency.
+tokio-tungstenite = { version = "0.28", default-features = false, features = [
+  "handshake",
+] }
 
 # Pinned exactly: 0.10 -> 0.11 removed the `Agent` trait entirely and 1.x -> 2.0
 # was a second breaking overhaul, so a caret range here would silently change

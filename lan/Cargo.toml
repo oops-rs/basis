@@ -17,14 +17,19 @@ mentra-provider.workspace = true
 agent-client-protocol.workspace = true
 async-trait.workspace = true
 clap.workspace = true
+futures.workspace = true
 serde.workspace = true
 serde_json.workspace = true
+serde_yaml_ng.workspace = true
 thiserror.workspace = true
 tokio.workspace = true
+tokio-tungstenite.workspace = true
 
 [dev-dependencies]
 mentra = { workspace = true, features = ["test-utils"] }
 tokio = { workspace = true, features = ["time"] }
+# The bridge tests dial the bridge, which the library itself never does.
+tokio-tungstenite = { workspace = true, features = ["connect"] }
 tempfile.workspace = true
 
 [[bin]]

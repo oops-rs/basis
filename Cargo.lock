@@ -1245,13 +1245,16 @@ dependencies = [
  "agent-client-protocol",
  "async-trait",
  "clap",
+ "futures",
  "mentra",
  "mentra-provider",
  "serde",
  "serde_json",
+ "serde_yaml_ng",
  "tempfile",
  "thiserror",
  "tokio",
+ "tokio-tungstenite",
 ]
 
 [[package]]
@@ -1321,9 +1324,9 @@ checksum = "cf8baf1c55e62ffcace7a9f06f4bd9cd3f0c4beb022d3b367256b91b87513d98"
 
 [[package]]
 name = "mentra"
-version = "0.14.0"
+version = "0.15.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "4b268a5c883beb304aa4295bba8384eca82d214947e7364334d806f1102d3fbd"
+checksum = "295b964c38bc9ce9745e9563fd427d13a2d341364d13cfc4351baae3419185e1"
 dependencies = [
  "async-trait",
  "base64",
