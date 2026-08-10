@@ -25,7 +25,10 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     println!("agent:   {}", run.agent_id());
 
     let first = run.execute(NullSink).await?;
-    println!("\nturn 1: {}", first.final_message.unwrap_or_default().trim());
+    println!(
+        "\nturn 1: {}",
+        first.final_message.unwrap_or_default().trim()
+    );
 
     let second = run
         .send(
