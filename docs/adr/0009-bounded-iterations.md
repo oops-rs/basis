@@ -1,6 +1,11 @@
 # 0009 — An unattended iteration is bounded by default
 
-> Status: Accepted · 2026-08-10
+> Status: **Superseded by
+> [`0014-watch-retired-runs-are-boundable.md`](0014-watch-retired-runs-are-boundable.md)**
+> · 2026-08-11 (accepted 2026-08-10). The bounds move to `RunConfig` and
+> `lan run` flags, all defaulting to unset; the deadline-defaults-to-interval
+> coupling dies with the interval. Graceful-trip semantics and the
+> no-default-bound-when-attended rule survive in 0014.
 > Extends [`0008-the-watch-baseline.md`](0008-the-watch-baseline.md).
 
 ## Context

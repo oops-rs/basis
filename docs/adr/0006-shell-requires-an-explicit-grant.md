@@ -1,6 +1,9 @@
 # 0006 — Shell execution requires an explicit grant
 
-> Status: Accepted · 2026-08-10
+> Status: **Superseded by [`0013-the-host-owns-the-boundary.md`](0013-the-host-owns-the-boundary.md)** · 2026-08-11
+> (Accepted 2026-08-10.) Shell is now enabled by default; the shipped image and
+> its special-cased grant are withdrawn. The `.git` carve-out and the
+> argument against environment inference survive in 0013.
 > Extends [`0004-kernel-enforced-confinement.md`](0004-kernel-enforced-confinement.md).
 
 ## Context

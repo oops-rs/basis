@@ -1,7 +1,13 @@
 # 0001 — Embedded scripting layer for extensions
 
-> Status: Deferred — written down per Bet 7 (earn every part).
-> Created: 2026-08-08
+> Status: **Rejected by
+> [`../adr/0010-the-crate-is-the-workflow-surface.md`](../adr/0010-the-crate-is-the-workflow-surface.md)**
+> · 2026-08-11. The trigger below never fired, and the need this anticipated
+> is better served by the SDK: orchestration and extension logic are
+> host-language code against the crate, not code lan interprets. If an
+> interception gap ever appears, the fix is widening the seam contract in
+> mentra (ADR-0012), not an embedded language.
+> Created: 2026-08-08 (Deferred — written down per Bet 7)
 > Related: [`../ARCHITECTURE.md`](../ARCHITECTURE.md) §3,
 > [`../adr/0001-mentra-is-the-runtime.md`](../adr/0001-mentra-is-the-runtime.md)
 

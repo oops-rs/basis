@@ -1,6 +1,11 @@
 # ADR-0008: The watch baseline is the workspace after the last successful run
 
-Status: accepted · 2026-08-10
+Status: **retired by
+[`0014-watch-retired-runs-are-boundable.md`](0014-watch-retired-runs-are-boundable.md)**
+· 2026-08-11 (accepted 2026-08-10). The `watch` command is deleted; the
+fingerprint and its semantics — §1–3 and the asymmetry rule — survive verbatim
+in `Workspace::fingerprint()` / `lan fingerprint`. The baseline policy (§4)
+moves to the caller's loop; `--always` (§5) becomes "don't call fingerprint".
 
 ## Context
 

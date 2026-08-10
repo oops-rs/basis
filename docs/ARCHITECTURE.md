@@ -4,6 +4,11 @@
 > The *how*. For the *why* — problem, idea, bets — see [`PROPOSAL.md`](PROPOSAL.md);
 > locked decisions live in [`adr/`](adr/); deferred ideas in [`proposals/`](proposals/);
 > research grounding in [`p0-groundwork.md`](p0-groundwork.md).
+> **Note (2026-08-11):** ADR-0010…0015 redirect the design toward an SDK-first
+> shape (watch retired, shell default flipped, crate split, no shipped
+> container). This document still describes the *built* P0–P4 state; the
+> transition ledger and phases are in [`REDESIGN.md`](REDESIGN.md), and
+> sections here are rewritten as phases land.
 > Reference bar: [pi](https://github.com/earendil-works/pi) (earendil-works) — minimal core, complete harness.
 > General-purpose: no domain assumptions. Periodic bug-checking is one use case, never a design input.
 
