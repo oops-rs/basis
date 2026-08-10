@@ -64,6 +64,11 @@ export LAN_API_KEY=…
 lan run --model gpt-5.6 "explain the module layout"
 ```
 
+Custom endpoints use complete local transcript replay and do not automatically
+send `previous_response_id`. That optional extension is not part of LAN's
+compatibility assumption; native provider presets retain Mentra's Hybrid state
+chaining.
+
 `--json` emits the event stream as newline-delimited JSON. The first line is always
 `run_started` and carries the schema version; the last is always `run_finished`:
 

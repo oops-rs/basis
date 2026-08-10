@@ -75,7 +75,9 @@ pub struct RunConfig {
     /// `None` auto-detects from the environment.
     pub provider: Option<BuiltinProvider>,
     /// An OpenAI-compatible endpoint to use instead of the provider's own
-    /// service. `None` falls back to `LAN_BASE_URL` / `OPENAI_BASE_URL`.
+    /// service. These endpoints use complete local replay instead of automatic
+    /// `previous_response_id` chaining. `None` falls back to `LAN_BASE_URL` /
+    /// `OPENAI_BASE_URL`.
     pub base_url: Option<String>,
     pub model: ModelSelector,
     pub context: ContextConfig,
@@ -130,6 +132,8 @@ impl RunConfig {
 
     /// Points the run at an OpenAI-compatible endpoint. A trailing `/v1` is
     /// stripped during resolution — paste the URL a gateway publishes.
+    /// Compatible endpoints use complete local replay rather than automatic
+    /// `previous_response_id` chaining.
     pub fn with_base_url(self, base_url: impl Into<String>) -> Self {
         Self {
             base_url: Some(base_url.into()),
@@ -553,15 +557,21 @@ fn load_templates(config: &RunConfig) -> Result<(Vec<PathBuf>, Vec<Template>), R
 /// Builds a provider aimed at an OpenAI-compatible endpoint.
 ///
 /// mentra's OpenAI preset is the right shape — the Responses wire format and
-/// bearer auth — so lan takes that definition and swaps only the base URL,
-/// rather than describing a provider from scratch and drifting from whatever
-/// mentra's preset learns next.
+/// bearer auth — so lan takes that definition, swaps the base URL, and disables
+/// automatic Hybrid HTTP state chaining. Building on the preset avoids
+/// describing a provider from scratch and drifting from whatever mentra learns
+/// next.
 fn compatible_provider(base_url: &str, api_key: &str) -> ResponsesProvider<StaticCredentialSource> {
     let mut definition = responses::openai_definition();
     definition.base_url = Some(base_url.to_string());
     definition.descriptor.display_name = Some(format!("OpenAI-compatible ({base_url})"));
 
+    // A compatible endpoint promises the Responses wire shape, not every
+    // optional OpenAI extension. LAN already replays the complete local
+    // transcript, so do not probe `previous_response_id` support with a
+    // request that may fail; native provider presets retain Hybrid chaining.
     ResponsesProvider::new(definition, StaticCredentialSource::new(api_key))
+        .without_hybrid_http_previous_response_id()
 }
 
 /// The workspace as discovery resolved it, falling back to what was asked for.
@@ -632,7 +642,85 @@ fn agent_config(config: &RunConfig, context: &WorkspaceContext) -> AgentConfig {
 
 #[cfg(test)]
 mod tests {
+    use std::borrow::Cow;
+    use std::collections::BTreeMap;
+    use std::io::{Read, Write};
+    use std::net::{TcpListener, TcpStream};
+    use std::thread;
+
     use super::*;
+
+    fn read_http_request(stream: &mut TcpStream) -> String {
+        let mut bytes = Vec::new();
+        let mut buffer = [0_u8; 4096];
+        let mut header_end = None;
+        let mut content_length = 0_usize;
+
+        loop {
+            let read = stream.read(&mut buffer).expect("read request");
+            if read == 0 {
+                break;
+            }
+            bytes.extend_from_slice(&buffer[..read]);
+            if header_end.is_none()
+                && let Some(index) = bytes.windows(4).position(|window| window == b"\r\n\r\n")
+            {
+                let end = index + 4;
+                header_end = Some(end);
+                let headers = String::from_utf8_lossy(&bytes[..end]);
+                content_length = headers
+                    .lines()
+                    .find_map(|line| {
+                        let (name, value) = line.split_once(':')?;
+                        name.eq_ignore_ascii_case("content-length")
+                            .then(|| value.trim().parse::<usize>().expect("content length"))
+                    })
+                    .unwrap_or_default();
+            }
+            if header_end.is_some_and(|end| bytes.len() >= end + content_length) {
+                break;
+            }
+        }
+
+        String::from_utf8(bytes).expect("request should be utf8")
+    }
+
+    fn spawn_two_response_server() -> (String, thread::JoinHandle<Vec<String>>) {
+        let listener = TcpListener::bind("127.0.0.1:0").expect("bind test server");
+        let address = listener.local_addr().expect("read server address");
+        let handle = thread::spawn(move || {
+            let mut requests = Vec::new();
+            for index in 1..=2 {
+                let (mut stream, _) = listener.accept().expect("accept request");
+                requests.push(read_http_request(&mut stream));
+                let response_id = format!("resp_{index}");
+                let body = format!(
+                    concat!(
+                        "data: {{\"type\":\"response.created\",\"response\":{{\"id\":\"{}\",\"model\":\"gpt-5\",\"status\":\"in_progress\"}}}}\n\n",
+                        "data: {{\"type\":\"response.completed\",\"response\":{{\"id\":\"{}\",\"model\":\"gpt-5\",\"status\":\"completed\"}}}}\n\n"
+                    ),
+                    response_id, response_id
+                );
+                let response = format!(
+                    concat!(
+                        "HTTP/1.1 200 OK\r\n",
+                        "connection: close\r\n",
+                        "content-type: text/event-stream\r\n",
+                        "content-length: {}\r\n\r\n",
+                        "{}"
+                    ),
+                    body.len(),
+                    body
+                );
+                stream
+                    .write_all(response.as_bytes())
+                    .expect("write response");
+            }
+            requests
+        });
+
+        (format!("http://{address}/"), handle)
+    }
 
     #[test]
     fn a_config_carries_no_task_specific_defaults() {
@@ -641,6 +729,51 @@ mod tests {
         assert_eq!(config.provider, None);
         assert!(matches!(config.model, ModelSelector::NewestAvailable));
         assert_eq!(config.session_name, DEFAULT_SESSION_NAME);
+    }
+
+    #[tokio::test]
+    async fn compatible_provider_skips_automatic_previous_response_id_chaining() {
+        let (base_url, handle) = spawn_two_response_server();
+        let provider = compatible_provider(&base_url, "test-key");
+
+        for (index, message) in ["first", "second"].into_iter().enumerate() {
+            let request = mentra::provider_core::Request {
+                model: Cow::Borrowed("gpt-5"),
+                system: None,
+                messages: Cow::Owned(vec![mentra::Message::user(mentra::ContentBlock::text(
+                    message,
+                ))]),
+                tools: Cow::Owned(Vec::new()),
+                tool_choice: None,
+                temperature: None,
+                max_output_tokens: None,
+                metadata: Cow::Owned(BTreeMap::new()),
+                provider_request_options: Default::default(),
+            };
+            let mut stream = provider
+                .session()
+                .stream_response(request)
+                .await
+                .expect("compatible provider should stream");
+            while let Some(event) = stream.recv().await {
+                event.expect("response event should decode");
+            }
+            if index == 0 {
+                assert_eq!(
+                    provider.session().latest_response_id().as_deref(),
+                    Some("resp_1"),
+                    "the second request must have provider state available to suppress"
+                );
+            }
+        }
+
+        let requests = handle.join().expect("server should capture requests");
+        for request in requests {
+            let body = request.split("\r\n\r\n").nth(1).unwrap_or_default();
+            let payload: serde_json::Value =
+                serde_json::from_str(body).expect("request body should be json");
+            assert!(payload.get("previous_response_id").is_none());
+        }
     }
 
     #[test]

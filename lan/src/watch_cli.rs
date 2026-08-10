@@ -89,7 +89,8 @@ pub(crate) struct WatchArgs {
     #[arg(long, value_name = "NAME")]
     provider: Option<String>,
 
-    /// An OpenAI-compatible endpoint, e.g. http://127.0.0.1:3455/v1.
+    /// An OpenAI-compatible endpoint, e.g. http://127.0.0.1:3455/v1. LAN uses
+    /// complete local replay instead of automatic previous_response_id chaining.
     #[arg(long, value_name = "URL")]
     base_url: Option<String>,
 

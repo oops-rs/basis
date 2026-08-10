@@ -112,7 +112,8 @@ struct AcpArgs {
     #[arg(long, value_name = "NAME")]
     provider: Option<String>,
 
-    /// An OpenAI-compatible endpoint, e.g. http://127.0.0.1:3455/v1.
+    /// An OpenAI-compatible endpoint, e.g. http://127.0.0.1:3455/v1. LAN uses
+    /// complete local replay instead of automatic previous_response_id chaining.
     #[arg(long, value_name = "URL")]
     base_url: Option<String>,
 
@@ -157,7 +158,8 @@ struct RunArgs {
     /// An OpenAI-compatible endpoint, e.g. http://127.0.0.1:3455/v1. Paste the
     /// URL as published; a trailing /v1 is handled. Falls back to
     /// LAN_BASE_URL or OPENAI_BASE_URL; the key comes from LAN_API_KEY or
-    /// OPENAI_API_KEY.
+    /// OPENAI_API_KEY. LAN uses complete local replay instead of automatic
+    /// previous_response_id chaining on compatible endpoints.
     #[arg(long, value_name = "URL")]
     base_url: Option<String>,
 
