@@ -235,7 +235,11 @@ fn truncate(text: &str, limit: usize) -> String {
     format!("{}… ({} bytes total)", &text[..cut], text.len())
 }
 
-#[cfg(test)]
+// Gated to unix: these spawn `/bin/sh` scripts, which is the cheapest way
+// to exercise a real subprocess. The code under test is portable; the
+// fixtures are not, and inventing a Windows shell script per case would test
+// the fixture rather than the runner.
+#[cfg(all(test, unix))]
 mod tests {
     use super::*;
 

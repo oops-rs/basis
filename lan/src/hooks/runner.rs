@@ -340,7 +340,9 @@ fn stderr_tail(stderr: &str) -> String {
     }
 }
 
-#[cfg(test)]
+// Gated to unix for the same reason as `exec`'s tests: the fixtures are
+// `/bin/sh` scripts.
+#[cfg(all(test, unix))]
 mod tests {
     use super::*;
     use serde_json::json;
