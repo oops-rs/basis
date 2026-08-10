@@ -32,14 +32,14 @@ hot-reloadable extensions. Two pi decisions independently validate ours:
 | Multi-provider LLM API | mentra-provider: OpenAI, Anthropic, Gemini, OpenRouter, Ollama, LM Studio | mentra |
 | Session persistence + resume | SQLite-backed sessions, snapshots | mentra |
 | Compaction | Memory compaction exists in mentra; wire to session lifecycle | mentra + glue |
-| Session branching / tree | Snapshot-based forking | build (on mentra snapshots) |
+| Session branching / tree | mentra's transcript tree, exposed on `PreparedRun` ✅ | built |
 | Builtin tools (shell, files, background exec, tasks) | Mentra builtins | mentra |
 | Context files (AGENTS.md) | Loader: workspace + global, parent-dir walk | build |
 | Skills (on-demand) | SKILL.md discovery, description-first loading | build |
-| Prompt templates (/commands) | Markdown templates with args, exposed over ACP as commands | build |
-| Extensions (custom tools, event interception) | MCP servers + lifecycle hooks (§3) | build |
+| Prompt templates (/commands) | Markdown templates with args, exposed over ACP as commands ✅ | built |
+| Extensions (custom tools, event interception) | MCP servers + subprocess hooks, allow/deny/modify (§3) ✅ | built |
 | Packages (shareable bundles) | Directory convention over skills/templates/hooks/MCP — defer | later |
-| RPC / headless mode | `run --json` event stream + **ACP** (standard, not bespoke) | build |
+| RPC / headless mode | `run --json` event stream + **ACP** (standard, not bespoke) ✅ | built |
 | SDK | The harness is a Rust crate on Mentra — embed in-process; other languages use ACP | free |
 | TUI / themes / keybindings | Out of scope by design — ACP clients own presentation | — |
 | Provider OAuth login flows | API-key auth first; OAuth per provider later | later |
@@ -154,12 +154,12 @@ docker run --rm \
 
 | Phase | Scope | Estimate |
 |---|---|---|
-| P0 Groundwork | Mine `mentra/docs/mentra-api-feedback.md`; read pi session-format + compaction docs; decide mentra-vs-lan split per capability | ~half a day |
-| P1 Crate + `run` | Mentra wiring, AGENTS.md loader, skills discovery, worktree hygiene, JSONL event stream. Acceptance: arbitrary prompts on arbitrary repos, in-process and as subprocess | 3–5 days |
-| **P2 ACP server** ✅ | `agent-client-protocol` crate; session mapping, permission surfacing, ws bridge. Sessions survive turns, so conversation and resume work independent of protocol. Template commands deferred to P3 with the rest of the template work; the ws bridge deferred until the stdio server is proven | done |
-| P3 Extension points | MCP client honoring `.mcp.json`; subprocess hooks; prompt templates (and their exposure as ACP commands); ws↔stdio bridge for acp-ui | 2–3 days |
-| P4 Loop + Docker | `watch` scheduler, Dockerfile, state volume, policy carve-outs | 1–2 days |
-| P5 Depth | Session branching/tree, compaction tuning, packages convention, provider OAuth | ongoing |
+| P0 Groundwork | Mine `mentra/docs/mentra-api-feedback.md`; read pi session-format + compaction docs; decide mentra-vs-lan split per capability | done |
+| P1 Crate + `run` | Mentra wiring, AGENTS.md loader, skills discovery, worktree hygiene, JSONL event stream. Acceptance: arbitrary prompts on arbitrary repos, in-process and as subprocess | done |
+| **P2 ACP server** ✅ | `agent-client-protocol` crate; session mapping, permission surfacing, modes, listing, history replay. Sessions survive turns, so conversation and resume work independent of protocol | done |
+| **P3 Extension points** ✅ | MCP client honoring `.mcp.json` *and* the servers an ACP client sends; subprocess hooks (allow/deny/modify); prompt templates surfaced as ACP commands; ws↔stdio bridge for acp-ui | done |
+| **P4 Loop + Docker** ✅ | `watch` scheduler with skip-if-unchanged, Dockerfile, state volume, shell grant | done |
+| P5 Depth | Branching ✅ (one-way until [mentra#15](https://github.com/oops-rs/mentra/issues/15)); compaction tuning, packages convention, provider OAuth remain | ongoing |
 
 Validation stays deliberately varied — a refactor, a doc task, a test-writing task, *and* a
 periodic check — so no single use case bends the API toward itself.

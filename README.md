@@ -117,6 +117,34 @@ client's UI rather than lan's ([ADR-0007](docs/adr/0007-acp-sessions-and-the-dis
 [`scripts/acp-smoke.py`](scripts/acp-smoke.py) drives it by hand if you want to watch the
 wire.
 
+For a browser client, `lan bridge` puts the same server behind a websocket — the transport
+only; the UI is [acp-ui](https://github.com/formulahendry/acp-ui), adopted rather than
+built ([ADR-0002](docs/adr/0002-acp-is-the-protocol.md)):
+
+```sh
+lan bridge --allow-origin http://localhost:5173
+```
+
+It binds to loopback and serves **no page** until one is named. A websocket handshake is
+exempt from the same-origin policy, so any page you visit could otherwise dial
+`ws://127.0.0.1` and drive an agent with write access to your workspace; the `Origin`
+allowlist is what stops that, and it starts empty.
+
+## Watching
+
+`lan watch` runs the same prompt on an interval and skips an iteration whose workspace has
+not changed, so an idle repository costs nothing:
+
+```sh
+lan watch "check for newly introduced TODOs and summarize them" --every 30m
+```
+
+"Changed" is a fingerprint over `git ls-files` — path, length, mtime, plus `HEAD` — so
+`.gitignore` is honored and `.git`'s own churn is ignored. Every uncertain case runs rather
+than skips: a false "changed" costs tokens, while a false "unchanged" would silently stop
+the watch working ([ADR-0008](docs/adr/0008-the-watch-baseline.md)). `--always` opts out
+when the answer depends on something the workspace cannot show.
+
 ## What the workspace contributes
 
 - **`AGENTS.md`** — discovered from a global config directory, then each ancestor of the
@@ -125,6 +153,18 @@ wire.
 - **Skills** — `.lan/skills/` in the workspace, else `skills/` in the global config
   directory. The model loads one by name when it needs it, so only the descriptions cost
   context.
+- **Prompt templates** — `.lan/templates/*.md`, markdown with a `description` and an
+  optional `argument-hint` in frontmatter. `$ARGUMENTS` and `$1`, `$2`… are substituted; a
+  nested path is a namespace, so `git/commit.md` is `git:commit`. ACP clients receive them
+  as commands.
+- **MCP servers** — `.mcp.json`, the same shape other agents read:
+  `{"mcpServers": {"name": {"command": …, "args": […], "env": {…}}}}`. `${VAR}` expands from
+  the environment, so a committed file need not carry a credential. An ACP client can also
+  send servers with `session/new`, and both sets are honored.
+- **Hooks** — `.lan/hooks.json` lists commands that get a JSON object on stdin and answer
+  with one on stdout: `allow`, `deny` with a reason the model sees, or `modify` with a
+  replacement input. Any language, process-isolated. A hook that breaks denies by default,
+  because a guard that fails open is a guard nobody knows is gone.
 - **Approval** — `--approve prompt` puts every consequential call to you first, with the
   command or the changed keys shown; `always` (the default) and `never` are the other two
   settings. Embedders implement `Approver` to answer however they like.
@@ -163,15 +203,21 @@ leave the agent nowhere to write its store.
 
 ## Status
 
-**P0–P2 complete, plus the container from P4.** What works today: the ACP server on stdio
-(the default mode), multi-turn conversation and resume, and one-shot `lan run` in prose or
-JSONL — all with AGENTS.md discovery, skills, command execution, approval, and
-kernel-enforced confinement in the image.
+**P0–P4 complete.** Everything the plan called a phase is built: the ACP server on stdio
+(the default mode) with modes, session listing and history replay; multi-turn conversation
+and resume; one-shot `lan run` in prose or JSONL; `lan watch` on an interval, skipping a
+workspace nothing has touched; MCP servers from `.mcp.json` and from the client; prompt
+templates surfaced as commands; subprocess hooks that allow, deny, or rewrite a tool call;
+a websocket bridge for [acp-ui](https://github.com/formulahendry/acp-ui); and branching.
+All with AGENTS.md discovery, skills, approval, and kernel-enforced confinement in the
+image.
 
-Still to come: **`lan watch`** (P4), and MCP wiring, prompt templates, subprocess hooks, and
-the ws↔stdio bridge that puts [acp-ui](https://github.com/formulahendry/acp-ui) in front of
-lan (P3). Session branching exists in mentra but is not yet exposed (P5). See
-[docs/ARCHITECTURE.md](docs/ARCHITECTURE.md) §6.
+Still open, and named honestly: branching is **one-way** until
+[mentra#15](https://github.com/oops-rs/mentra/issues/15) — an abandoned line of work can be
+inspected but not returned to. Compaction tuning, the packages convention, and provider
+OAuth remain (P5), and **nobody has driven this from Zed or JetBrains yet** — it is verified
+against the protocol and its official client library, not against the ecosystem. There is no
+CI, and lan itself is unpublished. See [docs/ARCHITECTURE.md](docs/ARCHITECTURE.md) §6.
 
 Docs follow the nous layout: [docs/PROPOSAL.md](docs/PROPOSAL.md)
 (why) · [docs/ARCHITECTURE.md](docs/ARCHITECTURE.md) (how) · [docs/adr/](docs/adr/)
