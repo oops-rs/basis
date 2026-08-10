@@ -53,7 +53,7 @@ impl fmt::Display for Interval {
         let seconds = self.0.as_secs();
 
         for (unit, per) in [("d", 86_400), ("h", 3_600), ("m", 60)] {
-            if seconds >= per && seconds % per == 0 {
+            if seconds >= per && seconds.is_multiple_of(per) {
                 return write!(f, "{}{unit}", seconds / per);
             }
         }
