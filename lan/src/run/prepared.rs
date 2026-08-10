@@ -53,6 +53,11 @@ pub struct RunContext {
     /// Over ACP these become the client's commands — see
     /// [`available_commands`](crate::templates::available_commands).
     pub templates: Vec<Template>,
+    /// MCP configuration files in effect, weakest precedence first.
+    pub mcp_files: Vec<ContextFile>,
+    /// The servers those files produced, after layering. Names only: the
+    /// header must not echo a command or a credential.
+    pub mcp_servers: Vec<String>,
 }
 
 /// A skill available to the run, without its body.
@@ -139,6 +144,7 @@ impl std::fmt::Debug for PreparedRun {
             .field("context_files", &self.run.context.documents().len())
             .field("skills", &self.run.skills.len())
             .field("templates", &self.run.templates.len())
+            .field("mcp_servers", &self.run.mcp_servers.len())
             .finish_non_exhaustive()
     }
 }
@@ -352,6 +358,8 @@ fn header_for(session_id: &str, run: &RunContext) -> Event {
                 argument_hint: template.argument_hint.clone(),
             })
             .collect(),
+        mcp_files: run.mcp_files.clone(),
+        mcp_servers: run.mcp_servers.clone(),
     }
 }
 

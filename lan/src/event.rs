@@ -173,6 +173,19 @@ pub enum Event {
         /// client can offer as commands.
         #[serde(default, skip_serializing_if = "Vec::is_empty")]
         templates: Vec<TemplateSummary>,
+        /// MCP configuration files in effect, weakest precedence first.
+        ///
+        /// Named for the same reason context files are, and more urgently: an
+        /// `.mcp.json` says which programs to spawn and carries the
+        /// credentials to spawn them with, so it is the last thing that should
+        /// take effect without appearing anywhere.
+        #[serde(default, skip_serializing_if = "Vec::is_empty")]
+        mcp_files: Vec<ContextFile>,
+        /// The servers those files produced, after layering. Names only —
+        /// commands, arguments, and environment stay out of the stream, which
+        /// is the same no-echo rule `McpError` follows.
+        #[serde(default, skip_serializing_if = "Vec::is_empty")]
+        mcp_servers: Vec<String>,
     },
 
     UserMessage {
@@ -340,6 +353,8 @@ mod tests {
                 skills: Vec::new(),
                 templates_dirs: Vec::new(),
                 templates: Vec::new(),
+                mcp_files: Vec::new(),
+                mcp_servers: Vec::new(),
             },
         );
         let json = serde_json::to_value(&line).expect("serializes");
@@ -372,6 +387,8 @@ mod tests {
                 }],
                 templates_dirs: Vec::new(),
                 templates: Vec::new(),
+                mcp_files: Vec::new(),
+                mcp_servers: Vec::new(),
             },
         );
         let json = serde_json::to_value(&line).expect("serializes");
@@ -410,6 +427,47 @@ mod tests {
         .expect("serializes");
         assert_eq!(failed["status"], "error");
         assert_eq!(failed["message"], "boom");
+    }
+
+    #[test]
+    fn the_header_names_mcp_files_and_servers_but_never_their_configuration() {
+        let line = EventLine::new(
+            0,
+            Event::RunStarted {
+                schema: EVENT_SCHEMA_VERSION,
+                lan: "0.1.0".to_string(),
+                session_id: "s1".to_string(),
+                workspace: PathBuf::from("/repo"),
+                model: "gpt-5".to_string(),
+                provider: "openai".to_string(),
+                context_files: Vec::new(),
+                skills_dirs: Vec::new(),
+                skills: Vec::new(),
+                templates_dirs: Vec::new(),
+                templates: Vec::new(),
+                mcp_files: vec![ContextFile {
+                    path: PathBuf::from("/repo/.mcp.json"),
+                    scope: "workspace".to_string(),
+                }],
+                mcp_servers: vec!["github".to_string()],
+            },
+        );
+        let text = serde_json::to_string(&line).expect("serializes");
+
+        assert!(text.contains("/repo/.mcp.json"), "the file must be named");
+        assert!(text.contains("github"), "so must the server");
+
+        // A server list is names, never configuration. The type makes this
+        // true — `mcp_servers` is `Vec<String>` — and the test says why, so a
+        // later change to a richer summary has to argue with it first: an
+        // `.mcp.json` holds the credentials its servers are spawned with, and
+        // this line travels into logs and client error panes.
+        for leak in ["command", "args", "env", "npx", "token"] {
+            assert!(
+                !text.contains(leak),
+                "the header must not carry MCP configuration, found {leak}: {text}"
+            );
+        }
     }
 
     #[test]

@@ -257,10 +257,15 @@ impl<W: Write + Send + 'static> WatchSink for WatchJsonlWriter<W> {
 }
 
 /// One line of a watch stream, kept in memory.
+///
+/// The run event is boxed because [`Event::RunStarted`] carries a run's whole
+/// inventory — context files, skills, templates, MCP servers — and every
+/// `Watch` record would otherwise be padded to that size for a payload it
+/// never holds.
 #[derive(Debug, Clone, PartialEq)]
 pub enum WatchRecord {
     Watch(WatchEvent),
-    Run { iteration: u64, event: Event },
+    Run { iteration: u64, event: Box<Event> },
 }
 
 /// Keeps every line in memory, shared with whoever else holds a clone.
@@ -305,7 +310,7 @@ impl CollectingWatchSink {
                 WatchRecord::Run {
                     iteration: which,
                     event,
-                } if which == iteration => Some(event),
+                } if which == iteration => Some(*event),
                 _ => None,
             })
             .collect()
@@ -326,7 +331,10 @@ impl WatchSink for CollectingWatchSink {
     }
 
     fn run_event(&mut self, iteration: u64, event: Event) -> std::io::Result<()> {
-        self.push(WatchRecord::Run { iteration, event });
+        self.push(WatchRecord::Run {
+            iteration,
+            event: Box::new(event),
+        });
         Ok(())
     }
 }

@@ -317,6 +317,8 @@ struct Resolved {
     skills: Vec<LoadedSkill>,
     templates_dirs: Vec<PathBuf>,
     templates: Vec<Template>,
+    mcp_files: Vec<crate::event::ContextFile>,
+    mcp_servers: Vec<String>,
 }
 
 impl Resolved {
@@ -331,6 +333,8 @@ impl Resolved {
             skills: self.skills,
             templates_dirs: self.templates_dirs,
             templates: self.templates,
+            mcp_files: self.mcp_files,
+            mcp_servers: self.mcp_servers,
         }
     }
 }
@@ -369,7 +373,25 @@ async fn resolve(config: &RunConfig) -> Result<Resolved, RunError> {
     // MCP servers are registered on the builder and connected by `build_async`,
     // so this must happen before the build. mentra's `McpRegistration` is
     // private, which is why the fold matches here rather than in `crate::mcp`.
-    let builder = mcp::servers(&config.workspace, &config.mcp)?
+    //
+    // Discovery is run for its own sake as well: the header names which files
+    // took effect, and an `.mcp.json` is the last thing that should apply
+    // invisibly — it says which programs to spawn.
+    let mcp_files: Vec<crate::event::ContextFile> = mcp::discover(&config.workspace, &config.mcp)?
+        .iter()
+        .map(|source| crate::event::ContextFile {
+            path: source.path.clone(),
+            scope: source.scope.label(),
+        })
+        .collect();
+
+    let servers = mcp::servers(&config.workspace, &config.mcp)?;
+    let mcp_servers: Vec<String> = servers
+        .iter()
+        .map(|server| server.name().to_string())
+        .collect();
+
+    let builder = servers
         .into_iter()
         .fold(builder, |builder, server| match server {
             mcp::McpServer::Stdio(server) => builder.with_mcp_server(server),
@@ -418,6 +440,8 @@ async fn resolve(config: &RunConfig) -> Result<Resolved, RunError> {
         skills,
         templates_dirs,
         templates,
+        mcp_files,
+        mcp_servers,
     })
 }
 
@@ -448,11 +472,14 @@ pub fn prepare_with_session(
             provider: provider.into(),
             model: model.into(),
             context,
-            // The caller owns the runtime, so it owns skill registration too.
+            // The caller owns the runtime, so it owns skill and MCP
+            // registration too.
             skills_dirs: Vec::new(),
             skills: Vec::new(),
             templates_dirs,
             templates,
+            mcp_files: Vec::new(),
+            mcp_servers: Vec::new(),
         },
     ))
 }
