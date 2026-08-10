@@ -145,6 +145,17 @@ than skips: a false "changed" costs tokens, while a false "unchanged" would sile
 the watch working ([ADR-0008](docs/adr/0008-the-watch-baseline.md)). `--always` opts out
 when the answer depends on something the workspace cannot show.
 
+Every iteration is **bounded**, because nobody is watching one:
+
+```sh
+lan watch "..." --every 30m --deadline 10m --tool-budget 40 --token-budget 200000
+```
+
+`--deadline` defaults to the interval — a turn outliving its own period is not
+converging, and the next tick is already due. The budgets default to unset, since a useful
+value depends on the prompt. A tripped bound fails that iteration and the watch carries on
+([ADR-0009](docs/adr/0009-bounded-iterations.md)).
+
 ## What the workspace contributes
 
 - **`AGENTS.md`** — discovered from a global config directory, then each ancestor of the
@@ -168,6 +179,11 @@ when the answer depends on something the workspace cannot show.
 - **Approval** — `--approve prompt` puts every consequential call to you first, with the
   command or the changed keys shown; `always` (the default) and `never` are the other two
   settings. Embedders implement `Approver` to answer however they like.
+- **`.git` carve-out** — `.git/hooks` and `.git/config` are denied to the file tools by
+  default: a file written there runs on the next commit, which turns an edit into code
+  execution outside anything approval covers. The rest of `.git` stays writable, since git
+  needs it. This binds the file tools, **not the shell** — a redirect inside `sh -c` still
+  lands, because nothing parses shell. Hygiene, not a boundary.
 - **Confinement** — the agent is scoped to the workspace; a write above it is refused.
   In-process this is hygiene, not a boundary
   ([ADR-0004](docs/adr/0004-kernel-enforced-confinement.md)). The boundary is the

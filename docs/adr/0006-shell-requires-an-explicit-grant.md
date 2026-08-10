@@ -64,7 +64,13 @@ grant is an act by whoever knows the boundary holds, never an inference by lan.
   boundary is the kernel's and the image author can vouch for it.
 - A host embedding the crate gets `ShellAccess::Denied` unless it opts in, so
   no embedder inherits command execution by surprise.
-- `.git/hooks` write-deny, named in ADR-0004 as hygiene, is still not
-  expressible: `RuntimePolicy` has allow-roots but no deny-roots. Recorded here
+- ~~`.git/hooks` write-deny is not expressible~~ — **closed.** mentra 0.17 added
+  `RuntimePolicy::with_denied_write_root`, and lan denies `.git/hooks` and
+  `.git/config` by default. Verified live: the builtin `files` tool is refused
+  with a reason the model reads and acts on. The limit is equally verified —
+  `sh -c 'echo hi > .git/hooks/pre-commit'` still lands, because nothing parses
+  shell. Hygiene that closes the route a model takes, never a boundary.
+- The original note, kept because the reasoning still holds for anything else
+  of this shape: `RuntimePolicy` had allow-roots but no deny-roots. Recorded here
   so it is not mistaken for done; it needs a mentra change or the native
   sandbox of [`proposals/0002`](../proposals/0002-native-sandbox.md).
