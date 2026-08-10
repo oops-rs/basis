@@ -350,7 +350,7 @@ async fn a_failing_turn_still_closes_the_stream() {
 }
 
 #[tokio::test]
-async fn an_empty_prompt_is_refused_before_a_session_is_used() {
+async fn an_empty_prompt_is_refused_when_it_would_be_sent() {
     let workspace = workspace_with_context("rules");
     let mock = mock(&["unused"]);
     let session = mock
@@ -360,7 +360,12 @@ async fn an_empty_prompt_is_refused_before_a_session_is_used() {
 
     let config = config(workspace.path(), "  \t\n ");
 
-    assert!(prepare_with_session(session, &config, "openai", "mock-model").is_err());
+    // Preparing is fine — a session with nothing said yet is what ACP's
+    // `session/new` opens. Sending is where the prompt has to be real.
+    let mut prepared =
+        prepare_with_session(session, &config, "openai", "mock-model").expect("prepared");
+
+    assert!(prepared.execute(CollectingSink::new()).await.is_err());
 }
 
 #[tokio::test]

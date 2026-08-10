@@ -40,6 +40,39 @@ struct Cli {
 enum Command {
     /// Run one prompt against a workspace and exit.
     Run(RunArgs),
+    /// Serve the Agent Client Protocol on stdio. Same as no subcommand.
+    Acp(AcpArgs),
+}
+
+/// Knobs for the ACP server.
+///
+/// Deliberately fewer than `run` has: an ACP client names the workspace itself
+/// (`cwd` on `session/new`) and sends the prompt over the protocol, so what is
+/// left is only what the client has no way to say.
+#[derive(Debug, Default, clap::Args)]
+struct AcpArgs {
+    /// Provider to use. Defaults to whichever API key is in the environment.
+    #[arg(long, value_name = "NAME")]
+    provider: Option<String>,
+
+    /// An OpenAI-compatible endpoint, e.g. http://127.0.0.1:3455/v1.
+    #[arg(long, value_name = "URL")]
+    base_url: Option<String>,
+
+    /// Model id. Defaults to the provider's newest available.
+    #[arg(long, value_name = "ID")]
+    model: Option<String>,
+
+    /// Let the agent run commands. See `lan run --help`; the same warning
+    /// applies, and here the client is asking on someone's behalf.
+    #[arg(long)]
+    allow_shell: bool,
+
+    /// When to ask before the agent changes anything. Defaults to asking the
+    /// ACP client, which is the point of a protocol with a permission request
+    /// in it.
+    #[arg(long, value_name = "MODE", default_value = "prompt")]
+    approve: ApproveMode,
 }
 
 #[derive(Debug, clap::Args)]
@@ -87,11 +120,13 @@ struct RunArgs {
     approve: ApproveMode,
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq, clap::ValueEnum)]
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, clap::ValueEnum)]
 enum ApproveMode {
     /// Never ask. Right for a confined or unattended run.
     Always,
-    /// Ask before each consequential call.
+    /// Ask before each consequential call. The default over ACP, where there
+    /// is a client to ask.
+    #[default]
     Prompt,
     /// Refuse anything that changes state outside the process.
     Never,
@@ -119,13 +154,64 @@ async fn main() -> ExitCode {
                 ExitCode::FAILURE
             }
         },
-        // The default mode is the ACP server, which arrives in P2. Saying so
-        // is more useful than a generic usage dump.
-        None => {
-            eprintln!("lan: the ACP server (default mode) is not implemented yet; use `lan run`");
+        // No subcommand serves ACP: the embedded case is the primary case
+        // (ADR-0002, ADR-0003), so it is what you get by default.
+        Some(Command::Acp(args)) => serve_acp(args).await,
+        None => serve_acp(AcpArgs::default()).await,
+    }
+}
+
+async fn serve_acp(args: AcpArgs) -> ExitCode {
+    match acp_config(args) {
+        Ok(config) => match lan::acp::serve_stdio(config).await {
+            Ok(()) => ExitCode::SUCCESS,
+            Err(error) => {
+                eprintln!("lan: acp: {error}");
+                ExitCode::FAILURE
+            }
+        },
+        Err(message) => {
+            eprintln!("lan: {message}");
             ExitCode::FAILURE
         }
     }
+}
+
+/// Builds the template each ACP session is configured from.
+///
+/// The workspace is a placeholder: every session replaces it with the `cwd`
+/// the client sends. It has to be *something* because `RunConfig` requires
+/// one, and the current directory is the least surprising stand-in.
+fn acp_config(args: AcpArgs) -> Result<lan::acp::ServeConfig, String> {
+    let workspace =
+        std::env::current_dir().map_err(|error| format!("no working directory: {error}"))?;
+
+    let mut config = RunConfig::new(workspace, "").with_session_name("lan acp");
+
+    if let Some(name) = &args.provider {
+        config = config.with_provider(provider::parse(name).map_err(|error| error.to_string())?);
+    }
+    if let Some(base_url) = args.base_url {
+        config = config.with_base_url(base_url);
+    }
+    if let Some(model) = args.model {
+        config = config.with_model(ModelSelector::Id(model));
+    }
+
+    let shell = if args.allow_shell {
+        ShellAccess::Granted
+    } else {
+        ShellAccess::from_env()
+    };
+    config = config
+        .with_shell(shell)
+        .with_approval(ApprovalPolicy::from(args.approve));
+
+    if let Some(warning) = shell::unconfined_warning(shell) {
+        eprintln!("lan: warning: {warning}");
+    }
+
+    Ok(lan::acp::ServeConfig::new(config))
 }
 
 async fn execute_run(args: RunArgs) -> Result<ExitCode, String> {

@@ -72,19 +72,26 @@ pub enum ApprovalDecision {
 
 /// Answers approval requests.
 ///
-/// Called from the event-forwarding task while the turn is blocked waiting, so
-/// an implementation must answer rather than wait for something that only
-/// happens after the run.
+/// Called from the event-forwarding task while the turn is blocked inside
+/// mentra waiting, so an implementation must answer rather than defer to
+/// something that only happens after the run.
+///
+/// Async because answering genuinely takes time and the caller is an async
+/// task: an ACP approver awaits a round trip to the client, and a terminal one
+/// waits on a person. A synchronous signature would force both to block a
+/// runtime worker thread — which tokio rejects outright for the ACP case.
+#[async_trait]
 pub trait Approver: Send + 'static {
-    fn approve(&mut self, request: &ApprovalRequest) -> ApprovalDecision;
+    async fn approve(&mut self, request: &ApprovalRequest) -> ApprovalDecision;
 }
 
 /// Approves everything. What a confined or headless run wants.
 #[derive(Debug, Default, Clone, Copy)]
 pub struct AllowAll;
 
+#[async_trait]
 impl Approver for AllowAll {
-    fn approve(&mut self, _request: &ApprovalRequest) -> ApprovalDecision {
+    async fn approve(&mut self, _request: &ApprovalRequest) -> ApprovalDecision {
         ApprovalDecision::Allow
     }
 }
@@ -93,8 +100,9 @@ impl Approver for AllowAll {
 #[derive(Debug, Default, Clone, Copy)]
 pub struct DenyAll;
 
+#[async_trait]
 impl Approver for DenyAll {
-    fn approve(&mut self, _request: &ApprovalRequest) -> ApprovalDecision {
+    async fn approve(&mut self, _request: &ApprovalRequest) -> ApprovalDecision {
         ApprovalDecision::Deny
     }
 }
@@ -260,8 +268,8 @@ mod tests {
         assert_eq!(ApprovalPolicy::default(), ApprovalPolicy::Always);
     }
 
-    #[test]
-    fn the_trivial_approvers_answer_as_named() {
+    #[tokio::test]
+    async fn the_trivial_approvers_answer_as_named() {
         let request = ApprovalRequest {
             request_id: "r".to_string(),
             tool_call_id: "t".to_string(),
@@ -270,7 +278,7 @@ mod tests {
             input: json!({}),
         };
 
-        assert_eq!(AllowAll.approve(&request), ApprovalDecision::Allow);
-        assert_eq!(DenyAll.approve(&request), ApprovalDecision::Deny);
+        assert_eq!(AllowAll.approve(&request).await, ApprovalDecision::Allow);
+        assert_eq!(DenyAll.approve(&request).await, ApprovalDecision::Deny);
     }
 }

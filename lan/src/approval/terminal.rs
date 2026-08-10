@@ -30,39 +30,48 @@ impl TerminalApprover {
     pub fn with_fallback(self, fallback: ApprovalDecision) -> Self {
         Self { fallback }
     }
-
-    fn ask(&self, request: &ApprovalRequest) -> std::io::Result<ApprovalDecision> {
-        let mut stderr = std::io::stderr();
-        writeln!(stderr)?;
-        writeln!(stderr, "  lan: {} wants to run", request.tool_name)?;
-        writeln!(stderr, "       {}", request.description)?;
-        if let Some(summary) = summarize_input(&request.input) {
-            writeln!(stderr, "       {summary}")?;
-        }
-        write!(stderr, "       allow? [y]es / [n]o / [a]lways / neve[r]: ")?;
-        stderr.flush()?;
-
-        let mut answer = String::new();
-        std::io::stdin().lock().read_line(&mut answer)?;
-
-        Ok(match answer.trim().to_ascii_lowercase().as_str() {
-            "y" | "yes" => ApprovalDecision::Allow,
-            "a" | "always" => ApprovalDecision::AllowForSession,
-            "r" | "never" => ApprovalDecision::DenyForSession,
-            // Anything else, including a bare newline, is a refusal: the
-            // safe answer should be the easy one to give.
-            _ => ApprovalDecision::Deny,
-        })
-    }
 }
 
+/// Asks on the terminal and reads the answer. Blocking by nature.
+fn ask(request: &ApprovalRequest) -> std::io::Result<ApprovalDecision> {
+    let mut stderr = std::io::stderr();
+    writeln!(stderr)?;
+    writeln!(stderr, "  lan: {} wants to run", request.tool_name)?;
+    writeln!(stderr, "       {}", request.description)?;
+    if let Some(summary) = summarize_input(&request.input) {
+        writeln!(stderr, "       {summary}")?;
+    }
+    write!(stderr, "       allow? [y]es / [n]o / [a]lways / neve[r]: ")?;
+    stderr.flush()?;
+
+    let mut answer = String::new();
+    std::io::stdin().lock().read_line(&mut answer)?;
+
+    Ok(match answer.trim().to_ascii_lowercase().as_str() {
+        "y" | "yes" => ApprovalDecision::Allow,
+        "a" | "always" => ApprovalDecision::AllowForSession,
+        "r" | "never" => ApprovalDecision::DenyForSession,
+        // Anything else, including a bare newline, is a refusal: the
+        // safe answer should be the easy one to give.
+        _ => ApprovalDecision::Deny,
+    })
+}
+
+#[async_trait::async_trait]
 impl Approver for TerminalApprover {
-    fn approve(&mut self, request: &ApprovalRequest) -> ApprovalDecision {
+    async fn approve(&mut self, request: &ApprovalRequest) -> ApprovalDecision {
         if !std::io::stdin().is_terminal() {
             return self.fallback;
         }
 
-        self.ask(request).unwrap_or(self.fallback)
+        let fallback = self.fallback;
+        let request = request.clone();
+
+        // Reading stdin blocks for as long as the person takes, so it belongs
+        // on a blocking thread rather than a runtime worker.
+        tokio::task::spawn_blocking(move || ask(&request).unwrap_or(fallback))
+            .await
+            .unwrap_or(fallback)
     }
 }
 
@@ -109,19 +118,19 @@ mod tests {
         }
     }
 
-    #[test]
-    fn with_no_terminal_the_fallback_answers() {
+    #[tokio::test]
+    async fn with_no_terminal_the_fallback_answers() {
         // The suite runs without a terminal on stdin, so this exercises the
         // real path rather than a simulated one.
         let mut approver = TerminalApprover::new();
         assert_eq!(
-            approver.approve(&request(json!({}))),
+            approver.approve(&request(json!({}))).await,
             ApprovalDecision::Deny
         );
 
         let mut permissive = TerminalApprover::new().with_fallback(ApprovalDecision::Allow);
         assert_eq!(
-            permissive.approve(&request(json!({}))),
+            permissive.approve(&request(json!({}))).await,
             ApprovalDecision::Allow
         );
     }

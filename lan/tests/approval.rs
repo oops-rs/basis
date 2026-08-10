@@ -135,8 +135,9 @@ struct ScriptedApprover {
     seen: Arc<Mutex<Vec<ApprovalRequest>>>,
 }
 
+#[async_trait]
 impl Approver for ScriptedApprover {
-    fn approve(&mut self, request: &ApprovalRequest) -> ApprovalDecision {
+    async fn approve(&mut self, request: &ApprovalRequest) -> ApprovalDecision {
         self.seen
             .lock()
             .expect("not poisoned")

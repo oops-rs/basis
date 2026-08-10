@@ -14,10 +14,10 @@ Name: **lan = Lightweight Agent Nucleus** ("A LAN connects machines; lan connect
 
 ## Repo state
 
-`/Users/wendell/developer/oops-rs/lan` — git on `main`, 11 commits, pushed to
-`origin`. **P1 is built and verified live**: `cargo test -p lan --all-features` = 71
-passing; `cargo clippy --all-targets --all-features -- -D warnings` clean. Now on
-**mentra 0.12** / mentra-provider 0.4.
+`/Users/wendell/developer/oops-rs/lan` — git on `main`, clean and pushed to `origin`.
+`cargo test -p lan --all-features` = 93 passing; `cargo clippy --all-targets
+--all-features -- -D warnings` clean. On **mentra 0.13** (published to crates.io) /
+mentra-provider 0.4 — no path dependency, no sibling checkout needed.
 
 ```
 Cargo.toml            # workspace: edition 2024, MSRV 1.85
@@ -29,18 +29,24 @@ lan/
   src/event/          #   mapping.rs (SessionEvent -> Event), jsonl.rs (writer)
   src/provider.rs     # provider choice, credential from env, base-URL normalizing
   src/skills.rs       # skills dir discovery (.lan/skills, then global skills/)
+  src/shell.rs        # ShellAccess: command execution needs an explicit grant
+  src/approval.rs     # ApprovalPolicy + Approver; PolicyAuthorizer on the runtime
+  src/approval/       #   terminal.rs (asks a person on stderr/stdin)
   src/run.rs          # RunConfig/run/prepare/prepare_with_session
   src/run/            #   prepared.rs (drives a session), sink.rs (EventSink impls)
-  src/main.rs         # thin CLI: `lan run [--json] [--base-url] [--model]`
+  src/main.rs         # thin CLI: `lan run [--json] [--allow-shell] [--approve] ...`
   examples/embed.rs   # in-process host reacting to events
   tests/run_stream.rs # assembly tests over mentra::test::MockRuntime (no network)
+  tests/approval.rs   # approval loop over a local ScriptedProvider, each run timed out
+Dockerfile            # read-only root, workspace sole rw mount, shell granted inside
+.dockerignore
 AGENTS.md             # mentra's conventions + lan-specific rules (READ THIS FIRST)
 README.md
 docs/
   PROPOSAL.md         # the why: problem, one idea, 7 bets (believe/buys/refuse)
   ARCHITECTURE.md     # the how: capability table, extension model, phases, risks
   p0-groundwork.md    # research + §4a: the gap list re-verified against 0.12
-  adr/0001..0005      # locked decisions
+  adr/0001..0006      # locked decisions (0006 = shell needs a grant)
   proposals/0001..0003 # deferred ideas with triggers
 ```
 
@@ -86,81 +92,71 @@ Core principle (Bet 4): **the core has no opinions** — no task types, pipeline
 - **Base URLs are normalized.** mentra's Responses transport appends `v1/responses` itself, but gateways publish their URL *with* `/v1`; lan strips a trailing `/v1` so a pasted URL works. `--base-url`, else `LAN_BASE_URL`, else `OPENAI_BASE_URL`; key from `LAN_API_KEY` or `OPENAI_API_KEY`. A base URL beats provider auto-detection — pointing somewhere specific is always deliberate.
 - **One skills directory, deliberately.** `register_skill_loader` replaces rather than merges (mentra#8), so lan registers the most specific and names the ignored ones on stderr, instead of merging directories itself (which would mean reimplementing mentra's frontmatter parsing — ADR-0005).
 
-## Where to pick up
+## Where things stand
 
-Completed: **P0** (research, groundwork, doc structure) and **P1** (crate + `lan run`).
-Phase plan is ARCHITECTURE.md §6: P2 = ACP server; P3 = extension points; P4 = watch +
-Docker; P5 = depth (branching, compaction).
+**Done: P0, P1, and two pieces of P4** (the container, and the shell grant it makes
+sound). Phase plan is ARCHITECTURE.md §6: P2 = ACP server; P3 = extension points;
+P4 = `watch`; P5 = depth.
 
-**P1 is verified live, and all four mentra gaps are fixed upstream.**
+93 tests green (80 unit + 13 integration across `run_stream.rs` and `approval.rs`),
+clippy clean at `-D warnings`. mentra is 721 green. Both repos pushed.
 
-The keys in `mentra/.env` are expired. The user supplied a local OpenAI-compatible
-gateway instead: `http://127.0.0.1:3455/v1`, Responses API, backed by a Codex/ChatGPT
-account. Two quirks worth knowing before using it again:
+### What works, verified against a live model
 
-- **Model choice is not free.** `/v1/models` advertises ten, but the proxy refuses most
-  — `gpt-4o`, `gpt-5.6`, and every `*-codex` return "not supported when using Codex with
-  a ChatGPT account". **`gpt-5.6-sol` works** (`-terra`/`-luna` likely too). Since
-  `NewestAvailable` picks `gpt-4o` off that list, always pass `--model gpt-5.6-sol`.
-- **It drops streams intermittently.** Transport errors and "Upstream response stream
-  closed before response.completed" appear perhaps one run in three, and succeed on
-  retry. Not a lan bug — lan reports them correctly and exits 1. Retry before debugging.
+One prompt against a workspace — prose or versioned JSONL, in-process or as a subprocess
+— with AGENTS.md precedence, layered skills, command execution, approval, and
+kernel-enforced confinement in the image. Specifically proven end to end:
 
-Verified end to end against it:
+- **Skills layering** — workspace `.lan/skills` and global `skills/` both registered;
+  `review` resolved to the *project* body while `deploy` still came from the global root.
+  Before mentra#8 only one root registered at all.
+- **Confinement** — in-process, a write to `../outside.txt` is denied. In the container,
+  a command reaching `/etc` is refused by the kernel with `Read-only file system`. That
+  is the ADR-0004 boundary actually delivered rather than asserted.
+- **Approval** — `--approve never` refuses a write and the model reports it accurately;
+  `--approve prompt` with stdin closed denies in seconds rather than hanging.
 
-- prompt answered from injected `AGENTS.md`; real tool use on a *different* repo
-  (`-C ../mentra` → correct answer, twice after one transient failure);
-- **layered skills** — workspace `.lan/skills` and global `skills/` both registered;
-  `review` resolved to the *project* body (`PROJECT-8891`, not the personal
-  `PERSONAL-0000`) while `deploy` still came from the global root (`GLOBAL-4417`). That
-  is mentra#8 proven through the model: before the fix only one root registered at all;
-- **`tool_completed` names its tool** (`load_skill`) — mentra#9 proven live;
-- confinement: a write to `../outside.txt` denied, file unchanged;
-- in-process embedding via `lan/examples/embed.rs`;
-- prose mode pipes cleanly — stdout carries only the answer.
+### What is missing (the README synopsis still names some of it)
 
-71 lan tests green (63 unit + 8 assembly); mentra 721 green; clippy clean at
-`-D warnings` in both.
+- **ACP server** — `lan` with no subcommand prints "not implemented". This is the
+  *default* mode and the primary embedding surface per Bet 2 / ADR-0002. **P2.**
+- **Multi-turn and resume** — `PreparedRun::execute` consumes the session, so every run
+  is one prompt and mentra's `resume_session` is never called. Blocks ACP, and is the one
+  real refactor P2 needs.
+- **`lan watch`** — no subcommand at all. P4.
+- **MCP `.mcp.json`, prompt templates, subprocess hooks** — P3.
+- **Branching** — mentra has it since 0.13 (`Session::branch_from`, `children`); lan maps
+  `SessionEvent::Branched` onto its stream but exposes nothing. P5.
+- **No CI**, and lan itself is unpublished.
 
-**mentra 0.13.0 is published** (crates.io, 2026-08-09). lan depends on it from the
-registry — no path dependency, no sibling checkout needed. The layered-skills run above
-was re-verified against the published crate and gave the identical result.
+### Starting P2
 
-**Shell and the container landed after that** (ADR-0006, `docs/adr/0006-*`). P1 could not
-run a single command — `RuntimePolicy::workspace_bounded` leaves mentra's
-`allow_shell_commands` false, correctly, so `lan run` could read and write files but not
-run `cargo test` or `git`. Now:
+`Event` is already the normalized spine, so the server maps `Event` → `session/update`
+and never touches `SessionEvent` again. `PermissionRequested`/`PermissionResolved` map
+onto `session/request_permission`, and the approval plumbing underneath is done and
+tested — P2 supplies an `Approver` that asks the client and returns its answer, and gets
+the rest free.
 
-- `--allow-shell` / `LAN_ALLOW_SHELL=1` grants it; the crate defaults to `Denied` so no
-  embedder inherits command execution. `RunConfig` does not read the env itself.
-- lan never *infers* the boundary. `detect_environment()` can tell it is inside a
-  container but not that the container was run with constrained mounts, so detection only
-  warns (granting on a bare `Host` prints what authority was handed over).
-- The **Dockerfile** is where the grant is sound and is on by default. Verified live:
-  `git log` works inside; writes to `/etc` and `/usr/local/bin` are refused by the kernel
-  with `Read-only file system`, not by a lan check. That is ADR-0004 finally delivered.
-- Two gotchas the image had to solve: mentra's SQLite store defaults under `$HOME`
-  (unwritable under `--read-only`) so `XDG_DATA_HOME=/state`; and `Cargo.lock` is now
-  committed, needed for `--locked` and standard for a crate shipping a binary.
+The refactor to do first: keep the session alive across turns instead of consuming it.
+That unlocks conversation and resume regardless of protocol, so it is worth doing on its
+own terms before any ACP code is written.
 
-Still **not** built, despite the README synopsis naming them: the ACP server (default
-`lan`, P2) and `lan watch` (P4). Runs are single-turn — no conversation, no resume,
-`execute` consumes the session and mentra's `resume_session` is never called. No MCP
-wiring, templates, or hooks (P3). No CI. lan is unpublished.
+Use the official `agent-client-protocol` crate (ADR-0002). Do not invent an RPC, and do
+not build a web frontend — adopt acp-ui behind a thin ws↔stdio bridge.
 
-**The permission gate is now closed** (`lan/src/approval.rs`). lan installs a
-`PolicyAuthorizer`, so `permission_requested` can actually fire, and the event forwarder
-answers it through an `Approver` — previously nothing resolved, which would have hung the
-turn, since mentra blocks on a oneshot. `--approve always|prompt|never`; read-only calls
-are never queued (prompting for reads trains people to approve blind). `TerminalApprover`
-asks on stderr and reads stdin, denying when there is no TTY so an unattended run fails
-visibly. `lan/tests/approval.rs` wraps every case in a 10s timeout — those tests fail by
-hanging, which is the regression worth catching. **P2 supplies an ACP `Approver` and gets
-the whole flow for free.**
+### Testing without burning tokens
 
-Then **P2 (ACP)**: `Event` is already the normalized spine, so the server maps `Event` →
-`session/update` rather than touching `SessionEvent` again. `PermissionRequested` /
-`PermissionResolved` map onto `session/request_permission`, and mentra's
-`SessionPermissionHandle` is the resolution side. `Session::subscribe` +
-`PreparedRun::execute` generalize to multi-turn by keeping the session alive instead of
-consuming it — that is the one refactor P2 will want.
+`lan/tests/approval.rs` defines a minimal `ScriptedProvider` (~40 lines) and builds a
+real `Runtime` around it; `run_stream.rs` uses `mentra::test::MockRuntime`. Between them
+the whole pipeline is exercised with no network. Prefer these to live runs while
+iterating. Note `Runtime::builder()` registers builtin tools and `empty_builder()` does
+not — a scripted `files` call silently does nothing under the latter.
+
+For live checks the user runs a local OpenAI-compatible gateway on
+`http://127.0.0.1:3455/v1` (Responses API, Codex/ChatGPT-backed, SSH-tunnel only — ask
+for the key, do not assume one is in the environment). Two quirks:
+
+- **Pass `--model gpt-5.6-sol`.** `/v1/models` advertises ten but the proxy refuses most,
+  including `gpt-4o`, which is what `NewestAvailable` picks.
+- **It drops streams roughly one run in three** — transport errors and "Upstream response
+  stream closed before response.completed". Not a lan bug; retry before debugging.

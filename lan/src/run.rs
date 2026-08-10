@@ -156,6 +156,9 @@ pub enum RunError {
     #[error("prompt is empty")]
     EmptyPrompt,
 
+    #[error("no session to resume")]
+    NoSuchSession,
+
     #[error(transparent)]
     Context(#[from] ContextError),
 
@@ -211,6 +214,16 @@ pub async fn prepare(config: RunConfig) -> Result<PreparedRun, RunError> {
         return Err(RunError::EmptyPrompt);
     }
 
+    prepare_without_prompt(config).await
+}
+
+/// Builds a session with no prompt in hand yet.
+///
+/// What a protocol server needs: ACP's `session/new` opens a conversation
+/// before the user has typed anything, so the empty-prompt check that guards
+/// [`prepare`] would reject exactly the case that matters. Prompts arrive later
+/// through [`PreparedRun::send`], which does its own checking.
+pub async fn prepare_without_prompt(config: RunConfig) -> Result<PreparedRun, RunError> {
     let resolved = resolve(&config).await?;
 
     let session = resolved.runtime.create_session_with_config(
@@ -328,16 +341,17 @@ async fn resolve(config: &RunConfig) -> Result<Resolved, RunError> {
 /// Prepares a run against a session the caller already built, so a host with
 /// its own runtime — custom tools, its own store, a provider lan does not
 /// know — still gets lan's context discovery and event stream.
+///
+/// The prompt in `config` may be empty. Once a session outlives a turn, a
+/// conversation with nothing said yet is a real state — it is what ACP's
+/// `session/new` opens — so the check belongs where a prompt is actually sent,
+/// which is [`PreparedRun::execute`] and [`PreparedRun::send`].
 pub fn prepare_with_session(
     session: Session,
     config: &RunConfig,
     provider: impl Into<String>,
     model: impl Into<String>,
 ) -> Result<PreparedRun, RunError> {
-    if config.prompt.trim().is_empty() {
-        return Err(RunError::EmptyPrompt);
-    }
-
     let context = WorkspaceContext::discover_with(&config.workspace, &config.context)?;
 
     Ok(PreparedRun::new(

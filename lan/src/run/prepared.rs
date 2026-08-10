@@ -354,7 +354,7 @@ async fn forward_events<S: EventSink, A: Approver>(
             received = receiver.recv() => {
                 match received {
                     Ok(event) => {
-                        resolve_if_permission(&event, &mut approver, &permissions);
+                        resolve_if_permission(&event, &mut approver, &permissions).await;
                         if !emit_session_event(&mut sink, &event) {
                             return sink;
                         }
@@ -372,7 +372,7 @@ async fn forward_events<S: EventSink, A: Approver>(
                 }
             }
             _ = &mut done => {
-                drain(&mut receiver, &mut sink, &mut approver, &permissions);
+                drain(&mut receiver, &mut sink, &mut approver, &permissions).await;
                 return sink;
             }
         }
@@ -380,7 +380,7 @@ async fn forward_events<S: EventSink, A: Approver>(
 }
 
 /// Empties whatever the broadcast channel still holds.
-fn drain<S: EventSink, A: Approver>(
+async fn drain<S: EventSink, A: Approver>(
     receiver: &mut SessionEventReceiver,
     sink: &mut S,
     approver: &mut A,
@@ -389,7 +389,7 @@ fn drain<S: EventSink, A: Approver>(
     loop {
         match receiver.try_recv() {
             Ok(event) => {
-                resolve_if_permission(&event, approver, permissions);
+                resolve_if_permission(&event, approver, permissions).await;
                 if !emit_session_event(sink, &event) {
                     return;
                 }
@@ -408,7 +408,7 @@ fn drain<S: EventSink, A: Approver>(
 ///
 /// The turn is blocked inside mentra waiting for this, so failing to resolve
 /// would hang the run — which is what happened before lan answered at all.
-fn resolve_if_permission<A: Approver>(
+async fn resolve_if_permission<A: Approver>(
     event: &SessionEvent,
     approver: &mut A,
     permissions: &SessionPermissionHandle,
@@ -424,14 +424,16 @@ fn resolve_if_permission<A: Approver>(
         return;
     };
 
-    let decision = approver.approve(&ApprovalRequest {
-        request_id: request_id.clone(),
-        tool_call_id: tool_call_id.clone(),
-        tool_name: tool_name.clone(),
-        description: description.clone(),
-        input: serde_json::from_str(preview)
-            .unwrap_or_else(|_| serde_json::Value::String(preview.clone())),
-    });
+    let decision = approver
+        .approve(&ApprovalRequest {
+            request_id: request_id.clone(),
+            tool_call_id: tool_call_id.clone(),
+            tool_name: tool_name.clone(),
+            description: description.clone(),
+            input: serde_json::from_str(preview)
+                .unwrap_or_else(|_| serde_json::Value::String(preview.clone())),
+        })
+        .await;
 
     // A failure here means the request was already resolved or withdrawn;
     // there is nothing useful left to do about it.

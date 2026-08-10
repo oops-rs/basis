@@ -12,6 +12,7 @@
 //! prompt, the workspace (AGENTS.md, skills, templates, `.mcp.json`), and
 //! config — never through code in this crate.
 
+pub mod acp;
 pub mod approval;
 pub mod context;
 pub mod event;
