@@ -38,3 +38,22 @@ tokio-tungstenite = { version = "0.28", default-features = false, features = [
 # was a second breaking overhaul, so a caret range here would silently change
 # the shape of the whole server. Re-check deliberately on upgrade (ADR-0002).
 agent-client-protocol = "=2.0.0"
+
+# A release binary that is mostly debug symbols and duplicated codegen is
+# nobody's intent; it is just cargo's default. These four settings take lan
+# from 24MB to 8.9MB with no behavioral change.
+#
+# Deliberately absent, and worth saying why so nobody adds it for the 1.3MB:
+# `panic = "abort"`. lan is a supervisor — `watch` survives a failed iteration
+# and the ACP server survives a failed turn — and aborting converts any panic,
+# including one inside a dependency, into killing the whole process. That is
+# exactly the property those features exist to provide.
+[profile.release]
+# ~5MB of the original 24MB was symbols nobody reads in a shipped binary.
+strip = true
+# "s" rather than 3 (12MB) or "z" (6.9MB): lan spends its life waiting on a
+# model, so a little code-layout speed is a cheap trade, while "z" starts
+# costing throughput in the JSON and streaming paths that do run hot.
+opt-level = "s"
+lto = true
+codegen-units = 1
