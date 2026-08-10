@@ -5,12 +5,16 @@
 //!
 //! ```text
 //! lan                       -> ACP server on stdio (P2)
+//! lan bridge                -> the same server on a websocket, for a browser
 //! lan run "<prompt>"        -> headless one-shot, JSONL events with --json
-//! lan watch "<prompt>"      -> recurring headless runs (P4)
+//! lan watch "<prompt>"      -> recurring headless runs, skip-if-unchanged
 //! ```
+
+mod watch_cli;
 
 use std::{
     io::{self, IsTerminal, Write},
+    net::SocketAddr,
     path::PathBuf,
     process::ExitCode,
 };
@@ -40,8 +44,43 @@ struct Cli {
 enum Command {
     /// Run one prompt against a workspace and exit.
     Run(RunArgs),
+    /// Run one prompt against a workspace on a schedule, skipping an
+    /// iteration whose workspace has not changed.
+    Watch(watch_cli::WatchArgs),
     /// Serve the Agent Client Protocol on stdio. Same as no subcommand.
     Acp(AcpArgs),
+    /// Serve the same protocol on a websocket, for a client that cannot spawn
+    /// a process — a browser one. lan ships no web UI; adopt an ACP client.
+    Bridge(BridgeArgs),
+}
+
+/// Knobs for the websocket bridge: where to listen, and who to talk to.
+#[derive(Debug, clap::Args)]
+struct BridgeArgs {
+    /// Address to listen on. Loopback unless --allow-non-loopback.
+    #[arg(long, value_name = "ADDR", default_value_t = lan::BridgeConfig::default().bind)]
+    bind: SocketAddr,
+
+    /// A web origin allowed to connect, e.g. http://localhost:5173.
+    /// Repeatable, matched exactly.
+    ///
+    /// Without one, no page is served. A page can open a websocket to a
+    /// loopback port without asking anyone — the same-origin policy does not
+    /// apply to the handshake — so this list is what stands between a site the
+    /// user happened to visit and this workspace.
+    #[arg(long = "allow-origin", value_name = "ORIGIN")]
+    allow_origin: Vec<String>,
+
+    /// Listen on an address other than loopback.
+    ///
+    /// Refused by default, and worth refusing: a reachable bridge gives anyone
+    /// who can route to it an agent that writes to the workspace, with no
+    /// authentication in the protocol to stop them.
+    #[arg(long)]
+    allow_non_loopback: bool,
+
+    #[command(flatten)]
+    acp: AcpArgs,
 }
 
 /// Knobs for the ACP server.
@@ -121,7 +160,7 @@ struct RunArgs {
 }
 
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq, clap::ValueEnum)]
-enum ApproveMode {
+pub(crate) enum ApproveMode {
     /// Never ask. Right for a confined or unattended run.
     Always,
     /// Ask before each consequential call. The default over ACP, where there
@@ -154,9 +193,17 @@ async fn main() -> ExitCode {
                 ExitCode::FAILURE
             }
         },
+        Some(Command::Watch(args)) => match watch_cli::execute(args).await {
+            Ok(code) => code,
+            Err(message) => {
+                eprintln!("lan: {message}");
+                ExitCode::FAILURE
+            }
+        },
         // No subcommand serves ACP: the embedded case is the primary case
         // (ADR-0002, ADR-0003), so it is what you get by default.
         Some(Command::Acp(args)) => serve_acp(args).await,
+        Some(Command::Bridge(args)) => serve_bridge(args).await,
         None => serve_acp(AcpArgs::default()).await,
     }
 }
@@ -172,6 +219,61 @@ async fn serve_acp(args: AcpArgs) -> ExitCode {
         },
         Err(message) => {
             eprintln!("lan: {message}");
+            ExitCode::FAILURE
+        }
+    }
+}
+
+/// Serves the ACP server on a websocket instead of stdio.
+///
+/// The bound address is printed before serving: with `--bind 127.0.0.1:0` it
+/// is the only way to learn the port, and with any bind it is the URL a client
+/// is configured with.
+async fn serve_bridge(args: BridgeArgs) -> ExitCode {
+    let config = match acp_config(args.acp) {
+        Ok(config) => config,
+        Err(message) => {
+            eprintln!("lan: {message}");
+            return ExitCode::FAILURE;
+        }
+    };
+
+    let mut bridge = lan::BridgeConfig::new(args.bind).with_origins(args.allow_origin);
+    if args.allow_non_loopback {
+        bridge = bridge.allowing_non_loopback();
+    }
+    let serves_no_page = bridge.allowed_origins.is_empty();
+
+    let bridge = match lan::Bridge::bind(bridge).await {
+        Ok(bridge) => bridge,
+        Err(error) => {
+            eprintln!("lan: bridge: {error}");
+            return ExitCode::FAILURE;
+        }
+    };
+
+    match bridge.local_addr() {
+        Ok(address) => eprintln!("lan: bridge listening on ws://{address}"),
+        Err(error) => {
+            eprintln!("lan: bridge: {error}");
+            return ExitCode::FAILURE;
+        }
+    }
+
+    // Said after the address, not before: it explains why a browser client
+    // that is about to be pointed here will be turned away, and it would be
+    // noise on a bind that never happened.
+    if serves_no_page {
+        eprintln!(
+            "lan: bridge: no web origin allowed, so no page is served. \
+             Pass --allow-origin <ORIGIN> for a browser client."
+        );
+    }
+
+    match bridge.serve(config).await {
+        Ok(()) => ExitCode::SUCCESS,
+        Err(error) => {
+            eprintln!("lan: bridge: {error}");
             ExitCode::FAILURE
         }
     }
