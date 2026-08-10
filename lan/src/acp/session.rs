@@ -12,6 +12,9 @@
 //! held. Putting the token inside would mean cancel waits for the turn it is
 //! trying to cancel — a deadlock that only shows up when someone presses stop.
 //!
+//! The session's mode lives outside the turn lock for the same reason, and is
+//! its own type — see [`mode`](super::mode).
+//!
 //! # Which id is the session id
 //!
 //! lan uses mentra's **agent id**, not its session id. mentra persists agents;
@@ -27,7 +30,8 @@ use std::{
 
 use agent_client_protocol::schema::v1::SessionId;
 
-use crate::{PreparedRun, run::TurnOptions};
+use super::mode::SessionModes;
+use crate::{PreparedRun, approval::ApprovalPolicy, run::TurnOptions};
 use mentra::runtime::CancellationToken;
 
 /// One open conversation.
@@ -38,21 +42,32 @@ pub struct AcpSession {
     /// Set while a turn is in flight. Reachable without the turn lock, which
     /// is the entire point — see the module docs.
     cancel: Arc<Mutex<Option<CancellationToken>>>,
+    /// Also reachable without the turn lock: ACP says `session/set_mode` may
+    /// arrive while the agent is generating.
+    modes: SessionModes,
     id: SessionId,
 }
 
 impl AcpSession {
-    pub fn new(run: PreparedRun) -> Self {
+    /// Opens a session at `initial_mode`, which is where the client's mode
+    /// picker starts.
+    pub fn new(run: PreparedRun, initial_mode: ApprovalPolicy) -> Self {
         Self {
             id: SessionId::new(run.agent_id().to_string()),
             run: Arc::new(tokio::sync::Mutex::new(run)),
             cancel: Arc::new(Mutex::new(None)),
+            modes: SessionModes::new(initial_mode),
         }
     }
 
     /// The ACP session id for this conversation: mentra's persisted agent id.
     pub fn id(&self) -> SessionId {
         self.id.clone()
+    }
+
+    /// This conversation's mode, shared with whatever turn is running.
+    pub fn modes(&self) -> &SessionModes {
+        &self.modes
     }
 
     /// Takes the turn lock. Held until the returned guard drops.

@@ -121,6 +121,19 @@ pub struct SkillSummary {
     pub description: String,
 }
 
+/// A prompt template a client can offer as a command.
+///
+/// Bodies stay out of the stream for the same reason skill bodies do: the
+/// stream says what is available, not what it contains.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct TemplateSummary {
+    pub name: String,
+    pub description: String,
+    /// What the template says its arguments look like, when it says.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub argument_hint: Option<String>,
+}
+
 /// A context file that was in effect for the run.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct ContextFile {
@@ -153,6 +166,13 @@ pub enum Event {
         /// model can actually load by name.
         #[serde(default, skip_serializing_if = "Vec::is_empty")]
         skills: Vec<SkillSummary>,
+        /// Template directories in effect, most specific first.
+        #[serde(default, skip_serializing_if = "Vec::is_empty")]
+        templates_dirs: Vec<PathBuf>,
+        /// The templates those directories produced, after layering — what a
+        /// client can offer as commands.
+        #[serde(default, skip_serializing_if = "Vec::is_empty")]
+        templates: Vec<TemplateSummary>,
     },
 
     UserMessage {
@@ -318,6 +338,8 @@ mod tests {
                 }],
                 skills_dirs: Vec::new(),
                 skills: Vec::new(),
+                templates_dirs: Vec::new(),
+                templates: Vec::new(),
             },
         );
         let json = serde_json::to_value(&line).expect("serializes");
@@ -348,6 +370,8 @@ mod tests {
                     name: "review".to_string(),
                     description: "house review style".to_string(),
                 }],
+                templates_dirs: Vec::new(),
+                templates: Vec::new(),
             },
         );
         let json = serde_json::to_value(&line).expect("serializes");

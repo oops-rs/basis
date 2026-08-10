@@ -27,9 +27,12 @@ use crate::{
     approval::{ApprovalPolicy, Approver, PolicyAuthorizer},
     context::{ContextConfig, ContextError, WorkspaceContext},
     event::RunOutcome,
+    hooks::{self, HookRunner, HooksConfig},
+    mcp::{self, McpConfig, McpError},
     provider::{self, ProviderError},
     shell::ShellAccess,
     skills::{self, SkillsConfig},
+    templates::{self, Template, TemplatesConfig},
 };
 
 pub use prepared::{LoadedSkill, PreparedRun, RunContext, TurnOptions};
@@ -53,6 +56,14 @@ pub struct RunConfig {
     pub model: ModelSelector,
     pub context: ContextConfig,
     pub skills: SkillsConfig,
+    /// Which MCP servers this run connects, and where to look for more.
+    pub mcp: McpConfig,
+    /// Where to look for prompt templates. Discovered, never executed here —
+    /// a template becomes a prompt only when something renders it.
+    pub templates: TemplatesConfig,
+    /// Where to look for subprocess hooks — external commands with a say over
+    /// each tool call.
+    pub hooks: HooksConfig,
     /// Whether the agent may run commands. Denied unless granted; see
     /// ADR-0006.
     pub shell: ShellAccess,
@@ -71,6 +82,9 @@ impl RunConfig {
             model: ModelSelector::NewestAvailable,
             context: ContextConfig::default(),
             skills: SkillsConfig::default(),
+            mcp: McpConfig::default(),
+            templates: TemplatesConfig::default(),
+            hooks: HooksConfig::default(),
             // Not read from the environment here: a library default must not
             // depend on ambient state. The binary reads LAN_ALLOW_SHELL and
             // calls `with_shell` explicitly.
@@ -106,6 +120,28 @@ impl RunConfig {
 
     pub fn with_skills(self, skills: SkillsConfig) -> Self {
         Self { skills, ..self }
+    }
+
+    /// Sets which MCP servers the run connects.
+    ///
+    /// Servers arrive from three places — the caller's own list, the
+    /// workspace's `.mcp.json`, and the global one — and this is where the
+    /// first of those goes. See [`crate::mcp`] for the precedence.
+    pub fn with_mcp(self, mcp: McpConfig) -> Self {
+        Self { mcp, ..self }
+    }
+
+    pub fn with_templates(self, templates: TemplatesConfig) -> Self {
+        Self { templates, ..self }
+    }
+
+    /// Sets where subprocess hooks are discovered.
+    ///
+    /// A hook is an external command that gets a say over each tool call; see
+    /// [`crate::hooks`] for the wire contract and for what happens when one
+    /// breaks.
+    pub fn with_hooks(self, hooks: HooksConfig) -> Self {
+        Self { hooks, ..self }
     }
 
     /// Grants or denies command execution.
@@ -176,6 +212,15 @@ pub enum RunError {
 
     #[error("failed to load skills: {0}")]
     Skills(#[from] mentra::SkillLoadError),
+
+    #[error(transparent)]
+    Mcp(#[from] McpError),
+
+    #[error("failed to load prompt templates: {0}")]
+    Templates(#[from] crate::templates::TemplateError),
+
+    #[error("failed to load hooks: {0}")]
+    Hooks(#[from] crate::hooks::HookConfigError),
 }
 
 /// Runs one prompt to completion, streaming events into `sink`.
@@ -270,6 +315,8 @@ struct Resolved {
     context: WorkspaceContext,
     skills_dirs: Vec<PathBuf>,
     skills: Vec<LoadedSkill>,
+    templates_dirs: Vec<PathBuf>,
+    templates: Vec<Template>,
 }
 
 impl Resolved {
@@ -282,6 +329,8 @@ impl Resolved {
             context: self.context,
             skills_dirs: self.skills_dirs,
             skills: self.skills,
+            templates_dirs: self.templates_dirs,
+            templates: self.templates,
         }
     }
 }
@@ -303,13 +352,41 @@ async fn resolve(config: &RunConfig) -> Result<Resolved, RunError> {
         // no permission request can ever be raised.
         .with_tool_authorizer(PolicyAuthorizer::new(config.approval));
 
+    // Loaded before the build so a hooks file that does not parse fails the run
+    // loudly, rather than at the first tool call — or worse, never.
+    //
+    // One runner for every hook rather than one registration each: `with_pre_hook`
+    // appends, so both work, but lan wants the ordering and the short-circuit to
+    // be its own (see `crate::hooks`). A run with no hooks registers nothing, so
+    // the mechanism costs nothing until someone writes the file.
+    let hooks = hooks::load(&config.workspace, &config.hooks)?;
+    let builder = if hooks.is_empty() {
+        builder
+    } else {
+        builder.with_pre_hook(HookRunner::new(&config.workspace, hooks))
+    };
+
+    // MCP servers are registered on the builder and connected by `build_async`,
+    // so this must happen before the build. mentra's `McpRegistration` is
+    // private, which is why the fold matches here rather than in `crate::mcp`.
+    let builder = mcp::servers(&config.workspace, &config.mcp)?
+        .into_iter()
+        .fold(builder, |builder, server| match server {
+            mcp::McpServer::Stdio(server) => builder.with_mcp_server(server),
+            mcp::McpServer::Sse(server) => builder.with_mcp_sse_server(server),
+        });
+
     let runtime = match &choice.base_url {
         Some(base_url) => {
             builder.with_registered_provider(compatible_provider(base_url, &choice.api_key))
         }
         None => builder.with_provider(choice.provider, choice.api_key.clone()),
     }
-    .build()?;
+    // `build` ignores MCP configuration outright; only `build_async` opens the
+    // connections. Always the async one, so a server can never be dropped by
+    // the choice of constructor.
+    .build_async()
+    .await?;
 
     let model = runtime
         .resolve_model(choice.provider, config.model.clone())
@@ -328,6 +405,10 @@ async fn resolve(config: &RunConfig) -> Result<Resolved, RunError> {
         })
         .collect();
 
+    // Templates need no runtime registration — they are lan-side convention
+    // data, rendered into a prompt by whatever surface offers them.
+    let (templates_dirs, templates) = load_templates(config)?;
+
     Ok(Resolved {
         runtime,
         model,
@@ -335,6 +416,8 @@ async fn resolve(config: &RunConfig) -> Result<Resolved, RunError> {
         context,
         skills_dirs,
         skills,
+        templates_dirs,
+        templates,
     })
 }
 
@@ -353,6 +436,9 @@ pub fn prepare_with_session(
     model: impl Into<String>,
 ) -> Result<PreparedRun, RunError> {
     let context = WorkspaceContext::discover_with(&config.workspace, &config.context)?;
+    // Unlike skills, templates are registered on nothing — so lan can discover
+    // them here without touching a runtime it does not own.
+    let (templates_dirs, templates) = load_templates(config)?;
 
     Ok(PreparedRun::new(
         session,
@@ -365,6 +451,8 @@ pub fn prepare_with_session(
             // The caller owns the runtime, so it owns skill registration too.
             skills_dirs: Vec::new(),
             skills: Vec::new(),
+            templates_dirs,
+            templates,
         },
     ))
 }
@@ -380,6 +468,19 @@ fn register_skills(runtime: &Runtime, config: &RunConfig) -> Result<Vec<PathBuf>
     runtime.register_skills_dirs(&paths)?;
 
     Ok(paths)
+}
+
+/// Loads every template the workspace defines, with the roots they came from.
+///
+/// A root that exists but holds a file lan cannot read is an error rather than
+/// an empty command list: a template that failed to load and a template nobody
+/// wrote look the same from a client, and only one of them is worth knowing
+/// about.
+fn load_templates(config: &RunConfig) -> Result<(Vec<PathBuf>, Vec<Template>), RunError> {
+    let sources = templates::discover(&config.workspace, &config.templates);
+    let dirs: Vec<PathBuf> = sources.iter().map(|source| source.path.clone()).collect();
+
+    Ok((dirs, templates::load_sources(&sources)?))
 }
 
 /// Builds a provider aimed at an OpenAI-compatible endpoint.

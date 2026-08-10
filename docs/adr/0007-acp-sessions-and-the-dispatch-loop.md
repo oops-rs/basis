@@ -35,9 +35,12 @@ identifier and the runtime's identifier are the same string.
 
 `session/prompt` spawns immediately and carries its `Responder` into the
 spawned task. Everything a turn does — streaming updates, asking permission,
-answering — happens there. `initialize`, `session/new`, and `session/load`
-answer inline, because they touch the disk and the provider but never the
-client.
+answering — happens there. So do `session/load` and `session/resume`: they
+read a session's transcript from behind the turn lock, and a turn holds that
+lock while it waits for the client, so taking it from the loop is the same
+deadlock by another route. `initialize`, `session/new`, `session/set_mode` and
+`session/close` answer inline, because they touch the disk and the provider's
+model list but never the client and never a lock a turn can be holding.
 
 **`Approver::approve` is async**, and the permission round trip awaits rather
 than blocks. The forwarding task is an ordinary async task; parking it parks
@@ -68,3 +71,7 @@ runtime."*
   lock on the run for the turn's duration. The cancellation token deliberately
   sits *outside* that lock — `session/cancel` arrives while the turn holds it,
   so a token stored inside would make cancel wait for the thing it cancels.
+- The session's permission mode sits outside that lock for the same reason.
+  ACP says `session/set_mode` may arrive "whether the Agent is idle or
+  actively generating", and a switch that waited for the turn it was meant to
+  govern would arrive too late to govern it.

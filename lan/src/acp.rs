@@ -16,16 +16,24 @@
 //! - [`approver`] answers mentra's permission requests by asking the client,
 //!   turning lan's existing [`Approver`](crate::Approver) seam into
 //!   `session/request_permission` with no new plumbing.
+//! - [`mode`] is the client's permission switch: ACP session modes over lan's
+//!   [`ApprovalPolicy`](crate::ApprovalPolicy), applied in front of the
+//!   approver so it can still change mid-session.
+//! - [`history`] replays a resumed conversation, which is what separates
+//!   `session/load` from `session/resume`.
 //! - [`session`] holds the open conversations, keyed by mentra's persisted
 //!   agent id so that `session/load` is just [`resume`](crate::run::resume).
 //! - [`server`] wires the handlers onto a connection.
 
 mod approver;
+mod history;
+mod mode;
 mod server;
 mod session;
 mod update;
 
 pub use approver::AcpApprover;
+pub use mode::{ModeError, ModedApprover, SessionModes};
 pub use server::{ServeConfig, SessionSource, serve, serve_stdio};
 pub use session::{AcpSession, SessionRegistry};
 pub use update::session_update;

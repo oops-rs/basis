@@ -28,7 +28,11 @@ use super::{EventSink, RunError, RunReport};
 use crate::{
     approval::{AllowAll, ApprovalDecision, ApprovalRequest, Approver},
     context::WorkspaceContext,
-    event::{ContextFile, EVENT_SCHEMA_VERSION, Event, NoticeSeverity, RunOutcome, SkillSummary},
+    event::{
+        ContextFile, EVENT_SCHEMA_VERSION, Event, NoticeSeverity, RunOutcome, SkillSummary,
+        TemplateSummary,
+    },
+    templates::Template,
 };
 
 /// What a run is about, once the runtime questions are settled.
@@ -43,6 +47,12 @@ pub struct RunContext {
     pub skills_dirs: Vec<PathBuf>,
     /// The skills those directories actually produced, after layering.
     pub skills: Vec<LoadedSkill>,
+    /// Template directories that exist, most specific first.
+    pub templates_dirs: Vec<PathBuf>,
+    /// The templates those directories produced, after layering, name-ordered.
+    /// Over ACP these become the client's commands — see
+    /// [`available_commands`](crate::templates::available_commands).
+    pub templates: Vec<Template>,
 }
 
 /// A skill available to the run, without its body.
@@ -128,6 +138,7 @@ impl std::fmt::Debug for PreparedRun {
             .field("model", &self.run.model)
             .field("context_files", &self.run.context.documents().len())
             .field("skills", &self.run.skills.len())
+            .field("templates", &self.run.templates.len())
             .finish_non_exhaustive()
     }
 }
@@ -329,6 +340,16 @@ fn header_for(session_id: &str, run: &RunContext) -> Event {
             .map(|skill| SkillSummary {
                 name: skill.name.clone(),
                 description: skill.description.clone(),
+            })
+            .collect(),
+        templates_dirs: run.templates_dirs.clone(),
+        templates: run
+            .templates
+            .iter()
+            .map(|template| TemplateSummary {
+                name: template.name.clone(),
+                description: template.description.clone(),
+                argument_hint: template.argument_hint.clone(),
             })
             .collect(),
     }
