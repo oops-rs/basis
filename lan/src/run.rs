@@ -47,13 +47,17 @@ const DEFAULT_SESSION_NAME: &str = "lan run";
 ///
 /// lan's own enum rather than a re-export, for the reason [`Event`] and
 /// [`TurnOptions`] are: the surface lan promises should not move when mentra's
-/// does. Only providers with a reasoning control honor it; the rest ignore it,
-/// which is why there is no "unsupported" error to handle.
+/// does. Provider adapters translate this semantic level to their own wire
+/// format. A provider or model that does not offer the requested level returns
+/// an error rather than silently lowering it.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[non_exhaustive]
 pub enum Effort {
     Low,
     Medium,
     High,
+    XHigh,
+    Max,
 }
 
 impl From<Effort> for ReasoningEffort {
@@ -62,6 +66,8 @@ impl From<Effort> for ReasoningEffort {
             Effort::Low => Self::Low,
             Effort::Medium => Self::Medium,
             Effort::High => Self::High,
+            Effort::XHigh => Self::XHigh,
+            Effort::Max => Self::Max,
         }
     }
 }
@@ -95,7 +101,8 @@ pub struct RunConfig {
     pub shell: ShellAccess,
     /// When the agent must ask before doing something consequential.
     pub approval: ApprovalPolicy,
-    /// How hard the model should think. `None` leaves the provider's default.
+    /// How hard the model should think. `None` leaves the provider's default;
+    /// unsupported provider/model levels fail instead of being downgraded.
     pub effort: Option<Effort>,
     pub session_name: String,
 }
@@ -589,9 +596,9 @@ fn resolved_workspace(requested: &Path, context: &WorkspaceContext) -> PathBuf {
 
 /// Asks the model for a reasoning effort, when one was requested.
 ///
-/// A provider without a reasoning control ignores the request rather than
-/// failing, so this is safe to call unconditionally — which is why `None`
-/// leaves the session untouched instead of sending a default nobody asked for.
+/// `None` leaves the session untouched instead of sending a default nobody
+/// asked for. Mentra's provider adapter validates the requested level and maps
+/// it to that API's wire format.
 fn apply_effort(session: &mut Session, effort: Option<Effort>) -> Result<(), RunError> {
     let Some(effort) = effort else {
         return Ok(());
@@ -845,6 +852,19 @@ mod tests {
             Some(Effort::High)
         );
         assert_eq!(config.effort, None, "the original is untouched");
+    }
+
+    #[test]
+    fn every_lan_effort_maps_to_the_same_provider_level() {
+        for (effort, expected) in [
+            (Effort::Low, ReasoningEffort::Low),
+            (Effort::Medium, ReasoningEffort::Medium),
+            (Effort::High, ReasoningEffort::High),
+            (Effort::XHigh, ReasoningEffort::XHigh),
+            (Effort::Max, ReasoningEffort::Max),
+        ] {
+            assert_eq!(ReasoningEffort::from(effort), expected);
+        }
     }
 
     #[tokio::test]

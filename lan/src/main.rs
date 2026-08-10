@@ -89,6 +89,9 @@ enum EffortArg {
     Low,
     Medium,
     High,
+    #[value(name = "xhigh")]
+    XHigh,
+    Max,
 }
 
 impl From<EffortArg> for lan::Effort {
@@ -97,6 +100,8 @@ impl From<EffortArg> for lan::Effort {
             EffortArg::Low => Self::Low,
             EffortArg::Medium => Self::Medium,
             EffortArg::High => Self::High,
+            EffortArg::XHigh => Self::XHigh,
+            EffortArg::Max => Self::Max,
         }
     }
 }
@@ -126,8 +131,8 @@ struct AcpArgs {
     #[arg(long)]
     allow_shell: bool,
 
-    /// How hard the model should think: low, medium, or high. Providers
-    /// without a reasoning control ignore it.
+    /// How hard the model should think: low, medium, high, xhigh, or max.
+    /// Unsupported provider/model levels fail instead of being downgraded.
     #[arg(long, value_name = "LEVEL")]
     effort: Option<EffortArg>,
 
@@ -177,8 +182,8 @@ struct RunArgs {
     #[arg(long)]
     allow_shell: bool,
 
-    /// How hard the model should think: low, medium, or high. Providers
-    /// without a reasoning control ignore it.
+    /// How hard the model should think: low, medium, high, xhigh, or max.
+    /// Unsupported provider/model levels fail instead of being downgraded.
     #[arg(long, value_name = "LEVEL")]
     effort: Option<EffortArg>,
 
@@ -470,5 +475,49 @@ fn exit_code<S>(report: &RunReport<S>) -> ExitCode {
         ExitCode::SUCCESS
     } else {
         ExitCode::FAILURE
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    const EFFORTS: [(&str, EffortArg); 5] = [
+        ("low", EffortArg::Low),
+        ("medium", EffortArg::Medium),
+        ("high", EffortArg::High),
+        ("xhigh", EffortArg::XHigh),
+        ("max", EffortArg::Max),
+    ];
+
+    #[test]
+    fn run_accepts_exactly_the_five_effort_spellings() {
+        for (value, expected) in EFFORTS {
+            let cli = Cli::try_parse_from(["lan", "run", "prompt", "--effort", value])
+                .expect("effort should parse");
+            let Some(Command::Run(args)) = cli.command else {
+                panic!("run command should parse");
+            };
+            assert_eq!(args.effort, Some(expected));
+        }
+
+        for invalid in ["x-high", "x_high", "none", "minimal", "ultra"] {
+            assert!(
+                Cli::try_parse_from(["lan", "run", "prompt", "--effort", invalid]).is_err(),
+                "unexpectedly accepted {invalid}"
+            );
+        }
+    }
+
+    #[test]
+    fn acp_accepts_the_same_five_effort_spellings() {
+        for (value, expected) in EFFORTS {
+            let cli = Cli::try_parse_from(["lan", "acp", "--effort", value])
+                .expect("effort should parse");
+            let Some(Command::Acp(args)) = cli.command else {
+                panic!("ACP command should parse");
+            };
+            assert_eq!(args.effort, Some(expected));
+        }
     }
 }

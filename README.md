@@ -32,6 +32,13 @@ lan run "summarize what changed in the last three commits"
 lan run -C ../other-repo --json "find the slowest test and explain why"
 ```
 
+`--effort` accepts exactly `low`, `medium`, `high`, `xhigh`, or `max`.
+LAN keeps those values provider-neutral: Responses-family APIs receive
+`reasoning.effort`, while Anthropic receives `output_config.effort` and enables
+adaptive thinking only on models that support it. Provider/model combinations
+without a requested tier fail explicitly instead of silently lowering it;
+omitting the flag leaves the provider default unchanged.
+
 By default the agent can read and write files inside the workspace but **cannot run
 commands** — a path check inside the process cannot confine a process once it starts, so
 that authority has to be granted deliberately:

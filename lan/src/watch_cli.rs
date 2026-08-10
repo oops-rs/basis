@@ -47,7 +47,8 @@ pub(crate) struct WatchArgs {
     #[arg(long)]
     json: bool,
 
-    /// How hard the model should think: low, medium, or high.
+    /// How hard the model should think: low, medium, high, xhigh, or max.
+    /// Unsupported provider/model levels fail instead of being downgraded.
     #[arg(long, value_name = "LEVEL")]
     effort: Option<crate::EffortArg>,
 
@@ -403,6 +404,22 @@ mod tests {
         let args = parse(&["do it", "--every", "2h", "--always"]).expect("parses");
 
         assert!(args.always);
+    }
+
+    #[test]
+    fn watch_accepts_the_five_effort_spellings() {
+        for (value, expected) in [
+            ("low", crate::EffortArg::Low),
+            ("medium", crate::EffortArg::Medium),
+            ("high", crate::EffortArg::High),
+            ("xhigh", crate::EffortArg::XHigh),
+            ("max", crate::EffortArg::Max),
+        ] {
+            let args = parse(&["do the thing", "--every", "30m", "--effort", value])
+                .expect("effort should parse");
+
+            assert_eq!(args.effort, Some(expected));
+        }
     }
 
     #[test]
