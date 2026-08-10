@@ -71,7 +71,8 @@
 //!
 //! lan runs `git` here as itself, not on the agent's behalf: this is lan
 //! reading the workspace the same way it reads `AGENTS.md`. It is unrelated to
-//! the shell grant of ADR-0006, which governs what the *agent* may execute.
+//! [`ShellAccess`](crate::ShellAccess), which governs what the *agent* may
+//! execute.
 //!
 //! # A digest for comparing, not for keeping
 //!

@@ -44,7 +44,7 @@ use std::{
 };
 
 use agent_client_protocol::{
-    Agent, Client, ConnectionTo, Handled, Stdio,
+    Agent, Client, ConnectionTo, Handled,
     schema::v1::{
         AgentCapabilities, AvailableCommand, AvailableCommandsUpdate, CancelNotification,
         CloseSessionRequest, CloseSessionResponse, ContentBlock, CurrentModeUpdate, Error,
@@ -255,16 +255,11 @@ impl ServeConfig {
     }
 }
 
-/// Serves ACP on stdin/stdout until the client disconnects.
-///
-/// This is what `lan` with no subcommand runs: the default mode, because
-/// embedding is the primary case (ADR-0002, ADR-0003).
-pub async fn serve_stdio(config: ServeConfig) -> Result<(), Error> {
-    serve(config, Stdio::new()).await
-}
-
 /// Serves ACP over any transport, which is what makes the server testable
 /// in-process — see `tests/acp.rs`, which drives it over `Channel::duplex()`.
+///
+/// [`serve_stdio`](super::serve_stdio) is this over stdin and stdout, which is
+/// what `lan` with no subcommand runs.
 pub async fn serve<T>(config: ServeConfig, transport: T) -> Result<(), Error>
 where
     T: agent_client_protocol::ConnectTo<Agent> + 'static,
@@ -1010,9 +1005,12 @@ mod tests {
 
     #[test]
     fn the_config_template_takes_the_clients_working_directory() {
+        // Denied rather than granted, so the assertion below has something to
+        // catch: granted is the default, and a template that was dropped
+        // entirely would still look right.
         let source = ConfiguredSource {
             template: Some(
-                RunConfig::new("/placeholder", "").with_shell(crate::ShellAccess::Granted),
+                RunConfig::new("/placeholder", "").with_shell(crate::ShellAccess::Denied),
             ),
         };
 
@@ -1021,7 +1019,7 @@ mod tests {
         assert_eq!(built.workspace, PathBuf::from("/repo"));
         assert_eq!(
             built.shell,
-            crate::ShellAccess::Granted,
+            crate::ShellAccess::Denied,
             "everything the client cannot say must carry through"
         );
     }

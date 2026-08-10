@@ -99,8 +99,7 @@ pub struct RunConfig {
     /// Where to look for subprocess hooks — external commands with a say over
     /// each tool call.
     pub hooks: HooksConfig,
-    /// Whether the agent may run commands. Denied unless granted; see
-    /// ADR-0006.
+    /// Whether the agent may run commands. Granted by default; see ADR-0013.
     pub shell: ShellAccess,
     /// When the agent must ask before doing something consequential.
     pub approval: ApprovalPolicy,
@@ -139,10 +138,10 @@ impl RunConfig {
             mcp: McpConfig::default(),
             templates: TemplatesConfig::default(),
             hooks: HooksConfig::default(),
-            // Not read from the environment here: a library default must not
-            // depend on ambient state. The binary reads LAN_ALLOW_SHELL and
-            // calls `with_shell` explicitly.
-            shell: ShellAccess::Denied,
+            // Granted, per ADR-0013, and from the enum's own default rather
+            // than from anything ambient: what a run may do is stated here, in
+            // the config, not read out of the environment behind the caller.
+            shell: ShellAccess::default(),
             approval: ApprovalPolicy::default(),
             effort: None,
             deadline: None,
@@ -206,9 +205,9 @@ impl RunConfig {
 
     /// Grants or denies command execution.
     ///
-    /// Granting asserts that something outside this process confines the
-    /// workspace — a container, or a per-command sandbox. lan takes the
-    /// caller's word for it and never infers it (ADR-0006).
+    /// Granted by default (ADR-0013). Denying is the read-only posture: it
+    /// shuts the command tools and nothing else, so it is a narrowing of what
+    /// this run does, never a claim about what the process could do.
     pub fn with_shell(self, shell: ShellAccess) -> Self {
         Self { shell, ..self }
     }
@@ -285,6 +284,27 @@ impl RunConfig {
     }
 }
 
+/// A bound that ended a run before its work did.
+///
+/// Separate from [`RunOutcome`] because the two answer different questions. A
+/// bounded run *failed* in the sense that no final message arrived, and it is
+/// reported that way on the stream; but "the model ran out of the time you gave
+/// it" and "the provider refused the request" call for different reactions, and
+/// a caller — the CLI's exit code, or a script driving many runs — should not
+/// have to read an error message to tell them apart (ADR-0015).
+///
+/// A token budget is deliberately absent: crossing it ends the turn *gracefully*
+/// at the next round boundary, so the run finishes with [`RunOutcome::Ok`] and
+/// keeps what it committed. There is nothing to distinguish.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[non_exhaustive]
+pub enum Bound {
+    /// [`RunConfig::with_deadline`] — the run took longer than it was given.
+    Deadline,
+    /// [`RunConfig::with_tool_budget`] — the run made all the calls it had.
+    ToolBudget,
+}
+
 /// What a completed run produced, alongside the sink it wrote to.
 #[derive(Debug)]
 pub struct RunReport<S> {
@@ -294,6 +314,8 @@ pub struct RunReport<S> {
     /// The assistant's final message, absent when the run failed.
     pub final_message: Option<String>,
     pub outcome: RunOutcome,
+    /// Which bound ended the run, when one did rather than the work.
+    pub stopped_by: Option<Bound>,
     pub sink: S,
 }
 
@@ -467,8 +489,8 @@ async fn resolve(config: &RunConfig) -> Result<Resolved, RunError> {
 
     let builder = Runtime::builder()
         // Path roots are hygiene, not a boundary: per ADR-0004 that is the
-        // kernel's job. Commands are the case where the difference bites, so
-        // they stay off unless the caller has granted them (ADR-0006).
+        // kernel's job, and per ADR-0013 lan ships no instance of one. What
+        // the config says about commands is passed through as written.
         .with_policy(
             git_protected(
                 RuntimePolicy::workspace_bounded(&config.workspace),
@@ -700,7 +722,8 @@ fn apply_effort(session: &mut Session, effort: Option<Effort>) -> Result<(), Run
 /// **This binds the builtin file tools, not the shell.** A command like
 /// `sh -c 'echo … > .git/hooks/pre-commit'` still reaches the path, because
 /// nothing here parses shell. It closes the route a model actually takes and
-/// remains hygiene; per ADR-0004 the boundary is the container's.
+/// remains hygiene; per ADR-0004 and ADR-0013 the boundary is the OS's, and
+/// lan does not ship one.
 fn git_protected(policy: RuntimePolicy, workspace: &Path) -> RuntimePolicy {
     let git = workspace.join(".git");
     policy
@@ -892,20 +915,24 @@ mod tests {
     }
 
     #[test]
-    fn commands_are_denied_unless_granted() {
+    fn commands_are_available_unless_the_caller_says_otherwise() {
         let config = RunConfig::new("/repo", "prompt");
 
-        assert_eq!(config.shell, ShellAccess::Denied);
-        assert!(!config.shell.is_granted());
+        assert_eq!(config.shell, ShellAccess::Granted);
+        assert!(config.shell.is_granted());
     }
 
     #[test]
-    fn granting_shell_returns_a_new_config() {
+    fn denying_shell_returns_a_new_config() {
         let base = RunConfig::new("/repo", "prompt");
-        let granted = base.clone().with_shell(ShellAccess::Granted);
+        let denied = base.clone().with_shell(ShellAccess::Denied);
 
-        assert_eq!(base.shell, ShellAccess::Denied, "the original is untouched");
-        assert_eq!(granted.shell, ShellAccess::Granted);
+        assert_eq!(
+            base.shell,
+            ShellAccess::Granted,
+            "the original is untouched"
+        );
+        assert_eq!(denied.shell, ShellAccess::Denied);
     }
 
     #[test]

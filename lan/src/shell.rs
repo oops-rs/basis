@@ -1,31 +1,34 @@
 //! Whether a run may execute commands.
 //!
-//! Per [ADR-0006], command execution is denied unless something outside the
-//! process is confining it, and lan never infers that — the grant is always an
-//! explicit act by whoever knows the boundary holds.
+//! Per [ADR-0013] the host owns the boundary. Commands are enabled by default:
+//! a harness that cannot run `cargo test` does very little real work, and the
+//! flag that used to gate them was theater once a process spawned — an
+//! in-process path check cannot confine a command that is already running.
 //!
-//! [ADR-0006]: https://github.com/oops-rs/lan/blob/main/docs/adr/0006-shell-requires-an-explicit-grant.md
-
-use mentra::runtime::{ExecutionEnvironment, detect_environment};
-
-/// Environment variable granting command execution.
-pub const ALLOW_SHELL_VAR: &str = "LAN_ALLOW_SHELL";
+//! So lan claims nothing. The process holds whatever authority the user who
+//! started it holds, and confinement, where it is wanted, comes from the OS —
+//! `docs/containerization.md` has the patterns. Denying is one line for a run
+//! that is meant to read and report.
+//!
+//! [ADR-0013]: https://github.com/oops-rs/lan/blob/main/docs/adr/0013-the-host-owns-the-boundary.md
 
 /// Whether the agent may run commands.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
 pub enum ShellAccess {
     /// No command execution.
     ///
-    /// The default. An in-process path check cannot confine a process once it
-    /// is running, so granting this by default would be claiming a boundary
-    /// lan does not have.
-    #[default]
+    /// For a run that inspects a workspace and reports on it. Worth being
+    /// precise about what this is: one route closed, not a boundary. The file
+    /// tools still write, and the process still runs as its user — see
+    /// [`ApprovalPolicy::Never`](crate::ApprovalPolicy::Never) for a run that
+    /// changes nothing at all.
     Denied,
     /// Commands allowed.
     ///
-    /// Only sound when something outside the process enforces the workspace
-    /// boundary — a container with the workspace as its sole writable mount,
-    /// or a per-command sandbox.
+    /// The default. A command reaches whatever the user account running lan
+    /// can reach, which is the honest description of a process on a host and
+    /// is why lan neither warns about it per run nor pretends otherwise.
+    #[default]
     Granted,
 }
 
@@ -34,46 +37,10 @@ impl ShellAccess {
         matches!(self, Self::Granted)
     }
 
-    /// Reads the grant from the environment.
-    ///
-    /// Any value except `0`, `false`, or empty counts as a grant: someone who
-    /// set the variable meant to set it.
-    pub fn from_env() -> Self {
-        match std::env::var(ALLOW_SHELL_VAR) {
-            Ok(value) => Self::from_flag(!matches!(
-                value.trim().to_ascii_lowercase().as_str(),
-                "" | "0" | "false" | "no"
-            )),
-            Err(_) => Self::Denied,
-        }
-    }
-
+    /// Maps a yes-or-no answer onto the enum, for a caller holding a bool —
+    /// a CLI flag, a config field, an environment variable of its own.
     pub fn from_flag(granted: bool) -> Self {
         if granted { Self::Granted } else { Self::Denied }
-    }
-}
-
-/// A warning to emit when commands were granted with nothing enforcing the
-/// boundary, or `None` when the grant is unremarkable.
-///
-/// Detection informs; it never decides. Being inside a container does not
-/// prove the container was run with a constrained mount set, so this cannot
-/// be used to grant — only to point out the most obviously unconfined case.
-pub fn unconfined_warning(access: ShellAccess) -> Option<String> {
-    if !access.is_granted() {
-        return None;
-    }
-
-    match detect_environment() {
-        ExecutionEnvironment::Host => Some(
-            "commands are enabled on the host: nothing outside this process is \
-             confining them, so a command can reach anything your user account \
-             can. Run inside the container image if that is not what you want."
-                .to_string(),
-        ),
-        // Inside a container or CI the operator chose the mounts and the blast
-        // radius; lan cannot check them and does not pretend to.
-        _ => None,
     }
 }
 
@@ -82,42 +49,16 @@ mod tests {
     use super::*;
 
     #[test]
-    fn denied_is_the_default() {
-        assert_eq!(ShellAccess::default(), ShellAccess::Denied);
-        assert!(!ShellAccess::default().is_granted());
+    fn commands_are_the_default() {
+        // ADR-0013: the first `lan "run the tests"` has to work, and a default
+        // of denied made the tool's purpose opt-in.
+        assert_eq!(ShellAccess::default(), ShellAccess::Granted);
+        assert!(ShellAccess::default().is_granted());
     }
 
     #[test]
     fn a_flag_maps_both_ways() {
         assert_eq!(ShellAccess::from_flag(true), ShellAccess::Granted);
         assert_eq!(ShellAccess::from_flag(false), ShellAccess::Denied);
-    }
-
-    #[test]
-    fn denial_never_warns() {
-        assert_eq!(unconfined_warning(ShellAccess::Denied), None);
-    }
-
-    #[test]
-    fn a_grant_on_the_host_is_called_out() {
-        // The suite runs on a host or in CI; only assert the host branch when
-        // that is actually where we are, so the test says something true
-        // either way.
-        let warning = unconfined_warning(ShellAccess::Granted);
-        match detect_environment() {
-            ExecutionEnvironment::Host => {
-                let warning = warning.expect("an unconfined grant must be called out");
-                assert!(warning.contains("nothing outside this process"));
-                assert!(
-                    !warning.contains(ALLOW_SHELL_VAR),
-                    "the grant can come from a flag or the variable, so the \
-                     warning must not assume one of them"
-                );
-            }
-            _ => assert_eq!(
-                warning, None,
-                "only the plainly unconfined case is worth a warning"
-            ),
-        }
     }
 }

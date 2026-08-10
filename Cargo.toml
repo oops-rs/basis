@@ -17,6 +17,11 @@ mentra = { version = "0.18", path = "../mentra/mentra" }
 mentra-provider = { version = "0.5", path = "../mentra/mentra-provider" }
 
 async-trait = "0.1"
+# Moves a blocking reader onto its own thread, which is how stdin becomes an
+# async stream. Already in the tree via agent-client-protocol, whose own stdio
+# transport is built on it; lan names it because it builds that transport
+# itself, to inspect the first line before serving (ADR-0015).
+blocking = "1"
 clap = { version = "4.6", features = ["derive"] }
 # `Sink`/`Stream` adapters for the websocket bridge. Already in the tree via
 # agent-client-protocol, whose transports are defined in terms of these traits.

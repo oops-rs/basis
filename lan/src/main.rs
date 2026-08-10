@@ -1,19 +1,41 @@
 //! The `lan` binary: a thin shell over the [`lan`] crate.
 //!
-//! Per ADR-0003 the library is the product and this is a wrapper. Modes, from
-//! `docs/ARCHITECTURE.md` §2:
+//! Per ADR-0003 the library is the product and this is a wrapper. The grammar
+//! is ADR-0015's, and it is five lines:
 //!
 //! ```text
-//! lan                       -> ACP server on stdio (P2)
-//! lan bridge                -> the same server on a websocket, for a browser
-//! lan run "<prompt>"        -> headless one-shot, JSONL events with --json
+//! lan                       -> ACP server on stdio, for an editor to spawn
+//! lan "<prompt>"            -> shorthand: exactly `lan run "<prompt>"`
+//! lan run "<prompt>"        -> headless one-shot; `-` reads the prompt from stdin
+//! lan bridge                -> the same ACP server on a websocket, for a browser
 //! lan fingerprint           -> the workspace's hash, for a caller's own loop
 //! ```
+//!
+//! A positional argument that is not one of the four subcommands is a prompt,
+//! so the human path carries no ceremony and the editor path is untouched. `--`
+//! escapes a prompt that collides with a subcommand name: `lan -- run`.
+//!
+//! # Exit codes
+//!
+//! These are contract (ADR-0015): a script branches on them without parsing
+//! anything. `--json` remains the structured detail.
+//!
+//! | Code | Meaning |
+//! |---|---|
+//! | [`EXIT_OK`] | the run finished |
+//! | [`EXIT_FAILED`] | the run failed, or lan could not start it |
+//! | [`EXIT_USAGE`] | the invocation was wrong |
+//! | [`EXIT_BOUNDED`] | a bound tripped: `--deadline` or `--tool-budget` |
+//!
+//! A `--token-budget` is absent from the last row on purpose: crossing it ends
+//! the run gracefully with everything it committed, so the run *succeeded* and
+//! exits `0`.
 
 mod duration_arg;
 
 use std::{
-    io::{self, IsTerminal, Write},
+    ffi::{OsStr, OsString},
+    io::{self, IsTerminal, Read, Write},
     net::SocketAddr,
     path::{Path, PathBuf},
     process::ExitCode,
@@ -22,13 +44,41 @@ use std::{
 use clap::{Parser, Subcommand};
 use lan::{
     ApprovalPolicy, Event, JsonlWriter, RunConfig, RunOutcome, RunReport, ShellAccess, Snapshot,
-    TerminalApprover, provider,
+    TerminalApprover,
+    acp::StdioError,
+    provider,
     run::{EventSink, FnSink},
-    shell,
 };
 use mentra::ModelSelector;
 
 use crate::duration_arg::DurationArg;
+
+/// The run finished.
+const EXIT_OK: u8 = 0;
+/// The run failed, or lan could not start it.
+const EXIT_FAILED: u8 = 1;
+/// The invocation was wrong. clap's own code for a usage error, named here so
+/// nothing else takes it and so the table above is complete.
+const EXIT_USAGE: u8 = 2;
+/// A bound tripped, which is not the same as failing: the run stopped because
+/// it reached an allowance its caller set, and kept what it had.
+const EXIT_BOUNDED: u8 = 3;
+
+/// What bare `lan` says when the first thing on stdin is not a message.
+///
+/// The trap ADR-0015 names: an editor spawning lan and a shell pipe look
+/// identical from here, so `cat prompt.txt | lan` cannot be detected as a
+/// prompt without breaking every editor. What can be done is answer, rather
+/// than wait silently, once the input proves it was never a client.
+const NOT_A_CLIENT: &str = "expected an ACP client on stdio; did you mean 'lan run -'?";
+
+/// The four subcommands plus clap's own, which is what makes a positional a
+/// prompt: anything that is not one of these words is one.
+const SUBCOMMANDS: [&str; 5] = ["run", "fingerprint", "acp", "bridge", "help"];
+
+/// Flags the top level answers itself. Every other flag belongs to `run`,
+/// which is what lets `lan --json "hi"` mean what it looks like.
+const TOP_LEVEL_FLAGS: [&str; 4] = ["-h", "--help", "-V", "--version"];
 
 #[derive(Debug, Parser)]
 #[command(
@@ -36,6 +86,18 @@ use crate::duration_arg::DurationArg;
     version,
     about = "Lightweight Agent Nucleus — an embeddable agent harness",
     long_about = None,
+    after_help = "\
+Shorthand:
+  lan \"fix the failing test\"    the same as: lan run \"fix the failing test\"
+  lan -- run                    a prompt that collides with a subcommand name
+  lan run -                     read the prompt from stdin
+  lan                           no arguments: the ACP server, on stdio
+
+Exit codes:
+  0  the run finished
+  1  the run failed, or lan could not start it
+  2  the invocation was wrong
+  3  a bound tripped (--deadline, --tool-budget); committed work was kept",
 )]
 struct Cli {
     #[command(subcommand)]
@@ -127,10 +189,14 @@ struct AcpArgs {
     #[arg(long, value_name = "ID")]
     model: Option<String>,
 
-    /// Let the agent run commands. See `lan run --help`; the same warning
-    /// applies, and here the client is asking on someone's behalf.
+    /// Stop the agent running commands.
+    ///
+    /// Commands are on by default: the host owns the boundary, and a harness
+    /// that cannot run `cargo test` does very little (ADR-0013). This shuts the
+    /// shell and background tools for a run meant to read and report — it
+    /// narrows what this run does, it does not confine the process.
     #[arg(long)]
-    allow_shell: bool,
+    no_shell: bool,
 
     /// How hard the model should think: low, medium, high, xhigh, or max.
     /// Unsupported provider/model levels fail instead of being downgraded.
@@ -147,6 +213,10 @@ struct AcpArgs {
 #[derive(Debug, clap::Args)]
 struct RunArgs {
     /// The prompt. What the agent does is entirely this plus the workspace.
+    ///
+    /// `-` reads the prompt from stdin instead, which is how a generated or
+    /// multi-line prompt arrives. A prompt that happens to be a subcommand
+    /// name needs `--` in front of it: `lan -- run`.
     prompt: String,
 
     /// Workspace root. Defaults to the current directory.
@@ -173,15 +243,18 @@ struct RunArgs {
     #[arg(long, value_name = "ID")]
     model: Option<String>,
 
-    /// Let the agent run commands (shell, background tasks).
+    /// Stop the agent running commands (shell, background tasks).
     ///
-    /// Denied by default: an in-process path check cannot confine a process
-    /// once it is running, so this grants real authority over anything your
-    /// user account can reach. Sound when something outside the process is
-    /// confining the workspace — the container image sets it for that reason.
-    /// Also settable with LAN_ALLOW_SHELL=1.
+    /// Commands are on by default. A run holds whatever authority your user
+    /// account holds, because an in-process path check cannot confine a
+    /// process once it is running and lan will not pretend otherwise
+    /// (ADR-0013). Confinement, where you want it, comes from the OS —
+    /// docs/containerization.md has the patterns.
+    ///
+    /// This flag is the read-only posture, not a boundary: file writes still
+    /// land. For a run that changes nothing, use --approve never.
     #[arg(long)]
-    allow_shell: bool,
+    no_shell: bool,
 
     /// How hard the model should think: low, medium, high, xhigh, or max.
     /// Unsupported provider/model levels fail instead of being downgraded.
@@ -224,7 +297,8 @@ struct FingerprintArgs {
 
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq, clap::ValueEnum)]
 pub(crate) enum ApproveMode {
-    /// Never ask. Right for a confined or unattended run.
+    /// Never ask. What an unattended run needs, since nobody is there to
+    /// answer and a question nothing answers is a hang.
     Always,
     /// Ask before each consequential call. The default over ACP, where there
     /// is a client to ask.
@@ -246,21 +320,21 @@ impl From<ApproveMode> for ApprovalPolicy {
 
 #[tokio::main]
 async fn main() -> ExitCode {
-    let cli = Cli::parse();
+    let cli = Cli::parse_from(normalize(std::env::args_os()));
 
     match cli.command {
         Some(Command::Run(args)) => match execute_run(args).await {
             Ok(code) => code,
             Err(message) => {
                 eprintln!("lan: {message}");
-                ExitCode::FAILURE
+                ExitCode::from(EXIT_FAILED)
             }
         },
         Some(Command::Fingerprint(args)) => match execute_fingerprint(args) {
             Ok(code) => code,
             Err(message) => {
                 eprintln!("lan: {message}");
-                ExitCode::FAILURE
+                ExitCode::from(EXIT_FAILED)
             }
         },
         // No subcommand serves ACP: the embedded case is the primary case
@@ -271,18 +345,64 @@ async fn main() -> ExitCode {
     }
 }
 
+/// Rewrites `lan "<prompt>"` as `lan run "<prompt>"`.
+///
+/// Done here rather than in the parser because the shorthand is a statement
+/// about one token — the first — and clap has no way to express "this
+/// positional is a subcommand unless it isn't". Deciding on the first argument
+/// alone is what makes the rule total: a flag's *value* can look like anything
+/// (`lan --model gpt-5 "hi"`), and scanning further would have to know every
+/// flag's arity to avoid mistaking `gpt-5` for the prompt.
+fn normalize(argv: impl IntoIterator<Item = OsString>) -> Vec<OsString> {
+    let mut argv: Vec<OsString> = argv.into_iter().collect();
+
+    // Bare `lan`: the ACP server, byte-identical to what an editor spawns.
+    let Some(first) = argv.get(1) else {
+        return argv;
+    };
+
+    if starts_a_run(first) {
+        argv.insert(1, OsString::from("run"));
+    }
+
+    argv
+}
+
+/// Whether the first argument opens a run, rather than naming a subcommand or
+/// asking the top level for help.
+///
+/// `--` lands here as a run too, which is what makes it the escape: `lan -- run`
+/// becomes `lan run -- run`, and the word arrives as a prompt.
+fn starts_a_run(first: &OsStr) -> bool {
+    match first.to_str() {
+        // Not UTF-8, so it is neither a reserved word nor a flag lan defines.
+        // `run` takes it as a prompt and clap reports the encoding.
+        None => true,
+        Some(word) => !SUBCOMMANDS.contains(&word) && !TOP_LEVEL_FLAGS.contains(&word),
+    }
+}
+
 async fn serve_acp(args: AcpArgs) -> ExitCode {
-    match acp_config(args) {
-        Ok(config) => match lan::acp::serve_stdio(config).await {
-            Ok(()) => ExitCode::SUCCESS,
-            Err(error) => {
-                eprintln!("lan: acp: {error}");
-                ExitCode::FAILURE
-            }
-        },
+    let config = match acp_config(args) {
+        Ok(config) => config,
         Err(message) => {
             eprintln!("lan: {message}");
-            ExitCode::FAILURE
+            return ExitCode::from(EXIT_FAILED);
+        }
+    };
+
+    match lan::acp::serve_stdio(config).await {
+        Ok(()) => ExitCode::from(EXIT_OK),
+        // Not an error the server had — an invocation that was never going to
+        // work. Said in the vocabulary of the command line, because that is
+        // where the fix is.
+        Err(StdioError::NotAClient) => {
+            eprintln!("lan: {NOT_A_CLIENT}");
+            ExitCode::from(EXIT_USAGE)
+        }
+        Err(error) => {
+            eprintln!("lan: acp: {error}");
+            ExitCode::from(EXIT_FAILED)
         }
     }
 }
@@ -297,7 +417,7 @@ async fn serve_bridge(args: BridgeArgs) -> ExitCode {
         Ok(config) => config,
         Err(message) => {
             eprintln!("lan: {message}");
-            return ExitCode::FAILURE;
+            return ExitCode::from(EXIT_FAILED);
         }
     };
 
@@ -311,7 +431,7 @@ async fn serve_bridge(args: BridgeArgs) -> ExitCode {
         Ok(bridge) => bridge,
         Err(error) => {
             eprintln!("lan: bridge: {error}");
-            return ExitCode::FAILURE;
+            return ExitCode::from(EXIT_FAILED);
         }
     };
 
@@ -319,7 +439,7 @@ async fn serve_bridge(args: BridgeArgs) -> ExitCode {
         Ok(address) => eprintln!("lan: bridge listening on ws://{address}"),
         Err(error) => {
             eprintln!("lan: bridge: {error}");
-            return ExitCode::FAILURE;
+            return ExitCode::from(EXIT_FAILED);
         }
     }
 
@@ -334,10 +454,10 @@ async fn serve_bridge(args: BridgeArgs) -> ExitCode {
     }
 
     match bridge.serve(config).await {
-        Ok(()) => ExitCode::SUCCESS,
+        Ok(()) => ExitCode::from(EXIT_OK),
         Err(error) => {
             eprintln!("lan: bridge: {error}");
-            ExitCode::FAILURE
+            ExitCode::from(EXIT_FAILED)
         }
     }
 }
@@ -363,21 +483,12 @@ fn acp_config(args: AcpArgs) -> Result<lan::acp::ServeConfig, String> {
         config = config.with_model(ModelSelector::Id(model));
     }
 
-    let shell = if args.allow_shell {
-        ShellAccess::Granted
-    } else {
-        ShellAccess::from_env()
-    };
     config = config
-        .with_shell(shell)
+        .with_shell(ShellAccess::from_flag(!args.no_shell))
         .with_approval(ApprovalPolicy::from(args.approve));
 
     if let Some(effort) = args.effort {
         config = config.with_effort(effort.into());
-    }
-
-    if let Some(warning) = shell::unconfined_warning(shell) {
-        eprintln!("lan: warning: {warning}");
     }
 
     Ok(lan::acp::ServeConfig::new(config))
@@ -391,7 +502,7 @@ async fn execute_run(args: RunArgs) -> Result<ExitCode, String> {
         }
     };
 
-    let mut config = RunConfig::new(workspace, args.prompt);
+    let mut config = RunConfig::new(workspace, prompt_from(args.prompt)?);
 
     if let Some(name) = &args.provider {
         config = config.with_provider(provider::parse(name).map_err(|error| error.to_string())?);
@@ -403,17 +514,7 @@ async fn execute_run(args: RunArgs) -> Result<ExitCode, String> {
         config = config.with_model(ModelSelector::Id(model));
     }
 
-    // The flag grants; the variable grants; neither can revoke the other.
-    let shell = if args.allow_shell {
-        ShellAccess::Granted
-    } else {
-        ShellAccess::from_env()
-    };
-    config = config.with_shell(shell);
-
-    if let Some(warning) = shell::unconfined_warning(shell) {
-        eprintln!("lan: warning: {warning}");
-    }
+    config = config.with_shell(ShellAccess::from_flag(!args.no_shell));
 
     let approval = ApprovalPolicy::from(args.approve);
     config = config.with_approval(approval);
@@ -443,7 +544,7 @@ async fn execute_run(args: RunArgs) -> Result<ExitCode, String> {
         let report = lan::run_with_approver(config, JsonlWriter::new(io::stdout()), approver)
             .await
             .map_err(|error| error.to_string())?;
-        return Ok(exit_code(&report));
+        return Ok(ExitCode::from(exit_code(&report)));
     }
 
     // Without --json the run is still driven by the same event stream; only
@@ -454,10 +555,50 @@ async fn execute_run(args: RunArgs) -> Result<ExitCode, String> {
         .map_err(|error| error.to_string())?;
 
     if let RunOutcome::Error { message } = &report.outcome {
-        eprintln!("lan: run failed: {message}");
+        // A tripped bound is not a failure, and calling it one would send
+        // someone looking for a broken model when the answer is a smaller
+        // task or a larger allowance.
+        let what = match report.stopped_by {
+            Some(_) => "run stopped",
+            None => "run failed",
+        };
+        eprintln!("lan: {what}: {message}");
     }
 
-    Ok(exit_code(&report))
+    Ok(ExitCode::from(exit_code(&report)))
+}
+
+/// The prompt as `run` was given it, reading stdin when it is `-`.
+///
+/// Explicit rather than detected: bare `lan` already owns stdin for the ACP
+/// server, and no amount of sniffing can tell an editor's pipe from a shell's
+/// (ADR-0015). So the caller says which one this is, with one character.
+fn prompt_from(argument: String) -> Result<String, String> {
+    match argument.as_str() {
+        "-" => read_prompt(io::stdin().lock()),
+        _ => Ok(argument),
+    }
+}
+
+/// Reads a whole prompt, refusing an empty one.
+///
+/// Whole, not a line: a generated prompt spans paragraphs, and a reader that
+/// stopped at the first newline would silently run a fraction of what it was
+/// given. An empty stdin is refused here rather than deeper, where the message
+/// would say "prompt is empty" without saying where the prompt was looked for.
+fn read_prompt(mut source: impl Read) -> Result<String, String> {
+    let mut prompt = String::new();
+    source
+        .read_to_string(&mut prompt)
+        .map_err(|error| format!("could not read the prompt from stdin: {error}"))?;
+
+    if prompt.trim().is_empty() {
+        return Err(
+            "no prompt on stdin: `-` reads one from stdin, and nothing arrived".to_string(),
+        );
+    }
+
+    Ok(prompt)
 }
 
 /// Prints the workspace fingerprint, or says why there is none.
@@ -477,7 +618,7 @@ fn execute_fingerprint(args: FingerprintArgs) -> Result<ExitCode, String> {
 
     println!("{}", fingerprint_line(&workspace)?);
 
-    Ok(ExitCode::SUCCESS)
+    Ok(ExitCode::from(EXIT_OK))
 }
 
 /// The one line stdout gets, or the reason stdout gets nothing.
@@ -539,11 +680,16 @@ fn prose_sink() -> impl EventSink {
     })
 }
 
-fn exit_code<S>(report: &RunReport<S>) -> ExitCode {
-    if report.succeeded() {
-        ExitCode::SUCCESS
-    } else {
-        ExitCode::FAILURE
+/// The exit code a finished run earns.
+///
+/// A tripped bound is checked first because it also failed: the outcome on the
+/// stream is an error either way, and "you ran out of the time you set" is the
+/// more useful of the two things that are true (ADR-0015).
+fn exit_code<S>(report: &RunReport<S>) -> u8 {
+    match report.stopped_by {
+        Some(_) => EXIT_BOUNDED,
+        None if report.succeeded() => EXIT_OK,
+        None => EXIT_FAILED,
     }
 }
 
@@ -693,5 +839,217 @@ mod tests {
             fingerprint_line(dir.path()).expect("still fingerprints"),
             "a workspace nobody touched must print the same line twice"
         );
+    }
+
+    /// The command line as lan sees it after the shorthand is resolved.
+    fn normalized(argv: &[&str]) -> Vec<String> {
+        normalize(argv.iter().map(OsString::from))
+            .into_iter()
+            .map(|argument| argument.to_string_lossy().into_owned())
+            .collect()
+    }
+
+    /// The `run` the shorthand produced, so a test can check what it carries.
+    fn shorthand(argv: &[&str]) -> RunArgs {
+        let parsed = Cli::try_parse_from(normalize(argv.iter().map(OsString::from)))
+            .expect("the shorthand should parse");
+
+        let Some(Command::Run(args)) = parsed.command else {
+            panic!("a prompt should have become a run: {argv:?}");
+        };
+        args
+    }
+
+    #[test]
+    fn a_positional_that_is_not_a_subcommand_is_a_prompt() {
+        assert_eq!(
+            shorthand(&["lan", "fix the failing test"]).prompt,
+            "fix the failing test"
+        );
+    }
+
+    #[test]
+    fn the_shorthand_is_exactly_the_run_subcommand() {
+        assert_eq!(
+            normalized(&["lan", "fix the failing test"]),
+            ["lan", "run", "fix the failing test"]
+        );
+    }
+
+    #[test]
+    fn flags_pass_through_the_shorthand() {
+        // The interesting half is `--model gpt-5`: a flag's value looks like a
+        // positional, so anything that scanned past the first argument would
+        // take "gpt-5" for the prompt.
+        let args = shorthand(&["lan", "--json", "--model", "gpt-5", "hi"]);
+
+        assert!(args.json);
+        assert_eq!(args.model.as_deref(), Some("gpt-5"));
+        assert_eq!(args.prompt, "hi");
+    }
+
+    #[test]
+    fn a_prompt_that_starts_with_a_dash_is_still_a_prompt() {
+        assert_eq!(shorthand(&["lan", "-"]).prompt, "-");
+        assert_eq!(
+            shorthand(&["lan", "-C", "/repo", "hi"]).workspace,
+            Some(PathBuf::from("/repo"))
+        );
+    }
+
+    #[test]
+    fn a_prompt_that_names_a_subcommand_needs_the_escape() {
+        // Without `--`, `lan run` is the subcommand with its prompt missing —
+        // clap says so rather than lan guessing which was meant.
+        let ambiguous = Cli::try_parse_from(normalize(["lan", "run"].iter().map(OsString::from)))
+            .expect_err("a bare subcommand name is not a prompt");
+        assert_eq!(ambiguous.exit_code(), i32::from(EXIT_USAGE));
+
+        assert_eq!(shorthand(&["lan", "--", "run"]).prompt, "run");
+        assert_eq!(shorthand(&["lan", "--", "bridge"]).prompt, "bridge");
+    }
+
+    #[test]
+    fn a_prompt_that_merely_begins_with_a_subcommand_name_needs_nothing() {
+        assert_eq!(
+            shorthand(&["lan", "run the tests and summarize"]).prompt,
+            "run the tests and summarize"
+        );
+    }
+
+    #[test]
+    fn bare_lan_is_left_alone_for_the_editor_that_spawns_it() {
+        assert_eq!(normalized(&["lan"]), ["lan"]);
+
+        let parsed = Cli::try_parse_from(["lan"]).expect("parses");
+        assert!(
+            parsed.command.is_none(),
+            "no subcommand is the ACP server; inserting one would break every editor"
+        );
+    }
+
+    #[test]
+    fn every_subcommand_still_reaches_itself() {
+        for subcommand in SUBCOMMANDS {
+            assert_eq!(
+                normalized(&["lan", subcommand]),
+                ["lan", subcommand],
+                "{subcommand} must not be rewritten as a prompt"
+            );
+        }
+    }
+
+    #[test]
+    fn the_top_level_still_answers_for_help_and_version() {
+        for flag in TOP_LEVEL_FLAGS {
+            assert_eq!(normalized(&["lan", flag]), ["lan", flag]);
+        }
+    }
+
+    #[test]
+    fn a_dash_reads_the_prompt_from_stdin() {
+        let prompt = read_prompt(&b"fix the failing test\nthen push\n"[..])
+            .expect("a prompt arrived on stdin");
+
+        assert_eq!(
+            prompt, "fix the failing test\nthen push\n",
+            "a multi-line prompt must arrive whole, not truncated at the first newline"
+        );
+    }
+
+    #[test]
+    fn an_empty_stdin_says_where_the_prompt_was_looked_for() {
+        let reason = read_prompt(&b"  \n"[..]).expect_err("whitespace is not a prompt");
+
+        assert!(
+            reason.contains("stdin"),
+            "the reason must name stdin: {reason}"
+        );
+    }
+
+    #[test]
+    fn a_prompt_that_is_not_a_dash_is_taken_as_written() {
+        assert_eq!(
+            prompt_from("fix the failing test".to_string()).expect("a literal prompt"),
+            "fix the failing test"
+        );
+    }
+
+    /// A report with nothing in it but the two fields the exit code reads.
+    fn report(outcome: RunOutcome, stopped_by: Option<lan::Bound>) -> RunReport<()> {
+        RunReport {
+            session_id: "s1".to_string(),
+            model: "gpt-5".to_string(),
+            provider: "openai".to_string(),
+            final_message: None,
+            outcome,
+            stopped_by,
+            sink: (),
+        }
+    }
+
+    #[test]
+    fn a_finished_run_exits_zero() {
+        assert_eq!(exit_code(&report(RunOutcome::Ok, None)), EXIT_OK);
+    }
+
+    #[test]
+    fn a_tripped_bound_is_told_apart_from_a_failure_by_the_exit_code() {
+        // The whole point of the contract: `lan run --deadline 10m …; case $? in`
+        // has to be able to retry a bounded run and escalate a failed one.
+        let failed = report(
+            RunOutcome::Error {
+                message: "provider refused the request".to_string(),
+            },
+            None,
+        );
+        let bounded = report(
+            RunOutcome::Error {
+                message: "deadline exceeded".to_string(),
+            },
+            Some(lan::Bound::Deadline),
+        );
+
+        assert_eq!(exit_code(&failed), EXIT_FAILED);
+        assert_eq!(exit_code(&bounded), EXIT_BOUNDED);
+        assert_ne!(
+            exit_code(&failed),
+            exit_code(&bounded),
+            "a shell script must be able to tell the two apart"
+        );
+    }
+
+    #[test]
+    fn the_signpost_names_the_invocation_that_would_have_worked() {
+        // A silent wait was the old failure. The message replaces it, and the
+        // only part that matters is that it says what to type instead.
+        assert!(
+            NOT_A_CLIENT.contains("lan run -"),
+            "the signpost must name the fix: {NOT_A_CLIENT}"
+        );
+    }
+
+    #[test]
+    fn commands_are_on_unless_the_run_says_no_shell() {
+        assert!(!run_args(&[]).no_shell, "ADR-0013: on by default");
+        assert!(run_args(&["--no-shell"]).no_shell);
+
+        let Some(Command::Acp(acp)) = Cli::try_parse_from(["lan", "acp", "--no-shell"])
+            .expect("parses")
+            .command
+        else {
+            panic!("ACP command should parse");
+        };
+        assert!(acp.no_shell);
+    }
+
+    #[test]
+    fn the_retired_grant_is_gone_rather_than_quietly_ignored() {
+        // Someone with `--allow-shell` in a script should be told it no longer
+        // exists, not have it silently accepted or, worse, taken as a prompt.
+        let error =
+            Cli::try_parse_from(["lan", "run", "prompt", "--allow-shell"]).expect_err("refused");
+
+        assert_eq!(error.exit_code(), i32::from(EXIT_USAGE));
     }
 }

@@ -54,7 +54,7 @@ pub use mcp::{
     DEFAULT_GLOBAL_MCP_FILE, DEFAULT_WORKSPACE_MCP_FILE, McpConfig, McpError, McpServer, McpSource,
 };
 pub use run::{
-    CollectingSink, Effort, EventSink, FnSink, NullSink, PreparedRun, RunConfig, RunContext,
+    Bound, CollectingSink, Effort, EventSink, FnSink, NullSink, PreparedRun, RunConfig, RunContext,
     RunError, RunReport, TurnOptions, resume, run, run_with_approver,
 };
 pub use shell::ShellAccess;

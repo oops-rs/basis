@@ -30,10 +30,12 @@ pub use terminal::TerminalApprover;
 pub enum ApprovalPolicy {
     /// Never ask.
     ///
-    /// The default, because it is what a headless run needs and what the
-    /// container already makes safe — there the kernel bounds the damage, so a
-    /// prompt would be ceremony. On an unconfined host with commands granted,
-    /// prefer [`Self::Prompt`].
+    /// The default, because it is what a headless run needs: there is nobody
+    /// to ask, and a prompt nothing can answer is a hang. It asserts nothing
+    /// about the run being confined — with commands on by default (ADR-0013)
+    /// an unattended run carries its user's full authority, so an *attended*
+    /// one is usually better served by [`Self::Prompt`], and anything that
+    /// needs a real boundary gets it from the OS.
     #[default]
     Always,
     /// Ask before anything that changes state outside this process.

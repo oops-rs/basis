@@ -24,16 +24,20 @@
 //! - [`session`] holds the open conversations, keyed by mentra's persisted
 //!   agent id so that `session/load` is just [`resume`](crate::run::resume).
 //! - [`server`] wires the handlers onto a connection.
+//! - [`stdio`] is the stdin/stdout transport, and the one place lan looks at
+//!   what a peer sent before serving it — see [`serve_stdio`].
 
 mod approver;
 mod history;
 mod mode;
 mod server;
 mod session;
+mod stdio;
 mod update;
 
 pub use approver::AcpApprover;
 pub use mode::{ModeError, ModedApprover, SessionModes};
-pub use server::{ServeConfig, SessionSource, serve, serve_stdio};
+pub use server::{ServeConfig, SessionSource, serve};
 pub use session::{AcpSession, SessionRegistry};
+pub use stdio::{StdioError, serve_stdio};
 pub use update::session_update;

@@ -24,7 +24,7 @@ use mentra::{
     session::{PermissionDecision, PermissionRuleScope},
 };
 
-use super::{EventSink, RunError, RunReport};
+use super::{Bound, EventSink, RunError, RunReport};
 use crate::{
     approval::{AllowAll, ApprovalDecision, ApprovalRequest, Approver},
     context::WorkspaceContext,
@@ -340,13 +340,14 @@ impl PreparedRun {
         let _ = done_tx.send(());
         let mut sink = forwarder.await?;
 
-        let (final_message, outcome) = match turn {
-            Ok(message) => (Some(message.text()), RunOutcome::Ok),
+        let (final_message, outcome, stopped_by) = match turn {
+            Ok(message) => (Some(message.text()), RunOutcome::Ok, None),
             Err(error) => (
                 None,
                 RunOutcome::Error {
                     message: error.to_string(),
                 },
+                tripped_bound(&error),
             ),
         };
 
@@ -360,8 +361,24 @@ impl PreparedRun {
             provider: self.run.provider.clone(),
             final_message,
             outcome,
+            stopped_by,
             sink,
         })
+    }
+}
+
+/// Which of the run's own bounds ended the turn, if one did.
+///
+/// Classified here, from the typed error, rather than left for someone to
+/// recognize in a message later — a caller matching on prose would break the
+/// first time mentra reworded one.
+fn tripped_bound(error: &mentra::error::RuntimeError) -> Option<Bound> {
+    match error {
+        mentra::error::RuntimeError::DeadlineExceeded => Some(Bound::Deadline),
+        mentra::error::RuntimeError::ToolBudgetExceeded(_) => Some(Bound::ToolBudget),
+        // Everything else is a failure of the work, not of the allowance: a
+        // provider error, a cancelled turn, an unreadable transcript.
+        _ => None,
     }
 }
 
@@ -642,5 +659,24 @@ mod tests {
         assert_eq!(bounded(TurnOptions::default(), &unset).deadline, None);
         assert_eq!(bounded(TurnOptions::default(), &unset).tool_budget, None);
         assert_eq!(bounded(TurnOptions::default(), &unset).token_budget, None);
+    }
+
+    #[test]
+    fn a_tripped_bound_is_told_apart_from_a_failed_run() {
+        use mentra::error::RuntimeError;
+
+        assert_eq!(
+            tripped_bound(&RuntimeError::DeadlineExceeded),
+            Some(Bound::Deadline)
+        );
+        assert_eq!(
+            tripped_bound(&RuntimeError::ToolBudgetExceeded(40)),
+            Some(Bound::ToolBudget)
+        );
+
+        // A run the provider refused is a failure, and a shell script that
+        // retried it as if it had merely run out of time would retry forever.
+        assert_eq!(tripped_bound(&RuntimeError::EmptyAssistantResponse), None);
+        assert_eq!(tripped_bound(&RuntimeError::Cancelled), None);
     }
 }

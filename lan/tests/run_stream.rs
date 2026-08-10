@@ -10,7 +10,9 @@
 
 use std::path::{Path, PathBuf};
 
-use lan::{CollectingSink, Event, JsonlWriter, RunConfig, RunOutcome, run::prepare_with_session};
+use lan::{
+    Bound, CollectingSink, Event, JsonlWriter, RunConfig, RunOutcome, run::prepare_with_session,
+};
 use mentra::{
     RuntimePolicy,
     test::{MockRuntime, MockToolCall},
@@ -347,6 +349,66 @@ async fn a_failing_turn_still_closes_the_stream() {
         ),
         "a failed turn must still terminate the stream"
     );
+}
+
+/// A run whose deadline has already passed, so the bound trips on the first
+/// check rather than after a wall-clock wait.
+#[tokio::test]
+async fn a_tripped_bound_is_reported_as_a_bound_not_just_a_failure() {
+    let workspace = workspace_with_context("rules");
+    let mock = mock(&["never streamed"]);
+    let session = mock
+        .runtime()
+        .create_session("test", mock.model())
+        .expect("session");
+
+    let config = config(workspace.path(), "go").with_deadline(std::time::Duration::ZERO);
+    let mut prepared =
+        prepare_with_session(session, &config, "openai", "mock-model").expect("prepared");
+
+    let report = prepared
+        .execute(CollectingSink::new())
+        .await
+        .expect("a bound ends the run, it does not break it");
+
+    // Both halves matter. The stream still says the run did not finish, which
+    // is what a client reading events needs; and the report says *why*, which
+    // is what the exit code needs — ADR-0015 asks a shell script to tell "out
+    // of time" from "the provider refused" without parsing a message.
+    assert!(!report.succeeded());
+    assert_eq!(report.stopped_by, Some(Bound::Deadline));
+
+    assert!(
+        matches!(
+            report.sink.into_events().last(),
+            Some(Event::RunFinished {
+                outcome: RunOutcome::Error { .. }
+            })
+        ),
+        "a bounded run must still terminate the stream"
+    );
+}
+
+#[tokio::test]
+async fn a_healthy_run_ran_into_no_bound() {
+    let workspace = workspace_with_context("rules");
+    let mock = mock(&["done"]);
+    let session = mock
+        .runtime()
+        .create_session("test", mock.model())
+        .expect("session");
+
+    let config = config(workspace.path(), "go");
+    let mut prepared =
+        prepare_with_session(session, &config, "openai", "mock-model").expect("prepared");
+
+    let report = prepared
+        .execute(CollectingSink::new())
+        .await
+        .expect("run completes");
+
+    assert!(report.succeeded());
+    assert_eq!(report.stopped_by, None);
 }
 
 #[tokio::test]
