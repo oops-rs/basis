@@ -212,9 +212,7 @@ a websocket bridge for [acp-ui](https://github.com/formulahendry/acp-ui); and br
 All with AGENTS.md discovery, skills, approval, and kernel-enforced confinement in the
 image.
 
-Still open, and named honestly: branching is **one-way** until
-[mentra#15](https://github.com/oops-rs/mentra/issues/15) — an abandoned line of work can be
-inspected but not returned to. Compaction tuning, the packages convention, and provider
+Still open, and named honestly: compaction tuning, the packages convention, and provider
 OAuth remain (P5), and **nobody has driven this from Zed or JetBrains yet** — it is verified
 against the protocol and its official client library, not against the ecosystem. There is no
 CI, and lan itself is unpublished. See [docs/ARCHITECTURE.md](docs/ARCHITECTURE.md) §6.

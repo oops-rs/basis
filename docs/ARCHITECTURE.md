@@ -159,7 +159,7 @@ docker run --rm \
 | **P2 ACP server** ✅ | `agent-client-protocol` crate; session mapping, permission surfacing, modes, listing, history replay. Sessions survive turns, so conversation and resume work independent of protocol | done |
 | **P3 Extension points** ✅ | MCP client honoring `.mcp.json` *and* the servers an ACP client sends; subprocess hooks (allow/deny/modify); prompt templates surfaced as ACP commands; ws↔stdio bridge for acp-ui | done |
 | **P4 Loop + Docker** ✅ | `watch` scheduler with skip-if-unchanged, Dockerfile, state volume, shell grant | done |
-| P5 Depth | Branching ✅ (one-way until [mentra#15](https://github.com/oops-rs/mentra/issues/15)); compaction tuning, packages convention, provider OAuth remain | ongoing |
+| P5 Depth | Branching ✅ — two-way since mentra 0.16, so an abandoned line of work can be returned to; compaction tuning, packages convention, provider OAuth remain | ongoing |
 
 Validation stays deliberately varied — a refactor, a doc task, a test-writing task, *and* a
 periodic check — so no single use case bends the API toward itself.
