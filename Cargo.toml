@@ -10,8 +10,11 @@ repository = "https://github.com/oops-rs/lan"
 homepage = "https://github.com/oops-rs/lan"
 
 [workspace.dependencies]
-mentra = "0.13"
-mentra-provider = "0.4"
+# TEMPORARY: path dependency while the P2 session work lands in mentra.
+# Switch back to the published version before P2 is done — the repo must not
+# be left unpublishable. See docs/HANDOFF.md.
+mentra = { version = "0.13", path = "../mentra/mentra" }
+mentra-provider = { version = "0.4", path = "../mentra/mentra-provider" }
 
 async-trait = "0.1"
 clap = { version = "4.6", features = ["derive"] }
