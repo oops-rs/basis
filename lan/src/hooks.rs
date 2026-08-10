@@ -72,22 +72,24 @@
 //! loud and gets fixed. A hook that would rather be ignored says
 //! `"on_failure": "allow"`.
 //!
-//! # A hook blocks the turn while it runs
+//! # A hook takes as long as it takes
 //!
-//! mentra's hook trait is synchronous but is called from inside an async turn,
-//! so consulting a hook occupies the thread that reached it. On a multi-thread
-//! tokio runtime — what the `lan` binary uses — `block_in_place` hands that
-//! worker's other tasks away first, and the cost is nothing worse than one
-//! worker being busy. On a **current-thread** runtime there is nowhere to hand
-//! them to: an embedder that runs lan on one is stalled for as long as the hook
-//! takes, bounded only by [`DEFAULT_HOOK_TIMEOUT`]. That matters most for ACP,
-//! where ADR-0007 makes "the dispatch loop is never blocked" an invariant.
+//! Consulting a hook means spawning a process and waiting for it, so it is
+//! genuinely blocking work. mentra's hook trait is async (since 0.16), so the
+//! wait goes to `spawn_blocking` — a thread meant for it — rather than onto a
+//! runtime worker. That holds on every runtime flavor, including
+//! `current_thread`, which is what an embedder inside an editor or a
+//! single-threaded server is likely to have.
 //!
-//! Timeouts keep this bounded rather than unbounded, which is why it is a wart
-//! and not a hazard. The real fix is an async trait method in mentra, tracked
-//! as [oops-rs/mentra#16](https://github.com/oops-rs/mentra/issues/16) — which
-//! also covers `PreExecutionContext` carrying no working directory of its own,
-//! the reason the wire contract sends the workspace root instead.
+//! This used to require branching on `Handle::runtime_flavor()` and calling
+//! `block_in_place`, which panics on `current_thread` and otherwise stalled
+//! that runtime for the hook's whole timeout. The trait's shape was the reason
+//! ([oops-rs/mentra#16](https://github.com/oops-rs/mentra/issues/16), fixed in
+//! 0.16), and it mattered most for ACP, where ADR-0007 makes "the dispatch loop
+//! is never blocked" an invariant.
+//!
+//! [`DEFAULT_HOOK_TIMEOUT`] still bounds how long any one hook can hold up the
+//! turn it is vetting, which is a different question from which thread waits.
 //!
 //! # A hook is code from the workspace
 //!

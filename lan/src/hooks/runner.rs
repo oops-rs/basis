@@ -18,7 +18,6 @@ use mentra::{
 };
 use serde_json::Value;
 use thiserror::Error;
-use tokio::runtime::{Handle, RuntimeFlavor};
 
 use super::{
     HookEvent, HookSpec, OnFailure,
@@ -91,9 +90,9 @@ impl HookRunner {
     /// carrying words, because an error here would reach the model as a bare
     /// blocked call with the reason thrown away.
     ///
-    /// Blocking, because the runtime's interception point is synchronous. The
-    /// call is wrapped so a subprocess does not stall the async runtime that
-    /// reached it.
+    /// Blocking: it spawns subprocesses and waits for them. Callers on an
+    /// async runtime should reach it through
+    /// [`decide_async`](Self::decide_async) rather than calling it directly.
     pub fn decide(&self, call: &HookCall) -> HookOutcome {
         if self.hooks.is_empty() {
             return HookOutcome::Allow;
@@ -101,7 +100,31 @@ impl HookRunner {
 
         let request = HookRequest::from_call(HookEvent::PreToolUse, &self.workspace, call);
 
-        without_starving_the_runtime(|| self.consult(request))
+        self.consult(request)
+    }
+
+    /// [`decide`](Self::decide), off the async runtime's own threads.
+    ///
+    /// Hooks are subprocesses, so deciding blocks for as long as they take.
+    /// `spawn_blocking` puts that on a thread meant for it, which works on
+    /// every runtime flavor — the previous `block_in_place` dance existed only
+    /// because mentra's hook trait was synchronous and there was nowhere else
+    /// to put the wait (oops-rs/mentra#16, fixed in 0.16).
+    pub async fn decide_async(&self, call: &HookCall) -> HookOutcome {
+        if self.hooks.is_empty() {
+            return HookOutcome::Allow;
+        }
+
+        let runner = self.clone();
+        let call = call.clone();
+
+        match tokio::task::spawn_blocking(move || runner.decide(&call)).await {
+            Ok(outcome) => outcome,
+            // The blocking task panicked, which a hook cannot cause — every
+            // failure inside `consult` is already an outcome. Denying keeps
+            // "a broken guard never silently allows" true even here.
+            Err(error) => HookOutcome::Deny(format!("hook runner failed: {error}")),
+        }
     }
 
     fn consult(&self, request: HookRequest) -> HookOutcome {
@@ -215,13 +238,14 @@ impl HookRunner {
     }
 }
 
+#[async_trait::async_trait]
 impl PreExecutionHook for HookRunner {
     /// Never returns `Err`.
     ///
     /// mentra turns a hook error into a bare blocked-tool result, which throws
     /// the reason away; every outcome here is a [`HookDecision`] instead, so
     /// whatever happened reaches both the model and the audit trail as words.
-    fn pre_tool_execution(
+    async fn pre_tool_execution(
         &self,
         context: &PreExecutionContext,
     ) -> Result<HookDecision, RuntimeError> {
@@ -232,7 +256,7 @@ impl PreExecutionHook for HookRunner {
             context.input_json.clone(),
         );
 
-        Ok(match self.decide(&call) {
+        Ok(match self.decide_async(&call).await {
             HookOutcome::Allow => HookDecision::Allow,
             HookOutcome::Deny(reason) => HookDecision::Deny(reason),
             HookOutcome::Modify { input, reason } => match serde_json::to_string(&input) {
@@ -257,23 +281,6 @@ impl fmt::Debug for HookRunner {
                 &self.hooks.iter().map(|spec| &spec.name).collect::<Vec<_>>(),
             )
             .finish_non_exhaustive()
-    }
-}
-
-/// Runs blocking work without stalling the async runtime that called it.
-///
-/// mentra's hook trait is synchronous but is invoked from inside a turn, so
-/// this call sits on a tokio worker while a subprocess runs. `block_in_place`
-/// hands the worker's remaining tasks to another thread first — but it panics
-/// on a current-thread runtime, so the flavor is checked rather than assumed.
-/// On a current-thread runtime there is nothing to hand off to, and the hook's
-/// timeout is what bounds the stall.
-fn without_starving_the_runtime<R>(work: impl FnOnce() -> R) -> R {
-    match Handle::try_current() {
-        Ok(handle) if matches!(handle.runtime_flavor(), RuntimeFlavor::MultiThread) => {
-            tokio::task::block_in_place(work)
-        }
-        _ => work(),
     }
 }
 
@@ -630,7 +637,7 @@ mod tests {
     }
 
     /// Puts a call to the runner the way mentra does.
-    fn hook_decision(hooks: Vec<HookSpec>) -> HookDecision {
+    async fn hook_decision(hooks: Vec<HookSpec>) -> HookDecision {
         HookRunner::new(".", hooks)
             .with_reporter(|_| {})
             .pre_tool_execution(&PreExecutionContext {
@@ -638,19 +645,21 @@ mod tests {
                 tool_name: "shell".to_string(),
                 tool_call_id: "call-1".to_string(),
                 input_json: r#"{"command":"ls"}"#.to_string(),
+                working_directory: std::path::PathBuf::from("."),
             })
+            .await
             .expect("a runner never errors")
     }
 
-    #[test]
-    fn the_runtime_seam_carries_every_outcome() {
+    #[tokio::test]
+    async fn the_runtime_seam_carries_every_outcome() {
         assert_eq!(
-            hook_decision(vec![sh("ok", r#"echo '{"decision":"allow"}'"#)]),
+            hook_decision(vec![sh("ok", r#"echo '{"decision":"allow"}'"#)]).await,
             HookDecision::Allow
         );
 
         assert_eq!(
-            hook_decision(vec![sh("no", r#"echo '{"decision":"deny","reason":"x"}'"#)]),
+            hook_decision(vec![sh("no", r#"echo '{"decision":"deny","reason":"x"}'"#)]).await,
             HookDecision::Deny("denied by hook 'no': x".to_string())
         );
 
@@ -659,7 +668,8 @@ mod tests {
             hook_decision(vec![sh(
                 "rewrite",
                 r#"echo '{"decision":"modify","input":{"command":"safe"}}'"#,
-            )]),
+            )])
+            .await,
             HookDecision::Modify {
                 input_json: r#"{"command":"safe"}"#.to_string(),
                 reason: Some("hook 'rewrite'".to_string()),
@@ -667,20 +677,27 @@ mod tests {
         );
     }
 
+    /// Both flavors, because a hook waits on a subprocess and where that wait
+    /// happens has to be right on either. `spawn_blocking` works on both;
+    /// `block_in_place`, which this used to need, panics on current_thread.
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
     async fn a_hook_runs_from_inside_a_multi_thread_runtime() {
-        // block_in_place panics on the wrong flavor, so both flavors are
-        // exercised: this one, and the current-thread one below.
-        let (outcome, _) = decide(vec![sh("ok", r#"echo '{"decision":"allow"}'"#)]);
+        let runner = HookRunner::new(".", vec![sh("ok", r#"echo '{"decision":"allow"}'"#)]);
 
-        assert_eq!(outcome, HookOutcome::Allow);
+        assert_eq!(
+            runner.decide_async(&call("shell")).await,
+            HookOutcome::Allow
+        );
     }
 
-    #[tokio::test]
+    #[tokio::test(flavor = "current_thread")]
     async fn a_hook_runs_from_inside_a_current_thread_runtime() {
-        let (outcome, _) = decide(vec![sh("ok", r#"echo '{"decision":"allow"}'"#)]);
+        let runner = HookRunner::new(".", vec![sh("ok", r#"echo '{"decision":"allow"}'"#)]);
 
-        assert_eq!(outcome, HookOutcome::Allow);
+        assert_eq!(
+            runner.decide_async(&call("shell")).await,
+            HookOutcome::Allow
+        );
     }
 
     #[test]

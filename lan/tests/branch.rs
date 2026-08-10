@@ -258,7 +258,7 @@ async fn an_entry_this_conversation_does_not_have_is_refused() {
 }
 
 #[tokio::test]
-async fn returning_to_an_already_abandoned_entry_is_refused() {
+async fn an_abandoned_entry_is_offered_and_accepted() {
     let workspace = workspace();
     let mock = mock(&["first answer", "second answer"]);
     let session = mock
@@ -291,11 +291,12 @@ async fn returning_to_an_already_abandoned_entry_is_refused() {
         .id
         .clone();
 
-    let error = prepared
+    // What `abandoned()` lists is what a client offers, so it has to be what
+    // `branch_from` accepts. Until mentra 0.16 it was not: lan showed the
+    // entry and then refused it, which is the worst of both.
+    prepared
         .branch_from(&left_behind)
-        .expect_err("mentra moves the leaf back along the path, never onto an abandoned one");
-
-    assert_eq!(error, BranchError::NotOnActivePath(left_behind));
+        .expect("an entry a client can see is an entry it can return to");
 }
 
 #[tokio::test]
@@ -389,5 +390,72 @@ async fn a_tool_round_is_one_entry_per_exchange() {
             .any(|entry| matches!(entry.kind, EntryKind::ToolExchange { .. })),
         "a tool exchange is a branch point like any other: {:?}",
         prepared.transcript()
+    );
+}
+
+#[tokio::test]
+async fn a_conversation_can_return_to_an_abandoned_branch() {
+    let workspace = workspace();
+    let mock = mock(&[
+        "first answer",
+        "second answer",
+        "different answer",
+        "back again",
+    ]);
+    let session = mock
+        .runtime()
+        .create_session("test", mock.model())
+        .expect("session");
+
+    let config = config(workspace.path(), "first");
+    let mut prepared =
+        prepare_with_session(session, &config, "openai", "mock-model").expect("prepared");
+
+    prepared
+        .execute(CollectingSink::new())
+        .await
+        .expect("the first turn");
+    let fork = prepared.leaf().expect("a leaf after one turn");
+
+    prepared
+        .send("second", CollectingSink::new(), AllowAll)
+        .await
+        .expect("the second turn");
+    // Where the original line of work ended, before anything was abandoned.
+    let original = prepared.leaf().expect("a leaf after two turns");
+
+    // Leave it and explore elsewhere.
+    prepared.branch_from(&fork).expect("branches away");
+    prepared
+        .send("elsewhere", CollectingSink::new(), AllowAll)
+        .await
+        .expect("the third turn");
+
+    // Now go back. This is what lan refused to attempt before mentra 0.16:
+    // the entry is archived, and `branch_from` could only reach the active
+    // path.
+    prepared
+        .branch_from(&original)
+        .expect("an abandoned branch can be returned to");
+
+    prepared
+        .send("carry on", CollectingSink::new(), AllowAll)
+        .await
+        .expect("the fourth turn");
+
+    // The request is the proof: the original path is the conversation again,
+    // and the exploration is not in it.
+    let sent = user_messages(&mock, 3).await;
+    assert!(
+        sent.contains(&"first".to_string()) && sent.contains(&"second".to_string()),
+        "the returned-to path carries both of its turns: {sent:?}"
+    );
+    assert!(
+        !sent.contains(&"elsewhere".to_string()),
+        "the abandoned exploration must not come back with it: {sent:?}"
+    );
+    assert!(
+        sent.contains(&"carry on".to_string()),
+        "and the conversation continues from there: {sent:?}"
     );
 }

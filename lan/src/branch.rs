@@ -79,15 +79,6 @@ pub enum BranchError {
     #[error("this conversation has no entry '{0}'")]
     UnknownEntry(String),
 
-    /// Named an entry that a previous branch left behind. mentra can move the
-    /// leaf back along the active path but not onto an abandoned one, so
-    /// returning to a path already left is not something lan can offer.
-    #[error(
-        "entry '{0}' was left behind by an earlier branch; a conversation can only return to a \
-         point still on its active path"
-    )]
-    NotOnActivePath(String),
-
     #[error("the conversation could not be branched: {0}")]
     Failed(String),
 }
@@ -146,23 +137,18 @@ impl PreparedRun {
     /// Returns to `entry`, so the next turn continues from there along a
     /// different path. Answers how many entries left the active path.
     ///
-    /// The entries after `entry` are moved, not deleted: they stay in the
-    /// transcript and stay reachable through [`children`](Self::children), so
-    /// a client can still show what was abandoned.
+    /// `entry` may be anywhere in the tree. Naming a point on the active path
+    /// shortens it; naming one an earlier branch left behind returns to it.
+    /// Either way nothing is deleted — whatever leaves the path stays reachable
+    /// through [`children`](Self::children), so a client can still show it.
     ///
     /// Branching emits `SessionEvent::Branched`, which lan maps to
     /// [`Event::Branched`](crate::Event::Branched). Nothing is streaming
     /// between turns, so that event reaches only a subscriber the host holds
     /// itself — the count returned here is what an ordinary caller reads.
     pub fn branch_from(&mut self, entry: &str) -> Result<usize, BranchError> {
-        let transcript = self.replay();
-
-        let target = match entry_on_path(transcript, entry) {
-            Some(id) => id,
-            None if entry_id(transcript, entry).is_some() => {
-                return Err(BranchError::NotOnActivePath(entry.to_string()));
-            }
-            None => return Err(BranchError::UnknownEntry(entry.to_string())),
+        let Some(target) = entry_id(self.replay(), entry) else {
+            return Err(BranchError::UnknownEntry(entry.to_string()));
         };
 
         self.session_mut()
@@ -182,16 +168,6 @@ fn entry_id(transcript: &AgentTranscript, entry: &str) -> Option<EntryId> {
         .items()
         .iter()
         .chain(transcript.archived())
-        .find(|item| item.id.as_str() == entry)
-        .map(|item| item.id.clone())
-}
-
-/// The same, restricted to the active path — the only entries a branch can
-/// return to.
-fn entry_on_path(transcript: &AgentTranscript, entry: &str) -> Option<EntryId> {
-    transcript
-        .items()
-        .iter()
         .find(|item| item.id.as_str() == entry)
         .map(|item| item.id.clone())
 }
@@ -295,20 +271,23 @@ mod tests {
     }
 
     #[test]
-    fn an_archived_entry_is_found_but_not_on_the_path() {
+    fn an_archived_entry_is_still_a_branch_point() {
         let mut transcript = transcript();
         let first = transcript.items()[0].id.clone();
         transcript.branch_from(&first).expect("the first entry");
 
         let abandoned = transcript.archived()[0].id.to_string();
 
+        // Addressable *and* returnable-to. lan used to refuse this itself,
+        // because mentra could only move the leaf along the active path
+        // (oops-rs/mentra#15, fixed in 0.16) — so what a client is offered and
+        // what it can act on are the same set again.
+        assert!(entry_id(&transcript, &abandoned).is_some());
         assert!(
-            entry_id(&transcript, &abandoned).is_some(),
-            "an abandoned entry stays addressable"
-        );
-        assert!(
-            entry_on_path(&transcript, &abandoned).is_none(),
-            "but it is not somewhere the conversation can return to"
+            transcript
+                .branch_from(&entry_id(&transcript, &abandoned).expect("addressable"))
+                .is_ok(),
+            "an abandoned entry is somewhere the conversation can return to"
         );
     }
 

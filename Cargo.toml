@@ -10,7 +10,7 @@ repository = "https://github.com/oops-rs/lan"
 homepage = "https://github.com/oops-rs/lan"
 
 [workspace.dependencies]
-mentra = "0.15"
+mentra = "0.16"
 mentra-provider = "0.4"
 
 async-trait = "0.1"
