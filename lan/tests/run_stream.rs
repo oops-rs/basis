@@ -53,7 +53,7 @@ async fn a_run_streams_deltas_between_the_bookends() {
         .expect("session");
 
     let config = config(workspace.path(), "say hello");
-    let prepared =
+    let mut prepared =
         prepare_with_session(session, &config, "openai", "mock-model").expect("prepared");
 
     let report = prepared
@@ -106,8 +106,9 @@ async fn the_header_reports_the_context_that_was_loaded() {
         .expect("session");
 
     let config = config(workspace.path(), "go");
-    let report = prepare_with_session(session, &config, "openai", "mock-model")
-        .expect("prepared")
+    let mut prepared =
+        prepare_with_session(session, &config, "openai", "mock-model").expect("prepared");
+    let report = prepared
         .execute(CollectingSink::new())
         .await
         .expect("run completes");
@@ -174,8 +175,9 @@ async fn workspace_context_reaches_the_model_as_the_system_prompt() {
         .expect("session");
 
     let config = config(workspace.path(), "go");
-    prepare_with_session(session, &config, "openai", "mock-model")
-        .expect("prepared")
+    let mut prepared =
+        prepare_with_session(session, &config, "openai", "mock-model").expect("prepared");
+    prepared
         .execute(CollectingSink::new())
         .await
         .expect("run completes");
@@ -223,8 +225,9 @@ async fn tool_calls_appear_on_the_stream_with_parsed_input() {
         .expect("session");
 
     let config = config(workspace.path(), "list the files");
-    let report = prepare_with_session(session, &config, "openai", "mock-model")
-        .expect("prepared")
+    let mut prepared =
+        prepare_with_session(session, &config, "openai", "mock-model").expect("prepared");
+    let report = prepared
         .execute(CollectingSink::new())
         .await
         .expect("run completes");
@@ -277,8 +280,9 @@ async fn the_jsonl_rendering_is_one_parseable_object_per_line() {
         .expect("session");
 
     let config = config(workspace.path(), "go");
-    let report = prepare_with_session(session, &config, "openai", "mock-model")
-        .expect("prepared")
+    let mut prepared =
+        prepare_with_session(session, &config, "openai", "mock-model").expect("prepared");
+    let report = prepared
         .execute(JsonlWriter::new(Vec::new()))
         .await
         .expect("run completes");
@@ -322,8 +326,9 @@ async fn a_failing_turn_still_closes_the_stream() {
         .expect("session");
 
     let config = config(workspace.path(), "go");
-    let report = prepare_with_session(session, &config, "openai", "mock-model")
-        .expect("prepared")
+    let mut prepared =
+        prepare_with_session(session, &config, "openai", "mock-model").expect("prepared");
+    let report = prepared
         .execute(CollectingSink::new())
         .await
         .expect("the run itself reports rather than erroring");

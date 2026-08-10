@@ -7,9 +7,12 @@
 //! whole pipeline against a scripted runtime, so the event contract is checked
 //! without a network call.
 
-use std::path::PathBuf;
+use std::{
+    path::PathBuf,
+    time::{Duration, SystemTime},
+};
 
-use mentra::{ContentBlock, Session, SessionEvent, SessionEventReceiver};
+use mentra::{ContentBlock, Session, SessionEvent, SessionEventReceiver, runtime::RunOptions};
 use tokio::sync::{
     broadcast::error::{RecvError, TryRecvError},
     oneshot,
@@ -17,6 +20,7 @@ use tokio::sync::{
 
 use mentra::{
     SessionPermissionHandle,
+    runtime::CancellationToken,
     session::{PermissionDecision, PermissionRuleScope},
 };
 
@@ -47,6 +51,64 @@ pub struct LoadedSkill {
     pub name: String,
     pub description: String,
     pub path: PathBuf,
+}
+
+/// Limits and stop signals for a single turn.
+///
+/// lan's own type rather than a re-export of mentra's `RunOptions`: the same
+/// reasoning as [`Event`] — lan owns its surface so mentra's internals can move
+/// without breaking lan's callers. Only the knobs a harness actually needs are
+/// exposed; the rest stay at mentra's defaults.
+#[derive(Debug, Clone, Default)]
+pub struct TurnOptions {
+    /// Trips to abandon the turn. The turn fails and is rolled back — what a
+    /// client's stop button means.
+    pub cancel: Option<CancellationToken>,
+    /// Trips to end the turn gracefully at the next round boundary, keeping
+    /// what the model has already committed.
+    pub stop: Option<CancellationToken>,
+    /// Gives up on the turn after this long.
+    pub deadline: Option<Duration>,
+    /// Caps how many tool calls one turn may make.
+    pub tool_budget: Option<usize>,
+}
+
+impl TurnOptions {
+    /// A turn that can be cancelled through the returned token.
+    pub fn cancellable() -> (Self, CancellationToken) {
+        let token = CancellationToken::default();
+        (
+            Self {
+                cancel: Some(token.clone()),
+                ..Self::default()
+            },
+            token,
+        )
+    }
+
+    pub fn with_deadline(self, deadline: Duration) -> Self {
+        Self {
+            deadline: Some(deadline),
+            ..self
+        }
+    }
+
+    pub fn with_tool_budget(self, tool_budget: usize) -> Self {
+        Self {
+            tool_budget: Some(tool_budget),
+            ..self
+        }
+    }
+
+    fn into_run_options(self) -> RunOptions {
+        RunOptions {
+            cancellation: self.cancel,
+            stop: self.stop,
+            deadline: self.deadline.map(|after| SystemTime::now() + after),
+            tool_budget: self.tool_budget,
+            ..RunOptions::default()
+        }
+    }
 }
 
 /// A session and the prompt to send it. Nothing has been sent yet.
@@ -80,34 +142,121 @@ impl PreparedRun {
         header_for(&self.session.id().to_string(), &self.run)
     }
 
-    /// Sends the prompt and streams the run into `sink`.
+    /// The session this run drives, for a host that wants mentra's own surface
+    /// — branching, the transcript tree, subagents — alongside lan's.
+    pub fn session(&self) -> &Session {
+        &self.session
+    }
+
+    pub fn session_mut(&mut self) -> &mut Session {
+        &mut self.session
+    }
+
+    /// Gives the session back, ending lan's involvement.
+    pub fn into_session(self) -> Session {
+        self.session
+    }
+
+    /// The session's id, which changes every time a session is created —
+    /// including on resume.
+    pub fn session_id(&self) -> String {
+        self.session.id().to_string()
+    }
+
+    /// The persisted agent id: the handle [`resume`](super::resume) takes.
+    ///
+    /// Unlike the session id this survives the process, because it names the
+    /// row in mentra's store rather than this run of it.
+    pub fn agent_id(&self) -> &str {
+        self.session.agent_id()
+    }
+
+    /// The committed conversation so far, oldest first.
+    pub fn history(&self) -> &[mentra::Message] {
+        self.session.history()
+    }
+
+    /// What this run is about, minus the session.
+    pub fn context(&self) -> &RunContext {
+        &self.run
+    }
+
+    /// Sends the configured prompt and streams the turn into `sink`.
     ///
     /// The stream always opens with [`Event::RunStarted`] and always closes
     /// with [`Event::RunFinished`], including when the turn fails: by then the
     /// stream has content a client needs to be able to finish reading.
-    pub async fn execute<S: EventSink>(self, sink: S) -> Result<RunReport<S>, RunError> {
+    ///
+    /// The session survives, so this can be called again — see
+    /// [`send`](Self::send) for a turn with a different prompt.
+    pub async fn execute<S: EventSink>(&mut self, sink: S) -> Result<RunReport<S>, RunError> {
         self.execute_with_approver(sink, AllowAll).await
     }
 
-    /// Sends the prompt, streaming into `sink` and routing any approval
-    /// request to `approver`.
+    /// Sends the configured prompt, streaming into `sink` and routing any
+    /// approval request to `approver`.
     ///
     /// The approver runs on the forwarding task while the turn is blocked
     /// waiting on it, which is what makes an interactive answer possible at
     /// all — and what means an approver must answer rather than defer.
     pub async fn execute_with_approver<S: EventSink, A: Approver>(
-        self,
+        &mut self,
         sink: S,
         approver: A,
     ) -> Result<RunReport<S>, RunError> {
-        let Self { mut session, run } = self;
-        let permissions = session.permission_handle();
+        let prompt = self.run.prompt.clone();
+        self.turn(prompt, sink, approver, TurnOptions::default())
+            .await
+    }
 
-        let session_id = session.id().to_string();
-        let receiver = session.subscribe();
+    /// Sends a further prompt on the same conversation.
+    ///
+    /// This is what separates a session from a one-shot: the model sees every
+    /// earlier turn, because the session was never thrown away.
+    pub async fn send<S: EventSink, A: Approver>(
+        &mut self,
+        prompt: impl Into<String>,
+        sink: S,
+        approver: A,
+    ) -> Result<RunReport<S>, RunError> {
+        self.turn(prompt.into(), sink, approver, TurnOptions::default())
+            .await
+    }
+
+    /// Sends a prompt with explicit run options — a cancellation token, a
+    /// deadline, a tool budget.
+    ///
+    /// This is what a protocol server's stop button needs: ACP's
+    /// `session/cancel` trips the token, and the turn ends rather than running
+    /// to completion unheard.
+    pub async fn send_with_options<S: EventSink, A: Approver>(
+        &mut self,
+        prompt: impl Into<String>,
+        sink: S,
+        approver: A,
+        options: TurnOptions,
+    ) -> Result<RunReport<S>, RunError> {
+        self.turn(prompt.into(), sink, approver, options).await
+    }
+
+    /// One turn, start to finish: header, forwarded events, outcome.
+    async fn turn<S: EventSink, A: Approver>(
+        &mut self,
+        prompt: String,
+        sink: S,
+        approver: A,
+        options: TurnOptions,
+    ) -> Result<RunReport<S>, RunError> {
+        if prompt.trim().is_empty() {
+            return Err(RunError::EmptyPrompt);
+        }
+
+        let permissions = self.session.permission_handle();
+        let session_id = self.session.id().to_string();
+        let receiver = self.session.subscribe();
 
         let mut sink = sink;
-        sink.emit(header_for(&session_id, &run))?;
+        sink.emit(header_for(&session_id, &self.run))?;
 
         let (done_tx, done_rx) = oneshot::channel();
         let forwarder = tokio::spawn(forward_events(
@@ -118,8 +267,9 @@ impl PreparedRun {
             permissions,
         ));
 
-        let turn = session
-            .append_turn(vec![ContentBlock::text(run.prompt.clone())])
+        let turn = self
+            .session
+            .append_turn_with_options(vec![ContentBlock::text(prompt)], options.into_run_options())
             .await;
 
         // The forwarder stops on this signal rather than on the channel
@@ -144,8 +294,8 @@ impl PreparedRun {
 
         Ok(RunReport {
             session_id,
-            model: run.model,
-            provider: run.provider,
+            model: self.run.model.clone(),
+            provider: self.run.provider.clone(),
             final_message,
             outcome,
             sink,

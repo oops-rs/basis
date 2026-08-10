@@ -154,8 +154,9 @@ async fn run_with(
     let session = session(&runtime, workspace, model);
     let seen = Arc::new(Mutex::new(Vec::new()));
 
-    let prepared = prepare_with_session(session, &config(workspace), "openai", "scripted-model")
-        .expect("prepared");
+    let mut prepared =
+        prepare_with_session(session, &config(workspace), "openai", "scripted-model")
+            .expect("prepared");
 
     let report = tokio::time::timeout(
         NOT_STUCK,

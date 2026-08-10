@@ -32,7 +32,7 @@ use crate::{
     skills::{self, SkillsConfig},
 };
 
-pub use prepared::{LoadedSkill, PreparedRun, RunContext};
+pub use prepared::{LoadedSkill, PreparedRun, RunContext, TurnOptions};
 pub use sink::{CollectingSink, EventSink, FnSink, NullSink};
 
 /// Default name for the session a run creates. Sessions are named so a client
@@ -181,6 +181,10 @@ pub enum RunError {
 /// is an `Err`. A failure *during* the turn is reported as
 /// [`RunOutcome::Error`] on an otherwise complete stream, because by then the
 /// events already emitted are worth keeping.
+///
+/// The session is dropped when this returns. For a conversation, keep the
+/// [`PreparedRun`] from [`prepare`] and call
+/// [`send`](PreparedRun::send) on it.
 pub async fn run<S: EventSink>(config: RunConfig, sink: S) -> Result<RunReport<S>, RunError> {
     prepare(config).await?.execute(sink).await
 }
@@ -207,6 +211,69 @@ pub async fn prepare(config: RunConfig) -> Result<PreparedRun, RunError> {
         return Err(RunError::EmptyPrompt);
     }
 
+    let resolved = resolve(&config).await?;
+
+    let session = resolved.runtime.create_session_with_config(
+        config.session_name.clone(),
+        resolved.model.clone(),
+        agent_config(&config, &resolved.context),
+    )?;
+
+    Ok(PreparedRun::new(
+        session,
+        resolved.into_context(config.prompt, &config.workspace),
+    ))
+}
+
+/// Picks up a conversation a previous process left behind.
+///
+/// `agent_id` is [`PreparedRun::agent_id`], not the session id: mentra persists
+/// agents, and a session is one process's view of one. Resuming replays the
+/// transcript from the store, so the first turn after this already knows
+/// everything the last one did.
+///
+/// `config.prompt` may be empty here — a caller that resumes to inspect the
+/// history, or to send a prompt chosen later, has nothing to say yet.
+pub async fn resume(agent_id: &str, config: RunConfig) -> Result<PreparedRun, RunError> {
+    let resolved = resolve(&config).await?;
+
+    let session = resolved.runtime.resume_session(agent_id)?;
+
+    Ok(PreparedRun::new(
+        session,
+        resolved.into_context(config.prompt.clone(), &config.workspace),
+    ))
+}
+
+/// A runtime and everything resolved alongside it, before a session exists.
+///
+/// Shared by [`prepare`] and [`resume`] so the two cannot disagree about how a
+/// runtime is built — the policy, the authorizer, the provider, and the skills
+/// are the same questions whether the conversation is new or continuing.
+struct Resolved {
+    runtime: Runtime,
+    model: mentra::ModelInfo,
+    provider: String,
+    context: WorkspaceContext,
+    skills_dirs: Vec<PathBuf>,
+    skills: Vec<LoadedSkill>,
+}
+
+impl Resolved {
+    fn into_context(self, prompt: String, requested_workspace: &Path) -> RunContext {
+        RunContext {
+            workspace: resolved_workspace(requested_workspace, &self.context),
+            prompt,
+            provider: self.provider,
+            model: self.model.id,
+            context: self.context,
+            skills_dirs: self.skills_dirs,
+            skills: self.skills,
+        }
+    }
+}
+
+async fn resolve(config: &RunConfig) -> Result<Resolved, RunError> {
     let context = WorkspaceContext::discover_with(&config.workspace, &config.context)?;
     let choice = provider::resolve(config.provider, config.base_url.as_deref())?;
 
@@ -237,34 +304,25 @@ pub async fn prepare(config: RunConfig) -> Result<PreparedRun, RunError> {
 
     // Skills must be registered on the runtime before the session spawns, so
     // the agent's tool roster includes `load_skill`.
-    let skills_dirs = register_skills(&runtime, &config)?;
-    let skills = runtime.skills();
+    let skills_dirs = register_skills(&runtime, config)?;
+    let skills = runtime
+        .skills()
+        .into_iter()
+        .map(|skill| LoadedSkill {
+            name: skill.name,
+            description: skill.description,
+            path: skill.path,
+        })
+        .collect();
 
-    let session = runtime.create_session_with_config(
-        config.session_name.clone(),
-        model.clone(),
-        agent_config(&config, &context),
-    )?;
-
-    Ok(PreparedRun::new(
-        session,
-        RunContext {
-            workspace: resolved_workspace(&config.workspace, &context),
-            prompt: config.prompt,
-            provider: ProviderId::from(choice.provider).to_string(),
-            model: model.id,
-            context,
-            skills_dirs,
-            skills: skills
-                .into_iter()
-                .map(|skill| LoadedSkill {
-                    name: skill.name,
-                    description: skill.description,
-                    path: skill.path,
-                })
-                .collect(),
-        },
-    ))
+    Ok(Resolved {
+        runtime,
+        model,
+        provider: ProviderId::from(choice.provider).to_string(),
+        context,
+        skills_dirs,
+        skills,
+    })
 }
 
 /// Prepares a run against a session the caller already built, so a host with
