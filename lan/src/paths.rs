@@ -1,0 +1,65 @@
+//! Small shared helpers for the workspace conventions.
+//!
+//! `skills`, `templates`, `hooks`, and `mcp` all answer the same shape of
+//! question — which directories exist, which of them are really the same
+//! directory, which name wins when two roots offer it. Anything more than one
+//! of them needs lives here rather than being copied, so the conventions
+//! cannot quietly drift apart from each other.
+
+use std::path::Path;
+
+/// Whether two paths name the same directory, following symlinks when both
+/// resolve.
+///
+/// Falls back to a literal comparison so a path that cannot be canonicalized —
+/// one that does not exist yet, or that this process cannot stat — is still
+/// compared rather than assumed distinct. Assuming distinct would register the
+/// same root twice, which for skills is a duplicate-name error and for
+/// templates is a silent self-shadow.
+pub(crate) fn same_dir(left: &Path, right: &Path) -> bool {
+    match (left.canonicalize(), right.canonicalize()) {
+        (Ok(left), Ok(right)) => left == right,
+        _ => left == right,
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::path::PathBuf;
+
+    #[test]
+    fn a_directory_is_itself() {
+        let dir = tempfile::tempdir().expect("tempdir");
+
+        assert!(same_dir(dir.path(), dir.path()));
+    }
+
+    #[test]
+    fn two_spellings_of_one_directory_match() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let indirect = dir.path().join("child").join("..");
+        std::fs::create_dir(dir.path().join("child")).expect("create child");
+
+        assert!(
+            same_dir(dir.path(), &indirect),
+            "a path that resolves to the same place is the same place"
+        );
+    }
+
+    #[test]
+    fn different_directories_do_not_match() {
+        let left = tempfile::tempdir().expect("tempdir");
+        let right = tempfile::tempdir().expect("tempdir");
+
+        assert!(!same_dir(left.path(), right.path()));
+    }
+
+    #[test]
+    fn unresolvable_paths_fall_back_to_comparing_as_written() {
+        let missing = PathBuf::from("/definitely/not/a/real/path");
+
+        assert!(same_dir(&missing, &missing));
+        assert!(!same_dir(&missing, &PathBuf::from("/also/not/real")));
+    }
+}

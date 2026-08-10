@@ -76,7 +76,7 @@ pub fn discover(workspace: &Path, config: &SkillsConfig) -> Vec<SkillsSource> {
         if global_dir.is_dir()
             && !sources
                 .iter()
-                .any(|source| same_dir(&source.path, &global_dir))
+                .any(|source| crate::paths::same_dir(&source.path, &global_dir))
         {
             sources.push(SkillsSource {
                 path: global_dir,
@@ -86,13 +86,6 @@ pub fn discover(workspace: &Path, config: &SkillsConfig) -> Vec<SkillsSource> {
     }
 
     sources
-}
-
-fn same_dir(left: &Path, right: &Path) -> bool {
-    match (left.canonicalize(), right.canonicalize()) {
-        (Ok(left), Ok(right)) => left == right,
-        _ => left == right,
-    }
 }
 
 #[cfg(test)]
