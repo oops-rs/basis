@@ -43,10 +43,21 @@
 //! one place, `store_in`, because two places would eventually disagree and a
 //! conversation written to one file and looked for in another is simply
 //! missing.
+//!
+//! # When there is no file
+//!
+//! [`WorkspaceBuilder::with_ephemeral_history`](crate::WorkspaceBuilder::with_ephemeral_history)
+//! answers *where* with *nowhere*, and opens mentra's in-memory store instead.
+//! Nothing in this module can see one of those conversations: there is no file
+//! for [`list_in`] to read and no row for [`list`] to filter, whichever
+//! directory either is pointed at. Everything below is about the durable case.
 
 use std::path::{Path, PathBuf};
 
-use mentra::{BuiltinProvider, Runtime, runtime::SqliteRuntimeStore};
+use mentra::{
+    BuiltinProvider, Runtime,
+    runtime::{SqliteRuntimeStore, VolatileRuntimeStore},
+};
 
 use crate::run::RunError;
 
@@ -156,13 +167,30 @@ fn enumerating_runtime(identifier: &str, dir: &Path) -> Result<Runtime, RunError
 /// The one place the filename is chosen: `WorkspaceBuilder` writes through
 /// this and [`list_in`] reads through it, so the two cannot drift.
 ///
-/// `SqliteRuntimeStore` stays inside lan rather than on its surface. A caller
-/// picks a *place*; mentra ships no store that is not a file, so nothing is
-/// lost by taking the place instead of the backend — and taking the backend
-/// would mean re-exporting `RuntimeStore` and the nine traits it composes
-/// (see [`WorkspaceBuilder::with_store_dir`](crate::WorkspaceBuilder::with_store_dir)).
+/// Neither this store type nor [`volatile`]'s reaches lan's surface. A caller
+/// picks a *posture* — history in a directory, or history nowhere — and lan
+/// picks the backend that is it, rather than re-exporting `RuntimeStore` and
+/// the nine traits it composes (see
+/// [`WorkspaceBuilder::with_store_dir`](crate::WorkspaceBuilder::with_store_dir)).
 pub(crate) fn store_in(dir: &Path) -> SqliteRuntimeStore {
     SqliteRuntimeStore::new(dir.join(STORE_FILENAME))
+}
+
+/// The store that keeps a workspace's conversations nowhere.
+///
+/// mentra's in-memory `RuntimeStore`: no file is opened, no transcript snapshot
+/// is written, no directory is created, and dropping the runtime that holds it
+/// takes every conversation with it. Constructed fresh per workspace, which is
+/// what makes two ephemeral workspaces two histories rather than one — the type
+/// is `Clone` and clones share state, so a shared instance would be a shared
+/// database with none of the durability.
+///
+/// The backing for
+/// [`WorkspaceBuilder::with_ephemeral_history`](crate::WorkspaceBuilder::with_ephemeral_history),
+/// and named here rather than in the builder so that the two mentra store types
+/// lan can open are chosen in one file.
+pub(crate) fn volatile() -> VolatileRuntimeStore {
+    VolatileRuntimeStore::new()
 }
 
 /// The directory mentra keeps lan's conversations in, for a caller that wants

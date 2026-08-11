@@ -63,7 +63,22 @@ pub struct WorkspaceBuilder {
     hooks: HooksConfig,
     interceptors: Vec<Arc<dyn Interceptor>>,
     shell: ShellAccess,
-    store_dir: Option<PathBuf>,
+    history: Option<History>,
+}
+
+/// What a caller said about where this workspace's conversations go.
+///
+/// One field rather than a directory beside a flag, so that the two knobs which
+/// set it cannot both be in force: whichever was called last is the one that is
+/// read, and there is no state in which they disagree. `None` is *unsaid* —
+/// mentra chooses, which is neither of these.
+#[derive(Debug, Clone, PartialEq, Eq)]
+enum History {
+    /// [`WorkspaceBuilder::with_store_dir`]: kept in this directory.
+    Directory(PathBuf),
+    /// [`WorkspaceBuilder::with_ephemeral_history`]: kept in memory, and
+    /// nowhere else.
+    Ephemeral,
 }
 
 /// Hand-written so a supplied credential cannot reach a log through a
@@ -89,7 +104,7 @@ impl std::fmt::Debug for WorkspaceBuilder {
                     .collect::<Vec<_>>(),
             )
             .field("shell", &self.shell)
-            .field("store_dir", &self.store_dir)
+            .field("history", &self.history)
             .finish_non_exhaustive()
     }
 }
@@ -113,7 +128,7 @@ impl WorkspaceBuilder {
             // than from anything ambient: what a run may do is stated here, in
             // configuration, not read out of the environment behind the caller.
             shell: ShellAccess::default(),
-            store_dir: None,
+            history: None,
         }
     }
 
@@ -259,15 +274,20 @@ impl WorkspaceBuilder {
     /// otherwise: a host that keeps lan's history inside its own application
     /// data, and a test that wants no persistent side effect at all. Both are
     /// asking the same question — *where* — so that is what this takes.
+    /// [`with_ephemeral_history`](Self::with_ephemeral_history) answers it with
+    /// *nowhere*, and is the last word between the two: whichever was called
+    /// last decides.
     ///
     /// Not the store itself, though mentra's `RuntimeBuilder::with_store` would
     /// take one. `RuntimeStore` is a composition of nine traits, and under the
     /// rule written on [`CancellationToken`](crate::CancellationToken) — every
     /// mentra type lan's surface makes a caller *name*, lan re-exports — that
     /// shape would cost the re-export of all nine plus the record types they
-    /// pass. What it would buy is a choice nobody can make: mentra's stores are
-    /// SQLite files, and both of them are constructed from a path. A caller
-    /// that genuinely wants its own backend still has one, on
+    /// pass. What it would buy is reachable without it: mentra ships two
+    /// stores, a SQLite file and an in-memory one, and between this and
+    /// [`with_ephemeral_history`](Self::with_ephemeral_history) a caller
+    /// already picks either without naming a mentra type. A caller that
+    /// genuinely wants its own backend still has one, on
     /// [`Workspace::runtime`](super::Workspace::runtime)'s side of the bargain:
     /// build the `Runtime` and drive it directly.
     ///
@@ -285,7 +305,49 @@ impl WorkspaceBuilder {
     /// migration path.
     pub fn with_store_dir(self, dir: impl Into<PathBuf>) -> Self {
         Self {
-            store_dir: Some(dir.into()),
+            history: Some(History::Directory(dir.into())),
+            ..self
+        }
+    }
+
+    /// Keeps this workspace's conversations in memory, and nowhere else.
+    ///
+    /// The sibling of [`with_store_dir`](Self::with_store_dir), for the caller
+    /// whose answer to *where* is *nowhere*. mentra's in-memory store backs it:
+    /// no database file is opened, no transcript snapshot is written, no
+    /// directory is created, and dropping the [`Workspace`] takes the history
+    /// with it.
+    ///
+    /// **Nothing survives the process.** Inside the workspace a conversation
+    /// behaves as it always does — [`resume`](super::Workspace::resume) finds
+    /// an agent this workspace minted, because the store lives exactly as long
+    /// as the workspace does. Past that edge there is nothing to find. A later
+    /// process cannot resume one of these by agent id; a second [`Workspace`]
+    /// opened on the same path gets its own empty store rather than this one's
+    /// history; and [`store::list_in`](crate::store::list_in) has no file to
+    /// read whichever directory it is pointed at, so `session/list` over ACP
+    /// reports nothing. There is no flush and no export: a conversation started
+    /// here cannot be made durable afterwards, so a host that might want one
+    /// later wants [`with_store_dir`](Self::with_store_dir) now.
+    ///
+    /// Who asks for it. A test suite, which otherwise writes to the real
+    /// database under the user's data directory and leaves a temp directory per
+    /// run behind to avoid it. And a host whose conversations are genuinely
+    /// disposable — a request-scoped run inside a server, a one-shot
+    /// classifier — where keeping a transcript is a cost and a disclosure
+    /// rather than a feature.
+    ///
+    /// Setting this and [`with_store_dir`](Self::with_store_dir) is not an
+    /// error: they write one field, so the last call wins. That is what every
+    /// single-valued knob on this builder already does —
+    /// [`with_model`](Self::with_model), [`with_base_url`](Self::with_base_url)
+    /// and the rest overwrite, and only [`with_interceptor`](Self::with_interceptor),
+    /// which is a list, appends — and it is what makes the half-configured
+    /// builder this type advertises usable: a helper that hands out ephemeral
+    /// builders can be overridden by the one caller that needs its history kept.
+    pub fn with_ephemeral_history(self) -> Self {
+        Self {
+            history: Some(History::Ephemeral),
             ..self
         }
     }
@@ -344,11 +406,13 @@ impl WorkspaceBuilder {
             // `crate::approval`).
             .with_tool_authorizer(ApprovalGate::new());
 
-        // Left alone unless the caller said where, because mentra's default is
-        // a real database a host may already have history in — moving it is a
-        // thing to be asked for, never a thing to happen by upgrade.
-        let builder = match &self.store_dir {
-            Some(dir) => builder.with_store(store::store_in(dir)),
+        // Left alone unless the caller said something, because mentra's default
+        // is a real database a host may already have history in — moving it, or
+        // dropping it on the floor, is a thing to be asked for and never a
+        // thing to happen by upgrade.
+        let builder = match &self.history {
+            Some(History::Directory(dir)) => builder.with_store(store::store_in(dir)),
+            Some(History::Ephemeral) => builder.with_store(store::volatile()),
             None => builder,
         };
 

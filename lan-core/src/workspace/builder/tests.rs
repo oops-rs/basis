@@ -180,12 +180,40 @@ fn history_goes_where_mentra_puts_it_unless_the_caller_says_otherwise() {
     // The default must stay the default: a host with conversations already
     // in mentra's database would lose sight of them if opening a workspace
     // started relocating the store on its own.
-    assert_eq!(WorkspaceBuilder::new("/repo").store_dir, None);
+    assert_eq!(WorkspaceBuilder::new("/repo").history, None);
     assert_eq!(
         WorkspaceBuilder::new("/repo")
             .with_store_dir("/elsewhere")
-            .store_dir,
-        Some(PathBuf::from("/elsewhere"))
+            .history,
+        Some(History::Directory(PathBuf::from("/elsewhere")))
+    );
+    assert_eq!(
+        WorkspaceBuilder::new("/repo")
+            .with_ephemeral_history()
+            .history,
+        Some(History::Ephemeral)
+    );
+}
+
+#[test]
+fn the_last_word_about_history_is_the_one_that_counts() {
+    // The two knobs answer one question, so they write one field and neither
+    // can be left half in force. A helper that hands out ephemeral builders
+    // has to be overridable by the caller that wants its history kept, and
+    // the reverse has to work as plainly.
+    assert_eq!(
+        WorkspaceBuilder::new("/repo")
+            .with_store_dir("/elsewhere")
+            .with_ephemeral_history()
+            .history,
+        Some(History::Ephemeral)
+    );
+    assert_eq!(
+        WorkspaceBuilder::new("/repo")
+            .with_ephemeral_history()
+            .with_store_dir("/elsewhere")
+            .history,
+        Some(History::Directory(PathBuf::from("/elsewhere")))
     );
 }
 

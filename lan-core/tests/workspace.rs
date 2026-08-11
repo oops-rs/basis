@@ -40,8 +40,6 @@ use mentra::{
     test::MockRuntime,
 };
 
-mod common;
-
 /// A port nothing listens on. Reaching it would be a test failure rather than a
 /// hang, but no code path here should try.
 const CLOSED_PORT: &str = "http://127.0.0.1:1/v1";
@@ -53,14 +51,15 @@ const CLOSED_PORT: &str = "http://127.0.0.1:1/v1";
 /// suite behaves the same whether or not the person running it has a key
 /// exported. An explicit model id short-circuits model resolution, which is the
 /// only part of opening a workspace that would otherwise make a request. The
-/// store is the test's own, so nothing here writes to the database under the
-/// user's data directory (see [`common::scratch_store`]).
+/// history is ephemeral, so nothing here writes to the database under the
+/// user's data directory — and the tests that are *about* persistence say
+/// [`WorkspaceBuilder::with_store_dir`] afterwards, which is the last word.
 fn offline(workspace: &Path) -> WorkspaceBuilder {
     Workspace::builder(workspace)
         .with_base_url(CLOSED_PORT)
         .with_api_key("test-key")
         .with_model(ModelSelector::Id("test-model".to_string()))
-        .with_store_dir(common::scratch_store())
+        .with_ephemeral_history()
         .with_context(ContextConfig {
             file_name: "AGENTS.md".to_string(),
             global_dir: None,
@@ -197,6 +196,122 @@ async fn a_conversation_is_found_again_only_through_the_directory_it_was_written
     assert!(
         reopened.resume(&agent_id, "again").is_err(),
         "a different directory is a different history"
+    );
+}
+
+/// A workspace that keeps its history nowhere is still a workspace.
+///
+/// The knob's floor. Swapping the backing store is exactly the kind of change
+/// that looks fine until a turn is driven through it: minting persists an
+/// agent, every round loads and saves it again, and resuming reads it back —
+/// all through the store, none of it exercised by opening one.
+#[tokio::test]
+async fn an_ephemeral_workspace_runs_a_turn_and_resumes_its_own_conversation() {
+    let dir = tempfile::tempdir().expect("tempdir");
+    write(&dir.path().join("AGENTS.md"), "house rules");
+
+    let endpoint = ScriptedEndpoint::start();
+    let workspace = offline(dir.path())
+        .with_base_url(&endpoint.base_url)
+        .with_ephemeral_history()
+        .open()
+        .await
+        .expect("opens");
+
+    // Scoped so the run is dropped before the resume: a live run holds the
+    // agent's lease, and that is true of every store rather than anything
+    // this knob changed.
+    let agent_id = {
+        let mut run = workspace.prepare("go").expect("mints");
+        let agent_id = run.agent_id().to_string();
+        let report = run
+            .execute(CollectingSink::default())
+            .await
+            .expect("the run completes");
+
+        assert!(matches!(report.outcome, RunOutcome::Ok));
+        agent_id
+    };
+
+    assert_eq!(
+        workspace
+            .resume(&agent_id, "again")
+            .expect("the store is alive as long as the workspace is")
+            .agent_id(),
+        agent_id,
+        "inside its workspace an ephemeral conversation behaves like any other"
+    );
+}
+
+/// Ephemeral history is written nowhere — including wherever the same builder
+/// had just been told to write it.
+///
+/// Both halves of the knob at once, and neither is provable without the other:
+/// if the last word did not count the file would appear because a directory was
+/// named, and if the store were not really in memory it would appear anyway.
+#[tokio::test]
+async fn an_ephemeral_workspace_leaves_the_directory_it_was_offered_empty() {
+    let dir = tempfile::tempdir().expect("tempdir");
+    write(&dir.path().join("AGENTS.md"), "house rules");
+    let store_dir = tempfile::tempdir().expect("tempdir");
+
+    let workspace = offline(dir.path())
+        .with_store_dir(store_dir.path())
+        .with_ephemeral_history()
+        .open()
+        .await
+        .expect("opens");
+    workspace.prepare("go").expect("mints");
+
+    assert_eq!(
+        std::fs::read_dir(store_dir.path())
+            .expect("the directory the test made")
+            .count(),
+        0,
+        "minting a run persists an agent, and this one persists it nowhere"
+    );
+    // Ordered after the directory check on purpose: listing opens the store it
+    // is pointed at, so asking first would create the very file being denied.
+    assert!(
+        store::list_in(store_dir.path(), dir.path())
+            .expect("lists")
+            .is_empty(),
+        "and there is nothing to list either"
+    );
+}
+
+/// Nothing outlives the workspace: no resume by agent id, nothing to list.
+///
+/// What `with_ephemeral_history` promises about a later *process*, proved here
+/// without starting one — a second `Workspace::open` gets a store of its own
+/// exactly as a second process would. The second one keeps real history, which
+/// is the sharpest form of the question: it has a database, it is pointed at
+/// the same workspace, and the conversation is still not in it.
+#[tokio::test]
+async fn an_ephemeral_conversation_is_gone_once_its_workspace_is() {
+    let dir = tempfile::tempdir().expect("tempdir");
+    write(&dir.path().join("AGENTS.md"), "house rules");
+    let store_dir = tempfile::tempdir().expect("tempdir");
+
+    let opened = offline(dir.path()).open().await.expect("opens");
+    let agent_id = opened.prepare("go").expect("mints").agent_id().to_string();
+    drop(opened);
+
+    let reopened = offline(dir.path())
+        .with_store_dir(store_dir.path())
+        .open()
+        .await
+        .expect("opens");
+
+    assert!(
+        reopened.resume(&agent_id, "again").is_err(),
+        "an ephemeral conversation cannot be resumed from anywhere else"
+    );
+    assert!(
+        store::list_in(store_dir.path(), dir.path())
+            .expect("lists")
+            .is_empty(),
+        "nor can it be found by looking"
     );
 }
 
