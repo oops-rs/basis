@@ -20,8 +20,8 @@ use std::{
 
 use async_trait::async_trait;
 use lan_core::{
-    AllowAll, ApprovalDecision, ApprovalRequest, Approver, CollectingSink, DenyAll, Event,
-    RunConfig, approval::ApprovalGate, run::prepare_with_session,
+    AllowAll, ApprovalAnswer, ApprovalDecision, ApprovalRequest, Approver, CollectingSink, DenyAll,
+    Event, RunConfig, approval::ApprovalGate, run::prepare_with_session,
 };
 use mentra::{
     BuiltinProvider, ContentBlock, ModelInfo, Role, Runtime, RuntimePolicy, Session,
@@ -149,7 +149,7 @@ struct Recording<A> {
 
 #[async_trait]
 impl<A: Approver> Approver for Recording<A> {
-    async fn approve(&mut self, request: &ApprovalRequest) -> ApprovalDecision {
+    async fn approve(&mut self, request: &ApprovalRequest) -> ApprovalAnswer {
         self.seen
             .lock()
             .expect("not poisoned")
@@ -198,6 +198,17 @@ fn tool_failed(events: &[Event], tool: &str) -> Option<bool> {
             is_error,
             ..
         } if tool_name == tool => Some(*is_error),
+        _ => None,
+    })
+}
+
+/// The result text the named tool produced — the same string the model reads
+/// back as that call's outcome.
+fn tool_result(events: &[Event], tool: &str) -> Option<String> {
+    events.iter().find_map(|event| match event {
+        Event::ToolCompleted {
+            tool_name, summary, ..
+        } if tool_name == tool => Some(summary.clone()),
         _ => None,
     })
 }
@@ -255,6 +266,52 @@ async fn a_refused_call_does_not_happen() {
     assert!(
         !workspace.path().join("made.txt").exists(),
         "a refused write must not reach the disk"
+    );
+}
+
+#[tokio::test]
+async fn a_refusal_tells_the_model_what_the_run_does_not_allow() {
+    // The whole point of the reason: it is the tool result the model reads,
+    // so a read-only run says so once instead of watching the model retry the
+    // same write. Pinned verbatim because paraphrase here is a silent
+    // regression — the string is the interface.
+    let workspace = tempfile::tempdir().expect("tempdir");
+
+    let (events, _asked) = run_with(workspace.path(), DenyAll).await;
+
+    assert_eq!(
+        tool_result(&events, "files").as_deref(),
+        Some(
+            "Tool execution denied: files changes state outside this process, \
+             which this run does not allow"
+        )
+    );
+}
+
+#[tokio::test]
+async fn a_refusal_with_nothing_to_say_still_refuses() {
+    // An approver that gives no reason is still fail-closed; the model just
+    // gets mentra's standing wording rather than lan's.
+    struct Silent;
+
+    #[async_trait]
+    impl Approver for Silent {
+        async fn approve(&mut self, _request: &ApprovalRequest) -> ApprovalAnswer {
+            ApprovalAnswer::new(ApprovalDecision::Deny)
+        }
+    }
+
+    let workspace = tempfile::tempdir().expect("tempdir");
+
+    let (events, _asked) = run_with(workspace.path(), Silent).await;
+
+    assert_eq!(
+        tool_result(&events, "files").as_deref(),
+        Some("Tool execution denied: denied by session approver")
+    );
+    assert!(
+        !workspace.path().join("made.txt").exists(),
+        "a refused write must not reach the disk, reason or no reason"
     );
 }
 

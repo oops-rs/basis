@@ -45,7 +45,7 @@ use std::{
 
 use agent_client_protocol::schema::v1::{SessionMode, SessionModeId, SessionModeState};
 
-use lan_core::approval::{ApprovalDecision, ApprovalRequest, Approver};
+use lan_core::approval::{ApprovalAnswer, ApprovalDecision, ApprovalRequest, Approver};
 
 /// What a session does about a call that changes state outside the process.
 ///
@@ -242,41 +242,55 @@ impl<A> ModedApprover<A> {
 
 #[async_trait::async_trait]
 impl<A: Approver> Approver for ModedApprover<A> {
-    async fn approve(&mut self, request: &ApprovalRequest) -> ApprovalDecision {
+    async fn approve(&mut self, request: &ApprovalRequest) -> ApprovalAnswer {
         // Read-only calls never reach here: lan-core's gate allows them
         // outright, because prompting for reads trains people to approve
         // without reading.
         match self.modes.current() {
-            ApprovalMode::Always => ApprovalDecision::Allow,
-            ApprovalMode::Never => ApprovalDecision::Deny,
+            ApprovalMode::Always => ApprovalDecision::Allow.into(),
+            ApprovalMode::Never => ApprovalAnswer::new(ApprovalDecision::Deny).because(format!(
+                "{} changes state outside this process, and this session is set to refuse that",
+                request.tool_name
+            )),
             ApprovalMode::Prompt => self.ask(request).await,
         }
     }
 }
 
 impl<A: Approver> ModedApprover<A> {
-    async fn ask(&mut self, request: &ApprovalRequest) -> ApprovalDecision {
+    async fn ask(&mut self, request: &ApprovalRequest) -> ApprovalAnswer {
         if let Some(allow) = self.modes.remembered(&request.tool_name) {
             return if allow {
-                ApprovalDecision::Allow
+                ApprovalDecision::Allow.into()
             } else {
-                ApprovalDecision::Deny
+                ApprovalAnswer::new(ApprovalDecision::Deny).because(format!(
+                    "{} was refused earlier in this session, and that answer still stands",
+                    request.tool_name
+                ))
             };
         }
 
         // The two "…for this session" answers are collapsed to a plain one
         // before mentra sees them, and remembered here instead — see the
-        // module docs.
-        match self.inner.approve(request).await {
+        // module docs. The reason survives the collapse, because it is what
+        // the model reads.
+        let answer = self.inner.approve(request).await;
+        match answer.decision {
             ApprovalDecision::AllowForSession => {
                 self.modes.remember(&request.tool_name, true);
-                ApprovalDecision::Allow
+                ApprovalAnswer {
+                    decision: ApprovalDecision::Allow,
+                    ..answer
+                }
             }
             ApprovalDecision::DenyForSession => {
                 self.modes.remember(&request.tool_name, false);
-                ApprovalDecision::Deny
+                ApprovalAnswer {
+                    decision: ApprovalDecision::Deny,
+                    ..answer
+                }
             }
-            decision => decision,
+            _ => answer,
         }
     }
 }
@@ -296,9 +310,9 @@ mod tests {
 
     #[async_trait::async_trait]
     impl Approver for Counting {
-        async fn approve(&mut self, _request: &ApprovalRequest) -> ApprovalDecision {
+        async fn approve(&mut self, _request: &ApprovalRequest) -> ApprovalAnswer {
             self.asked.fetch_add(1, Ordering::SeqCst);
-            self.answer
+            self.answer.into()
         }
     }
 
@@ -400,7 +414,7 @@ mod tests {
         ] {
             let (_modes, mut approver, asked) = gate(mode, ApprovalDecision::Allow);
 
-            assert_eq!(approver.approve(&request("shell")).await, expected);
+            assert_eq!(approver.approve(&request("shell")).await.decision, expected);
             assert_eq!(
                 asked.load(Ordering::SeqCst),
                 0,
@@ -410,11 +424,26 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn a_read_only_session_says_so_when_it_refuses() {
+        // The model reads this as the tool result, and "denied" on its own
+        // would have it try the same write again.
+        let (_modes, mut approver, _asked) = gate(ApprovalMode::Never, ApprovalDecision::Allow);
+
+        assert_eq!(
+            approver.approve(&request("shell")).await.reason.as_deref(),
+            Some(
+                "shell changes state outside this process, \
+                 and this session is set to refuse that"
+            )
+        );
+    }
+
+    #[tokio::test]
     async fn asking_puts_the_request_to_the_client() {
         let (_modes, mut approver, asked) = gate(ApprovalMode::Prompt, ApprovalDecision::Allow);
 
         assert_eq!(
-            approver.approve(&request("shell")).await,
+            approver.approve(&request("shell")).await.decision,
             ApprovalDecision::Allow
         );
         assert_eq!(asked.load(Ordering::SeqCst), 1);
@@ -428,18 +457,18 @@ mod tests {
         // Collapsed to a plain allow so mentra does not store a rule of its
         // own — the one lan keeps is the one a mode change can clear.
         assert_eq!(
-            approver.approve(&request("shell")).await,
+            approver.approve(&request("shell")).await.decision,
             ApprovalDecision::Allow
         );
         assert_eq!(
-            approver.approve(&request("shell")).await,
+            approver.approve(&request("shell")).await.decision,
             ApprovalDecision::Allow
         );
         assert_eq!(asked.load(Ordering::SeqCst), 1);
 
         // A different tool was never answered for.
         assert_eq!(
-            approver.approve(&request("files")).await,
+            approver.approve(&request("files")).await.decision,
             ApprovalDecision::Allow
         );
         assert_eq!(asked.load(Ordering::SeqCst), 2);
@@ -454,7 +483,7 @@ mod tests {
         modes.set(&SessionModeId::new(NEVER)).expect("switches");
 
         assert_eq!(
-            approver.approve(&request("shell")).await,
+            approver.approve(&request("shell")).await.decision,
             ApprovalDecision::Deny,
             "a stale allow must not survive the mode that replaced it"
         );
@@ -462,7 +491,7 @@ mod tests {
         // And it stays forgotten on the way back, rather than reappearing.
         modes.set(&SessionModeId::new(PROMPT)).expect("switches");
         assert_eq!(
-            approver.approve(&request("shell")).await,
+            approver.approve(&request("shell")).await.decision,
             ApprovalDecision::Allow,
             "the client is asked again, and answered again"
         );
@@ -474,12 +503,16 @@ mod tests {
             gate(ApprovalMode::Prompt, ApprovalDecision::DenyForSession);
 
         assert_eq!(
-            approver.approve(&request("shell")).await,
+            approver.approve(&request("shell")).await.decision,
             ApprovalDecision::Deny
         );
+
+        let repeated = approver.approve(&request("shell")).await;
+        assert_eq!(repeated.decision, ApprovalDecision::Deny);
         assert_eq!(
-            approver.approve(&request("shell")).await,
-            ApprovalDecision::Deny
+            repeated.reason.as_deref(),
+            Some("shell was refused earlier in this session, and that answer still stands"),
+            "a remembered refusal still owes the model a reason"
         );
         assert_eq!(asked.load(Ordering::SeqCst), 1);
     }

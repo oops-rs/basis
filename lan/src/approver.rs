@@ -5,7 +5,7 @@
 
 use std::io::{BufRead, IsTerminal, Write};
 
-use lan_core::{ApprovalDecision, ApprovalRequest, Approver};
+use lan_core::{ApprovalAnswer, ApprovalDecision, ApprovalRequest, Approver};
 
 /// Asks on the terminal and reads a single-key answer.
 ///
@@ -13,10 +13,11 @@ use lan_core::{ApprovalDecision, ApprovalRequest, Approver};
 /// being piped still asks the person rather than writing the question into
 /// the pipe.
 ///
-/// With nothing to ask — stdin is not a terminal — the answer is always
-/// [`ApprovalDecision::Deny`]. That is the right fallback for an unattended
-/// run: it fails safe, visibly, instead of quietly granting whatever was asked
-/// for, and it is what `lan run --approve prompt` documents.
+/// With nothing to ask — stdin is not a terminal — the answer is always a
+/// refusal. That is the right fallback for an unattended run: it fails safe,
+/// visibly, instead of quietly granting whatever was asked for, and it is what
+/// `lan run --approve prompt` documents. Every refusal here says which case it
+/// was, because that text is what the model reads back.
 #[derive(Debug, Default)]
 pub struct TerminalApprover;
 
@@ -26,8 +27,16 @@ impl TerminalApprover {
     }
 }
 
+/// A refusal that names the reason, for the model rather than the person.
+fn refused(request: &ApprovalRequest, why: &str) -> ApprovalAnswer {
+    ApprovalAnswer::new(ApprovalDecision::Deny).because(format!(
+        "{} needs approval and {why}, so this run cannot allow it",
+        request.tool_name
+    ))
+}
+
 /// Asks on the terminal and reads the answer. Blocking by nature.
-fn ask(request: &ApprovalRequest) -> std::io::Result<ApprovalDecision> {
+fn ask(request: &ApprovalRequest) -> std::io::Result<ApprovalAnswer> {
     let mut stderr = std::io::stderr();
     writeln!(stderr)?;
     writeln!(stderr, "  lan: {} wants to run", request.tool_name)?;
@@ -42,29 +51,35 @@ fn ask(request: &ApprovalRequest) -> std::io::Result<ApprovalDecision> {
     std::io::stdin().lock().read_line(&mut answer)?;
 
     Ok(match answer.trim().to_ascii_lowercase().as_str() {
-        "y" | "yes" => ApprovalDecision::Allow,
-        "a" | "always" => ApprovalDecision::AllowForSession,
-        "r" | "never" => ApprovalDecision::DenyForSession,
+        "y" | "yes" => ApprovalDecision::Allow.into(),
+        "a" | "always" => ApprovalDecision::AllowForSession.into(),
+        "r" | "never" => ApprovalAnswer::new(ApprovalDecision::DenyForSession).because(format!(
+            "{} was refused at the prompt, for the rest of this run",
+            request.tool_name
+        )),
         // Anything else, including a bare newline, is a refusal: the
         // safe answer should be the easy one to give.
-        _ => ApprovalDecision::Deny,
+        _ => ApprovalAnswer::new(ApprovalDecision::Deny)
+            .because(format!("{} was refused at the prompt", request.tool_name)),
     })
 }
 
 #[async_trait::async_trait]
 impl Approver for TerminalApprover {
-    async fn approve(&mut self, request: &ApprovalRequest) -> ApprovalDecision {
+    async fn approve(&mut self, request: &ApprovalRequest) -> ApprovalAnswer {
         if !std::io::stdin().is_terminal() {
-            return ApprovalDecision::Deny;
+            return refused(request, "there is no terminal to ask at");
         }
 
-        let request = request.clone();
+        let asked = request.clone();
 
         // Reading stdin blocks for as long as the person takes, so it belongs
         // on a blocking thread rather than a runtime worker.
-        tokio::task::spawn_blocking(move || ask(&request).unwrap_or(ApprovalDecision::Deny))
-            .await
-            .unwrap_or(ApprovalDecision::Deny)
+        match tokio::task::spawn_blocking(move || ask(&asked)).await {
+            Ok(Ok(answer)) => answer,
+            Ok(Err(_)) => refused(request, "the terminal could not be read"),
+            Err(_) => refused(request, "the question could not be put to the terminal"),
+        }
     }
 }
 
@@ -116,10 +131,20 @@ mod tests {
         // The suite runs without a terminal on stdin, so this exercises the
         // real path rather than a simulated one.
         let mut approver = TerminalApprover::new();
+        let answer = approver.approve(&request(json!({}))).await;
+
         assert_eq!(
-            approver.approve(&request(json!({}))).await,
+            answer.decision,
             ApprovalDecision::Deny,
             "an unattended run must fail safe rather than grant what it cannot ask about"
+        );
+        assert_eq!(
+            answer.reason.as_deref(),
+            Some(
+                "shell needs approval and there is no terminal to ask at, \
+                 so this run cannot allow it"
+            ),
+            "the model should read why nobody could answer, not just that nobody did"
         );
     }
 

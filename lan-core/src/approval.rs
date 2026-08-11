@@ -42,7 +42,7 @@ pub struct ApprovalRequest {
     pub input: Value,
 }
 
-/// How an [`Approver`] answered.
+/// What an [`Approver`] decided.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
 pub enum ApprovalDecision {
     Allow,
@@ -53,6 +53,47 @@ pub enum ApprovalDecision {
     AllowForSession,
     /// Deny, and stop asking about this tool for the rest of the session.
     DenyForSession,
+}
+
+/// How an [`Approver`] answered: the decision, and — when it refused — why.
+///
+/// The reason is not decoration. A denial reaches the model as that tool
+/// call's result, so the wording is the only thing telling it what to do
+/// next: a model told merely that something was denied tries the write
+/// again, and one told this run does not allow writes stops and reports.
+/// An answer that leaves it unset still denies; the model just reads
+/// mentra's standing "denied by session approver" instead.
+///
+/// Allowing needs no reason, because an allowed call explains itself by
+/// happening.
+#[derive(Debug, Clone, PartialEq, Eq, Default)]
+pub struct ApprovalAnswer {
+    pub decision: ApprovalDecision,
+    pub reason: Option<String>,
+}
+
+impl ApprovalAnswer {
+    /// An answer that says only what it decided.
+    pub fn new(decision: ApprovalDecision) -> Self {
+        Self {
+            decision,
+            reason: None,
+        }
+    }
+
+    /// The same answer, carrying the words the model will read.
+    pub fn because(self, reason: impl Into<String>) -> Self {
+        Self {
+            reason: Some(reason.into()),
+            ..self
+        }
+    }
+}
+
+impl From<ApprovalDecision> for ApprovalAnswer {
+    fn from(decision: ApprovalDecision) -> Self {
+        Self::new(decision)
+    }
 }
 
 /// Answers approval requests. The seam a host plugs its own judgment into.
@@ -75,18 +116,21 @@ pub enum ApprovalDecision {
 ///
 /// The worked example is the binary's `TerminalApprover`. Asked when stdin is
 /// not a terminal — an unattended `lan run --approve prompt`, a cron job — it
-/// returns [`ApprovalDecision::Deny`] without printing a question nobody would
-/// read, so the run fails visibly instead of quietly granting whatever came up.
-/// `lan-acp`'s client approver applies the same rule to a failed round trip, a
-/// cancelled request, an answer it cannot parse, and its own thirty-minute
-/// timeout.
+/// denies without printing a question nobody would read, so the run fails
+/// visibly instead of quietly granting whatever came up. `lan-acp`'s client
+/// approver applies the same rule to a failed round trip, a cancelled request,
+/// an answer it cannot parse, and its own thirty-minute timeout.
+///
+/// Each of those denials should say which one it was, on the
+/// [`reason`](ApprovalAnswer::reason) of its answer. Failing closed silently
+/// leaves the model to guess, and it guesses that retrying will work.
 ///
 /// [`ApprovalDecision`]'s own default is [`Deny`](ApprovalDecision::Deny) for
 /// the same reason, and so is mentra's when an authorizer times out: silence is
 /// never a yes.
 #[async_trait]
 pub trait Approver: Send + 'static {
-    async fn approve(&mut self, request: &ApprovalRequest) -> ApprovalDecision;
+    async fn approve(&mut self, request: &ApprovalRequest) -> ApprovalAnswer;
 }
 
 /// Forwards to the approver inside.
@@ -97,7 +141,7 @@ pub trait Approver: Send + 'static {
 /// three, and without this each arm would have to duplicate the whole run.
 #[async_trait]
 impl<A: Approver + ?Sized> Approver for Box<A> {
-    async fn approve(&mut self, request: &ApprovalRequest) -> ApprovalDecision {
+    async fn approve(&mut self, request: &ApprovalRequest) -> ApprovalAnswer {
         (**self).approve(request).await
     }
 }
@@ -109,8 +153,8 @@ pub struct AllowAll;
 
 #[async_trait]
 impl Approver for AllowAll {
-    async fn approve(&mut self, _request: &ApprovalRequest) -> ApprovalDecision {
-        ApprovalDecision::Allow
+    async fn approve(&mut self, _request: &ApprovalRequest) -> ApprovalAnswer {
+        ApprovalDecision::Allow.into()
     }
 }
 
@@ -122,8 +166,11 @@ pub struct DenyAll;
 
 #[async_trait]
 impl Approver for DenyAll {
-    async fn approve(&mut self, _request: &ApprovalRequest) -> ApprovalDecision {
-        ApprovalDecision::Deny
+    async fn approve(&mut self, request: &ApprovalRequest) -> ApprovalAnswer {
+        ApprovalAnswer::new(ApprovalDecision::Deny).because(format!(
+            "{} changes state outside this process, which this run does not allow",
+            request.tool_name
+        ))
     }
 }
 
@@ -309,8 +356,30 @@ mod tests {
     async fn the_trivial_approvers_answer_as_named() {
         let request = approval_request();
 
-        assert_eq!(AllowAll.approve(&request).await, ApprovalDecision::Allow);
-        assert_eq!(DenyAll.approve(&request).await, ApprovalDecision::Deny);
+        assert_eq!(
+            AllowAll.approve(&request).await.decision,
+            ApprovalDecision::Allow
+        );
+        assert_eq!(
+            DenyAll.approve(&request).await.decision,
+            ApprovalDecision::Deny
+        );
+    }
+
+    #[tokio::test]
+    async fn a_blanket_refusal_tells_the_model_why_it_was_refused() {
+        // Without this the model reads "denied" and tries the write again;
+        // with it, it learns the run itself is the reason and stops.
+        let reason = DenyAll
+            .approve(&approval_request())
+            .await
+            .reason
+            .expect("a refusal the model can act on must explain itself");
+
+        assert_eq!(
+            reason,
+            "shell changes state outside this process, which this run does not allow"
+        );
     }
 
     #[tokio::test]
@@ -318,10 +387,12 @@ mod tests {
         // What the binary relies on to choose between three approvers without
         // writing the run out three times.
         let mut chosen: Box<dyn Approver> = Box::new(DenyAll);
+        let answer = chosen.approve(&approval_request()).await;
 
-        assert_eq!(
-            chosen.approve(&approval_request()).await,
-            ApprovalDecision::Deny
+        assert_eq!(answer.decision, ApprovalDecision::Deny);
+        assert!(
+            answer.reason.is_some(),
+            "the reason must survive the indirection too"
         );
     }
 
@@ -330,5 +401,17 @@ mod tests {
         // The fail-closed rule, in the one place every approver inherits it:
         // whatever a decision defaults to is what silence means.
         assert_eq!(ApprovalDecision::default(), ApprovalDecision::Deny);
+        assert_eq!(
+            ApprovalAnswer::default(),
+            ApprovalAnswer::new(ApprovalDecision::Deny)
+        );
+    }
+
+    #[test]
+    fn a_reason_rides_along_without_changing_the_decision() {
+        let answer = ApprovalAnswer::from(ApprovalDecision::DenyForSession).because("no writes");
+
+        assert_eq!(answer.decision, ApprovalDecision::DenyForSession);
+        assert_eq!(answer.reason.as_deref(), Some("no writes"));
     }
 }

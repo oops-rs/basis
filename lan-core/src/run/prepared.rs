@@ -26,7 +26,7 @@ use mentra::{
 
 use super::{Bound, EventSink, RunError, RunReport};
 use crate::{
-    approval::{AllowAll, ApprovalDecision, ApprovalRequest, Approver},
+    approval::{AllowAll, ApprovalAnswer, ApprovalDecision, ApprovalRequest, Approver},
     context::WorkspaceContext,
     event::{
         ContextFile, EVENT_SCHEMA_VERSION, Event, NoticeSeverity, RunOutcome, SkillSummary,
@@ -536,7 +536,7 @@ async fn resolve_if_permission<A: Approver>(
         return;
     };
 
-    let decision = approver
+    let answer = approver
         .approve(&ApprovalRequest {
             request_id: request_id.clone(),
             tool_call_id: tool_call_id.clone(),
@@ -549,11 +549,16 @@ async fn resolve_if_permission<A: Approver>(
 
     // A failure here means the request was already resolved or withdrawn;
     // there is nothing useful left to do about it.
-    let _ = permissions.resolve_permission(request_id, permission_decision(decision));
+    let _ = permissions.resolve_permission(request_id, permission_decision(answer));
 }
 
-fn permission_decision(decision: ApprovalDecision) -> PermissionDecision {
-    match decision {
+/// Restates an approver's answer in the terms mentra resolves with.
+///
+/// The reason rides along on refusals, because mentra puts it in the tool
+/// result the model reads; a refusal that gives none keeps mentra's own
+/// wording.
+fn permission_decision(answer: ApprovalAnswer) -> PermissionDecision {
+    let decision = match answer.decision {
         ApprovalDecision::Allow => PermissionDecision::allow(),
         ApprovalDecision::Deny => PermissionDecision::deny(),
         ApprovalDecision::AllowForSession => {
@@ -562,6 +567,11 @@ fn permission_decision(decision: ApprovalDecision) -> PermissionDecision {
         ApprovalDecision::DenyForSession => {
             PermissionDecision::deny_and_remember(PermissionRuleScope::Session)
         }
+    };
+
+    match answer.reason {
+        Some(reason) => decision.with_reason(reason),
+        None => decision,
     }
 }
 

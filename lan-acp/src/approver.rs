@@ -26,7 +26,7 @@ use agent_client_protocol::{
     },
 };
 
-use lan_core::approval::{ApprovalDecision, ApprovalRequest, Approver};
+use lan_core::approval::{ApprovalAnswer, ApprovalDecision, ApprovalRequest, Approver};
 
 /// Option ids on the wire. Chosen by lan, echoed back by the client, and
 /// matched here — so they are a contract with ourselves and belong in one
@@ -60,7 +60,7 @@ impl AcpApprover {
 
 #[async_trait::async_trait]
 impl Approver for AcpApprover {
-    async fn approve(&mut self, request: &ApprovalRequest) -> ApprovalDecision {
+    async fn approve(&mut self, request: &ApprovalRequest) -> ApprovalAnswer {
         let outbound = RequestPermissionRequest::new(
             self.session_id.clone(),
             ToolCallUpdate::new(
@@ -73,19 +73,26 @@ impl Approver for AcpApprover {
         );
 
         match round_trip(&self.connection, outbound).await {
-            Some(outcome) => decision(&outcome),
+            Ok(outcome) => answer(&outcome, &request.tool_name),
             // A failed round trip, a closed connection, or a client that never
-            // answered. Deny rather than assume consent.
-            None => ApprovalDecision::Deny,
+            // answered. Deny rather than assume consent, and say which it was
+            // — the model reads this, and "denied" alone invites a retry.
+            Err(why) => refused(&request.tool_name, &why),
         }
     }
 }
 
-/// Performs the round trip, returning `None` if it failed or timed out.
+/// A refusal that names the reason, for the model to read.
+fn refused(tool_name: &str, why: &str) -> ApprovalAnswer {
+    ApprovalAnswer::new(ApprovalDecision::Deny)
+        .because(format!("{tool_name} needs approval and {why}"))
+}
+
+/// Performs the round trip, describing the failure when there is one.
 async fn round_trip(
     connection: &ConnectionTo<Client>,
     request: RequestPermissionRequest,
-) -> Option<RequestPermissionOutcome> {
+) -> Result<RequestPermissionOutcome, String> {
     let response = tokio::time::timeout(
         ANSWER_TIMEOUT,
         connection.send_request(request).block_task(),
@@ -93,8 +100,12 @@ async fn round_trip(
     .await;
 
     match response {
-        Ok(Ok(response)) => Some(response.outcome),
-        Ok(Err(_)) | Err(_) => None,
+        Ok(Ok(response)) => Ok(response.outcome),
+        Ok(Err(_)) => Err("the client could not be reached".to_string()),
+        Err(_) => Err(format!(
+            "the client did not answer within {} minutes",
+            ANSWER_TIMEOUT.as_secs() / 60
+        )),
     }
 }
 
@@ -124,17 +135,21 @@ fn options() -> Vec<PermissionOption> {
 /// Matched on the option id lan itself sent. An id lan does not recognize is a
 /// client bug, and the safe reading of an answer we do not understand is a
 /// denial.
-fn decision(outcome: &RequestPermissionOutcome) -> ApprovalDecision {
+fn answer(outcome: &RequestPermissionOutcome, tool_name: &str) -> ApprovalAnswer {
     let RequestPermissionOutcome::Selected(selected) = outcome else {
         // `Cancelled` — the turn is being torn down; there is nothing to allow.
-        return ApprovalDecision::Deny;
+        return refused(tool_name, "the request was cancelled");
     };
 
     match &*selected.option_id.0 {
-        ALLOW_ONCE => ApprovalDecision::Allow,
-        ALLOW_ALWAYS => ApprovalDecision::AllowForSession,
-        REJECT_ALWAYS => ApprovalDecision::DenyForSession,
-        _ => ApprovalDecision::Deny,
+        ALLOW_ONCE => ApprovalDecision::Allow.into(),
+        ALLOW_ALWAYS => ApprovalDecision::AllowForSession.into(),
+        REJECT_ONCE => ApprovalAnswer::new(ApprovalDecision::Deny)
+            .because(format!("{tool_name} was refused by the client")),
+        REJECT_ALWAYS => ApprovalAnswer::new(ApprovalDecision::DenyForSession).because(format!(
+            "{tool_name} was refused by the client, for the rest of this session"
+        )),
+        _ => refused(tool_name, "the client's answer could not be read"),
     }
 }
 
@@ -158,16 +173,36 @@ mod tests {
 
     #[test]
     fn every_offered_option_maps_to_a_decision() {
-        assert_eq!(decision(&selected(ALLOW_ONCE)), ApprovalDecision::Allow);
         assert_eq!(
-            decision(&selected(ALLOW_ALWAYS)),
+            answer(&selected(ALLOW_ONCE), "shell").decision,
+            ApprovalDecision::Allow
+        );
+        assert_eq!(
+            answer(&selected(ALLOW_ALWAYS), "shell").decision,
             ApprovalDecision::AllowForSession
         );
-        assert_eq!(decision(&selected(REJECT_ONCE)), ApprovalDecision::Deny);
         assert_eq!(
-            decision(&selected(REJECT_ALWAYS)),
+            answer(&selected(REJECT_ONCE), "shell").decision,
+            ApprovalDecision::Deny
+        );
+        assert_eq!(
+            answer(&selected(REJECT_ALWAYS), "shell").decision,
             ApprovalDecision::DenyForSession
         );
+    }
+
+    #[test]
+    fn allowing_needs_no_reason_and_refusing_gives_one() {
+        // The model reads a refusal's reason as the tool result; an allowed
+        // call explains itself by happening.
+        assert_eq!(answer(&selected(ALLOW_ONCE), "shell").reason, None);
+
+        for id in [REJECT_ONCE, REJECT_ALWAYS] {
+            let reason = answer(&selected(id), "shell")
+                .reason
+                .unwrap_or_else(|| panic!("{id} must explain itself"));
+            assert!(reason.starts_with("shell "), "{reason}");
+        }
     }
 
     #[test]
@@ -186,19 +221,44 @@ mod tests {
 
     #[test]
     fn a_cancelled_request_denies() {
+        let answer = answer(&RequestPermissionOutcome::Cancelled, "shell");
+
         assert_eq!(
-            decision(&RequestPermissionOutcome::Cancelled),
+            answer.decision,
             ApprovalDecision::Deny,
             "a cancelled turn has nothing left to authorize"
+        );
+        assert_eq!(
+            answer.reason.as_deref(),
+            Some("shell needs approval and the request was cancelled")
         );
     }
 
     #[test]
     fn an_unrecognized_answer_denies() {
+        let answer = answer(&selected("something-else"), "shell");
+
         assert_eq!(
-            decision(&selected("something-else")),
+            answer.decision,
             ApprovalDecision::Deny,
             "an answer lan cannot read must not be treated as consent"
         );
+        assert_eq!(
+            answer.reason.as_deref(),
+            Some("shell needs approval and the client's answer could not be read")
+        );
+    }
+
+    #[test]
+    fn a_client_that_never_answers_says_so_in_minutes() {
+        // The wording quotes the timeout, so it cannot drift away from the
+        // constant that actually bounds the wait.
+        assert_eq!(
+            refused("shell", "the client did not answer within 30 minutes")
+                .reason
+                .as_deref(),
+            Some("shell needs approval and the client did not answer within 30 minutes")
+        );
+        assert_eq!(ANSWER_TIMEOUT.as_secs() / 60, 30);
     }
 }

@@ -43,7 +43,9 @@ pub mod skills;
 pub mod store;
 pub mod templates;
 
-pub use approval::{AllowAll, ApprovalDecision, ApprovalGate, ApprovalRequest, Approver, DenyAll};
+pub use approval::{
+    AllowAll, ApprovalAnswer, ApprovalDecision, ApprovalGate, ApprovalRequest, Approver, DenyAll,
+};
 pub use branch::{BranchError, EntryKind, TranscriptEntry};
 pub use context::{
     ContextConfig, ContextDocument, ContextError, ContextScope, DEFAULT_CONTEXT_FILE,
