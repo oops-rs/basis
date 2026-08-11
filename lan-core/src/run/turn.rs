@@ -9,6 +9,9 @@ use std::time::{Duration, SystemTime};
 
 use mentra::runtime::{CancellationToken, RunOptions};
 
+use super::RunError;
+use crate::budget::BudgetPool;
+
 /// Limits and stop signals for a single turn.
 ///
 /// lan's own type rather than a re-export of mentra's `RunOptions`: the same
@@ -42,6 +45,17 @@ pub struct TurnOptions {
     /// already committed is kept, so the work is not thrown away for being one
     /// round too long.
     pub token_budget: Option<u64>,
+    /// An allowance this turn shares with every other run drawing on it.
+    ///
+    /// The other kind of token bound, and the two compose rather than compete:
+    /// [`token_budget`](Self::token_budget) says what *this* turn may spend, a
+    /// pool says what the whole job may, and a turn carrying both stops at
+    /// whichever comes first. See [`BudgetPool`] for how that is arranged, and
+    /// for the overshoot a shared soft bound implies.
+    ///
+    /// A turn drawing on a pool with nothing left is refused before its prompt
+    /// is sent, with [`RunError::BudgetExhausted`](crate::RunError::BudgetExhausted).
+    pub budget: Option<BudgetPool>,
 }
 
 impl TurnOptions {
@@ -121,14 +135,39 @@ impl TurnOptions {
         }
     }
 
+    /// Draws this turn's tokens from an allowance shared with other runs.
+    ///
+    /// Immutable like the rest — a new value, the same pool. That is the whole
+    /// shape of the exception [`BudgetPool`] makes: options are copied, the
+    /// allowance is shared.
+    pub fn with_budget(self, budget: BudgetPool) -> Self {
+        Self {
+            budget: Some(budget),
+            ..self
+        }
+    }
+
     pub(super) fn into_run_options(self) -> RunOptions {
-        RunOptions {
+        let options = RunOptions {
             cancellation: self.cancel,
             stop: self.stop,
             deadline: self.deadline.map(|after| SystemTime::now() + after),
             tool_budget: self.tool_budget,
             token_budget: self.token_budget,
             ..RunOptions::default()
+        };
+
+        // Installing the pool's counter is what makes the bound shared: mentra
+        // adds each round's usage to whatever handle it was given and checks
+        // the bound against that total, so every run on one pool is measured
+        // against every other's spending rather than its own.
+        match self.budget {
+            Some(pool) => RunOptions {
+                token_budget: Some(pool.turn_bound(self.token_budget)),
+                token_usage: pool.counter(),
+                ..options
+            },
+            None => options,
         }
     }
 }
@@ -138,16 +177,44 @@ impl TurnOptions {
 /// said nothing about limits, and reading that silence as "no deadline" would
 /// unbound a run whose config asked for one.
 pub(super) fn bounded(options: TurnOptions, bounds: &TurnOptions) -> TurnOptions {
+    // Cloned rather than moved out, because taking the field would leave
+    // `options` partially moved and the `..options` below could not finish the
+    // job. It is an `Arc` either way.
+    let budget = options.budget.clone().or_else(|| bounds.budget.clone());
+
     TurnOptions {
         deadline: options.deadline.or(bounds.deadline),
         tool_budget: options.tool_budget.or(bounds.tool_budget),
         token_budget: options.token_budget.or(bounds.token_budget),
+        budget,
         ..options
     }
+}
+
+/// Refuses a turn whose shared allowance is already spent.
+///
+/// Checked here — before a header is emitted, before a prompt is sent, before
+/// anything is committed — rather than left to mentra, which would take the
+/// turn, run no rounds, and report the missing assistant message as a provider
+/// error. See [`BudgetPool`] for the whole argument.
+pub(super) fn drawable(options: &TurnOptions) -> Result<(), RunError> {
+    let Some(pool) = &options.budget else {
+        return Ok(());
+    };
+
+    if pool.is_exhausted() {
+        return Err(RunError::BudgetExhausted {
+            limit: pool.limit(),
+            spent: pool.spent(),
+        });
+    }
+
+    Ok(())
 }
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::run::RunUsage;
 
     #[test]
     fn attaching_a_token_does_not_unbound_a_configured_run() {
@@ -229,5 +296,132 @@ mod tests {
         assert_eq!(bounded(TurnOptions::default(), &unset).deadline, None);
         assert_eq!(bounded(TurnOptions::default(), &unset).tool_budget, None);
         assert_eq!(bounded(TurnOptions::default(), &unset).token_budget, None);
+        assert!(bounded(TurnOptions::default(), &unset).budget.is_none());
+    }
+
+    #[test]
+    fn a_pool_bounds_the_turn_at_the_whole_jobs_allowance() {
+        // Not at the run's share of it: the counter is shared, so the figure
+        // handed to mentra is the job's and every drawing run is measured
+        // against every other's spending.
+        let pool = BudgetPool::new(500_000);
+        let options = TurnOptions::default().with_budget(pool.clone());
+
+        assert_eq!(options.into_run_options().token_budget, Some(500_000));
+    }
+
+    #[test]
+    fn a_pooled_turn_reports_into_the_pools_own_counter() {
+        // The claim the whole design rests on. If mentra were handed a fresh
+        // counter, each run would get the pool's limit to itself and the job
+        // would cost N times what was asked for.
+        let pool = BudgetPool::new(1_000);
+        let run_options = TurnOptions::default()
+            .with_budget(pool.clone())
+            .into_run_options();
+
+        pool.record(RunUsage {
+            input_tokens: 300,
+            ..RunUsage::default()
+        });
+
+        assert_eq!(
+            run_options.reported_tokens(),
+            300,
+            "mentra reads the spending the pool records, and the reverse"
+        );
+    }
+
+    #[test]
+    fn an_unpooled_turn_gets_a_counter_of_its_own() {
+        // Two unpooled runs must not accidentally share accounting, which they
+        // would if lan reused one handle instead of letting mentra's default
+        // mint a fresh one per turn.
+        let first = TurnOptions::default()
+            .with_token_budget(100)
+            .into_run_options();
+        let second = TurnOptions::default()
+            .with_token_budget(100)
+            .into_run_options();
+
+        assert!(!std::sync::Arc::ptr_eq(
+            &first.token_usage,
+            &second.token_usage
+        ));
+    }
+
+    #[test]
+    fn a_per_turn_cap_and_a_pool_both_bind() {
+        // mentra has one bound per run, so the two have to be resolved into one
+        // figure here. A cap of 50k on a pool that has spent 200k of 500k means
+        // "stop at 250k of the job's total" — tighter than the pool, and the
+        // pool is still the ceiling when the cap is the looser of the two.
+        let pool = BudgetPool::new(500_000);
+        pool.record(RunUsage {
+            input_tokens: 200_000,
+            ..RunUsage::default()
+        });
+
+        let capped = TurnOptions::default()
+            .with_budget(pool.clone())
+            .with_token_budget(50_000);
+        assert_eq!(capped.into_run_options().token_budget, Some(250_000));
+
+        let generous = TurnOptions::default()
+            .with_budget(pool)
+            .with_token_budget(u64::MAX);
+        assert_eq!(generous.into_run_options().token_budget, Some(500_000));
+    }
+
+    #[test]
+    fn attaching_a_token_does_not_detach_the_pool() {
+        // The same argument as the deadline above, and the expensive version of
+        // it: a stop button that quietly unbounded the shared allowance would
+        // let a fan-out spend without limit.
+        let pool = BudgetPool::new(1_000);
+        let configured = TurnOptions::default().with_budget(pool.clone());
+        let (options, _token) = TurnOptions::stoppable();
+
+        assert_eq!(bounded(options, &configured).budget, Some(pool));
+    }
+
+    #[test]
+    fn an_explicit_pool_wins_over_the_configured_one() {
+        let configured = TurnOptions::default().with_budget(BudgetPool::new(1_000));
+        let explicit = BudgetPool::new(50);
+
+        let merged = bounded(
+            TurnOptions::default().with_budget(explicit.clone()),
+            &configured,
+        );
+
+        assert_eq!(merged.budget, Some(explicit));
+    }
+
+    #[test]
+    fn a_turn_on_a_spent_pool_is_refused_rather_than_sent() {
+        let pool = BudgetPool::new(100);
+        let options = TurnOptions::default().with_budget(pool.clone());
+
+        assert!(drawable(&options).is_ok(), "a full pool draws");
+
+        pool.record(RunUsage {
+            input_tokens: 120,
+            ..RunUsage::default()
+        });
+
+        let refused = drawable(&options).expect_err("a spent pool refuses");
+        assert!(matches!(
+            refused,
+            RunError::BudgetExhausted {
+                limit: 100,
+                spent: 120
+            }
+        ));
+    }
+
+    #[test]
+    fn a_turn_with_no_pool_is_always_drawable() {
+        assert!(drawable(&TurnOptions::default().with_token_budget(0)).is_ok());
     }
 }

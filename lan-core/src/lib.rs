@@ -51,6 +51,7 @@
 
 pub mod approval;
 pub mod branch;
+pub mod budget;
 pub mod context;
 pub mod event;
 pub mod fingerprint;
@@ -70,6 +71,7 @@ pub use approval::{
     AllowAll, ApprovalAnswer, ApprovalDecision, ApprovalGate, ApprovalRequest, Approver, DenyAll,
 };
 pub use branch::{BranchError, EntryKind, TranscriptEntry};
+pub use budget::BudgetPool;
 pub use context::{
     ContextConfig, ContextDocument, ContextError, ContextScope, DEFAULT_CONTEXT_FILE,
     WorkspaceContext,

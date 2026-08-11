@@ -344,6 +344,11 @@ impl RunConfig {
             deadline: self.deadline,
             tool_budget: self.tool_budget,
             token_budget: self.token_budget,
+            // A one-prompt run has no siblings to share an allowance with, so
+            // there is nothing for a pool to do here. A caller who wants one
+            // wants the `Workspace` shape (ADR-0010), where a pool is attached
+            // per `RunSpec`.
+            budget: None,
         }
     }
 }
@@ -404,6 +409,16 @@ impl<S> RunReport<S> {
 pub enum RunError {
     #[error("prompt is empty")]
     EmptyPrompt,
+
+    /// The shared allowance this turn draws on has nothing left.
+    ///
+    /// A decision rather than a failure of the work, which is why it is its own
+    /// variant: a caller fanning out over a [`BudgetPool`](crate::BudgetPool)
+    /// stops minting on this, where it would retry on a provider error. Raised
+    /// before the prompt is sent and before the stream opens, so the
+    /// conversation is left exactly as it was.
+    #[error("the shared token budget is spent: {spent} of {limit} tokens reported")]
+    BudgetExhausted { limit: u64, spent: u64 },
 
     #[error("no session to resume")]
     NoSuchSession,

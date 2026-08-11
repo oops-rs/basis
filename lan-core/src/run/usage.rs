@@ -21,12 +21,15 @@
 ///
 /// It counts the rounds of the run's own agent. A subagent gets its own event
 /// bus in mentra, and nothing relays it to the parent's, so work delegated
-/// through `task` does not appear here. Note the asymmetry with
-/// [`TurnOptions::token_budget`](super::TurnOptions): *that* is enforced
-/// against a counter a child run shares with its parent, so a delegating run
-/// can be stopped by a budget this figure never accounted for. Narrowing that
-/// gap needs a subagent's usage to reach the parent stream, which is upstream
-/// work (ADR-0005), not something lan can infer from the outside.
+/// through `task` does not appear here. The token bounds have the same blind
+/// spot rather than covering for it: mentra enforces
+/// [`TurnOptions::token_budget`](super::TurnOptions) and
+/// [`BudgetPool`](crate::BudgetPool) against an accounting handle it *can*
+/// share with a child — `RunOptions::child` exists for exactly that — but its
+/// own `task` intrinsic runs the child on fresh options, so a delegating run
+/// spends tokens that neither this figure nor its budget ever sees. Closing
+/// that needs a subagent's usage and accounting to reach the parent, which is
+/// upstream work (ADR-0005), not something lan can infer from the outside.
 ///
 /// And cache tokens are counted but never mixed in — see
 /// [`total_tokens`](Self::total_tokens).

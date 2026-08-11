@@ -17,7 +17,7 @@ use tokio::sync::oneshot;
 use self::forward::forward_events;
 use super::{
     Bound, EventSink, OutputReport, OutputSpec, RunError, RunReport, RunUsage, TurnOptions,
-    turn::bounded,
+    turn::{bounded, drawable},
 };
 use crate::{
     approval::{AllowAll, Approver},
@@ -362,14 +362,13 @@ impl PreparedRun {
         approver: A,
         options: TurnOptions,
     ) -> Result<RunReport<S>, RunError> {
+        let options = bounded(options, &self.bounds);
+        drawable(&options)?;
         let turn = self.begin(&prompt, sink, approver)?;
 
         let result = self
             .session
-            .append_turn_with_options(
-                vec![ContentBlock::text(prompt)],
-                bounded(options, &self.bounds).into_run_options(),
-            )
+            .append_turn_with_options(vec![ContentBlock::text(prompt)], options.into_run_options())
             .await;
 
         let ended = match &result {
@@ -398,13 +397,15 @@ impl PreparedRun {
         approver: A,
         options: TurnOptions,
     ) -> Result<OutputReport<T, S>, RunError> {
+        let options = bounded(options, &self.bounds);
+        drawable(&options)?;
         let turn = self.begin(&prompt, sink, approver)?;
 
         let result = self
             .session
             .append_turn_to_output::<Value>(
                 vec![ContentBlock::text(prompt)],
-                bounded(options, &self.bounds).into_run_options(),
+                options.into_run_options(),
                 spec.into_terminal_spec(),
             )
             .await;

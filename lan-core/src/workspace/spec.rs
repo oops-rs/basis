@@ -14,7 +14,10 @@
 
 use std::time::Duration;
 
-use crate::run::{Effort, TurnOptions};
+use crate::{
+    budget::BudgetPool,
+    run::{Effort, TurnOptions},
+};
 
 /// Default name for the session a run creates. Sessions are named so a client
 /// can tell them apart; the name carries no behavior.
@@ -63,6 +66,17 @@ pub struct RunSpec {
     /// full, so the round that crosses the line always finishes. This is the
     /// bound that maps to money.
     pub token_budget: Option<u64>,
+    /// An allowance this run shares with the others drawing on it.
+    ///
+    /// Where [`token_budget`](Self::token_budget) is this run's own ceiling, a
+    /// [`BudgetPool`] is the job's — the one figure a fan-out spends from
+    /// together. A spec carrying both stops at whichever binds first.
+    ///
+    /// The one field here that is shared rather than copied: deriving a second
+    /// spec from this one gives it a *handle on the same pool*, which is the
+    /// point. See [`BudgetPool`] for why that exception exists and what it
+    /// costs.
+    pub budget: Option<BudgetPool>,
 }
 
 impl RunSpec {
@@ -74,6 +88,7 @@ impl RunSpec {
             deadline: None,
             tool_budget: None,
             token_budget: None,
+            budget: None,
         }
     }
 
@@ -132,6 +147,30 @@ impl RunSpec {
         }
     }
 
+    /// Draws this run's tokens from an allowance shared with other runs.
+    ///
+    /// The line a fan-out is written on — [`BudgetPool::spec`] is this call with
+    /// the prompt folded in:
+    ///
+    /// ```no_run
+    /// # async fn example(workspace: &lan_core::Workspace) -> Result<(), lan_core::RunError> {
+    /// # use lan_core::{BudgetPool, RunSpec};
+    /// let pool = BudgetPool::new(500_000);
+    /// let run = workspace.prepare(RunSpec::new("review the tests").with_budget(pool.clone()))?;
+    /// # let _ = run;
+    /// # Ok(())
+    /// # }
+    /// ```
+    ///
+    /// Every turn the minted run performs draws here, not just the first, so a
+    /// conversation and a one-shot are bounded the same way.
+    pub fn with_budget(self, budget: BudgetPool) -> Self {
+        Self {
+            budget: Some(budget),
+            ..self
+        }
+    }
+
     /// The bounds this spec puts on every turn the run performs.
     ///
     /// Limits only. Cancellation and the graceful stop signal are per-call
@@ -143,6 +182,7 @@ impl RunSpec {
             deadline: self.deadline,
             tool_budget: self.tool_budget,
             token_budget: self.token_budget,
+            budget: self.budget.clone(),
             ..TurnOptions::default()
         }
     }
@@ -236,5 +276,35 @@ mod tests {
 
         assert!(options.cancel.is_none());
         assert!(options.stop.is_none());
+    }
+
+    #[test]
+    fn a_shared_allowance_reaches_the_turn_through_the_spec() {
+        use crate::budget::BudgetPool;
+
+        let pool = BudgetPool::new(500_000);
+        let options = RunSpec::new("prompt")
+            .with_budget(pool.clone())
+            .turn_options();
+
+        assert_eq!(options.budget, Some(pool));
+    }
+
+    #[test]
+    fn deriving_a_spec_shares_the_pool_but_copies_everything_else() {
+        use crate::budget::BudgetPool;
+
+        // The exception stated as a test: a fan-out derives one spec per run and
+        // every one of them has to spend from the *same* allowance, while the
+        // prompts stay independent.
+        let pool = BudgetPool::new(1_000);
+        let template = RunSpec::new("").with_budget(pool.clone());
+
+        let first = template.clone().with_prompt("review the tests");
+        let second = template.with_prompt("review the docs");
+
+        assert_eq!(first.budget, second.budget, "one allowance, two runs");
+        assert_eq!(first.budget, Some(pool));
+        assert_ne!(first.prompt, second.prompt);
     }
 }
