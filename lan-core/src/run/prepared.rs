@@ -256,19 +256,23 @@ impl PreparedRun {
     /// prose.
     ///
     /// ADR-0010's structured output, and the primitive a workflow is built on:
-    /// the model is handed one terminal tool whose input *is* the answer, is
-    /// required to call it, and `T` is deserialized from what it sent. The
-    /// caller writes the schema — see [`OutputSpec`] for why lan derives
-    /// nothing.
+    /// the model is handed one terminal tool whose input *is* the answer, and
+    /// `T` is deserialized from what it sent. The caller writes the schema —
+    /// see [`OutputSpec`] for why lan derives nothing.
     ///
-    /// **A typed turn is a shaping turn, not a working one.** That one terminal
-    /// tool is the *only* tool the turn holds — no files, no shell, no MCP — so
-    /// it can answer only from the conversation it already has. Asking it to
-    /// review code in the same call returns a structurally valid answer from a
-    /// model that read nothing, reported as a success: do the work on an
-    /// ordinary turn ([`send`](Self::send) or [`execute`](Self::execute)),
-    /// then ask for the shape on the next. `examples/review_workflow.rs` is
-    /// the pattern written out.
+    /// **By default a typed turn is a shaping turn, not a working one.** That
+    /// terminal tool is the *only* tool the turn holds — no files, no shell, no
+    /// MCP — and the model is required to call it, so the turn can answer only
+    /// from the conversation it already has. Asking it to review code in the
+    /// same call returns a structurally valid answer from a model that read
+    /// nothing, reported as a success. Two ways past that, and they are
+    /// different trades. [`OutputSpec::with_tools`] keeps the ordinary toolset
+    /// on this turn, so one call reads and answers — and gives up the forcing
+    /// that guaranteed an answer. Or do the work on an ordinary turn
+    /// ([`send`](Self::send) or [`execute`](Self::execute)) and ask for the
+    /// shape on the next, which keeps the forcing and keeps each run's reading
+    /// in a context of its own; `examples/review_workflow.rs` is that written
+    /// out.
     ///
     /// The stream is unchanged. Header, forwarded events, permissions put to
     /// the approver, `RunFinished`: a client reading events cannot tell a typed
@@ -293,7 +297,14 @@ impl PreparedRun {
     /// - [`RunError::Runtime`] — the turn failed, *or* it finished without ever
     ///   calling the terminal tool. mentra reports both as
     ///   `MalformedProviderEvent` and lan will not read error prose to tell
-    ///   them apart.
+    ///   them apart. A working turn ([`OutputSpec::with_tools`]) reaches the
+    ///   second of those the most ways, since nothing forces its ending: it can
+    ///   answer in prose, or be refused another round by a bound while it is
+    ///   still gathering. Which bound that was is on the stream, as
+    ///   [`Event::RunFinished`]'s `stopped_by` — [`Bound::TokenBudget`] for an
+    ///   allowance spent mid-gather — and only there, because the report that
+    ///   would otherwise carry it is not handed back when there is no value to
+    ///   hand back with it.
     ///
     /// The stream is complete and closed in every one of those cases, so a sink
     /// with somewhere to put events — a file, a channel — has the whole run.

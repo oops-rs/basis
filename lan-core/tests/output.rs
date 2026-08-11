@@ -11,8 +11,14 @@
 //! test avoids having to know the tool name mentra generates per call. Refusing
 //! to call it — the model that answers in prose instead — is scripted too,
 //! because that is the failure a schema-shaped ask actually meets in the field.
+//!
+//! A turn that keeps its tools (`OutputSpec::with_tools`) forces nothing, so
+//! the second provider below cannot be driven by the forced choice. It finds
+//! the terminal tool by the description the *caller* wrote, which lan owns and
+//! mentra passes through untouched.
 
 use std::{
+    collections::VecDeque,
     path::Path,
     sync::{
         Arc, Mutex,
@@ -22,8 +28,8 @@ use std::{
 
 use async_trait::async_trait;
 use lan_core::{
-    AllowAll, CollectingSink, Event, OutputSpec, RunConfig, RunError, RunOutcome,
-    run::prepare_with_session,
+    AllowAll, Bound, CollectingSink, Event, FnSink, OutputSpec, RunConfig, RunError, RunOutcome,
+    TurnOptions, run::prepare_with_session,
 };
 use mentra::{
     BuiltinProvider, ContentBlock, ModelInfo, Role, Runtime, RuntimePolicy, Session, TokenUsage,
@@ -43,6 +49,16 @@ struct Review {
     verdict: String,
     findings: Vec<String>,
 }
+
+/// The description the caller puts on the answering tool — and, for the working
+/// turn below, the only handle a test has on that tool. mentra mints the name
+/// per call and a working turn forces no choice to name it in, but the
+/// description is the caller's own and travels untouched.
+const SUBMIT_REVIEW: &str = "call this once you have read every changed file";
+
+/// A file in the workspace, for the round that proves a working turn can reach
+/// one.
+const WORKSPACE_FILE: &str = "AGENTS.md";
 
 /// Plays a model that honours a forced tool choice.
 ///
@@ -130,6 +146,141 @@ impl Provider for ForcedToolProvider {
     }
 }
 
+/// One scripted round: what the model does when the turn asks it for one.
+#[derive(Clone)]
+enum Say {
+    /// Reads a real file through the ordinary toolset — the round a shaping
+    /// turn has no tool for.
+    Read,
+    /// Calls the terminal tool with this payload, ending the turn.
+    Answer(Value),
+    /// Talks instead. A working turn is allowed to, which is exactly what it
+    /// trades away for the rounds it gets.
+    Prose,
+}
+
+/// What one request put in front of the model: the two things a typed turn
+/// changes about a round.
+#[derive(Clone, Debug)]
+struct Offer {
+    tools: Vec<String>,
+    /// The generated answering tool, picked out by the caller's description
+    /// because its name is minted per call.
+    terminal: Option<String>,
+    choice: Option<ToolChoice>,
+}
+
+impl Offer {
+    /// Everything on the request that was not the answering tool.
+    fn ordinary(&self) -> Vec<&String> {
+        self.tools
+            .iter()
+            .filter(|name| Some(*name) != self.terminal.as_ref())
+            .collect()
+    }
+}
+
+/// A model that plays one scripted [`Say`] per round and records what each
+/// request offered it.
+///
+/// Cloned before it is handed to the runtime, so a test can read the offers
+/// back afterwards — the counterpart of `ForcedToolProvider`, for the turns
+/// where nothing is forced.
+#[derive(Clone)]
+struct ScriptedModel {
+    model: ModelInfo,
+    rounds: Arc<Mutex<VecDeque<Say>>>,
+    offers: Arc<Mutex<Vec<Offer>>>,
+    /// Reported per round, as a real provider reports it.
+    usage: Option<TokenUsage>,
+}
+
+impl ScriptedModel {
+    fn new(rounds: Vec<Say>) -> Self {
+        Self {
+            model: ModelInfo::new("typed-model", BuiltinProvider::Anthropic),
+            rounds: Arc::new(Mutex::new(VecDeque::from(rounds))),
+            offers: Arc::new(Mutex::new(Vec::new())),
+            usage: None,
+        }
+    }
+
+    fn spending(self, input: u64, output: u64) -> Self {
+        Self {
+            usage: Some(TokenUsage {
+                input_tokens: Some(input),
+                output_tokens: Some(output),
+                ..TokenUsage::default()
+            }),
+            ..self
+        }
+    }
+
+    fn offers(&self) -> Vec<Offer> {
+        self.offers.lock().expect("not poisoned").clone()
+    }
+}
+
+#[async_trait]
+impl Provider for ScriptedModel {
+    fn descriptor(&self) -> ProviderDescriptor {
+        ProviderDescriptor::new(self.model.provider.clone())
+    }
+
+    async fn list_models(&self) -> Result<Vec<ModelInfo>, ProviderError> {
+        Ok(vec![self.model.clone()])
+    }
+
+    async fn stream(&self, request: Request<'_>) -> Result<ProviderEventStream, ProviderError> {
+        let terminal = request
+            .tools
+            .iter()
+            .find(|tool| tool.description.as_deref() == Some(SUBMIT_REVIEW))
+            .map(|tool| tool.name.clone());
+        let round = {
+            let mut offers = self.offers.lock().expect("not poisoned");
+            offers.push(Offer {
+                tools: request.tools.iter().map(|tool| tool.name.clone()).collect(),
+                terminal: terminal.clone(),
+                choice: request.tool_choice.clone(),
+            });
+            offers.len()
+        };
+        let say = self
+            .rounds
+            .lock()
+            .expect("not poisoned")
+            .pop_front()
+            .unwrap_or_else(|| panic!("the model was asked for an unscripted round {round}"));
+
+        let content = match say {
+            Say::Read => vec![ContentBlock::ToolUse {
+                id: format!("read-{round}"),
+                name: "files".to_string(),
+                input: json!({ "operations": [{ "op": "read", "path": WORKSPACE_FILE }] }),
+            }],
+            Say::Answer(payload) => vec![ContentBlock::ToolUse {
+                id: format!("answer-{round}"),
+                name: terminal.expect("a typed turn's request carries the terminal tool"),
+                input: payload,
+            }],
+            Say::Prose => vec![ContentBlock::text("I read it, and it looks fine to me")],
+        };
+        let calls_a_tool = content
+            .iter()
+            .any(|block| matches!(block, ContentBlock::ToolUse { .. }));
+
+        Ok(provider_event_stream_from_response(Response {
+            id: format!("scripted-{round}"),
+            model: self.model.id.clone(),
+            role: Role::Assistant,
+            content,
+            stop_reason: calls_a_tool.then(|| "tool_use".to_string()),
+            usage: self.usage.clone(),
+        }))
+    }
+}
+
 fn workspace() -> tempfile::TempDir {
     let dir = tempfile::tempdir().expect("tempdir");
     std::fs::write(dir.path().join("AGENTS.md"), "house rules").expect("write AGENTS.md");
@@ -166,6 +317,15 @@ fn prepared(
     provider: ForcedToolProvider,
 ) -> (Runtime, lan_core::PreparedRun) {
     let model = provider.model.clone();
+    prepared_with(dir, provider, model)
+}
+
+/// The same, for a provider that is not a [`ForcedToolProvider`].
+fn prepared_with<P: Provider + 'static>(
+    dir: &tempfile::TempDir,
+    provider: P,
+    model: ModelInfo,
+) -> (Runtime, lan_core::PreparedRun) {
     let runtime = Runtime::builder()
         .with_provider_instance(provider)
         // Nothing here reads a conversation back, so the history has nowhere
@@ -195,7 +355,7 @@ fn prepared(
 fn review_spec() -> OutputSpec {
     OutputSpec::new(
         "submit_review",
-        "call this once you have read every changed file",
+        SUBMIT_REVIEW,
         json!({
             "type": "object",
             "properties": {
@@ -471,4 +631,211 @@ async fn a_plain_turn_reports_what_it_spent_too() {
 
     assert!(report.succeeded());
     assert_eq!(report.usage.total_tokens(), 100);
+}
+
+#[tokio::test]
+async fn a_working_typed_turn_reads_a_file_and_answers_in_the_same_call() {
+    // What `with_tools` is for, end to end: the ask that used to need two
+    // turns — read, then shape — done in one, with the reading proved by the
+    // file that actually opened rather than by the roster alone.
+    let dir = workspace();
+    let provider = ScriptedModel::new(vec![
+        Say::Read,
+        Say::Answer(json!({ "verdict": "hold", "findings": ["the house rules are unenforced"] })),
+    ]);
+    let handle = provider.clone();
+    let model = provider.model.clone();
+    let (_runtime, mut run) = prepared_with(&dir, provider, model);
+
+    let output = run
+        .output::<Review, _, _>(
+            "read AGENTS.md, then review this diff",
+            review_spec().with_tools(),
+            CollectingSink::new(),
+            AllowAll,
+        )
+        .await
+        .expect("a working turn answers");
+
+    assert_eq!(
+        output.value,
+        Review {
+            verdict: "hold".to_string(),
+            findings: vec!["the house rules are unenforced".to_string()],
+        }
+    );
+
+    let offers = handle.offers();
+    assert_eq!(offers.len(), 2, "the turn worked a round, then answered");
+    for (round, offer) in offers.iter().enumerate() {
+        assert!(
+            offer.terminal.is_some(),
+            "round {round} can still end the turn: {:?}",
+            offer.tools
+        );
+        assert!(
+            offer.ordinary().iter().any(|name| *name == "files"),
+            "round {round} keeps the ordinary toolset: {:?}",
+            offer.tools
+        );
+        assert!(
+            !matches!(offer.choice, Some(ToolChoice::Tool { .. })),
+            "round {round} forces nothing — a forced choice would preclude \
+             either the working rounds or the call that ends them, got {:?}",
+            offer.choice
+        );
+    }
+
+    // The roster is not the point; the reading is. A turn that was offered the
+    // file tool and never opened anything would pass every assertion above.
+    let events = output.report.sink.into_events();
+    assert!(
+        events.iter().any(|event| matches!(
+            event,
+            Event::ToolCompleted { tool_name, is_error: false, .. } if tool_name == "files"
+        )),
+        "the file was read on the turn that answered: {events:#?}"
+    );
+}
+
+#[tokio::test]
+async fn a_shaping_turn_is_still_handed_one_tool_and_told_to_call_it() {
+    // The control for the test above, and the promise `with_tools` had to keep
+    // to be addable at all: a spec that does not ask for tools does not get
+    // them, and is still made to answer on the first round.
+    let dir = workspace();
+    let provider = ScriptedModel::new(vec![Say::Answer(
+        json!({ "verdict": "ship", "findings": [] }),
+    )]);
+    let handle = provider.clone();
+    let model = provider.model.clone();
+    let (_runtime, mut run) = prepared_with(&dir, provider, model);
+
+    run.output::<Review, _, _>(
+        "review this diff",
+        review_spec(),
+        CollectingSink::new(),
+        AllowAll,
+    )
+    .await
+    .expect("a shaping turn answers");
+
+    let offers = handle.offers();
+    assert_eq!(offers.len(), 1, "one round decides a shape");
+    assert!(
+        offers[0].terminal.is_some() && offers[0].ordinary().is_empty(),
+        "the terminal tool is the only tool: {:?}",
+        offers[0].tools
+    );
+    assert!(
+        matches!(offers[0].choice, Some(ToolChoice::Tool { .. })),
+        "and the model is told to call it, got {:?}",
+        offers[0].choice
+    );
+}
+
+#[tokio::test]
+async fn a_working_turn_that_settles_for_prose_produces_no_value() {
+    // The price of the mode: nothing forces the ending, so the model can work
+    // and then simply talk. A workflow must hear that as the failure it is
+    // rather than receive a value nobody committed.
+    let dir = workspace();
+    let provider = ScriptedModel::new(vec![Say::Read, Say::Prose]);
+    let handle = provider.clone();
+    let model = provider.model.clone();
+    let (_runtime, mut run) = prepared_with(&dir, provider, model);
+
+    let error = run
+        .output::<Review, _, _>(
+            "read AGENTS.md, then review this diff",
+            review_spec().with_tools(),
+            CollectingSink::new(),
+            AllowAll,
+        )
+        .await
+        .expect_err("prose is not an answer to a typed ask");
+
+    assert!(
+        matches!(error, RunError::Runtime(_)),
+        "expected a runtime failure, got {error:?}"
+    );
+    // And it is this mode's failure, not the old one: the turn had the whole
+    // toolset in front of it for both rounds and still ended on talk.
+    let offers = handle.offers();
+    assert_eq!(offers.len(), 2);
+    assert!(
+        offers
+            .iter()
+            .all(|offer| offer.ordinary().iter().any(|name| *name == "files")),
+        "a working turn ran: {offers:?}"
+    );
+}
+
+#[tokio::test]
+async fn a_working_turn_out_of_budget_says_so_on_the_stream() {
+    // A working turn can be refused another round while it is still gathering,
+    // which is the one way it fails that reads exactly like a broken provider.
+    // The report that would name the bound is not returned — there is no value
+    // to return it with — so the stream is where a caller has to be able to
+    // find it.
+    let dir = workspace();
+    let provider = ScriptedModel::new(vec![
+        Say::Read,
+        Say::Answer(json!({ "verdict": "ship", "findings": [] })),
+    ])
+    .spending(60, 40);
+    let handle = provider.clone();
+    let model = provider.model.clone();
+    let (_runtime, mut run) = prepared_with(&dir, provider, model);
+
+    // The sink is a closure over shared state rather than a `CollectingSink`,
+    // because a failed typed turn keeps the report the sink comes back inside.
+    let events = Arc::new(Mutex::new(Vec::new()));
+    let recorded = Arc::clone(&events);
+
+    // `let else` rather than `expect_err`, which would want the success type to
+    // be `Debug` and so want it of the sink.
+    let Err(error) = run
+        .output_with_options::<Review, _, _>(
+            "read AGENTS.md, then review this diff",
+            review_spec().with_tools(),
+            FnSink::new(move |event| {
+                recorded.lock().expect("not poisoned").push(event);
+                Ok(())
+            }),
+            AllowAll,
+            TurnOptions::default().with_token_budget(100),
+        )
+        .await
+    else {
+        panic!("a turn stopped before the terminal call has no value");
+    };
+
+    assert!(
+        matches!(error, RunError::Runtime(_)),
+        "expected a runtime failure, got {error:?}"
+    );
+    let offers = handle.offers();
+    assert_eq!(
+        offers.len(),
+        1,
+        "the budget ended the turn before the answering round"
+    );
+    assert!(
+        offers[0].ordinary().iter().any(|name| *name == "files"),
+        "and it was a working turn that got cut off: {offers:?}"
+    );
+
+    let events = events.lock().expect("not poisoned").clone();
+    assert!(
+        matches!(
+            events.last(),
+            Some(Event::RunFinished {
+                stopped_by: Some(Bound::TokenBudget),
+                ..
+            })
+        ),
+        "the allowance, not the provider, is what ended it: {:?}",
+        events.last()
+    );
 }

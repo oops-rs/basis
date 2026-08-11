@@ -5,18 +5,24 @@
 //! find out what happened. A run that answers in a declared shape composes with
 //! everything.
 //!
-//! The mechanism is mentra's — one generated terminal tool, forced, whose input
-//! *is* the answer — and lan's job here is to own the way a caller asks for it.
+//! The mechanism is mentra's — one generated terminal tool whose input *is*
+//! the answer — and lan's job here is to own the way a caller asks for it.
 //! Hence [`OutputSpec`] rather than a re-export of mentra's
 //! `TerminalOutputSpec`, for the reason [`Event`](crate::Event) and
 //! [`TurnOptions`](super::TurnOptions) exist: lan's surface should not move
 //! when mentra's does.
 //!
-//! One consequence of that mechanism shapes every use of it: while a run is
-//! answering into a schema, the terminal tool is the *only* tool it holds.
-//! A typed turn cannot read a file, run a command, or reach an MCP server —
-//! it shapes what earlier turns on the same run already gathered. The work
-//! happens on an ordinary turn; the type comes after.
+//! What a typed turn may *do* on its way to that answer is the spec's to say,
+//! and by default it may do very little: the terminal tool is the only tool the
+//! run holds, so the turn cannot read a file, run a command, or reach an MCP
+//! server. It shapes what earlier turns on the same run already gathered — the
+//! work happens on an ordinary turn, and the type comes after.
+//!
+//! [`OutputSpec::with_tools`] is the other way: the ordinary toolset stays on
+//! the request beside the terminal tool, and one turn reads and then answers.
+//! What it gives up is the forcing — a shaping turn is *made* to answer, and a
+//! working turn can simply talk instead. Neither is the right default for the
+//! other's job, so the choice is the caller's and lives on the spec.
 //!
 //! The schema is the caller's to write. lan derives nothing — no
 //! `schemars`, no proc macro — because a derived schema is a second
@@ -31,9 +37,11 @@ use super::RunReport;
 
 /// The shape a turn must answer in.
 ///
-/// All three fields are load-bearing, so there is a single constructor and no
-/// `with_*` builders: a spec missing any of them would describe a tool the
-/// model cannot use.
+/// The three fields describing that shape are all load-bearing, so they arrive
+/// together through one constructor: a spec missing any of them would describe
+/// a tool the model cannot use. [`with_tools`](Self::with_tools) is a builder
+/// because what it says is not part of the shape — it is what the turn wearing
+/// that shape is allowed to do on its way to filling it in.
 #[derive(Debug, Clone, PartialEq)]
 pub struct OutputSpec {
     /// What the answering tool is called, as the model sees it — `report` or
@@ -43,13 +51,22 @@ pub struct OutputSpec {
     pub name: String,
     /// What the tool is for, in the imperative. The model reads this to decide
     /// what a complete answer looks like, so "one entry per problem you saw on
-    /// the last turn" is worth more than "returns findings". It cannot ask for
-    /// work — the typed turn holds no tool but this one — so describe the
-    /// answer, not a task.
+    /// the last turn" is worth more than "returns findings".
+    ///
+    /// Whether it may also ask for *work* is [`with_tools`](Self::with_tools).
+    /// By default the turn holds no tool but this one, so a description asking
+    /// the model to go and read something describes work it cannot do —
+    /// describe the answer, not a task. A turn that kept its tools has the
+    /// opposite exposure, since nothing makes it stop working and answer, and
+    /// this is where the condition for stopping belongs: "call this once you
+    /// have read every changed file and have nothing further to check".
     pub description: String,
     /// JSON Schema for the answer. The field descriptions in it are read by the
     /// model, not just validated against.
     pub schema: Value,
+    /// Whether the turn keeps its ordinary tools while it answers. False unless
+    /// [`with_tools`](Self::with_tools) says otherwise.
+    pub keeps_tools: bool,
 }
 
 impl OutputSpec {
@@ -58,11 +75,43 @@ impl OutputSpec {
             name: name.into(),
             description: description.into(),
             schema,
+            keeps_tools: false,
+        }
+    }
+
+    /// Lets the turn work before it answers, instead of only shaping what the
+    /// conversation already holds.
+    ///
+    /// A shaping turn asked for something it has not been told answers from
+    /// nothing it looked at: well-formed, empty, and reported as a success. The
+    /// way around that has been to spend two turns on every read-then-answer
+    /// job, one to gather and one to shape. This spends one — the run keeps the
+    /// whole toolset beside the terminal tool, works as many rounds as it
+    /// needs, and ends the turn by calling it.
+    ///
+    /// The cost is that nothing forces the ending. A model that works and then
+    /// answers in prose, or that runs out of budget mid-gather, produces no
+    /// value at all; [`PreparedRun::output`](super::PreparedRun::output) says
+    /// what comes back instead. Two turns also remain the better shape when the
+    /// reading should *not* share a context with the answering — one reader per
+    /// reviewer, as in `examples/review_workflow.rs`.
+    pub fn with_tools(self) -> Self {
+        Self {
+            keeps_tools: true,
+            ..self
         }
     }
 
     pub(crate) fn into_terminal_spec(self) -> TerminalOutputSpec {
-        TerminalOutputSpec::new(self.name, self.description, self.schema)
+        let Self {
+            name,
+            description,
+            schema,
+            keeps_tools,
+        } = self;
+
+        let spec = TerminalOutputSpec::new(name, description, schema);
+        if keeps_tools { spec.with_tools() } else { spec }
     }
 }
 
@@ -124,5 +173,35 @@ mod tests {
         let template = spec();
 
         assert_eq!(template.clone(), template);
+    }
+
+    #[test]
+    fn a_shaping_turn_is_what_a_caller_gets_without_asking_for_more() {
+        // The default is the narrow turn, and it stays that way through the
+        // conversion: a spec that never mentioned tools must not acquire them
+        // on the way to mentra.
+        assert!(!spec().keeps_tools);
+        assert!(!spec().into_terminal_spec().keeps_tools);
+    }
+
+    #[test]
+    fn asking_for_the_toolset_survives_the_trip_to_mentra() {
+        // The whole of `with_tools` is one bool that has to arrive: dropped
+        // here, the run still answers — from a model that read nothing — and
+        // nothing about the result says the tools went missing.
+        let terminal = spec().with_tools().into_terminal_spec();
+
+        assert!(terminal.keeps_tools);
+        assert_eq!(terminal.tool_name, "report", "the rest of the spec travels");
+    }
+
+    #[test]
+    fn asking_for_the_toolset_leaves_the_caller_a_spec_to_reuse() {
+        // Same fan-out as above, one line later: `with_tools` returns a spec,
+        // so twenty runs share one working template as they share a shaping one.
+        let template = spec().with_tools();
+
+        assert_eq!(template.clone(), template);
+        assert_ne!(template, spec(), "and it is not the shaping spec");
     }
 }

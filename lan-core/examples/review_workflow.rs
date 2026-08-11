@@ -18,10 +18,10 @@
 //! - `EventFanIn`, so N concurrent runs narrate into one pane without losing
 //!   which of them said what.
 //!
-//! The one thing to copy carefully is on `review` below: a typed turn is handed
-//! exactly one tool and cannot read anything, so a reviewer takes two turns —
-//! one to read, one to answer. A single typed turn returns an empty list, and
-//! returns it as a success.
+//! The one thing to copy carefully is on `review` below: each reviewer takes
+//! two turns, one to read and one to answer. A typed turn can do both at once
+//! (`OutputSpec::with_tools`); two turns are the choice this workflow makes,
+//! for the reason written out there.
 //!
 //! ```sh
 //! export LAN_API_KEY=…                    # or ANTHROPIC_API_KEY, etc.
@@ -195,18 +195,22 @@ async fn main() -> Result<(), Box<dyn Error>> {
     Ok(())
 }
 
-/// One dimension's review, in the two turns a typed answer actually takes.
+/// One dimension's review, in two turns — a choice, not a constraint.
 ///
-/// **A typed turn is a shaping turn, not a working one.** While a run is
-/// answering into a schema it is handed exactly one tool — the one that *is*
-/// the answer — and it is forced to call it on the first round. It cannot read
-/// a file, run a command or reach an MCP server on that turn. Asking a reviewer
-/// for findings in a single `output` call therefore returns an empty list from
-/// a model that never opened anything, and it returns it as a success.
+/// A typed turn is a *shaping* turn by default: it is handed exactly one tool,
+/// the one that *is* the answer, and forced to call it on the first round, so
+/// it cannot read a file or run a command. Asking for findings in a single
+/// `output` call therefore returns an empty list from a model that never opened
+/// anything, and returns it as a success. `OutputSpec::with_tools` lifts that —
+/// one turn that reads and then answers — and a smaller workflow should reach
+/// for it.
 ///
-/// So: turn one is an ordinary run with the whole toolset, which is where the
-/// reading happens; turn two asks for the shape. The session carries the
-/// reading across, which is the entire reason a `PreparedRun` outlives a turn.
+/// This one keeps the two turns on purpose. The reading turn is where a
+/// reviewer's whole context goes, and here that context is deliberately narrow:
+/// three reviewers read for three different things, and the shaping prompt
+/// (`SUBMIT`) can then say "report what *you* found" without competing with a
+/// tool roster for the model's attention. The session carries the reading
+/// across, which is the entire reason a `PreparedRun` outlives a turn.
 async fn review(
     workspace: &Workspace,
     spec: RunSpec,
@@ -300,10 +304,11 @@ async fn narrate(merged: &mut MergedEvents<&'static str>) {
 /// The fan-in step: one more bounded run, given the findings rather than the
 /// code, drawing on what the reviewers left in the pool.
 ///
-/// A single typed turn is the right shape here and the wrong one in `review`,
-/// for the same reason: this judge has nothing to look up. Everything it weighs
-/// is in the prompt, so being handed one tool and told to answer costs it
-/// nothing.
+/// A single shaping turn is exactly right here, where in `review` it would have
+/// been the wrong half of a trade: this judge has nothing to look up.
+/// Everything it weighs is in the prompt, so being handed one tool and told to
+/// answer costs it nothing — and the forcing that costs nothing is the forcing
+/// worth keeping.
 async fn verify(
     workspace: &Workspace,
     pool: &BudgetPool,
