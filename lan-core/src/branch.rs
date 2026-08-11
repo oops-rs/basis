@@ -27,7 +27,7 @@
 //! # Why here and not in `run::prepared`
 //!
 //! Branching is its own concern with its own types, and
-//! [`PreparedRun`](crate::PreparedRun) already exposes everything it needs
+//! [`PreparedRun`] already exposes everything it needs
 //! through [`session`](crate::PreparedRun::session). Keeping it out of the
 //! module that drives turns leaves both smaller than one module holding both
 //! would be.
