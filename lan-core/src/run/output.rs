@@ -89,7 +89,7 @@ mod tests {
     fn spec() -> OutputSpec {
         OutputSpec::new(
             "report",
-            "call this once every file has been reviewed",
+            "the verdict you reached on the last turn",
             json!({
                 "type": "object",
                 "properties": {
@@ -107,7 +107,7 @@ mod tests {
         assert_eq!(terminal.tool_name, "report");
         assert_eq!(
             terminal.description,
-            "call this once every file has been reviewed"
+            "the verdict you reached on the last turn"
         );
         // The schema travels whole, descriptions included: they are what the
         // model reads to decide what belongs in the field.
