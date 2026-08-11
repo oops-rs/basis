@@ -3,7 +3,7 @@
 //! Split out of `server.rs` for its size — the file was past the 800-line
 //! ceiling with these inline, and past it again with the handlers still in one
 //! module. The handlers are driven end to end over a real connection in
-//! `tests/acp.rs`; what is left here is the pieces that can be checked without
+//! `tests/acp/`; what is left here is the pieces that can be checked without
 //! one, which is why they sit together rather than beside each handler.
 
 use std::path::{Path, PathBuf};

@@ -68,7 +68,7 @@ use crate::session::SessionRegistry;
 use lifecycle::Replay;
 
 /// Serves ACP over any transport, which is what makes the server testable
-/// in-process — see `tests/acp.rs`, which drives it over `Channel::duplex()`.
+/// in-process — see `tests/acp/`, which drives it over `Channel::duplex()`.
 ///
 /// [`serve_stdio`](crate::serve_stdio) is this over stdin and stdout, which is
 /// what `lan` with no subcommand runs.

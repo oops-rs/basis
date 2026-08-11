@@ -64,7 +64,7 @@ runtime."*
   signature that cannot express the protocol's own permission flow.
 - The rule "spawn before driving a turn" is invariant, not a preference. It is
   stated in `acp/server.rs`'s module docs and depended on by
-  `acp/approver.rs`'s. `tests/acp.rs` covers it with a real client over
+  `acp/approver.rs`'s. `tests/acp/` covers it with a real client over
   `Channel::duplex()`, under a timeout, because the failure it guards against
   is silence rather than a wrong answer.
 - One conversation runs one turn at a time: `session/prompt` holds an async
