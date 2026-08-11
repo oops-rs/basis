@@ -67,19 +67,28 @@ use crate::{
 /// cap each run with [`RunSpec::with_token_budget`] as well, or fan out less
 /// widely — but do not read `limit` as a ceiling.
 ///
-/// # What it cannot see
+/// # What it sees, and what it does not
 ///
-/// Exactly what [`RunUsage`] cannot see, for the same reason: work a run
-/// delegates through mentra's `task` tool runs on a fresh agent with a fresh
-/// accounting handle, so a subagent's tokens reach neither the parent's
-/// `RunUsage` nor this pool. mentra *can* share the handle down —
-/// `RunOptions::child()` exists for exactly that — but its own `task` intrinsic
-/// does not use it, and lan's default tool profile allows `task`. A fan-out
-/// whose runs delegate spends more than this pool will ever admit to. Narrowing
-/// that is upstream work (ADR-0005), not something lan can infer from outside.
+/// Delegated work is inside the pool, which is recent enough to be worth
+/// saying plainly. mentra's `task` intrinsic drives its subagent on the
+/// parent run's [`RunOptions::child`](mentra::runtime::RunOptions::child),
+/// which carries the *same* accounting handle — this pool's counter — and the
+/// same bound, so a fan-out whose runs delegate draws on one figure at every
+/// depth rather than spending beside it. The child's usage reports are relayed
+/// onto the parent's stream too, so [`RunUsage`] agrees with what stopped the
+/// turn. Before mentra `0436bae` none of that held: `task` ran its child on
+/// fresh options, and a delegating fan-out spent more than this pool would
+/// ever admit to.
 ///
-/// The other caveat is [`RunUsage`]'s: this counts what providers *report*. One
-/// that reports nothing spends nothing as far as the pool is concerned.
+/// The edge that survives is a refusal rather than an overrun. A delegation
+/// issued once the pool is already crossed inherits an allowance with nothing
+/// in it, does zero rounds, and fails the tool call visibly instead of
+/// returning an empty success — the delegating side of the same round-boundary
+/// softness described above.
+///
+/// What genuinely stays outside is [`RunUsage`]'s caveat and not a structural
+/// one: this counts what providers *report*. One that reports nothing spends
+/// nothing as far as the pool is concerned.
 ///
 /// # Running out
 ///
@@ -220,10 +229,10 @@ impl BudgetPool {
     ///
     /// **Not a settlement.** A run this pool bounded has already been counted,
     /// round by round, as it ran — passing its [`RunReport::usage`] here would
-    /// bill the job twice. This is for the other case: work that spent tokens
-    /// against the same allowance without drawing on the pool, such as a run
-    /// bounded some other way, or a delegated subagent whose usage a host
-    /// managed to observe for itself (see the blind spot above).
+    /// bill the job twice, and so would passing a delegated subagent's usage,
+    /// which now reports into this same counter on its own. This is for work
+    /// that spent against the same allowance without ever drawing on the pool:
+    /// a run bounded some other way, or a call the host made itself.
     ///
     /// Saturates rather than wrapping, so an absurd figure cannot roll the
     /// counter over and hand the job a fresh allowance.

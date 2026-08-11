@@ -19,17 +19,28 @@
 /// how many events were dropped — may have lost a report along with everything
 /// else, which undercounts.
 ///
-/// It counts the rounds of the run's own agent. A subagent gets its own event
-/// bus in mentra, and nothing relays it to the parent's, so work delegated
-/// through `task` does not appear here. The token bounds have the same blind
-/// spot rather than covering for it: mentra enforces
-/// [`TurnOptions::token_budget`](super::TurnOptions) and
-/// [`BudgetPool`](crate::BudgetPool) against an accounting handle it *can*
-/// share with a child — `RunOptions::child` exists for exactly that — but its
-/// own `task` intrinsic runs the child on fresh options, so a delegating run
-/// spends tokens that neither this figure nor its budget ever sees. Closing
-/// that needs a subagent's usage and accounting to reach the parent, which is
-/// upstream work (ADR-0005), not something lan can infer from the outside.
+/// It counts the rounds of the run's own agent *and* of the work that agent
+/// delegates. mentra's `task` intrinsic drives its subagent on the parent
+/// run's [`RunOptions::child`](mentra::runtime::RunOptions::child) and relays
+/// the child's usage reports onto the parent's bus, so a delegated round
+/// arrives here like any other — indistinguishable from the parent's own,
+/// which is consistent with the accounting being aggregate: mentra's usage
+/// report carries no agent id for anyone to attribute by. Summing the stream
+/// and reading this figure therefore give one answer, and it is the same
+/// answer [`TurnOptions::token_budget`](super::TurnOptions) and
+/// [`BudgetPool`](crate::BudgetPool) are enforced against, because the child
+/// shares the parent's accounting handle rather than getting one of its own.
+/// None of that was true before mentra `0436bae`: the child ran on fresh
+/// options and reported to a bus nobody read, so a delegating run spent tokens
+/// neither this figure nor any bound ever saw.
+///
+/// One edge survives, and it fails loudly rather than leaking: a delegation
+/// issued once the shared budget is already crossed inherits an allowance with
+/// nothing left in it, does zero rounds, and comes back as a failed tool call
+/// instead of an empty success. That is the round-boundary softness
+/// [`TurnOptions::token_budget`](super::TurnOptions) already describes, seen
+/// from the delegating side, and mentra pins it
+/// (`delegating_with_the_budget_already_spent_fails_the_delegation`).
 ///
 /// And cache tokens are counted but never mixed in — see
 /// [`total_tokens`](Self::total_tokens).

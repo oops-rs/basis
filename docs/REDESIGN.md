@@ -1,12 +1,15 @@
 # lan — Redesign plan
 
-> rev 4 · 2026-08-11 · The transition from the P0–P4 harness to the SDK-first
+> rev 5 · 2026-08-11 · The transition from the P0–P4 harness to the SDK-first
 > shape decided in [ADR-0010](adr/0010-the-crate-is-the-workflow-surface.md)
 > through [ADR-0015](adr/0015-cli-grammar.md). This document is the honest
 > ledger of that transition: what exists, what is in between, what is not
 > started. `README.md` and `ARCHITECTURE.md` describe the *shipped* state and
 > are updated per phase as work lands — never ahead of it.
-> **Phases A, B and C have landed** (rev 4); D is open.
+> **Phases A, B, C and D have landed** (rev 5), with one Phase D item — declared
+> subprocess tools — deliberately **held** rather than built, because no
+> concrete use case exists for it on record and the phase's own rule is that
+> its items ship only against one (Bet 7).
 
 ## 1. The target in one paragraph
 
@@ -30,7 +33,13 @@ Phase B landed in three more — `fbcacb4` (the crate split), `a4c259c`
 its reason again, over mentra `15fdcfe`) — and its rows carry those. Phase C
 landed in four — `8b52ebf` (the `Workspace` / run split), `07cf4d1` (typed
 output, cancellation, usage, fan-in, over mentra `fce664a`), `e21d632` (the
-`BudgetPool`), `0ff745c` (the two acceptance examples).
+`BudgetPool`), `0ff745c` (the two acceptance examples). Phase D landed in five
+— `f3529be` (credential redaction and a resolution that answers to no shell),
+`397ca13` (`with_store_dir`), `e81e5d8` (the interception seam's in-process
+binding, and `session/list` working at all), `71cc59d`
+(`with_ephemeral_history`), `f76617d` (the last rustdoc warning) — over two
+mentra fixes, `0436bae` (delegated task accounting) and `b1a83de` (store
+recovery deferred to build).
 
 | Piece | Decided in | Status today |
 |---|---|---|
@@ -52,11 +61,14 @@ output, cancellation, usage, fan-in, over mentra `fce664a`), `e21d632` (the
 | Tagged sinks / event fan-in | 0010 | **Built** (`07cf4d1`) — `EventFanIn` mints one `TaggedSink` per run and merges them into `MergedEvents`; the tag rides outside `Event`, so the versioned wire schema is untouched [13] |
 | Cancellation on the public API | 0010 | **Built** (`07cf4d1`) — `TurnOptions::cancellable()` / `stoppable()` / `with_cancel` / `with_stop`, `execute_with_options` and its neighbours on every entry point, and `CancellationToken` re-exported under the rule the commit writes down: every mentra type lan's surface makes a caller *name*, lan re-exports [8] |
 | Recipe + review-workflow examples | 0010/0014 | **Built** (`0ff745c`) — `examples/watch.rs` and `examples/review_workflow.rs`, public-API only, both run live [12] |
-| Declared subprocess tools | 0012 | **Not started** |
-| Hooks re-founded as authorizer binding | 0012 | **In between** — hooks work; unification with the `Approver`/`ToolAuthorizer` seam is structural, not behavioral |
-| Subagents / teams surfaced | 0010 | **In between** — mentra ships `task` + `team_*` and lan sets no tool profile, so `task` is already reachable from every run. What Phase C added is the reason the decision matters: a delegated turn's tokens reach neither `RunUsage` nor any bound [10] |
+| Declared subprocess tools | 0012 | **Not started** — held for a concrete use case (Bet 7) |
+| Hooks re-founded as authorizer binding | 0012 | **Built** (`e81e5d8`) — interception is one contract with two bindings: an in-process `Interceptor` trait and subprocess hooks, folded by one `Chain` so first-refusal-wins and composing modifications hold for both by construction. `Approver` stays a *sibling* seam rather than a parent — asking a person and rewriting a call are different questions, and mentra keeps them apart for the same reason [15] [16] |
+| Subagents / teams surfaced | 0010 | **In between**, and for a smaller reason than before — `task` stays in the default reach and is now *accounted*: mentra `0436bae` runs the delegated subagent on the parent's `RunOptions::child()` and relays its usage, so delegated tokens reach both the parent's bounds and its stream. `team_*` is still reachable and still awaiting a concrete use case before lan surfaces it deliberately [10] |
+| History location on `WorkspaceBuilder` | 0010 | **Built** (`397ca13`, `71cc59d`) — `with_store_dir(dir)` says where, `with_ephemeral_history()` says nowhere, and `store::list_in` reads back what the first wrote. One private field, so last call wins structurally. Closes the data-directory hole footnote 6 had been recording since Phase C [6] |
+| `session/list` over ACP | 0007/0010 | **Built** (`e81e5d8`) — it had never worked: lan filtered on the workspace's runtime identifier while writing every agent under mentra's `"default"`. `WorkspaceBuilder::open` now tags what it persists. Forward-only, deliberately [17] |
+| Credentials never printed | — | **Built** (`f3529be`) — `ProviderChoice` and `McpServer`'s stdio env hand-write `Debug`: names kept so a misconfiguration stays fixable, values redacted. Provider resolution reads the environment through a passed-in lookup, so the suite passes identically with `LAN_API_KEY`/`LAN_BASE_URL` set and unset [18] |
 
-Footnotes on the Phase B and Phase C rows, because a ledger that records only
+Footnotes on the Phase B, C and D rows, because a ledger that records only
 the wins is not a ledger:
 
 1. `cargo tree -p lan-core` still shows `tokio-tungstenite`. It arrives
@@ -93,24 +105,40 @@ the wins is not a ledger:
    Threading a reason through `RememberedRule` was wider than `15fdcfe`
    needed to be; deliberately left as the third upstream candidate under
    ADR-0005.
-6. **The suite writes a real database under the user's data directory**, and
-   Phase C is where that finally got written down rather than where it
-   started. A runtime with no store configured takes mentra's default —
-   `~/Library/Application Support/mentra/workspaces/<hash>/runtime.sqlite` on
-   macOS, `data_local_dir()` elsewhere (`mentra/src/default_paths.rs`) — and
-   lan has been building real `Runtime`s in tests since P1 (`af04f9d`):
-   `cargo test -p lan-core --test approval` alone touches that file, no
-   `Workspace` involved. What Phase C changed is how ordinary it is, since
+6. **The suite wrote a real database under the user's data directory** — and
+   Phase D closed it end-to-end, so this footnote is now a record of a fixed
+   hole rather than an open one. A runtime with no store configured takes
+   mentra's default — `~/Library/Application Support/mentra/workspaces/<hash>/runtime.sqlite`
+   on macOS, `data_local_dir()` elsewhere (`mentra/src/default_paths.rs`) —
+   and lan had been building real `Runtime`s in tests since P1 (`af04f9d`):
+   `cargo test -p lan-core --test approval` alone touched that file, no
+   `Workspace` involved. Phase C made it ordinary rather than causing it, since
    `Workspace::open` makes "this test drives a real runtime" the default shape.
-   Two things follow that are worth knowing before someone rediscovers them.
-   The knob is *not* missing upstream — `RuntimeBuilder::with_store` takes any
-   `RuntimeStore` and `SqliteRuntimeStore::new` is public — so this is lan's
-   gap and not mentra's: `WorkspaceBuilder` exposes no `with_store`, and
-   adding one is a lan-side builder method, not an ADR-0005 candidate. And the
-   default path is keyed by the *process's* current directory rather than by
-   the workspace path lan opened, so every test binary in one `cargo test`
-   shares one file whatever temp directory it opened — verified by running two
-   test binaries and watching one `runtime.sqlite` change under both.
+   Two facts made it worse than it looked. The default path is keyed by the
+   *process's* current directory rather than by the workspace lan opened, so
+   every test binary in one `cargo test` shares one file whatever temp
+   directory it opened — verified by running two test binaries and watching one
+   `runtime.sqlite` change under both. And mentra opened that default store
+   *eagerly*, at handle construction, before `with_store` could rebind it, so
+   even a runtime that named its own store still touched the machine-wide file
+   on the way past — which `397ca13` named as an upstream item rather than
+   papering over.
+   Three changes close it. `397ca13` added `WorkspaceBuilder::with_store_dir`
+   and moved the test suites onto scratch stores; `71cc59d` added
+   `with_ephemeral_history` and moved them again, onto mentra's in-memory store,
+   which is where a test that is not testing persistence belongs; mentra
+   `b1a83de` made store recovery wait for the store the builder ends with, so
+   constructing one only records a path and the first `open()` is what touches
+   disk. The honest metric is now flat in both directions: across a full
+   `cargo test --workspace`, agent rows in the machine-wide default database
+   move by zero and the file's mtime does not move either — measured on all four
+   paths a lan test binary could key (`b5a71edc0abf57d2` for the workspace root,
+   `e8f5371f626eb964` for `lan-core`, `9e7efd0f1007c4b0` for `lan-acp`,
+   `cc9c24177d9e277d` for `lan`). Temp directories left behind per run: zero.
+   The rows those databases already hold — 1,046 under `lan-core`'s hash, 260
+   under the binary's, 110 under the workspace root's — are the historical
+   accumulation, and nothing deletes them; the claim is about what a run adds
+   from here, which is nothing.
 7. `RuntimeBuilder`'s privacy (footnote 3) bit again, in the place the split
    made most visible. `WorkspaceBuilder::open` folds the discovered MCP
    servers into the builder inline (`lan-core/src/workspace/builder.rs`,
@@ -136,24 +164,42 @@ the wins is not a ledger:
    prose: lan asks mentra for a `Value` and deserializes it here, so an answer
    that does not fit `T` is lan's finding and a caller can retry it with a
    clearer schema.
-10. **Delegated tokens escape every bound lan can set.** mentra's `task`
-    intrinsic spawns a subagent and drives it with `child.send(…)`
-    (`mentra/src/runtime/intrinsic/execute.rs`), and `send` is
-    `run(content, RunOptions::default())` (`mentra/src/agent/lifecycle.rs`) —
-    a fresh, zeroed counter and no bound at all. So a delegating run's
-    subagent tokens reach neither `RunUsage` nor `TurnOptions::token_budget`
-    nor a `BudgetPool`. `RunOptions::child()` exists and documents itself as
-    the way to share exactly that accounting, and mentra's own path does not
-    use it; lan sets no `tool_profile`, so `task` is available to every run by
-    default. The clearest upstream candidate Phase C found (ADR-0005) — lan
-    cannot infer a subagent's spending from outside. One live observation
-    belongs on the same pile without being a claim about either crate: on the
-    gateway the acceptance runs used, one model failed *every* reading turn
-    with `malformed provider event: assistant turn ended before MessageStopped`
+10. **Delegated tokens used to escape every bound lan could set. They no longer
+    do.** Phase C found the hole and Phase D's upstream wave closed it, so what
+    follows is both halves. The hole: mentra's `task` intrinsic spawned a
+    subagent and drove it on `RunOptions::default()` — a fresh, zeroed counter
+    and no bound at all — while `RunOptions::child()` sat beside it documenting
+    exactly the inheritance that path needed. A delegating run's subagent
+    tokens therefore reached neither `RunUsage` nor `TurnOptions::token_budget`
+    nor a `BudgetPool`, and lan sets no `tool_profile`, so `task` is available
+    to every run by default.
+    The fix is mentra `0436bae`, and it closes the gap on both sides.
+    Accounting: the parent's in-flight options reach the spawn site through
+    `ToolContext::child_run_options`, so the delegated run shares the parent's
+    accounting handle and `token_budget` and ends with its cancellation, stop,
+    and deadline (`mentra/src/runtime/intrinsic/execute.rs`). Observation: the
+    child's `UsageReport` events are relayed onto the parent's bus for the
+    duration of the run, so an observer summing lan's event stream gets the
+    same total the accounting handle reports — pinned upstream by
+    `delegated_subagent_usage_counts_against_the_parent_token_budget` and
+    `delegated_usage_reports_reach_the_parent_event_stream`. `child()`'s own
+    rustdoc no longer claims mentra never spawns a child run itself, which it
+    had.
+    One edge follows from round-boundary softness and is pinned rather than
+    hidden: a delegation issued *after* the budget is already crossed inherits
+    a spent allowance, does zero rounds, and fails visibly instead of
+    succeeding empty (`delegating_with_the_budget_already_spent_fails_the_delegation`).
+    `Session::spawn_subagent` is deliberately unchanged — host-initiated, with
+    nothing in flight to inherit — and gained `spawn_subagent_with_options` for
+    a host that wants the inheritance anyway.
+    One live observation from Phase C stays on the pile without being a claim
+    about either crate: on the gateway the acceptance runs used, one model
+    failed *every* reading turn with
+    `malformed provider event: assistant turn ended before MessageStopped`
     where two others on the same gateway did the same work, and what set it
     apart is that it reached for `task` where they read files directly. One
     gateway, one model, no reduction — recorded because the delegating path is
-    already where the unknowns are.
+    where the unknowns were.
 11. **A crossed token budget is a silent success upstream**, which is why two
     lan decisions look the way they do. `mentra/src/agent/runner.rs` answers
     `options.token_budget_exceeded()` with a plain `return Ok(())` at the
@@ -211,6 +257,86 @@ the wins is not a ledger:
     breaking addition for anyone matching it exhaustively. Accepted
     knowingly: lan is unpublished, and pre-1.0 the crate API is the stated
     compatibility surface.
+15. **`HookRunner::decide` now refuses when interceptors are registered**, which
+    is a behavior change on a public method and a deliberate one. `decide` is
+    synchronous; an `Interceptor` is `async` by contract; there is nowhere in a
+    synchronous call to await one. The two options were to skip the
+    interceptors — silently removing a control the host believes is in place,
+    the exact failure the module is arranged to avoid — or to deny with a
+    reason naming `decide_async`. It denies. A runner with no interceptors is
+    unaffected, so nothing that worked before this change behaves differently;
+    what changed is that a *new* combination fails closed rather than quietly.
+    `lan-core/src/hooks/runner.rs`.
+16. **Implementing a lan trait costs the host an `async-trait` dependency.**
+    `Interceptor` and `Approver` are both `#[async_trait]`, and `lan-core` does
+    not re-export the macro, so a host writing either impl adds
+    `async-trait = "0.1"` to its own manifest to spell the attribute. A
+    consistent papercut rather than a defect — mentra's own hook trait has the
+    same shape and the reason is the same one (a participant that reads a file
+    or takes a lock must not block a runtime worker) — but it is a line of
+    someone else's `Cargo.toml` that lan's docs ask for without saying so.
+17. **`session/list` had never worked, and the fix is forward-only on purpose.**
+    lan filtered listings on the workspace's runtime identifier
+    (`store::runtime_identifier`) while `WorkspaceBuilder::open` never set one,
+    so mentra tagged every agent `"default"` and no workspace's list ever
+    matched a row. `e81e5d8` sets the tag. Three upstream facts decide what
+    happens to rows written before it. Listing is one query —
+    `SELECT id FROM agents WHERE runtime_identifier = ?1`
+    (`SqliteRuntimeStore::list_agents_by_runtime`) — so an untagged row cannot
+    appear. Resuming does not consult the tag at all: `load_agent` is
+    `… FROM agents WHERE id = ?1`, so every pre-existing conversation is still
+    resumable by id. And the agent upsert re-tags on conflict
+    (`ON CONFLICT(id) DO UPDATE SET runtime_identifier = excluded.runtime_identifier`),
+    so an old conversation joins its workspace's list the first time it is
+    resumed and used. That is why there is no migration: nothing is stranded,
+    and the gap heals on use. The alternative — falling back to reading
+    `"default"` when a workspace's own query comes back empty — would be
+    strictly worse, because `"default"` is also *every other mentra program's*
+    tag in the same shared database, so a client would be offered conversations
+    that were never the user's.
+18. **The redactions are hand-written, which is the cost of having them.**
+    `ProviderChoice` printed its `api_key` through a derived `Debug` — which is
+    how a failing resolution test once put a live key in a terminal, since
+    `expect()` formats the `Ok` it did not want — and `McpServer`'s stdio `env`
+    had the same shape, holding already-expanded values like a real
+    `GITHUB_TOKEN` and deriving its way into every `{:?}` of an `McpConfig`,
+    `McpSource`, or `RunConfig`. Both now write `Debug` by hand: names kept,
+    because naming `env.GITHUB_TOKEN` is what makes a misconfiguration fixable;
+    values redacted. The edge that comes with it is the ordinary one for a
+    hand-written impl — a field added later is not redacted until someone adds
+    it here — and it is the reason the SSE side was left alone, since it
+    already self-redacts through mentra's `SecretString`. The same commit made
+    provider resolution read the environment through a passed-in lookup, the
+    idiom `crate::mcp` already uses for `${VAR}` expansion, so its rules are
+    pinned by fixtures rather than by whatever the shell that started the tests
+    exported: the suite passes identically with `LAN_API_KEY`/`LAN_BASE_URL`
+    set and unset, and the `env -u` ritual that used to precede every
+    invocation is retired.
+19. **Tests move to their own file at the 800-line ceiling**, adopted as a
+    convention this phase rather than declared: `lan-core/src/hooks/runner.rs`
+    and `lan-core/src/workspace/builder.rs` both ended `mod tests;` with the
+    cases in `runner/tests.rs` and `builder/tests.rs`, which is what kept them
+    under the limit while growing. Two pre-existing files are still over it and
+    are not pretending otherwise — `lan-acp/src/server.rs` at 1,089 lines and
+    `lan/src/main.rs` at 1,073. Neither was touched this phase; both are named
+    here so the ceiling stays a real number rather than an aspiration.
+20. **mentra's `MockRuntime` littered, and could collide.** With no store
+    configured, `MockRuntime::builder().build()` minted
+    `$TMPDIR/mentra-mock-runtime-<nanos>.sqlite` (`mentra/src/test.rs`) and
+    nothing removed it: a full `cargo test --workspace` in lan left 58 such
+    files behind, measured as a before/after delta against mentra `b1a83de`.
+    That is litter rather than a correctness problem. The correctness question
+    was the second use of the same clock — the mock's runtime identifier is
+    `mock-runtime-<nanos>` from the same `now_nanos()` — so two mocks built
+    inside one nanosecond tick would have shared both a store path and a
+    runtime identifier, and each would have listed the other's agents. That is
+    offered as a *suspected* mechanism and nothing more: a flake in
+    `lan-core/tests/hooks.rs` was seen exactly once, has not reproduced since,
+    and was never reduced to a failing case, so the honest statement is that
+    the collision was possible in principle and unproven in this instance.
+    The mentra fix — `MockRuntime` defaulting to the volatile store, with the
+    SQLite path kept as an explicit `with_store` — landed as mentra `aa206b7`,
+    and with it the same before/after delta is zero.
 
 Discoveries that shrank the plan: structured output and per-run bounds +
 cancellation were assumed to be new mentra work; both already exist upstream
@@ -221,19 +347,30 @@ so a lan denial can say why it refused. Phase C made a second one, for the
 same reason: the typed path wanted a *session*-level entry point so a typed
 turn would emit the same events as any other, and mentra grew
 `Session::append_turn_to_output` (`fce664a`) rather than lan reaching past the
-session to the agent.
+session to the agent. Phase D made three more, and they are the first that
+fixed something *already wrong* upstream rather than adding a door lan needed:
+`0436bae`, `b1a83de`, and `aa206b7`.
 
 What Phase C mostly discovered, though, is where the honest edges are — and
-they are cheaper to name than to close. Three candidates join ADR-0005's list.
-Two are about accounting: a `task`-delegated subagent runs on default options,
-so its tokens are invisible to every bound lan can set (footnote 10), and a
-crossed token budget returns an untyped `Ok`, so lan cannot report a stop it
-cannot observe (footnote 11). The third is about ergonomics rather than truth:
-a typed turn holds only its terminal tool, which is upstream's documented
+Phase D is where two of them stopped being edges. The running tally, because a
+list of "candidates" that only grows says nothing about whether the ADR-0005
+discipline works. **Nine named across Phases B–D. Three fixed upstream this
+phase**: `task`-delegated accounting, which now shares the parent's handle and
+relays its usage (mentra `0436bae`, footnote 10); the eager default-store
+open, which now waits for the store the builder ends with (mentra `b1a83de`,
+footnote 6); and `MockRuntime` defaulting to the volatile store, which took
+the temp litter and a possible identifier collision with it (mentra `aa206b7`,
+footnote 20). **Five still open**, none of them blocking: a crossed token
+budget returns an untyped `Ok`, so lan cannot report a stop it cannot observe
+(footnote 11); `RuntimeBuilder` is public inside a private module, so no
+downstream code can name it (footnotes 3 and 7); a `RememberedRule` keeps a
+verdict without its reason (footnote 5); `tokio-tungstenite` is unconditional
+in mentra-provider, so there is no lan-side gate to close (footnote 1); and a
+typed turn holds only its terminal tool, which is upstream's documented
 contract and still costs every workflow a turn of reading before it can shape
-(footnote 12). One more edge is lan's own to fix rather than mentra's — a store
-knob on `WorkspaceBuilder` (footnote 6). Together with Phase B's three, that is
-six upstream candidates named and none of them blocking.
+(footnote 12). One edge on that Phase C list was lan's own rather than
+mentra's — a store knob on `WorkspaceBuilder` — and `397ca13` plus `71cc59d`
+built it (footnote 6).
 
 ## 3. Phases
 
@@ -325,20 +462,61 @@ actually do. A fact about the surface the acceptance criterion could not have
 predicted, found by writing the example and paid for in doc corrections rather
 than in API changes.
 
-### Phase D — Bindings (evidence-gated)
+### Phase D — Bindings (evidence-gated) — **landed, less the item held**
 
-1. Declared subprocess tools: manifest discovery + stdio wrapper over
-   `ExecutableTool`.
-2. Hook/authorizer unification per ADR-0012 — structural refactor; behavior
-   (fail-closed, allow/deny/modify) unchanged.
-3. Surface mentra `task`/`team_*` deliberately rather than by default; agent
-   definitions as workspace data if demanded. Phase C sharpened this one: lan
-   sets no tool profile, so `task` is already reachable, and a delegated turn
-   spends tokens no bound of lan's can see (footnote 10). "Decide their place"
-   now means deciding that too.
+1. ⏸ Declared subprocess tools: manifest discovery + stdio wrapper over
+   `ExecutableTool`. **Held, not built.** No concrete use case exists for it on
+   record, and the rule below is that a Phase D item ships only against one.
+   Building it anyway would be the phase failing its own test.
+2. ✅ Hook/authorizer unification per ADR-0012. — `e81e5d8`. It came out as one
+   contract with two bindings rather than as a merge: `hooks::contract` holds
+   the types both bindings speak, one `Chain` decides what any answer means, and
+   `HookRunner` owns the order — interceptors first in registration order, then
+   global hooks, then workspace hooks, on the rule that the further a
+   participant is from the workspace's own data, the earlier it speaks. That
+   ordering is load-bearing rather than cosmetic: since the first refusal
+   short-circuits, it is what lets a host's compiled guard refuse before a
+   repository-supplied program is spawned at all. Fail-closed carries over
+   unchanged — an erroring or panicking interceptor denies, on its own task so
+   a panic cannot take the turn — and the one behavior change is the honest
+   consequence of a sync method meeting an async contract (footnote 15). The
+   `Approver` seam is deliberately untouched: approval-with-a-person and
+   execution-policy-with-rewriting are sibling seams upstream, and merging them
+   would trade two honest contracts for one vague one.
+3. ◐ Surface mentra `task`/`team_*` deliberately rather than by default.
+   **Half done, and the half that was urgent.** `task` is still in the default
+   reach — but the reason that mattered is gone: mentra `0436bae` makes a
+   delegated turn spend against the parent's bounds and report onto its stream
+   (footnote 10), so "reachable by default" no longer means "spends money
+   nobody can see". Deciding `team_*`'s place is what remains, and it waits on
+   a concrete use case like item 1.
+
+Beyond the three planned items, Phase D shipped what the work turned up:
+`WorkspaceBuilder::with_store_dir` and `with_ephemeral_history` with
+`store::list_in` as the reading mirror (`397ca13`, `71cc59d`), which closed the
+data-directory hole footnote 6 had been carrying since Phase C; `session/list`,
+which had never worked in any release (`e81e5d8`, footnote 17); and credential
+redaction with a provider resolution that answers to a passed-in lookup rather
+than to the ambient shell (`f3529be`, footnote 18). None of the three was
+planned; each was found by doing the planned work.
 
 Each Phase D item ships only against a concrete use case, per Bet 7. Gaps
 found here are filed as mentra issues even when fixed immediately (ADR-0005).
+
+Acceptance: met, with item 1 held rather than claimed. `cargo test --workspace`
+is 625 passed, 0 failed, and it is that in both directions — with
+`LAN_API_KEY`/`LAN_BASE_URL` exported and with them scrubbed, which is the
+claim `f3529be` makes and the reason the `env -u` ritual is retired. The
+data-directory probe is zero: across a full suite run, agent rows in the
+machine-wide default database move by zero and no `runtime.sqlite` under any of
+lan's four candidate paths changes mtime (footnote 6), and no temp directory is
+left behind. `RUSTDOCFLAGS="-D warnings" cargo doc -p lan-core --no-deps` is
+clean, which `f76617d` is the last commit of, and the ten `lan-core` doctests
+pass under the scrubbed environment. Two hygiene notes belong with that rather
+than in the win column: the phase adopted tests-in-their-own-file at the
+800-line ceiling and named the two files still over it (footnote 19), and
+mentra's `MockRuntime` left 58 stray SQLite files in the temp directory per
+suite run until the fix now in flight, which takes that to zero (footnote 20).
 
 ## 4. Explicitly not planned
 
@@ -367,10 +545,14 @@ found here are filed as mentra issues even when fixed immediately (ADR-0005).
   "never called the terminal tool" with the same error as a malformed stream
   (footnote 9). Neither cost a surface change; the first cost three doc
   corrections (`dae4765`), which is the cheap way to find that out.
-- **Token accounting is honest about less than it looks like.** `RunUsage`, a
-  `--token-budget` and a `BudgetPool` all count what providers *report*, and
-  all three are blind to what a run delegates through `task` (footnote 10).
-  The numbers are real; their scope is narrower than "what this job cost", and
-  the rustdoc on each says so rather than the docs implying otherwise.
+- **Token accounting is honest about less than it looks like** — narrower now
+  than when this line was written. `RunUsage`, a `--token-budget` and a
+  `BudgetPool` all count what providers *report*, and that caveat is
+  permanent. What is no longer true is the second half: all three were blind to
+  what a run delegated through `task`, and mentra `0436bae` closed that in both
+  directions, accounting and event stream (footnote 10). The numbers are real;
+  their scope is "what was reported for this run and everything it delegated",
+  which is most of the way to "what this job cost", and the rustdoc on each says
+  so.
 - **Bridge limbo.** Neither core nor extracted; revisit when acp-ui usage is
   real or an upstream home appears.

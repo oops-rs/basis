@@ -237,8 +237,10 @@ its prompt is sent — a decision with its own name, so a fan-out stops minting 
 of retrying it like a provider error.
 
 Both the pool and `RunReport::usage` count what providers *report*. One that reports
-nothing spends nothing as far as either is concerned, and work a run delegates through
-mentra's `task` tool is invisible to both.
+nothing spends nothing as far as either is concerned. Work a run delegates through
+mentra's `task` tool *is* counted: the subagent runs on the parent's accounting handle and
+its usage reports are relayed onto the parent's stream, so the figure and the bound both
+cover it.
 
 ### One stream for many runs
 
@@ -290,6 +292,66 @@ turn even though nothing was discarded, because mentra still owes a final assist
 and the last committed one was a tool result. The work is kept either way; the report is
 what disagrees.
 
+### Getting a say over each tool call
+
+Interception is one contract with two bindings. A repository declares a subprocess in
+`.lan/hooks.json`; an embedding host implements `Interceptor` and its own compiled code
+gets the say, which is what you want when the guard needs a vault handle, a token you just
+minted, or a regex that lives in a config struct:
+
+```rust
+#[async_trait::async_trait]
+impl lan_core::Interceptor for Redact {
+    fn name(&self) -> &str { "redact" }
+
+    async fn intercept(&self, call: &lan_core::HookRequest)
+        -> Result<lan_core::HookOutcome, lan_core::InterceptorError>
+    {
+        let Some(command) = call.input.get("command").and_then(|v| v.as_str()) else {
+            return Ok(lan_core::HookOutcome::Allow);
+        };
+        if !command.contains("--token") {
+            return Ok(lan_core::HookOutcome::Allow);
+        }
+        Ok(lan_core::HookOutcome::Modify {
+            input: serde_json::json!({"command": "deploy --token REDACTED"}),
+            reason: Some("stripped a credential".to_string()),
+        })
+    }
+}
+
+let workspace = lan_core::Workspace::builder("/repo").with_interceptor(Redact).open().await?;
+```
+
+Both bindings speak the same vocabulary and are folded by the same chain, so allow, deny,
+and modify mean one thing whichever side said it. They are consulted interceptors first in
+registration order, then global hooks, then workspace hooks — the further a participant is
+from the workspace's own data, the earlier it speaks — and since the first refusal
+short-circuits, that is what lets your own guard refuse before a repository's program is
+spawned at all. A participant that errors or panics **denies**. The trait is `async`, so
+your crate needs `async-trait` to spell the attribute.
+
+The other seam is `Approver`, and the two are deliberately not merged: an approver answers
+*may this happen* and feeds the permission machinery a person drives, while an interceptor
+answers *may this happen, in this form* and composes with everything else on the chain.
+
+### Where the history goes
+
+Conversations are persisted by mentra, and unset, it picks a database keyed by the
+*process's* current directory — not by the workspace you opened. Two knobs say otherwise,
+and the last one called wins:
+
+```rust
+lan_core::Workspace::builder("/repo").with_store_dir("/var/lib/myapp/history")  // there
+lan_core::Workspace::builder("/repo").with_ephemeral_history()                  // nowhere
+```
+
+`with_store_dir` keeps this workspace's conversations in a directory you name, and
+`lan_core::store::list_in` reads them back from it. `with_ephemeral_history` uses an
+in-memory store: resume works inside the workspace's lifetime and nothing survives the
+process — no file, no export, no way to make one durable afterwards, so a host that might
+want that later wants `with_store_dir` now.
+
 See [`lan-core/examples/embed.rs`](lan-core/examples/embed.rs) for a host that reacts to
 events as they arrive, [`conversation.rs`](lan-core/examples/conversation.rs) for the
 two-turn version, [`watch.rs`](lan-core/examples/watch.rs) for the recurring-run loop, and
@@ -313,6 +375,13 @@ here are only what a client cannot say. Sessions are mentra agents, which means
 `session/load` resumes a conversation from a previous process, and `session/cancel` stops a
 turn in flight. Permission requests become `session/request_permission`, so approval is the
 client's UI rather than lan's ([ADR-0007](docs/adr/0007-acp-sessions-and-the-dispatch-loop.md)).
+
+`session/list` works as of the interception wave, and had not before: lan filtered listings
+by the workspace a conversation belongs to while filing every conversation under mentra's
+`"default"` tag, so no list ever matched. Conversations from before the fix keep the old
+tag and do not appear in a list — but none of them is stranded, because resuming looks a
+conversation up by id and never by tag, and mentra re-files one under its workspace the
+first time it is resumed and used.
 
 An editor spawning lan and a shell pipe look identical from inside the process — both are a
 non-TTY stdin with no arguments — so `cat prompt.txt | lan` cannot be detected as a prompt
@@ -403,7 +472,9 @@ the example calls it inline because that loop has nothing else to do while it wa
 - **Hooks** — `.lan/hooks.json` lists commands that get a JSON object on stdin and answer
   with one on stdout: `allow`, `deny` with a reason the model sees, or `modify` with a
   replacement input. Any language, process-isolated. A hook that breaks denies by default,
-  because a guard that fails open is a guard nobody knows is gone.
+  because a guard that fails open is a guard nobody knows is gone. This is the subprocess
+  binding of the interception contract; an embedding host's own `Interceptor` is the other,
+  and both are folded by one chain (see above).
 - **Approval** — `--approve prompt` puts every consequential call to you first, with the
   command or the changed keys shown; `always` (the default on the CLI) and `never` are the
   other two settings. Over ACP the default is `prompt`, since there is a client to ask.
@@ -426,7 +497,8 @@ the example calls it inline because that loop has nothing else to do while it wa
 ## Status
 
 **P0–P4 complete.** Everything the original plan called a phase is built: the ACP server on
-stdio (the default mode) with modes, session listing and history replay; multi-turn
+stdio (the default mode) with modes, session listing — which only began returning anything
+in Phase D — and history replay; multi-turn
 conversation and resume; one-shot `lan run` in prose or JSONL; MCP servers from `.mcp.json`
 and from the client; prompt templates surfaced as commands; subprocess hooks that allow,
 deny, or rewrite a tool call; a websocket bridge for
@@ -444,7 +516,11 @@ landed** too — the split into `lan-core`, `lan-acp`, and the binary, MCP behin
 and approval as the `Approver` trait alone. **So has Phase C, the SDK proper** — the
 `Workspace` / run split, typed output, cancellation on every entry point, the shared
 `BudgetPool`, tagged sinks with a fan-in, and the two acceptance examples that were its
-criterion. Phase D (bindings) is open, and this README describes only what is built.
+criterion. **And Phase D, the bindings** — interception as one contract with two bindings,
+the two history knobs, `session/list` working for the first time, and credentials kept out
+of every `Debug`. One Phase D item is deliberately held rather than built: declared
+subprocess tools, because no concrete use case for them exists on record and the phase's
+rule is that its items ship only against one. This README describes only what is built.
 
 Still open, and named honestly: compaction tuning, the packages convention, and provider
 OAuth remain, and **nobody has driven this from Zed or JetBrains yet** — it is verified
