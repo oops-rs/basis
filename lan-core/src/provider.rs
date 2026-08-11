@@ -3,6 +3,23 @@
 //! Which model answers is configuration, not a lan opinion — but *finding* the
 //! credential is glue every embedder would otherwise write, so lan does it
 //! once, by the environment-variable names the ecosystem already uses.
+//!
+//! # Nothing here repeats what it read
+//!
+//! The value this module goes looking for is a credential, so
+//! [`ProviderChoice`]'s `Debug` redacts it. That is not hypothetical tidiness:
+//! a resolution test that failed with the wrong variables exported printed a
+//! live key into a terminal, because `expect` formats the `Ok` it did not
+//! want. The same rule as [`WorkspaceBuilder`](crate::WorkspaceBuilder)'s own
+//! `Debug`.
+//!
+//! # The environment is a parameter
+//!
+//! Resolution consults the environment in three places — the base URL, the
+//! compatible-endpoint key, and auto-detection — which is enough to make every
+//! test of it a test of the shell that started it. So the lookup is passed in,
+//! exactly as [`crate::mcp`] passes one to `${VAR}` expansion, and the rules
+//! below can be pinned without mutating the process's own environment.
 
 use mentra::BuiltinProvider;
 use thiserror::Error;
@@ -29,7 +46,7 @@ const BASE_URL_VARS: &[&str] = &["LAN_BASE_URL", "OPENAI_BASE_URL"];
 const COMPATIBLE_KEY_VARS: &[&str] = &["LAN_API_KEY", "OPENAI_API_KEY"];
 
 /// A provider together with the key it will authenticate with.
-#[derive(Debug, Clone)]
+#[derive(Clone)]
 pub struct ProviderChoice {
     pub provider: BuiltinProvider,
     pub api_key: String,
@@ -39,6 +56,23 @@ pub struct ProviderChoice {
     /// than the provider's own service. Already normalized by
     /// [`normalize_base_url`].
     pub base_url: Option<String>,
+}
+
+/// Hand-written so a resolved credential cannot reach a log — or a panicking
+/// test's output — through a `{:?}`. This is the struct an `expect` on a
+/// resolution prints, and the field is a key lan has just read out of the
+/// environment, in plain text. Everything else is printed as it is, including
+/// `source_var`: naming the variable a key came from is how a caller debugs
+/// which one won, and it says nothing about the value.
+impl std::fmt::Debug for ProviderChoice {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("ProviderChoice")
+            .field("provider", &self.provider)
+            .field("api_key", &"<redacted>")
+            .field("source_var", &self.source_var)
+            .field("base_url", &self.base_url)
+            .finish()
+    }
 }
 
 impl ProviderChoice {
@@ -168,8 +202,28 @@ pub fn resolve_with(
     base_url: Option<&str>,
     api_key: Option<&str>,
 ) -> Result<ProviderChoice, ProviderError> {
-    if let Some(raw) = base_url.map(str::to_string).or_else(env_base_url) {
-        return resolve_compatible(&raw, requested, api_key);
+    resolve_against(&|var| std::env::var(var).ok(), requested, base_url, api_key)
+}
+
+/// The same, against an explicit environment, so the rules are testable
+/// without mutating the process's own.
+///
+/// Private, and meant to stay that way: a host whose credential lives
+/// somewhere lan cannot read passes it to
+/// [`WorkspaceBuilder::with_api_key`](crate::WorkspaceBuilder::with_api_key),
+/// and a second, wider way to supply one would be a second thing to keep
+/// honest.
+fn resolve_against(
+    lookup: &dyn Fn(&str) -> Option<String>,
+    requested: Option<BuiltinProvider>,
+    base_url: Option<&str>,
+    api_key: Option<&str>,
+) -> Result<ProviderChoice, ProviderError> {
+    if let Some(raw) = base_url
+        .map(str::to_string)
+        .or_else(|| env_base_url(lookup))
+    {
+        return resolve_compatible(lookup, &raw, requested, api_key);
     }
 
     match (requested, api_key) {
@@ -183,7 +237,7 @@ pub fn resolve_with(
         (Some(provider), None) => {
             let var = key_var(provider).ok_or(ProviderError::NotKeyed(provider))?;
             let api_key =
-                read_key(var).ok_or(ProviderError::MissingCredential { provider, var })?;
+                read(lookup, var).ok_or(ProviderError::MissingCredential { provider, var })?;
             Ok(ProviderChoice {
                 provider,
                 api_key,
@@ -194,7 +248,7 @@ pub fn resolve_with(
         (None, None) => CANDIDATES
             .iter()
             .find_map(|(provider, var)| {
-                read_key(var).map(|api_key| ProviderChoice {
+                read(lookup, var).map(|api_key| ProviderChoice {
                     provider: *provider,
                     api_key,
                     source_var: Some(var),
@@ -208,6 +262,7 @@ pub fn resolve_with(
 /// A custom endpoint speaks the OpenAI Responses wire format, so it is
 /// registered under the OpenAI provider id unless the caller named another.
 fn resolve_compatible(
+    lookup: &dyn Fn(&str) -> Option<String>,
     raw: &str,
     requested: Option<BuiltinProvider>,
     api_key: Option<&str>,
@@ -217,7 +272,7 @@ fn resolve_compatible(
         Some(api_key) => (api_key.to_string(), None),
         None => COMPATIBLE_KEY_VARS
             .iter()
-            .find_map(|var| read_key(var).map(|key| (key, Some(*var))))
+            .find_map(|var| read(lookup, var).map(|key| (key, Some(*var))))
             .ok_or(ProviderError::NoCompatibleCredential)?,
     };
 
@@ -229,25 +284,41 @@ fn resolve_compatible(
     })
 }
 
-fn env_base_url() -> Option<String> {
-    BASE_URL_VARS.iter().find_map(|var| {
-        std::env::var(var)
-            .ok()
-            .filter(|value| !value.trim().is_empty())
-    })
+fn env_base_url(lookup: &dyn Fn(&str) -> Option<String>) -> Option<String> {
+    BASE_URL_VARS.iter().find_map(|var| read(lookup, var))
 }
 
 /// Treats a variable set to whitespace as absent — an empty key produces a
-/// confusing authentication failure much later.
-fn read_key(var: &str) -> Option<String> {
-    std::env::var(var)
-        .ok()
-        .filter(|value| !value.trim().is_empty())
+/// confusing authentication failure much later, and an empty base URL a
+/// request to nowhere.
+fn read(lookup: &dyn Fn(&str) -> Option<String>, var: &str) -> Option<String> {
+    lookup(var).filter(|value| !value.trim().is_empty())
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// An environment fixed by the test rather than by the shell that started
+    /// it. Every resolution test goes through one of these, because the
+    /// variables this module reads are exactly the ones a person working on lan
+    /// is likely to have exported.
+    fn exporting(vars: &[(&str, &str)]) -> impl Fn(&str) -> Option<String> {
+        let vars: Vec<(String, String)> = vars
+            .iter()
+            .map(|(var, value)| (var.to_string(), value.to_string()))
+            .collect();
+
+        move |name| {
+            vars.iter()
+                .find(|(var, _)| var == name)
+                .map(|(_, value)| value.clone())
+        }
+    }
+
+    fn nothing_exported() -> impl Fn(&str) -> Option<String> {
+        exporting(&[])
+    }
 
     #[test]
     fn provider_names_parse_case_insensitively() {
@@ -291,18 +362,131 @@ mod tests {
     }
 
     #[test]
+    fn detection_takes_the_first_candidate_the_environment_offers() {
+        let choice = resolve_against(
+            &exporting(&[
+                ("OPENAI_API_KEY", "openai-key"),
+                ("ANTHROPIC_API_KEY", "anthropic-key"),
+            ]),
+            None,
+            None,
+            None,
+        )
+        .expect("a key is exported");
+
+        assert_eq!(choice.provider, BuiltinProvider::Anthropic);
+        assert_eq!(choice.source_var, Some("ANTHROPIC_API_KEY"));
+    }
+
+    #[test]
+    fn a_named_provider_reads_its_own_variable_and_says_which() {
+        let choice = resolve_against(
+            &exporting(&[
+                ("ANTHROPIC_API_KEY", "anthropic-key"),
+                ("GEMINI_API_KEY", "gemini-key"),
+            ]),
+            Some(BuiltinProvider::Gemini),
+            None,
+            None,
+        )
+        .expect("the named provider's key is exported");
+
+        assert_eq!(choice.api_key, "gemini-key");
+        assert_eq!(choice.source_var, Some("GEMINI_API_KEY"));
+    }
+
+    #[test]
+    fn a_variable_set_to_whitespace_is_treated_as_absent() {
+        // Otherwise the run fails at the first request, with an
+        // authentication error that names nothing useful.
+        let error = resolve_against(
+            &exporting(&[("ANTHROPIC_API_KEY", "   ")]),
+            None,
+            None,
+            None,
+        )
+        .expect_err("rejected");
+
+        assert!(matches!(error, ProviderError::NoCredential));
+    }
+
+    #[test]
+    fn an_environment_base_url_outranks_provider_detection() {
+        // Pointing at an endpoint is always deliberate; whichever key happens
+        // to be exported is not.
+        let choice = resolve_against(
+            &exporting(&[
+                ("ANTHROPIC_API_KEY", "anthropic-key"),
+                ("LAN_BASE_URL", "http://127.0.0.1:3455/v1"),
+                ("LAN_API_KEY", "gateway-key"),
+            ]),
+            None,
+            None,
+            None,
+        )
+        .expect("a base URL and a key are enough");
+
+        assert_eq!(choice.base_url.as_deref(), Some("http://127.0.0.1:3455/"));
+        assert_eq!(choice.api_key, "gateway-key");
+        assert_eq!(choice.source_var, Some("LAN_API_KEY"));
+    }
+
+    #[test]
+    fn a_base_url_with_no_key_anywhere_is_refused() {
+        let error = resolve_against(
+            &exporting(&[("LAN_BASE_URL", "http://127.0.0.1:3455/v1")]),
+            None,
+            None,
+            None,
+        )
+        .expect_err("rejected");
+
+        assert!(matches!(error, ProviderError::NoCompatibleCredential));
+    }
+
+    #[test]
     fn selecting_a_local_provider_by_key_is_rejected() {
-        let error = resolve(Some(BuiltinProvider::Ollama), None).expect_err("rejected");
+        let error = resolve_against(
+            &nothing_exported(),
+            Some(BuiltinProvider::Ollama),
+            None,
+            None,
+        )
+        .expect_err("rejected");
 
         assert!(matches!(error, ProviderError::NotKeyed(_)));
     }
 
     #[test]
+    fn a_named_provider_with_no_key_names_the_variable_it_wanted() {
+        let error = resolve_against(
+            &nothing_exported(),
+            Some(BuiltinProvider::OpenRouter),
+            None,
+            None,
+        )
+        .expect_err("rejected");
+
+        assert!(matches!(
+            error,
+            ProviderError::MissingCredential {
+                var: "OPENROUTER_API_KEY",
+                ..
+            }
+        ));
+    }
+
+    #[test]
     fn a_supplied_key_is_used_instead_of_the_environment() {
         // The point of supplying one: a host whose credential lives in a vault
-        // never exports it, so nothing in the environment can be consulted.
-        let choice = resolve_with(Some(BuiltinProvider::Anthropic), None, Some("supplied-key"))
-            .expect("a named provider and a key need no lookup");
+        // wants its own key used even where lan could have found another.
+        let choice = resolve_against(
+            &exporting(&[("ANTHROPIC_API_KEY", "exported-key")]),
+            Some(BuiltinProvider::Anthropic),
+            None,
+            Some("supplied-key"),
+        )
+        .expect("a named provider and a key need no lookup");
 
         assert_eq!(choice.api_key, "supplied-key");
         assert_eq!(choice.provider, BuiltinProvider::Anthropic);
@@ -314,8 +498,13 @@ mod tests {
 
     #[test]
     fn a_supplied_key_reaches_a_compatible_endpoint() {
-        let choice = resolve_with(None, Some("http://127.0.0.1:3455/v1"), Some("supplied-key"))
-            .expect("a base URL and a key are enough");
+        let choice = resolve_against(
+            &nothing_exported(),
+            None,
+            Some("http://127.0.0.1:3455/v1"),
+            Some("supplied-key"),
+        )
+        .expect("a base URL and a key are enough");
 
         assert_eq!(choice.api_key, "supplied-key");
         assert_eq!(choice.base_url.as_deref(), Some("http://127.0.0.1:3455/"));
@@ -326,9 +515,33 @@ mod tests {
     fn a_key_with_nothing_to_attribute_it_to_is_refused() {
         // Guessing here would mean picking a service to send someone's
         // credential to.
-        let error = resolve_with(None, None, Some("supplied-key")).expect_err("rejected");
+        let error = resolve_against(&nothing_exported(), None, None, Some("supplied-key"))
+            .expect_err("rejected");
 
         assert!(matches!(error, ProviderError::UnattributedCredential));
+    }
+
+    #[test]
+    fn a_resolved_credential_is_not_printed() {
+        // How this was found: a resolution test failed with a gateway's
+        // variables exported, and `expect` printed the live key it had just
+        // read into the terminal.
+        let choice = resolve_against(
+            &exporting(&[("ANTHROPIC_API_KEY", "sk-secret-value")]),
+            None,
+            None,
+            None,
+        )
+        .expect("a key is exported");
+
+        let printed = format!("{choice:?}");
+
+        assert!(!printed.contains("sk-secret-value"));
+        assert!(printed.contains("redacted"));
+        assert!(
+            printed.contains("ANTHROPIC_API_KEY"),
+            "which variable answered is not the secret, and is how a caller debugs this"
+        );
     }
 
     #[test]

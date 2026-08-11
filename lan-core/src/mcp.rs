@@ -75,12 +75,46 @@ pub const DEFAULT_GLOBAL_MCP_FILE: &str = "mcp.json";
 /// only create something to drift. The enum exists because mentra's own
 /// equivalent is private, so a caller holding a mixed list has nowhere to put
 /// it (see the module docs on transports).
-#[derive(Debug, Clone)]
+#[derive(Clone)]
 pub enum McpServer {
     /// A child process speaking JSON-RPC over its standard streams.
     Stdio(McpServerConfig),
     /// The legacy HTTP+SSE transport from protocol revision 2024-11-05.
     Sse(McpSseServerConfig),
+}
+
+/// Hand-written for the reason [`McpError`] reports so little: a stdio
+/// server's `env` holds credentials, and by the time one reaches this type lan
+/// has already expanded `${GITHUB_TOKEN}` into the real value. Deriving would
+/// put those in every `{:?}` of an [`McpConfig`], an [`McpSource`], or a
+/// [`RunConfig`](crate::RunConfig) — all of which do derive, and any of which
+/// a host may log.
+///
+/// Variable *names* survive, because that is the same line the errors draw:
+/// naming `env.GITHUB_TOKEN` is what makes a misconfiguration fixable, and it
+/// repeats nothing that was read. The SSE side needs no help — mentra types
+/// those headers as `SecretString`, which redacts itself.
+impl std::fmt::Debug for McpServer {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Self::Stdio(config) => f
+                .debug_struct("Stdio")
+                .field("name", &config.name)
+                .field("command", &config.command)
+                .field("args", &config.args)
+                .field("cwd", &config.cwd)
+                .field(
+                    "env",
+                    &config
+                        .env
+                        .keys()
+                        .map(|key| (key, "<redacted>"))
+                        .collect::<std::collections::BTreeMap<_, _>>(),
+                )
+                .finish(),
+            Self::Sse(config) => f.debug_tuple("Sse").field(config).finish(),
+        }
+    }
 }
 
 impl McpServer {
@@ -467,5 +501,51 @@ mod tests {
 
         assert!(base.supplied.is_empty(), "the original is untouched");
         assert_eq!(supplied.supplied.len(), 1);
+    }
+
+    #[test]
+    fn a_servers_environment_is_not_printed() {
+        // By the time a server is one of these, `${GITHUB_TOKEN}` has been
+        // expanded — so this is the real value, not the placeholder.
+        let server = McpServer::Stdio(McpServerConfig {
+            name: "gh".to_string(),
+            command: "server".to_string(),
+            args: vec!["--org".to_string(), "acme".to_string()],
+            env: [("GITHUB_TOKEN".to_string(), "ghp-secret-value".to_string())]
+                .into_iter()
+                .collect(),
+            cwd: None,
+        });
+
+        let printed = format!("{server:?}");
+
+        assert!(!printed.contains("ghp-secret-value"));
+        assert!(printed.contains("redacted"));
+        assert!(
+            printed.contains("GITHUB_TOKEN"),
+            "the variable's name is what makes a misconfiguration fixable"
+        );
+        assert!(
+            printed.contains("server") && printed.contains("acme"),
+            "the command and its arguments are how a spawn is debugged"
+        );
+    }
+
+    #[test]
+    fn a_configured_server_is_not_printed_by_whatever_holds_it() {
+        // `McpConfig` derives `Debug`, and `RunConfig` holds one — so the
+        // redaction has to survive being nested rather than being something a
+        // caller has to remember to reach for.
+        let config = McpConfig::default().with_supplied(vec![McpServer::Stdio(McpServerConfig {
+            name: "gh".to_string(),
+            command: "server".to_string(),
+            args: Vec::new(),
+            env: [("GITHUB_TOKEN".to_string(), "ghp-secret-value".to_string())]
+                .into_iter()
+                .collect(),
+            cwd: None,
+        })]);
+
+        assert!(!format!("{config:?}").contains("ghp-secret-value"));
     }
 }
