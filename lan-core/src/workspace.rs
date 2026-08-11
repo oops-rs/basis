@@ -1,0 +1,306 @@
+//! A workspace opened once, minting runs cheaply.
+//!
+//! Everything a run needs but does not change divides in two, and until now lan
+//! kept both halves in one [`RunConfig`](crate::RunConfig) and re-resolved the
+//! lot for every prompt. ADR-0010 named the cost: a twenty-agent fan-out read
+//! `AGENTS.md` twenty times, resolved the model twenty times, and opened twenty
+//! copies of every MCP server the workspace configures.
+//!
+//! So:
+//!
+//! - **[`WorkspaceBuilder::open`]** settles what belongs to the workspace —
+//!   context documents, credential and provider, the resolved model, skills,
+//!   templates, hooks, MCP connections, the command posture, the approval gate.
+//!   It is `async` and it does real I/O, once.
+//! - **[`Workspace::prepare`]** mints one run from a [`RunSpec`]. It is *not*
+//!   `async`, which is the honest signal that nothing is discovered, resolved,
+//!   or connected here: a session is spawned on the runtime that already
+//!   exists, and that is all.
+//!
+//! ```no_run
+//! # async fn example() -> Result<(), lan_core::RunError> {
+//! use lan_core::{CollectingSink, Workspace};
+//!
+//! let workspace = Workspace::open("/repo").await?;
+//!
+//! // Two runs, one discovery, driven together.
+//! let mut first = workspace.prepare("what does this repo do?")?;
+//! let mut second = workspace.prepare("what is not tested?")?;
+//! let (a, b) = tokio::join!(
+//!     first.execute(CollectingSink::default()),
+//!     second.execute(CollectingSink::default()),
+//! );
+//! # let _ = (a?, b?);
+//! # Ok(())
+//! # }
+//! ```
+//!
+//! The free functions in [`crate::run`](mod@crate::run) — `run`, `prepare`,
+//! `resume` and the rest — are thin wrappers that open a workspace, mint one
+//! run from it, and drop the workspace when the run ends. There is one
+//! resolution path, and this is it.
+
+mod builder;
+mod spec;
+
+use std::path::{Path, PathBuf};
+
+use mentra::{ModelInfo, Runtime, Session, agent::AgentConfig, provider::ReasoningOptions};
+
+pub use builder::WorkspaceBuilder;
+pub use spec::RunSpec;
+
+pub(crate) use builder::{load_templates, resolved_workspace};
+pub(crate) use spec::DEFAULT_SESSION_NAME;
+
+use crate::{
+    context::WorkspaceContext,
+    event::ContextFile,
+    fingerprint::{self, Snapshot},
+    run::{Effort, LoadedSkill, PreparedRun, RunContext, RunError},
+    templates::Template,
+};
+
+/// One workspace, resolved: the runtime, the model, and everything discovered
+/// on disk, ready to mint runs from.
+///
+/// Held by reference by every run it mints, so a host keeps one per repository
+/// for as long as it wants to send prompts at it. Dropping it does not end the
+/// runs already minted — a [`PreparedRun`] owns its session — but the MCP
+/// connections and the runtime go with it.
+///
+/// `Send` and `Sync`: mentra's [`Runtime`] is shared through `Arc`s and creates
+/// sessions from `&self`, so concurrent minting from one workspace needs no
+/// lock of lan's own.
+pub struct Workspace {
+    /// The path the caller asked for. What the agent is scoped to, and what
+    /// policy roots are built from.
+    path: PathBuf,
+    /// The same directory as discovery resolved it, symlinks followed. What
+    /// the run header reports, so `workspace` and `context_files` name one
+    /// place.
+    root: PathBuf,
+    runtime: Runtime,
+    model: ModelInfo,
+    provider: String,
+    context: WorkspaceContext,
+    /// Built once from the context, cloned per run: none of its inputs vary.
+    agent: AgentConfig,
+    skills_dirs: Vec<PathBuf>,
+    skills: Vec<LoadedSkill>,
+    templates_dirs: Vec<PathBuf>,
+    templates: Vec<Template>,
+    mcp_files: Vec<ContextFile>,
+    mcp_servers: Vec<String>,
+}
+
+/// Hand-written because mentra's [`Runtime`] is not `Debug`, and because the
+/// context documents hold whole files — a derived impl would dump them.
+impl std::fmt::Debug for Workspace {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("Workspace")
+            .field("root", &self.root)
+            .field("provider", &self.provider)
+            .field("model", &self.model.id)
+            .field("context_files", &self.context.documents().len())
+            .field("skills", &self.skills.len())
+            .field("templates", &self.templates.len())
+            .field("mcp_servers", &self.mcp_servers)
+            .finish_non_exhaustive()
+    }
+}
+
+impl Workspace {
+    /// Opens `path` with lan's defaults: the provider auto-detected from the
+    /// environment, the newest model it offers, and every convention discovered
+    /// where convention says to look.
+    ///
+    /// [`builder`](Self::builder) is the same call with the knobs exposed.
+    pub async fn open(path: impl Into<PathBuf>) -> Result<Self, RunError> {
+        Self::builder(path).open().await
+    }
+
+    /// Configures a workspace before opening it.
+    pub fn builder(path: impl Into<PathBuf>) -> WorkspaceBuilder {
+        WorkspaceBuilder::new(path)
+    }
+
+    /// Mints a run: a fresh conversation against this workspace.
+    ///
+    /// Synchronous, and deliberately so — everything expensive already
+    /// happened. What this does is spawn a session on the existing runtime and
+    /// hand back the [`PreparedRun`] that drives it.
+    ///
+    /// The spec's prompt may be empty. Once a session outlives a turn, a
+    /// conversation with nothing said yet is a real state — it is what ACP's
+    /// `session/new` opens — so the emptiness check belongs where a prompt is
+    /// actually sent, which is [`PreparedRun::execute`] and
+    /// [`PreparedRun::send`]. (The free [`prepare`](crate::run::prepare) keeps
+    /// its own up-front check, because a one-shot caller that passed nothing
+    /// wants to hear about it before a session exists.)
+    pub fn prepare(&self, spec: impl Into<RunSpec>) -> Result<PreparedRun, RunError> {
+        let spec = spec.into();
+        let mut session = self.runtime.create_session_with_config(
+            spec.session_name.clone(),
+            self.model.clone(),
+            self.agent.clone(),
+        )?;
+        apply_effort(&mut session, spec.effort)?;
+
+        Ok(self.minted(session, spec))
+    }
+
+    /// Picks up a conversation a previous process left behind.
+    ///
+    /// `agent_id` is [`PreparedRun::agent_id`], not the session id: mentra
+    /// persists agents, and a session is one process's view of one. Resuming
+    /// replays the transcript from the store, so the first turn after this
+    /// already knows everything the last one did.
+    ///
+    /// The workspace has to be the one the conversation belongs to. Nothing
+    /// here checks that — mentra's store is keyed by agent, not by path — so
+    /// resuming an agent under a workspace it never ran in gives it that
+    /// workspace's context and tools alongside its own history.
+    pub fn resume(
+        &self,
+        agent_id: &str,
+        spec: impl Into<RunSpec>,
+    ) -> Result<PreparedRun, RunError> {
+        let spec = spec.into();
+        let mut session = self.runtime.resume_session(agent_id)?;
+        apply_effort(&mut session, spec.effort)?;
+
+        Ok(self.minted(session, spec))
+    }
+
+    /// A cheap stand-in for everything in this workspace a run could see.
+    ///
+    /// The utility ADR-0014 kept when `watch` was deleted, on the type its
+    /// ledger row promised it to. The semantics are [`crate::fingerprint`]'s
+    /// verbatim: a digest over `git ls-files` plus `HEAD`, `stat` only, and
+    /// every uncertain answer resolving to *changed* rather than unchanged.
+    ///
+    /// Fingerprints the workspace **as it is now**, not as it was when the
+    /// workspace was opened — that is the whole point, since a caller's loop
+    /// asks it repeatedly against one long-lived workspace.
+    ///
+    /// Blocking: it spawns `git` and stats files. An async caller belongs on a
+    /// blocking thread — `tokio::task::spawn_blocking`, or the equivalent.
+    pub fn fingerprint(&self) -> Snapshot {
+        fingerprint::snapshot(&self.root)
+    }
+
+    /// The path this workspace was opened with, which is what its runs are
+    /// scoped to.
+    pub fn path(&self) -> &Path {
+        &self.path
+    }
+
+    /// The same directory as discovery resolved it, symlinks followed. What the
+    /// run header reports, and what [`fingerprint`](Self::fingerprint) reads.
+    pub fn root(&self) -> &Path {
+        &self.root
+    }
+
+    /// The model every run from this workspace uses, resolved once.
+    pub fn model(&self) -> &str {
+        &self.model.id
+    }
+
+    pub fn provider(&self) -> &str {
+        &self.provider
+    }
+
+    /// The context documents discovered at open, weakest precedence first.
+    pub fn context(&self) -> &WorkspaceContext {
+        &self.context
+    }
+
+    /// The skills registered on the runtime, after layering.
+    pub fn skills(&self) -> &[LoadedSkill] {
+        &self.skills
+    }
+
+    /// The prompt templates this workspace defines, after layering,
+    /// name-ordered. Over ACP these become the client's commands.
+    pub fn templates(&self) -> &[Template] {
+        &self.templates
+    }
+
+    /// The MCP servers connected at open, by name. Names only: nothing here
+    /// echoes a command or a credential.
+    pub fn mcp_servers(&self) -> &[String] {
+        &self.mcp_servers
+    }
+
+    /// The runtime the runs are minted on, for a host that wants mentra's own
+    /// surface — the task board, teams, the store — alongside lan's.
+    ///
+    /// The same bargain as [`PreparedRun::session`]: lan does not hide mentra,
+    /// and reaching past lan's surface is a supported thing to do rather than a
+    /// workaround.
+    pub fn runtime(&self) -> &Runtime {
+        &self.runtime
+    }
+
+    /// Wraps a freshly created or resumed session in the run context this
+    /// workspace describes.
+    ///
+    /// Shared by [`prepare`](Self::prepare) and [`resume`](Self::resume) so the
+    /// two cannot disagree about what a run from this workspace reports.
+    fn minted(&self, session: Session, spec: RunSpec) -> PreparedRun {
+        let bounds = spec.turn_options();
+
+        PreparedRun::new(
+            session,
+            RunContext {
+                workspace: self.root.clone(),
+                prompt: spec.prompt,
+                provider: self.provider.clone(),
+                model: self.model.id.clone(),
+                context: self.context.clone(),
+                skills_dirs: self.skills_dirs.clone(),
+                skills: self.skills.clone(),
+                templates_dirs: self.templates_dirs.clone(),
+                templates: self.templates.clone(),
+                mcp_files: self.mcp_files.clone(),
+                mcp_servers: self.mcp_servers.clone(),
+            },
+        )
+        .with_bounds(bounds)
+    }
+}
+
+/// Asks the model for a reasoning effort, when one was requested.
+///
+/// `None` leaves the session untouched instead of sending a default nobody
+/// asked for. Mentra's provider adapter validates the requested level and maps
+/// it to that API's wire format.
+fn apply_effort(session: &mut Session, effort: Option<Effort>) -> Result<(), RunError> {
+    let Some(effort) = effort else {
+        return Ok(());
+    };
+
+    session.set_reasoning(Some(ReasoningOptions {
+        effort: Some(effort.into()),
+        summary: None,
+    }))?;
+
+    Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// Concurrent minting is the point of the split, and it holds only if a
+    /// workspace can be shared across tasks and threads. Asserted at compile
+    /// time so a future field that is neither cannot slip in unnoticed.
+    #[test]
+    fn a_workspace_can_be_shared_across_tasks() {
+        const fn assert_send_sync<T: Send + Sync>() {}
+
+        assert_send_sync::<Workspace>();
+        assert_send_sync::<RunSpec>();
+    }
+}

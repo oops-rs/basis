@@ -8,48 +8,46 @@
 //! prompt itself, the workspace's own context files, and configuration.
 //!
 //! [`run`] answers the whole question — build a runtime, resolve a model, send
-//! the prompt. A host that already owns a mentra runtime skips to
-//! [`prepare_with_session`] and keeps its own.
+//! the prompt — for the case where one prompt is the whole job. Everything in
+//! this module is a wrapper around [`Workspace`]: it opens
+//! one, mints a single run from it, and drops it when the run ends. A host
+//! sending more than one prompt at a repository should open the workspace
+//! itself and keep it, which is what the split of ADR-0010 is for.
+//!
+//! A host that already owns a mentra runtime skips to [`prepare_with_session`]
+//! and keeps its own.
 
 mod prepared;
 mod sink;
 
-use std::{
-    path::{Path, PathBuf},
-    time::Duration,
-};
+use std::{path::PathBuf, time::Duration};
 
-use mentra::{
-    BuiltinProvider, ModelSelector, ProviderId, Runtime, RuntimePolicy, Session,
-    agent::{AgentConfig, WorkspaceConfig},
-    provider::{ReasoningEffort, ReasoningOptions},
-    provider_core::{StaticCredentialSource, responses, responses::ResponsesProvider},
-};
+use mentra::{BuiltinProvider, ModelSelector, Session};
 use thiserror::Error;
 
 #[cfg(feature = "mcp")]
-use crate::mcp::{self, McpConfig, McpError};
+use crate::mcp::{McpConfig, McpError};
 use crate::{
-    approval::{ApprovalGate, Approver},
+    approval::Approver,
     context::{ContextConfig, ContextError, WorkspaceContext},
-    event::{ContextFile, RunOutcome},
-    hooks::{self, HookRunner, HooksConfig},
-    provider::{self, ProviderError},
+    event::RunOutcome,
+    hooks::HooksConfig,
+    provider::ProviderError,
     shell::ShellAccess,
-    skills::{self, SkillsConfig},
-    templates::{self, Template, TemplatesConfig},
+    skills::SkillsConfig,
+    templates::TemplatesConfig,
+    workspace::{
+        DEFAULT_SESSION_NAME, RunSpec, Workspace, WorkspaceBuilder, load_templates,
+        resolved_workspace,
+    },
 };
 
 pub use prepared::{LoadedSkill, PreparedRun, RunContext, TurnOptions};
 pub use sink::{CollectingSink, EventSink, FnSink, NullSink};
 
-/// Default name for the session a run creates. Sessions are named so a client
-/// can tell them apart; the name carries no behavior.
-const DEFAULT_SESSION_NAME: &str = "lan run";
-
 /// How hard the model should think before answering.
 ///
-/// lan's own enum rather than a re-export, for the reason [`Event`] and
+/// lan's own enum rather than a re-export, for the reason [`Event`](crate::Event) and
 /// [`TurnOptions`] are: the surface lan promises should not move when mentra's
 /// does. Provider adapters translate this semantic level to their own wire
 /// format. A provider or model that does not offer the requested level returns
@@ -64,7 +62,7 @@ pub enum Effort {
     Max,
 }
 
-impl From<Effort> for ReasoningEffort {
+impl From<Effort> for mentra::provider::ReasoningEffort {
     fn from(effort: Effort) -> Self {
         match effort {
             Effort::Low => Self::Low,
@@ -78,6 +76,13 @@ impl From<Effort> for ReasoningEffort {
 
 /// Everything a run needs. Task-specific behavior lives in `prompt` and in the
 /// workspace, never in this struct.
+///
+/// This conflates two lifetimes, and [`split`](Self::split) is where the seam
+/// is: most of it describes a *workspace* — where to discover context, which
+/// provider answers, which MCP servers to connect — and only a handful of
+/// fields describe one run. A caller sending many prompts at one repository
+/// wants [`Workspace`] and a [`RunSpec`] each; a caller
+/// sending one wants this, and pays for the discovery once either way.
 #[derive(Debug, Clone)]
 pub struct RunConfig {
     pub workspace: PathBuf,
@@ -268,11 +273,49 @@ impl RunConfig {
     /// their defaults here and arrive through
     /// [`send_with_options`](PreparedRun::send_with_options).
     pub fn turn_options(&self) -> TurnOptions {
-        TurnOptions {
+        self.spec().turn_options()
+    }
+
+    /// The two halves this config conflates: what belongs to the workspace, and
+    /// what belongs to one run of it.
+    ///
+    /// Every function in this module is `config.split()` followed by an
+    /// `open().await` and a mint, so this is not a second description of the
+    /// mapping — it *is* the mapping, and it is public because it is also the
+    /// migration path. A caller that outgrows one-prompt-per-config keeps the
+    /// builder, opens it once, and mints a [`RunSpec`] per run.
+    pub fn split(&self) -> (WorkspaceBuilder, RunSpec) {
+        let mut builder = Workspace::builder(&self.workspace)
+            .with_model(self.model.clone())
+            .with_context(self.context.clone())
+            .with_skills(self.skills.clone())
+            .with_templates(self.templates.clone())
+            .with_hooks(self.hooks.clone())
+            .with_shell(self.shell);
+
+        #[cfg(feature = "mcp")]
+        {
+            builder = builder.with_mcp(self.mcp.clone());
+        }
+        if let Some(provider) = self.provider {
+            builder = builder.with_provider(provider);
+        }
+        if let Some(base_url) = &self.base_url {
+            builder = builder.with_base_url(base_url.clone());
+        }
+
+        (builder, self.spec())
+    }
+
+    /// The per-run half alone, for the callers that need no runtime.
+    fn spec(&self) -> RunSpec {
+        RunSpec {
+            prompt: self.prompt.clone(),
+            session_name: self.session_name.clone(),
+            effort: self.effort,
             deadline: self.deadline,
             tool_budget: self.tool_budget,
             token_budget: self.token_budget,
-            ..TurnOptions::default()
         }
     }
 }
@@ -318,6 +361,12 @@ impl<S> RunReport<S> {
     }
 }
 
+/// Anything that can go wrong opening a workspace, preparing a run, or driving
+/// one.
+///
+/// One error type across all three, rather than a `WorkspaceError` beside it:
+/// opening a workspace exists to prepare runs, and every failure listed here is
+/// a failure a caller of [`run`] has always been able to receive.
 #[derive(Debug, Error)]
 pub enum RunError {
     #[error("prompt is empty")]
@@ -370,9 +419,10 @@ pub enum RunError {
 /// [`RunOutcome::Error`] on an otherwise complete stream, because by then the
 /// events already emitted are worth keeping.
 ///
-/// The session is dropped when this returns. For a conversation, keep the
-/// [`PreparedRun`] from [`prepare`] and call
-/// [`send`](PreparedRun::send) on it.
+/// The session is dropped when this returns, and so is the workspace opened to
+/// hold it. For a conversation, keep the [`PreparedRun`] from [`prepare`] and
+/// call [`send`](PreparedRun::send) on it; for many conversations, keep a
+/// [`Workspace`].
 pub async fn run<S: EventSink>(config: RunConfig, sink: S) -> Result<RunReport<S>, RunError> {
     prepare(config).await?.execute(sink).await
 }
@@ -397,6 +447,8 @@ pub async fn run_with_approver<S: EventSink, A: Approver>(
 
 /// Resolves everything a run needs — context, credential, runtime, model,
 /// session — without sending the prompt.
+///
+/// One prompt, one workspace, opened and dropped around it.
 pub async fn prepare(config: RunConfig) -> Result<PreparedRun, RunError> {
     if config.prompt.trim().is_empty() {
         return Err(RunError::EmptyPrompt);
@@ -412,21 +464,9 @@ pub async fn prepare(config: RunConfig) -> Result<PreparedRun, RunError> {
 /// [`prepare`] would reject exactly the case that matters. Prompts arrive later
 /// through [`PreparedRun::send`], which does its own checking.
 pub async fn prepare_without_prompt(config: RunConfig) -> Result<PreparedRun, RunError> {
-    let resolved = resolve(&config).await?;
-    let bounds = config.turn_options();
+    let (workspace, spec) = config.split();
 
-    let mut session = resolved.runtime.create_session_with_config(
-        config.session_name.clone(),
-        resolved.model.clone(),
-        agent_config(&config, &resolved.context),
-    )?;
-    apply_effort(&mut session, config.effort)?;
-
-    Ok(PreparedRun::new(
-        session,
-        resolved.into_context(config.prompt, &config.workspace),
-    )
-    .with_bounds(bounds))
+    workspace.open().await?.prepare(spec)
 }
 
 /// Picks up a conversation a previous process left behind.
@@ -439,179 +479,9 @@ pub async fn prepare_without_prompt(config: RunConfig) -> Result<PreparedRun, Ru
 /// `config.prompt` may be empty here — a caller that resumes to inspect the
 /// history, or to send a prompt chosen later, has nothing to say yet.
 pub async fn resume(agent_id: &str, config: RunConfig) -> Result<PreparedRun, RunError> {
-    let resolved = resolve(&config).await?;
-    let bounds = config.turn_options();
+    let (workspace, spec) = config.split();
 
-    let mut session = resolved.runtime.resume_session(agent_id)?;
-    apply_effort(&mut session, config.effort)?;
-
-    Ok(PreparedRun::new(
-        session,
-        resolved.into_context(config.prompt.clone(), &config.workspace),
-    )
-    .with_bounds(bounds))
-}
-
-/// A runtime and everything resolved alongside it, before a session exists.
-///
-/// Shared by [`prepare`] and [`resume`] so the two cannot disagree about how a
-/// runtime is built — the policy, the authorizer, the provider, and the skills
-/// are the same questions whether the conversation is new or continuing.
-struct Resolved {
-    runtime: Runtime,
-    model: mentra::ModelInfo,
-    provider: String,
-    context: WorkspaceContext,
-    skills_dirs: Vec<PathBuf>,
-    skills: Vec<LoadedSkill>,
-    templates_dirs: Vec<PathBuf>,
-    templates: Vec<Template>,
-    mcp_files: Vec<ContextFile>,
-    mcp_servers: Vec<String>,
-}
-
-impl Resolved {
-    fn into_context(self, prompt: String, requested_workspace: &Path) -> RunContext {
-        RunContext {
-            workspace: resolved_workspace(requested_workspace, &self.context),
-            prompt,
-            provider: self.provider,
-            model: self.model.id,
-            context: self.context,
-            skills_dirs: self.skills_dirs,
-            skills: self.skills,
-            templates_dirs: self.templates_dirs,
-            templates: self.templates,
-            mcp_files: self.mcp_files,
-            mcp_servers: self.mcp_servers,
-        }
-    }
-}
-
-async fn resolve(config: &RunConfig) -> Result<Resolved, RunError> {
-    let context = WorkspaceContext::discover_with(&config.workspace, &config.context)?;
-    let choice = provider::resolve(config.provider, config.base_url.as_deref())?;
-
-    let builder = Runtime::builder()
-        // Path roots are hygiene, not a boundary: per ADR-0004 that is the
-        // kernel's job, and per ADR-0013 lan ships no instance of one. What
-        // the config says about commands is passed through as written.
-        .with_policy(
-            git_protected(
-                RuntimePolicy::workspace_bounded(&config.workspace),
-                &config.workspace,
-            )
-            .allow_shell_commands(config.shell.is_granted())
-            .allow_background_commands(config.shell.is_granted()),
-        )
-        // Without an authorizer mentra allows every call unconditionally, and
-        // no permission request can ever be raised — so the gate goes on even
-        // for a run that approves everything (see `crate::approval`).
-        .with_tool_authorizer(ApprovalGate::new());
-
-    // Loaded before the build so a hooks file that does not parse fails the run
-    // loudly, rather than at the first tool call — or worse, never.
-    //
-    // One runner for every hook rather than one registration each: `with_pre_hook`
-    // appends, so both work, but lan wants the ordering and the short-circuit to
-    // be its own (see `crate::hooks`). A run with no hooks registers nothing, so
-    // the mechanism costs nothing until someone writes the file.
-    let hooks = hooks::load(&config.workspace, &config.hooks)?;
-    let builder = if hooks.is_empty() {
-        builder
-    } else {
-        builder.with_pre_hook(HookRunner::new(&config.workspace, hooks))
-    };
-
-    // Both lists reach the header whether or not this build has MCP in it: what
-    // a run reports is a schema clients parse, and a field that vanished with a
-    // cargo feature would make the stream's shape depend on how lan was built.
-    #[cfg(feature = "mcp")]
-    let (builder, mcp_files, mcp_servers) = {
-        let (files, servers) = discovered_mcp(config)?;
-        let names: Vec<String> = servers
-            .iter()
-            .map(|server| server.name().to_string())
-            .collect();
-        let builder = servers
-            .into_iter()
-            .fold(builder, |builder, server| match server {
-                mcp::McpServer::Stdio(server) => builder.with_mcp_server(server),
-                mcp::McpServer::Sse(server) => builder.with_mcp_sse_server(server),
-            });
-
-        (builder, files, names)
-    };
-    #[cfg(not(feature = "mcp"))]
-    let (mcp_files, mcp_servers): (Vec<ContextFile>, Vec<String>) = (Vec::new(), Vec::new());
-
-    let runtime = match &choice.base_url {
-        Some(base_url) => {
-            builder.with_registered_provider(compatible_provider(base_url, &choice.api_key))
-        }
-        None => builder.with_provider(choice.provider, choice.api_key.clone()),
-    }
-    // `build` ignores MCP configuration outright; only `build_async` opens the
-    // connections. Always the async one, so a server can never be dropped by
-    // the choice of constructor.
-    .build_async()
-    .await?;
-
-    let model = runtime
-        .resolve_model(choice.provider, config.model.clone())
-        .await?;
-
-    // Skills must be registered on the runtime before the session spawns, so
-    // the agent's tool roster includes `load_skill`.
-    let skills_dirs = register_skills(&runtime, config)?;
-    let skills = runtime
-        .skills()
-        .into_iter()
-        .map(|skill| LoadedSkill {
-            name: skill.name,
-            description: skill.description,
-            path: skill.path,
-        })
-        .collect();
-
-    // Templates need no runtime registration — they are lan-side convention
-    // data, rendered into a prompt by whatever surface offers them.
-    let (templates_dirs, templates) = load_templates(config)?;
-
-    Ok(Resolved {
-        runtime,
-        model,
-        provider: ProviderId::from(choice.provider).to_string(),
-        context,
-        skills_dirs,
-        skills,
-        templates_dirs,
-        templates,
-        mcp_files,
-        mcp_servers,
-    })
-}
-
-/// Registers the MCP servers this run connects, and reports what took effect.
-///
-/// Servers are registered on the builder and connected by `build_async`, so
-/// this must happen before the build. mentra's `McpRegistration` is private,
-/// which is why the fold matches here rather than in [`crate::mcp`].
-///
-/// Discovery runs for its own sake as well: the header names which files took
-/// effect, and an `.mcp.json` is the last thing that should apply invisibly —
-/// it says which programs to spawn.
-#[cfg(feature = "mcp")]
-fn discovered_mcp(config: &RunConfig) -> Result<(Vec<ContextFile>, Vec<mcp::McpServer>), RunError> {
-    let files: Vec<ContextFile> = mcp::discover(&config.workspace, &config.mcp)?
-        .iter()
-        .map(|source| ContextFile {
-            path: source.path.clone(),
-            scope: source.scope.label(),
-        })
-        .collect();
-
-    Ok((files, mcp::servers(&config.workspace, &config.mcp)?))
+    workspace.open().await?.resume(agent_id, spec)
 }
 
 /// Prepares a run against a session the caller already built, so a host with
@@ -622,6 +492,11 @@ fn discovered_mcp(config: &RunConfig) -> Result<(Vec<ContextFile>, Vec<mcp::McpS
 /// conversation with nothing said yet is a real state — it is what ACP's
 /// `session/new` opens — so the check belongs where a prompt is actually sent,
 /// which is [`PreparedRun::execute`] and [`PreparedRun::send`].
+///
+/// This is the one path that does not go through
+/// [`Workspace`], because there is no runtime for lan to
+/// build: the caller brought one. It still discovers what it can without
+/// touching that runtime.
 pub fn prepare_with_session(
     session: Session,
     config: &RunConfig,
@@ -631,7 +506,7 @@ pub fn prepare_with_session(
     let context = WorkspaceContext::discover_with(&config.workspace, &config.context)?;
     // Unlike skills, templates are registered on nothing — so lan can discover
     // them here without touching a runtime it does not own.
-    let (templates_dirs, templates) = load_templates(config)?;
+    let (templates_dirs, templates) = load_templates(&config.workspace, &config.templates)?;
 
     Ok(PreparedRun::new(
         session,
@@ -654,200 +529,9 @@ pub fn prepare_with_session(
     .with_bounds(config.turn_options()))
 }
 
-/// Registers every skills directory that exists, most specific first.
-///
-/// Roots layer rather than replace, so a workspace skill shadows a personal
-/// one of the same name and everything else from the global root still loads.
-fn register_skills(runtime: &Runtime, config: &RunConfig) -> Result<Vec<PathBuf>, RunError> {
-    let sources = skills::discover(&config.workspace, &config.skills);
-    let paths: Vec<PathBuf> = sources.iter().map(|source| source.path.clone()).collect();
-
-    runtime.register_skills_dirs(&paths)?;
-
-    Ok(paths)
-}
-
-/// Loads every template the workspace defines, with the roots they came from.
-///
-/// A root that exists but holds a file lan cannot read is an error rather than
-/// an empty command list: a template that failed to load and a template nobody
-/// wrote look the same from a client, and only one of them is worth knowing
-/// about.
-fn load_templates(config: &RunConfig) -> Result<(Vec<PathBuf>, Vec<Template>), RunError> {
-    let sources = templates::discover(&config.workspace, &config.templates);
-    let dirs: Vec<PathBuf> = sources.iter().map(|source| source.path.clone()).collect();
-
-    Ok((dirs, templates::load_sources(&sources)?))
-}
-
-/// Builds a provider aimed at an OpenAI-compatible endpoint.
-///
-/// mentra's OpenAI preset is the right shape — the Responses wire format and
-/// bearer auth — so lan takes that definition, swaps the base URL, and disables
-/// automatic Hybrid HTTP state chaining. Building on the preset avoids
-/// describing a provider from scratch and drifting from whatever mentra learns
-/// next.
-fn compatible_provider(base_url: &str, api_key: &str) -> ResponsesProvider<StaticCredentialSource> {
-    let mut definition = responses::openai_definition();
-    definition.base_url = Some(base_url.to_string());
-    definition.descriptor.display_name = Some(format!("OpenAI-compatible ({base_url})"));
-
-    // A compatible endpoint promises the Responses wire shape, not every
-    // optional OpenAI extension. LAN already replays the complete local
-    // transcript, so do not probe `previous_response_id` support with a
-    // request that may fail; native provider presets retain Hybrid chaining.
-    ResponsesProvider::new(definition, StaticCredentialSource::new(api_key))
-        .without_hybrid_http_previous_response_id()
-}
-
-/// The workspace as discovery resolved it, falling back to what was asked for.
-///
-/// Discovery follows symlinks so the parent walk is meaningful, which means a
-/// document's path can sit under a different spelling of the same directory
-/// than the caller typed. Reporting the resolved root keeps the header
-/// internally consistent — `workspace` and `context_files` name one place.
-fn resolved_workspace(requested: &Path, context: &WorkspaceContext) -> PathBuf {
-    context
-        .root()
-        .map(Path::to_path_buf)
-        .unwrap_or_else(|| requested.to_path_buf())
-}
-
-/// Asks the model for a reasoning effort, when one was requested.
-///
-/// `None` leaves the session untouched instead of sending a default nobody
-/// asked for. Mentra's provider adapter validates the requested level and maps
-/// it to that API's wire format.
-fn apply_effort(session: &mut Session, effort: Option<Effort>) -> Result<(), RunError> {
-    let Some(effort) = effort else {
-        return Ok(());
-    };
-
-    session.set_reasoning(Some(ReasoningOptions {
-        effort: Some(effort.into()),
-        summary: None,
-    }))?;
-
-    Ok(())
-}
-
-/// Keeps the parts of `.git` that decide what *runs* out of reach.
-///
-/// `.git/hooks` holds programs git executes on ordinary operations, and
-/// `.git/config` can name more of them (`core.hooksPath`, and the `filter`/
-/// `diff` drivers that run on checkout). Writing either turns a file edit into
-/// code execution outside anything lan's policy or approval covers, which is
-/// why they are singled out rather than denying `.git` wholesale — an agent
-/// legitimately reads `.git`, and `git` itself must keep writing objects and
-/// refs underneath it.
-///
-/// **This binds the builtin file tools, not the shell.** A command like
-/// `sh -c 'echo … > .git/hooks/pre-commit'` still reaches the path, because
-/// nothing here parses shell. It closes the route a model actually takes and
-/// remains hygiene; per ADR-0004 and ADR-0013 the boundary is the OS's, and
-/// lan does not ship one.
-fn git_protected(policy: RuntimePolicy, workspace: &Path) -> RuntimePolicy {
-    let git = workspace.join(".git");
-    policy
-        .with_denied_write_root(git.join("hooks"))
-        .with_denied_write_root(git.join("config"))
-}
-
-/// Turns discovered context into the agent's system prompt, and scopes the
-/// agent to the workspace. Everything else stays at mentra's defaults —
-/// opinions belong in the prompt and the workspace, not here.
-fn agent_config(config: &RunConfig, context: &WorkspaceContext) -> AgentConfig {
-    AgentConfig {
-        system: context.render(),
-        workspace: WorkspaceConfig {
-            base_dir: config.workspace.clone(),
-            ..Default::default()
-        },
-        ..Default::default()
-    }
-}
-
 #[cfg(test)]
 mod tests {
-    use std::borrow::Cow;
-    use std::collections::BTreeMap;
-    use std::io::{Read, Write};
-    use std::net::{TcpListener, TcpStream};
-    use std::thread;
-
     use super::*;
-
-    fn read_http_request(stream: &mut TcpStream) -> String {
-        let mut bytes = Vec::new();
-        let mut buffer = [0_u8; 4096];
-        let mut header_end = None;
-        let mut content_length = 0_usize;
-
-        loop {
-            let read = stream.read(&mut buffer).expect("read request");
-            if read == 0 {
-                break;
-            }
-            bytes.extend_from_slice(&buffer[..read]);
-            if header_end.is_none()
-                && let Some(index) = bytes.windows(4).position(|window| window == b"\r\n\r\n")
-            {
-                let end = index + 4;
-                header_end = Some(end);
-                let headers = String::from_utf8_lossy(&bytes[..end]);
-                content_length = headers
-                    .lines()
-                    .find_map(|line| {
-                        let (name, value) = line.split_once(':')?;
-                        name.eq_ignore_ascii_case("content-length")
-                            .then(|| value.trim().parse::<usize>().expect("content length"))
-                    })
-                    .unwrap_or_default();
-            }
-            if header_end.is_some_and(|end| bytes.len() >= end + content_length) {
-                break;
-            }
-        }
-
-        String::from_utf8(bytes).expect("request should be utf8")
-    }
-
-    fn spawn_two_response_server() -> (String, thread::JoinHandle<Vec<String>>) {
-        let listener = TcpListener::bind("127.0.0.1:0").expect("bind test server");
-        let address = listener.local_addr().expect("read server address");
-        let handle = thread::spawn(move || {
-            let mut requests = Vec::new();
-            for index in 1..=2 {
-                let (mut stream, _) = listener.accept().expect("accept request");
-                requests.push(read_http_request(&mut stream));
-                let response_id = format!("resp_{index}");
-                let body = format!(
-                    concat!(
-                        "data: {{\"type\":\"response.created\",\"response\":{{\"id\":\"{}\",\"model\":\"gpt-5\",\"status\":\"in_progress\"}}}}\n\n",
-                        "data: {{\"type\":\"response.completed\",\"response\":{{\"id\":\"{}\",\"model\":\"gpt-5\",\"status\":\"completed\"}}}}\n\n"
-                    ),
-                    response_id, response_id
-                );
-                let response = format!(
-                    concat!(
-                        "HTTP/1.1 200 OK\r\n",
-                        "connection: close\r\n",
-                        "content-type: text/event-stream\r\n",
-                        "content-length: {}\r\n\r\n",
-                        "{}"
-                    ),
-                    body.len(),
-                    body
-                );
-                stream
-                    .write_all(response.as_bytes())
-                    .expect("write response");
-            }
-            requests
-        });
-
-        (format!("http://{address}/"), handle)
-    }
 
     #[test]
     fn a_config_carries_no_task_specific_defaults() {
@@ -856,51 +540,6 @@ mod tests {
         assert_eq!(config.provider, None);
         assert!(matches!(config.model, ModelSelector::NewestAvailable));
         assert_eq!(config.session_name, DEFAULT_SESSION_NAME);
-    }
-
-    #[tokio::test]
-    async fn compatible_provider_skips_automatic_previous_response_id_chaining() {
-        let (base_url, handle) = spawn_two_response_server();
-        let provider = compatible_provider(&base_url, "test-key");
-
-        for (index, message) in ["first", "second"].into_iter().enumerate() {
-            let request = mentra::provider_core::Request {
-                model: Cow::Borrowed("gpt-5"),
-                system: None,
-                messages: Cow::Owned(vec![mentra::Message::user(mentra::ContentBlock::text(
-                    message,
-                ))]),
-                tools: Cow::Owned(Vec::new()),
-                tool_choice: None,
-                temperature: None,
-                max_output_tokens: None,
-                metadata: Cow::Owned(BTreeMap::new()),
-                provider_request_options: Default::default(),
-            };
-            let mut stream = provider
-                .session()
-                .stream_response(request)
-                .await
-                .expect("compatible provider should stream");
-            while let Some(event) = stream.recv().await {
-                event.expect("response event should decode");
-            }
-            if index == 0 {
-                assert_eq!(
-                    provider.session().latest_response_id().as_deref(),
-                    Some("resp_1"),
-                    "the second request must have provider state available to suppress"
-                );
-            }
-        }
-
-        let requests = handle.join().expect("server should capture requests");
-        for request in requests {
-            let body = request.split("\r\n\r\n").nth(1).unwrap_or_default();
-            let payload: serde_json::Value =
-                serde_json::from_str(body).expect("request body should be json");
-            assert!(payload.get("previous_response_id").is_none());
-        }
     }
 
     #[test]
@@ -914,26 +553,6 @@ mod tests {
         assert_eq!(base.provider, None, "the original must be untouched");
         assert_eq!(derived.provider, Some(BuiltinProvider::Anthropic));
         assert_eq!(derived.session_name, "named");
-    }
-
-    #[test]
-    fn context_becomes_the_system_prompt_and_the_workspace_is_scoped() {
-        let context = WorkspaceContext::from_documents(vec![crate::context::ContextDocument {
-            path: PathBuf::from("/repo/AGENTS.md"),
-            scope: crate::context::ContextScope::Workspace,
-            content: "house rules".to_string(),
-        }]);
-        let config = RunConfig::new("/repo", "prompt");
-
-        let agent = agent_config(&config, &context);
-
-        assert!(
-            agent
-                .system
-                .expect("a system prompt")
-                .contains("house rules")
-        );
-        assert_eq!(agent.workspace.base_dir, PathBuf::from("/repo"));
     }
 
     #[test]
@@ -958,15 +577,6 @@ mod tests {
     }
 
     #[test]
-    fn an_empty_workspace_context_leaves_the_system_prompt_unset() {
-        let config = RunConfig::new("/repo", "prompt");
-
-        let agent = agent_config(&config, &WorkspaceContext::default());
-
-        assert_eq!(agent.system, None);
-    }
-
-    #[test]
     fn asking_for_no_effort_leaves_the_provider_default() {
         let config = RunConfig::new("/repo", "prompt");
 
@@ -980,6 +590,8 @@ mod tests {
 
     #[test]
     fn every_lan_effort_maps_to_the_same_provider_level() {
+        use mentra::provider::ReasoningEffort;
+
         for (effort, expected) in [
             (Effort::Low, ReasoningEffort::Low),
             (Effort::Medium, ReasoningEffort::Medium),
@@ -1060,5 +672,41 @@ mod tests {
 
         assert!(options.cancel.is_none());
         assert!(options.stop.is_none());
+    }
+
+    #[test]
+    fn splitting_a_config_keeps_every_per_run_field() {
+        let (_, spec) = RunConfig::new("/repo", "prompt")
+            .with_session_name("named")
+            .with_effort(Effort::Max)
+            .with_deadline(Duration::from_secs(90))
+            .with_tool_budget(7)
+            .with_token_budget(1_000)
+            .split();
+
+        assert_eq!(spec.prompt, "prompt");
+        assert_eq!(spec.session_name, "named");
+        assert_eq!(spec.effort, Some(Effort::Max));
+        assert_eq!(spec.deadline, Some(Duration::from_secs(90)));
+        assert_eq!(spec.tool_budget, Some(7));
+        assert_eq!(spec.token_budget, Some(1_000));
+    }
+
+    #[tokio::test]
+    async fn splitting_a_config_keeps_every_workspace_field() {
+        // Checked by opening the builder rather than by reading fields, because
+        // the fields are private and because what matters is that the opened
+        // workspace behaves as the config asked. A missing workspace fails the
+        // same way through both paths — which it can only do if `split` carried
+        // the path and the context config across.
+        let config = RunConfig::new("/definitely/not/a/real/path", "hello")
+            .with_provider(BuiltinProvider::Anthropic)
+            .with_base_url("http://127.0.0.1:1/v1");
+        let (builder, _) = config.split();
+
+        assert!(matches!(
+            builder.open().await.expect_err("rejected"),
+            RunError::Context(ContextError::WorkspaceMissing { .. })
+        ));
     }
 }

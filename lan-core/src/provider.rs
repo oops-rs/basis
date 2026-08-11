@@ -78,6 +78,9 @@ pub enum ProviderError {
 
     #[error("base URL must be an absolute http(s) URL, got '{0}'")]
     InvalidBaseUrl(String),
+
+    #[error("an API key was supplied with no provider and no base URL to attribute it to")]
+    UnattributedCredential,
 }
 
 /// Trims a base URL to what mentra's Responses transport expects.
@@ -136,7 +139,8 @@ pub fn key_var(provider: BuiltinProvider) -> Option<&'static str> {
         .map(|(_, var)| *var)
 }
 
-/// Resolves how lan will reach a model.
+/// Resolves how lan will reach a model, with the credential read from the
+/// environment.
 ///
 /// A base URL — passed in, or found in the environment — wins over provider
 /// auto-detection: pointing at a specific endpoint is always deliberate, so it
@@ -145,12 +149,38 @@ pub fn resolve(
     requested: Option<BuiltinProvider>,
     base_url: Option<&str>,
 ) -> Result<ProviderChoice, ProviderError> {
+    resolve_with(requested, base_url, None)
+}
+
+/// Resolves how lan will reach a model, with the credential supplied rather
+/// than looked up.
+///
+/// `api_key` of `None` is [`resolve`] — the environment answers. A host that
+/// holds its key somewhere lan cannot read, a vault or a token it just
+/// exchanged, passes it here instead of exporting a variable for lan to find
+/// again ([`WorkspaceBuilder::with_api_key`](crate::WorkspaceBuilder::with_api_key)).
+///
+/// A supplied key still has to say *where it is for*: with neither a provider
+/// nor a base URL, lan would be choosing a service to send someone's credential
+/// to, so that combination is refused.
+pub fn resolve_with(
+    requested: Option<BuiltinProvider>,
+    base_url: Option<&str>,
+    api_key: Option<&str>,
+) -> Result<ProviderChoice, ProviderError> {
     if let Some(raw) = base_url.map(str::to_string).or_else(env_base_url) {
-        return resolve_compatible(&raw, requested);
+        return resolve_compatible(&raw, requested, api_key);
     }
 
-    match requested {
-        Some(provider) => {
+    match (requested, api_key) {
+        (Some(provider), Some(api_key)) => Ok(ProviderChoice {
+            provider,
+            api_key: api_key.to_string(),
+            source_var: None,
+            base_url: None,
+        }),
+        (None, Some(_)) => Err(ProviderError::UnattributedCredential),
+        (Some(provider), None) => {
             let var = key_var(provider).ok_or(ProviderError::NotKeyed(provider))?;
             let api_key =
                 read_key(var).ok_or(ProviderError::MissingCredential { provider, var })?;
@@ -161,7 +191,7 @@ pub fn resolve(
                 base_url: None,
             })
         }
-        None => CANDIDATES
+        (None, None) => CANDIDATES
             .iter()
             .find_map(|(provider, var)| {
                 read_key(var).map(|api_key| ProviderChoice {
@@ -180,12 +210,16 @@ pub fn resolve(
 fn resolve_compatible(
     raw: &str,
     requested: Option<BuiltinProvider>,
+    api_key: Option<&str>,
 ) -> Result<ProviderChoice, ProviderError> {
     let base_url = normalize_base_url(raw)?;
-    let (api_key, source_var) = COMPATIBLE_KEY_VARS
-        .iter()
-        .find_map(|var| read_key(var).map(|key| (key, Some(*var))))
-        .ok_or(ProviderError::NoCompatibleCredential)?;
+    let (api_key, source_var) = match api_key {
+        Some(api_key) => (api_key.to_string(), None),
+        None => COMPATIBLE_KEY_VARS
+            .iter()
+            .find_map(|var| read_key(var).map(|key| (key, Some(*var))))
+            .ok_or(ProviderError::NoCompatibleCredential)?,
+    };
 
     Ok(ProviderChoice {
         provider: requested.unwrap_or(BuiltinProvider::OpenAI),
@@ -261,6 +295,40 @@ mod tests {
         let error = resolve(Some(BuiltinProvider::Ollama), None).expect_err("rejected");
 
         assert!(matches!(error, ProviderError::NotKeyed(_)));
+    }
+
+    #[test]
+    fn a_supplied_key_is_used_instead_of_the_environment() {
+        // The point of supplying one: a host whose credential lives in a vault
+        // never exports it, so nothing in the environment can be consulted.
+        let choice = resolve_with(Some(BuiltinProvider::Anthropic), None, Some("supplied-key"))
+            .expect("a named provider and a key need no lookup");
+
+        assert_eq!(choice.api_key, "supplied-key");
+        assert_eq!(choice.provider, BuiltinProvider::Anthropic);
+        assert_eq!(
+            choice.source_var, None,
+            "no variable was read, so none may be named"
+        );
+    }
+
+    #[test]
+    fn a_supplied_key_reaches_a_compatible_endpoint() {
+        let choice = resolve_with(None, Some("http://127.0.0.1:3455/v1"), Some("supplied-key"))
+            .expect("a base URL and a key are enough");
+
+        assert_eq!(choice.api_key, "supplied-key");
+        assert_eq!(choice.base_url.as_deref(), Some("http://127.0.0.1:3455/"));
+        assert!(choice.is_compatible_endpoint());
+    }
+
+    #[test]
+    fn a_key_with_nothing_to_attribute_it_to_is_refused() {
+        // Guessing here would mean picking a service to send someone's
+        // credential to.
+        let error = resolve_with(None, None, Some("supplied-key")).expect_err("rejected");
+
+        assert!(matches!(error, ProviderError::UnattributedCredential));
     }
 
     #[test]

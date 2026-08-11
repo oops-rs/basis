@@ -19,6 +19,28 @@
 //! prompt, the workspace (AGENTS.md, skills, templates, `.mcp.json`), and
 //! config — never through code in this crate.
 //!
+//! # Two shapes
+//!
+//! [`Workspace`] is the SDK's shape (ADR-0010). Opening one settles everything
+//! that belongs to a repository rather than to a prompt — context documents,
+//! the credential and the resolved model, skills, templates, hooks, MCP
+//! connections — and then mints runs from it without doing any of that again:
+//!
+//! ```no_run
+//! # async fn example() -> Result<(), lan_core::RunError> {
+//! let workspace = lan_core::Workspace::open("/repo").await?;
+//! let mut run = workspace.prepare("what does this repo do?")?;
+//! let report = run.execute(lan_core::CollectingSink::default()).await?;
+//! # let _ = report;
+//! # Ok(())
+//! # }
+//! ```
+//!
+//! [`run`](run()) and its neighbours are the one-prompt shape: a
+//! [`RunConfig`] in, a report out, with a workspace opened and dropped around
+//! it. They are wrappers over the same path — [`RunConfig::split`] is the seam
+//! — so nothing behaves differently for having gone through one.
+//!
 //! # Features
 //!
 //! - **`mcp`** (default) — `.mcp.json` discovery and the MCP binding of the
@@ -42,6 +64,7 @@ pub mod shell;
 pub mod skills;
 pub mod store;
 pub mod templates;
+pub mod workspace;
 
 pub use approval::{
     AllowAll, ApprovalAnswer, ApprovalDecision, ApprovalGate, ApprovalRequest, Approver, DenyAll,
@@ -76,3 +99,4 @@ pub use skills::{SkillsConfig, SkillsSource};
 // is being listed, and `PersistedSession` is only meaningful beside it.
 pub use store::PersistedSession;
 pub use templates::{Template, TemplateError, TemplateSource, TemplatesConfig};
+pub use workspace::{RunSpec, Workspace, WorkspaceBuilder};
