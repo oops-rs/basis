@@ -1,0 +1,28 @@
+[package]
+name = "lan-acp"
+description = "The Agent Client Protocol adapter over lan-core: the same event stream and the same seams, served to editors and web UIs."
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+homepage.workspace = true
+keywords = ["agent", "acp", "llm", "harness", "mentra"]
+categories = ["development-tools"]
+
+[dependencies]
+lan-core.workspace = true
+mentra.workspace = true
+
+agent-client-protocol.workspace = true
+async-trait.workspace = true
+blocking.workspace = true
+futures.workspace = true
+serde_json.workspace = true
+thiserror.workspace = true
+tokio.workspace = true
+
+[dev-dependencies]
+mentra = { workspace = true, features = ["test-utils"] }
+tokio = { workspace = true, features = ["time"] }
+tempfile.workspace = true

@@ -1,7 +1,8 @@
-//! The `lan` binary: a thin shell over the [`lan`] crate.
+//! The `lan` binary: a thin shell over [`lan_core`] and [`lan_acp`].
 //!
-//! Per ADR-0003 the library is the product and this is a wrapper. The grammar
-//! is ADR-0015's, and it is five lines:
+//! Per ADR-0003 the library is the product and this is a wrapper; per ADR-0011
+//! there are two of them, and the CLI is what sits over both. The grammar is
+//! ADR-0015's, and it is five lines:
 //!
 //! ```text
 //! lan                       -> ACP server on stdio, for an editor to spawn
@@ -31,6 +32,8 @@
 //! the run gracefully with everything it committed, so the run *succeeded* and
 //! exits `0`.
 
+mod approver;
+mod bridge;
 mod duration_arg;
 
 use std::{
@@ -42,16 +45,15 @@ use std::{
 };
 
 use clap::{Parser, Subcommand};
-use lan::{
+use lan_acp::StdioError;
+use lan_core::{
     ApprovalPolicy, Event, JsonlWriter, RunConfig, RunOutcome, RunReport, ShellAccess, Snapshot,
-    TerminalApprover,
-    acp::StdioError,
     provider,
     run::{EventSink, FnSink},
 };
 use mentra::ModelSelector;
 
-use crate::duration_arg::DurationArg;
+use crate::{approver::TerminalApprover, duration_arg::DurationArg};
 
 /// The run finished.
 const EXIT_OK: u8 = 0;
@@ -121,7 +123,7 @@ enum Command {
 #[derive(Debug, clap::Args)]
 struct BridgeArgs {
     /// Address to listen on. Loopback unless --allow-non-loopback.
-    #[arg(long, value_name = "ADDR", default_value_t = lan::BridgeConfig::default().bind)]
+    #[arg(long, value_name = "ADDR", default_value_t = bridge::BridgeConfig::default().bind)]
     bind: SocketAddr,
 
     /// A web origin allowed to connect, e.g. http://localhost:5173.
@@ -157,7 +159,7 @@ enum EffortArg {
     Max,
 }
 
-impl From<EffortArg> for lan::Effort {
+impl From<EffortArg> for lan_core::Effort {
     fn from(effort: EffortArg) -> Self {
         match effort {
             EffortArg::Low => Self::Low,
@@ -391,7 +393,7 @@ async fn serve_acp(args: AcpArgs) -> ExitCode {
         }
     };
 
-    match lan::acp::serve_stdio(config).await {
+    match lan_acp::serve_stdio(config).await {
         Ok(()) => ExitCode::from(EXIT_OK),
         // Not an error the server had — an invocation that was never going to
         // work. Said in the vocabulary of the command line, because that is
@@ -421,13 +423,13 @@ async fn serve_bridge(args: BridgeArgs) -> ExitCode {
         }
     };
 
-    let mut bridge = lan::BridgeConfig::new(args.bind).with_origins(args.allow_origin);
+    let mut bridge = bridge::BridgeConfig::new(args.bind).with_origins(args.allow_origin);
     if args.allow_non_loopback {
         bridge = bridge.allowing_non_loopback();
     }
     let serves_no_page = bridge.allowed_origins.is_empty();
 
-    let bridge = match lan::Bridge::bind(bridge).await {
+    let bridge = match bridge::Bridge::bind(bridge).await {
         Ok(bridge) => bridge,
         Err(error) => {
             eprintln!("lan: bridge: {error}");
@@ -467,7 +469,7 @@ async fn serve_bridge(args: BridgeArgs) -> ExitCode {
 /// The workspace is a placeholder: every session replaces it with the `cwd`
 /// the client sends. It has to be *something* because `RunConfig` requires
 /// one, and the current directory is the least surprising stand-in.
-fn acp_config(args: AcpArgs) -> Result<lan::acp::ServeConfig, String> {
+fn acp_config(args: AcpArgs) -> Result<lan_acp::ServeConfig, String> {
     let workspace =
         std::env::current_dir().map_err(|error| format!("no working directory: {error}"))?;
 
@@ -491,7 +493,7 @@ fn acp_config(args: AcpArgs) -> Result<lan::acp::ServeConfig, String> {
         config = config.with_effort(effort.into());
     }
 
-    Ok(lan::acp::ServeConfig::new(config))
+    Ok(lan_acp::ServeConfig::new(config))
 }
 
 async fn execute_run(args: RunArgs) -> Result<ExitCode, String> {
@@ -541,7 +543,7 @@ async fn execute_run(args: RunArgs) -> Result<ExitCode, String> {
     let approver = TerminalApprover::new();
 
     if args.json {
-        let report = lan::run_with_approver(config, JsonlWriter::new(io::stdout()), approver)
+        let report = lan_core::run_with_approver(config, JsonlWriter::new(io::stdout()), approver)
             .await
             .map_err(|error| error.to_string())?;
         return Ok(ExitCode::from(exit_code(&report)));
@@ -550,7 +552,7 @@ async fn execute_run(args: RunArgs) -> Result<ExitCode, String> {
     // Without --json the run is still driven by the same event stream; only
     // the rendering differs. Streaming the assistant's text as it arrives is
     // what makes an interactive invocation feel live.
-    let report = lan::run_with_approver(config, prose_sink(), approver)
+    let report = lan_core::run_with_approver(config, prose_sink(), approver)
         .await
         .map_err(|error| error.to_string())?;
 
@@ -623,7 +625,7 @@ fn execute_fingerprint(args: FingerprintArgs) -> Result<ExitCode, String> {
 
 /// The one line stdout gets, or the reason stdout gets nothing.
 fn fingerprint_line(workspace: &Path) -> Result<String, String> {
-    match lan::fingerprint::snapshot(workspace) {
+    match lan_core::fingerprint::snapshot(workspace) {
         Snapshot::Known(fingerprint) => Ok(fingerprint.hex()),
         Snapshot::Unknown { reason } => Err(reason),
     }
@@ -976,7 +978,7 @@ mod tests {
     }
 
     /// A report with nothing in it but the two fields the exit code reads.
-    fn report(outcome: RunOutcome, stopped_by: Option<lan::Bound>) -> RunReport<()> {
+    fn report(outcome: RunOutcome, stopped_by: Option<lan_core::Bound>) -> RunReport<()> {
         RunReport {
             session_id: "s1".to_string(),
             model: "gpt-5".to_string(),
@@ -1007,7 +1009,7 @@ mod tests {
             RunOutcome::Error {
                 message: "deadline exceeded".to_string(),
             },
-            Some(lan::Bound::Deadline),
+            Some(lan_core::Bound::Deadline),
         );
 
         assert_eq!(exit_code(&failed), EXIT_FAILED);

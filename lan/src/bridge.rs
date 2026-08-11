@@ -11,7 +11,7 @@
 //!
 //! One connection is one ACP conversation, exactly as one stdio process is.
 //! [`transport`](self::transport) maps frames to lines, and
-//! [`serve`](crate::acp::serve) takes it from there, so the server a browser
+//! [`serve`](lan_acp::serve) takes it from there, so the server a browser
 //! reaches is the same server an editor reaches — same handlers, same tests,
 //! no second implementation to keep honest.
 //!
@@ -37,9 +37,21 @@
 //! loopback socket is already running as this user and could simply run `lan`,
 //! so a bound would cost a real client an unexplained refusal to deny an
 //! attacker nothing.
+//!
+//! # Why this lives in the binary
+//!
+//! It knows nothing about lan. Every ACP agent needs the same relay to reach a
+//! browser, and this one would work over any of them: it depends on the
+//! protocol's transport traits and on `lan-acp`'s [`serve`](lan_acp::serve),
+//! not on a single thing the harness does. So it is not a layer — it is
+//! ACP-ecosystem tooling parked here until extraction or upstreaming has
+//! somewhere to go, and it is never an identity argument for lan (ADR-0011).
 
 mod origin;
 mod transport;
+
+#[cfg(test)]
+mod end_to_end;
 
 use std::{
     io,
@@ -47,10 +59,9 @@ use std::{
     sync::Arc,
 };
 
+use lan_acp::{self as acp, ServeConfig};
 use tokio::net::{TcpListener, TcpStream};
 use tokio_tungstenite::accept_hdr_async;
-
-use crate::acp::{self, ServeConfig};
 
 pub use transport::websocket_transport;
 
@@ -90,12 +101,8 @@ impl BridgeConfig {
         }
     }
 
-    /// Admits one web origin, e.g. `http://localhost:5173`.
-    pub fn with_origin(mut self, origin: impl Into<String>) -> Self {
-        self.allowed_origins.push(origin.into());
-        self
-    }
-
+    /// Admits the web origins a page may connect from, e.g.
+    /// `http://localhost:5173`. Matched exactly; empty means no page is served.
     pub fn with_origins(mut self, origins: impl IntoIterator<Item = String>) -> Self {
         self.allowed_origins.extend(origins);
         self
@@ -189,11 +196,6 @@ impl Bridge {
     }
 }
 
-/// Binds and serves in one call, for a caller that fixed the port itself.
-pub async fn serve_websocket(bridge: BridgeConfig, config: ServeConfig) -> Result<(), BridgeError> {
-    Bridge::bind(bridge).await?.serve(config).await
-}
-
 /// Serves one connection, start to finish.
 ///
 /// Nothing leaves here. A listening socket meets clients that fail their
@@ -272,7 +274,7 @@ mod tests {
     #[test]
     fn origins_accumulate() {
         let config = BridgeConfig::default()
-            .with_origin("http://localhost:5173")
+            .with_origins(["http://localhost:5173".to_string()])
             .with_origins(["https://acp.example".to_string()]);
 
         assert_eq!(

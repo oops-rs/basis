@@ -1,0 +1,26 @@
+[package]
+name = "lan-core"
+description = "The lan SDK: workspace discovery, run lifecycle, one event stream, and the two seams. No protocol, no transport, no TTY."
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+homepage.workspace = true
+keywords = ["agent", "llm", "harness", "mentra", "sdk"]
+categories = ["development-tools"]
+
+[dependencies]
+mentra.workspace = true
+
+async-trait.workspace = true
+serde.workspace = true
+serde_json.workspace = true
+serde_yaml_ng.workspace = true
+thiserror.workspace = true
+tokio.workspace = true
+
+[dev-dependencies]
+mentra = { workspace = true, features = ["test-utils"] }
+tokio = { workspace = true, features = ["time"] }
+tempfile.workspace = true

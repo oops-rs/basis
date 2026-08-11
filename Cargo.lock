@@ -1244,18 +1244,46 @@ version = "0.1.0"
 dependencies = [
  "agent-client-protocol",
  "async-trait",
- "blocking",
  "clap",
  "futures",
+ "lan-acp",
+ "lan-core",
  "mentra",
- "mentra-provider",
+ "serde_json",
+ "tempfile",
+ "thiserror",
+ "tokio",
+ "tokio-tungstenite",
+]
+
+[[package]]
+name = "lan-acp"
+version = "0.1.0"
+dependencies = [
+ "agent-client-protocol",
+ "async-trait",
+ "blocking",
+ "futures",
+ "lan-core",
+ "mentra",
+ "serde_json",
+ "tempfile",
+ "thiserror",
+ "tokio",
+]
+
+[[package]]
+name = "lan-core"
+version = "0.1.0"
+dependencies = [
+ "async-trait",
+ "mentra",
  "serde",
  "serde_json",
  "serde_yaml_ng",
  "tempfile",
  "thiserror",
  "tokio",
- "tokio-tungstenite",
 ]
 
 [[package]]

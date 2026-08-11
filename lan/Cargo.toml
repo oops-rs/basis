@@ -1,27 +1,27 @@
 [package]
 name = "lan"
-version = "0.1.0"
-description = "A full-functional, embeddable agent harness built on Mentra. Library first, binary second."
+description = "Lightweight Agent Nucleus: the CLI over lan-core and lan-acp — headless runs, an ACP server, and a websocket bridge."
+version.workspace = true
 edition.workspace = true
 rust-version.workspace = true
 license.workspace = true
 repository.workspace = true
 homepage.workspace = true
 keywords = ["agent", "llm", "acp", "harness", "mentra"]
-categories = ["development-tools"]
+categories = ["development-tools", "command-line-utilities"]
 
 [dependencies]
+lan-core.workspace = true
+lan-acp.workspace = true
 mentra.workspace = true
-mentra-provider.workspace = true
 
+# The bridge speaks ACP's transport traits without speaking ACP itself: it
+# relays frames between a websocket and the server lan-acp already serves.
 agent-client-protocol.workspace = true
 async-trait.workspace = true
-blocking.workspace = true
 clap.workspace = true
 futures.workspace = true
-serde.workspace = true
 serde_json.workspace = true
-serde_yaml_ng.workspace = true
 thiserror.workspace = true
 tokio.workspace = true
 tokio-tungstenite.workspace = true
@@ -29,7 +29,7 @@ tokio-tungstenite.workspace = true
 [dev-dependencies]
 mentra = { workspace = true, features = ["test-utils"] }
 tokio = { workspace = true, features = ["time"] }
-# The bridge tests dial the bridge, which the library itself never does.
+# The bridge tests dial the bridge, which the binary itself never does.
 tokio-tungstenite = { workspace = true, features = ["connect"] }
 tempfile.workspace = true
 

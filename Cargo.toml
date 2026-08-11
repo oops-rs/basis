@@ -1,8 +1,11 @@
 [workspace]
-members = ["lan"]
+members = ["lan", "lan-acp", "lan-core"]
 resolver = "3"
 
 [workspace.package]
+# One version across the three: they are one product split by dependency
+# weight (ADR-0011), not three things that release on their own schedules.
+version = "0.1.0"
 edition = "2024"
 rust-version = "1.88"
 license = "MIT"
@@ -10,21 +13,26 @@ repository = "https://github.com/oops-rs/lan"
 homepage = "https://github.com/oops-rs/lan"
 
 [workspace.dependencies]
+# The layers of ADR-0011, named here so each crate states which of them it is
+# built on and cargo resolves one version of each.
+lan-core = { version = "0.1", path = "lan-core" }
+lan-acp = { version = "0.1", path = "lan-acp" }
+
 # TEMPORARY: use the sibling checkout for unreleased Mentra changes.
-# Restore registry-only dependencies before publishing; standalone checkouts
+# Restore the registry-only dependency before publishing; standalone checkouts
 # need the same sibling layout while this override is present.
 mentra = { version = "0.18", path = "../mentra/mentra" }
-mentra-provider = { version = "0.5", path = "../mentra/mentra-provider" }
 
 async-trait = "0.1"
 # Moves a blocking reader onto its own thread, which is how stdin becomes an
 # async stream. Already in the tree via agent-client-protocol, whose own stdio
-# transport is built on it; lan names it because it builds that transport
+# transport is built on it; `lan-acp` names it because it builds that transport
 # itself, to inspect the first line before serving (ADR-0015).
 blocking = "1"
 clap = { version = "4.6", features = ["derive"] }
-# `Sink`/`Stream` adapters for the websocket bridge. Already in the tree via
-# agent-client-protocol, whose transports are defined in terms of these traits.
+# `Sink`/`Stream` adapters for the two transports lan builds itself: `lan-acp`'s
+# peekable stdio one and the binary's websocket bridge. Already in the tree via
+# agent-client-protocol, whose own transports are defined in terms of these traits.
 futures = "0.3"
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"

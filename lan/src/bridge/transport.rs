@@ -6,7 +6,7 @@
 //! the bridge is a mapping between two framings that agree — one frame is one
 //! line — and nothing above it changes.
 //!
-//! That agreement is why the bridge calls [`serve`](crate::acp::serve)
+//! That agreement is why the bridge calls [`serve`](lan_acp::serve)
 //! directly instead of spawning a `lan` subprocess and copying bytes between
 //! its pipes and a socket. A subprocess would buy nothing: the server is
 //! already generic over its transport, so the tested server is the same server,
@@ -29,7 +29,7 @@ use tokio_tungstenite::{
 /// Public because the handshake is not lan's to own: a host already running an
 /// HTTP server has done the upgrade itself and holds the
 /// [`WebSocketStream`] this takes. Handing it here is the whole integration —
-/// pass the result to [`serve`](crate::acp::serve).
+/// pass the result to [`serve`](lan_acp::serve).
 pub fn websocket_transport<S>(
     socket: WebSocketStream<S>,
 ) -> Lines<
