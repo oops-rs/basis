@@ -5,6 +5,10 @@
 //! from. Spawning a real MCP server would test mentra's client, which mentra
 //! already tests. What a client sends over `session/new` is `lan-acp`'s edge,
 //! and is tested there.
+//!
+//! The whole file compiles away without the `mcp` feature, because so does
+//! everything it names (ADR-0012).
+#![cfg(feature = "mcp")]
 
 use std::path::{Path, PathBuf};
 

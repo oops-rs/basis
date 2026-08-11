@@ -10,6 +10,21 @@ homepage.workspace = true
 keywords = ["agent", "llm", "harness", "mentra", "sdk"]
 categories = ["development-tools"]
 
+# MCP is one binding of the tool contract, not a privileged subsystem
+# (ADR-0012), so an embedder can compile a lan-core that has never heard of it:
+# no `.mcp.json` discovery, no `McpConfig` on a run, no servers registered.
+# Default-on, because the binary and `lan-acp` both want it — a client's
+# `mcpServers` on `session/new` is the protocol's own concept.
+#
+# What this cannot drop is the weight underneath: mentra's MCP client is
+# unconditional upstream (its features are `openai-oauth` and `test-utils`), so
+# there is nothing to forward. Gating lan's half still delivers the contract
+# point — one seam, one adapter, droppable at compile time — and the day mentra
+# grows a feature, this is where it gets forwarded.
+[features]
+default = ["mcp"]
+mcp = []
+
 [dependencies]
 mentra.workspace = true
 

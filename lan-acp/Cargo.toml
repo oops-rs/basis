@@ -11,7 +11,9 @@ keywords = ["agent", "acp", "llm", "harness", "mentra"]
 categories = ["development-tools"]
 
 [dependencies]
-lan-core.workspace = true
+# `mcp` explicitly rather than by default: ACP carries `mcpServers` on
+# `session/new`, so `from_acp` has nothing to convert into without it.
+lan-core = { workspace = true, features = ["mcp"] }
 mentra.workspace = true
 
 agent-client-protocol.workspace = true

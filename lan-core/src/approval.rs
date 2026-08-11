@@ -1,16 +1,23 @@
 //! Asking before the agent does something consequential.
 //!
-//! Until now lan installed no tool authorizer at all, so mentra's session
-//! authorizer took `inner = None` and allowed every call unconditionally —
-//! which also meant the `permission_requested` events in lan's stream could
-//! never fire, and that anything answering them would have hung, because
-//! nothing resolved them.
+//! Two pieces, and only two. [`ApprovalGate`] is the tool authorizer lan
+//! installs on every runtime; it answers one question — *is this call worth
+//! asking about* — and puts every call where the answer is yes to whoever is
+//! answering. [`Approver`] is whoever that is, and it is the only thing that
+//! decides.
 //!
-//! This module closes both halves: a policy that decides which calls need
-//! asking, and an [`Approver`] that answers. Only the trivial answers live
-//! here — `lan-acp` supplies one that asks the client, and the binary one that
-//! asks a person at a terminal, because neither a protocol nor a TTY belongs
-//! in the core (ADR-0011).
+//! There was a third piece until ADR-0010: an `ApprovalPolicy` enum the core
+//! interpreted, whose three values were three trait impls in disguise. Two of
+//! them ship here — [`AllowAll`] and [`DenyAll`] — and the third, asking a
+//! person, lives where the terminal is: `lan-acp` supplies an approver that
+//! asks the client, and the binary one that asks at a TTY (ADR-0011). What the
+//! enum could never express, the trait can: allow edits but deny the network,
+//! ask over Slack with a timeout, escalate after the third refusal.
+//!
+//! Nothing installs an approver by default, and that is deliberate: with no
+//! approver the run gets [`AllowAll`], which is what a headless run needs.
+//! Anything stricter is one argument to
+//! [`run_with_approver`](crate::run::run_with_approver).
 
 use std::time::Duration;
 
@@ -22,28 +29,6 @@ use mentra::{
     },
 };
 use serde_json::Value;
-
-/// When the agent must ask before acting.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
-pub enum ApprovalPolicy {
-    /// Never ask.
-    ///
-    /// The default, because it is what a headless run needs: there is nobody
-    /// to ask, and a prompt nothing can answer is a hang. It asserts nothing
-    /// about the run being confined — with commands on by default (ADR-0013)
-    /// an unattended run carries its user's full authority, so an *attended*
-    /// one is usually better served by [`Self::Prompt`], and anything that
-    /// needs a real boundary gets it from the OS.
-    #[default]
-    Always,
-    /// Ask before anything that changes state outside this process.
-    Prompt,
-    /// Refuse anything that changes state outside this process.
-    ///
-    /// Useful for a genuinely read-only run: the agent can inspect a
-    /// workspace and report, and cannot touch it.
-    Never,
-}
 
 /// What the agent wants to do, as put to an [`Approver`].
 #[derive(Debug, Clone, PartialEq)]
@@ -70,7 +55,7 @@ pub enum ApprovalDecision {
     DenyForSession,
 }
 
-/// Answers approval requests.
+/// Answers approval requests. The seam a host plugs its own judgment into.
 ///
 /// Called from the event-forwarding task while the turn is blocked inside
 /// mentra waiting, so an implementation must answer rather than defer to
@@ -80,12 +65,45 @@ pub enum ApprovalDecision {
 /// task: an ACP approver awaits a round trip to the client, and a terminal one
 /// waits on a person. A synchronous signature would force both to block a
 /// runtime worker thread — which tokio rejects outright for the ACP case.
+///
+/// # Fail closed
+///
+/// **An approver that cannot answer denies.** No terminal to ask at, an answer
+/// that never came, a channel whose other end is gone: none of those is
+/// consent, and the only calls that reach an approver are the ones that change
+/// something outside this process.
+///
+/// The worked example is the binary's `TerminalApprover`. Asked when stdin is
+/// not a terminal — an unattended `lan run --approve prompt`, a cron job — it
+/// returns [`ApprovalDecision::Deny`] without printing a question nobody would
+/// read, so the run fails visibly instead of quietly granting whatever came up.
+/// `lan-acp`'s client approver applies the same rule to a failed round trip, a
+/// cancelled request, an answer it cannot parse, and its own thirty-minute
+/// timeout.
+///
+/// [`ApprovalDecision`]'s own default is [`Deny`](ApprovalDecision::Deny) for
+/// the same reason, and so is mentra's when an authorizer times out: silence is
+/// never a yes.
 #[async_trait]
 pub trait Approver: Send + 'static {
     async fn approve(&mut self, request: &ApprovalRequest) -> ApprovalDecision;
 }
 
-/// Approves everything. What a confined or headless run wants.
+/// Forwards to the approver inside.
+///
+/// Lets a caller hold an approver it chose at runtime — one of several, or one
+/// a feature flag picked — and still pass it to anything taking
+/// `impl Approver`. The binary is exactly that caller: `--approve` names one of
+/// three, and without this each arm would have to duplicate the whole run.
+#[async_trait]
+impl<A: Approver + ?Sized> Approver for Box<A> {
+    async fn approve(&mut self, request: &ApprovalRequest) -> ApprovalDecision {
+        (**self).approve(request).await
+    }
+}
+
+/// Approves everything. What a confined or headless run wants, and what a run
+/// given no approver of its own gets.
 #[derive(Debug, Default, Clone, Copy)]
 pub struct AllowAll;
 
@@ -96,7 +114,9 @@ impl Approver for AllowAll {
     }
 }
 
-/// Refuses everything, with the reason surfacing to the model as a tool error.
+/// Refuses everything, so the agent can inspect a workspace and report on it
+/// and cannot touch it. Each refusal reaches the model as a tool error, which
+/// is how it learns to stop trying.
 #[derive(Debug, Default, Clone, Copy)]
 pub struct DenyAll;
 
@@ -115,36 +135,50 @@ pub fn is_consequential(level: ToolSideEffectLevel) -> bool {
     !matches!(level, ToolSideEffectLevel::None)
 }
 
-/// Applies an [`ApprovalPolicy`] to each tool call.
+/// Puts every consequential call to the [`Approver`], and lets the rest
+/// through.
 ///
-/// Installed on the runtime so that `Prompt` reaches mentra's session
-/// authorizer, which is what emits `PermissionRequested` and waits.
-#[derive(Debug, Clone, Copy)]
-pub struct PolicyAuthorizer {
-    policy: ApprovalPolicy,
+/// This is the runtime half of approval, installed as mentra's
+/// `ToolAuthorizer`. It carries no policy: since ADR-0010 there is nothing left
+/// for one to say, because the approver decides. What it still owns is the
+/// filter — [`is_consequential`] — and the choice to *surface* rather than
+/// answer, which is what turns a call into a `PermissionRequested` event and
+/// blocks the turn until someone resolves it.
+///
+/// Installed even by a run that approves everything, and that is the point. An
+/// authorizer is fixed when the runtime is built and mentra never hands it
+/// back; without one it allows every call unconditionally and no permission
+/// request can ever be raised. Surfacing unconditionally is what lets the
+/// answer be chosen per turn — or changed mid-session, which is how an ACP
+/// client's mode picker works at all.
+#[derive(Debug, Default, Clone, Copy)]
+pub struct ApprovalGate {
     timeout: Option<Duration>,
 }
 
-impl PolicyAuthorizer {
-    pub fn new(policy: ApprovalPolicy) -> Self {
+impl ApprovalGate {
+    pub fn new() -> Self {
         Self {
-            policy,
             // No timeout by default: a person reading a diff should not lose
             // the turn to a stopwatch. A host that needs one sets it.
             timeout: None,
         }
     }
 
+    /// Gives up on an unanswered request after `timeout`, denying the call.
+    ///
+    /// mentra applies this to the whole wait, so it bounds an approver that
+    /// never answers as well as one that answers slowly — the fail-closed rule
+    /// of [`Approver`], enforced from outside for approvers that forget it.
     pub fn with_timeout(self, timeout: Duration) -> Self {
         Self {
             timeout: Some(timeout),
-            ..self
         }
     }
 }
 
 #[async_trait]
-impl ToolAuthorizer for PolicyAuthorizer {
+impl ToolAuthorizer for ApprovalGate {
     async fn authorize(
         &self,
         request: &ToolAuthorizationRequest,
@@ -153,17 +187,12 @@ impl ToolAuthorizer for PolicyAuthorizer {
             return Ok(ToolAuthorizationDecision::allow());
         }
 
-        Ok(match self.policy {
-            ApprovalPolicy::Always => ToolAuthorizationDecision::allow(),
-            ApprovalPolicy::Prompt => ToolAuthorizationDecision::prompt(format!(
-                "{} wants to run and can change state outside this process",
-                request.tool_name
-            )),
-            ApprovalPolicy::Never => ToolAuthorizationDecision::deny(format!(
-                "{} changes state outside this process, which this run does not allow",
-                request.tool_name
-            )),
-        })
+        // The reason becomes the description the approver shows, so it says
+        // what is being asked rather than that something is.
+        Ok(ToolAuthorizationDecision::prompt(format!(
+            "{} wants to run and can change state outside this process",
+            request.tool_name
+        )))
     }
 
     fn timeout(&self) -> Option<Duration> {
@@ -202,15 +231,22 @@ mod tests {
         }
     }
 
-    async fn outcome(
-        policy: ApprovalPolicy,
-        level: ToolSideEffectLevel,
-    ) -> ToolAuthorizationOutcome {
-        PolicyAuthorizer::new(policy)
+    async fn outcome(level: ToolSideEffectLevel) -> ToolAuthorizationOutcome {
+        ApprovalGate::new()
             .authorize(&request("shell", level))
             .await
             .expect("authorization does not error")
             .outcome
+    }
+
+    fn approval_request() -> ApprovalRequest {
+        ApprovalRequest {
+            request_id: "r".to_string(),
+            tool_call_id: "t".to_string(),
+            tool_name: "shell".to_string(),
+            description: "d".to_string(),
+            input: json!({}),
+        }
     }
 
     #[test]
@@ -223,62 +259,76 @@ mod tests {
 
     #[tokio::test]
     async fn a_read_only_call_is_never_worth_asking_about() {
-        for policy in [
-            ApprovalPolicy::Always,
-            ApprovalPolicy::Prompt,
-            ApprovalPolicy::Never,
+        assert_eq!(
+            outcome(ToolSideEffectLevel::None).await,
+            ToolAuthorizationOutcome::Allow,
+            "prompting for reads trains people to approve without reading"
+        );
+    }
+
+    #[tokio::test]
+    async fn every_other_call_is_put_to_the_approver() {
+        for level in [
+            ToolSideEffectLevel::LocalState,
+            ToolSideEffectLevel::Process,
+            ToolSideEffectLevel::External,
         ] {
             assert_eq!(
-                outcome(policy, ToolSideEffectLevel::None).await,
-                ToolAuthorizationOutcome::Allow,
-                "prompting for reads trains people to approve without reading"
+                outcome(level).await,
+                ToolAuthorizationOutcome::Prompt,
+                "{level:?} changes something outside this process"
             );
         }
     }
 
     #[tokio::test]
-    async fn the_policy_decides_consequential_calls() {
-        assert_eq!(
-            outcome(ApprovalPolicy::Always, ToolSideEffectLevel::Process).await,
-            ToolAuthorizationOutcome::Allow
-        );
-        assert_eq!(
-            outcome(ApprovalPolicy::Prompt, ToolSideEffectLevel::Process).await,
-            ToolAuthorizationOutcome::Prompt
-        );
-        assert_eq!(
-            outcome(ApprovalPolicy::Never, ToolSideEffectLevel::Process).await,
-            ToolAuthorizationOutcome::Deny
-        );
-    }
-
-    #[tokio::test]
-    async fn a_denial_says_why() {
-        let decision = PolicyAuthorizer::new(ApprovalPolicy::Never)
+    async fn the_request_says_which_tool_wants_to_run() {
+        // This text is what an approver shows a person, so a request that
+        // named nothing would be a prompt nobody can answer.
+        let decision = ApprovalGate::new()
             .authorize(&request("files", ToolSideEffectLevel::LocalState))
             .await
             .expect("no error");
 
-        let reason = decision.reason.expect("a denial must explain itself");
-        assert!(reason.contains("files"));
+        let reason = decision.reason.expect("a prompt must say what it is about");
+        assert!(reason.contains("files"), "{reason}");
     }
 
     #[test]
-    fn always_is_the_default_policy() {
-        assert_eq!(ApprovalPolicy::default(), ApprovalPolicy::Always);
+    fn a_gate_waits_as_long_as_it_takes_unless_told_otherwise() {
+        assert_eq!(ApprovalGate::new().timeout(), None);
+        assert_eq!(
+            ApprovalGate::new()
+                .with_timeout(Duration::from_secs(60))
+                .timeout(),
+            Some(Duration::from_secs(60))
+        );
     }
 
     #[tokio::test]
     async fn the_trivial_approvers_answer_as_named() {
-        let request = ApprovalRequest {
-            request_id: "r".to_string(),
-            tool_call_id: "t".to_string(),
-            tool_name: "shell".to_string(),
-            description: "d".to_string(),
-            input: json!({}),
-        };
+        let request = approval_request();
 
         assert_eq!(AllowAll.approve(&request).await, ApprovalDecision::Allow);
         assert_eq!(DenyAll.approve(&request).await, ApprovalDecision::Deny);
+    }
+
+    #[tokio::test]
+    async fn a_boxed_approver_answers_exactly_as_the_one_inside() {
+        // What the binary relies on to choose between three approvers without
+        // writing the run out three times.
+        let mut chosen: Box<dyn Approver> = Box::new(DenyAll);
+
+        assert_eq!(
+            chosen.approve(&approval_request()).await,
+            ApprovalDecision::Deny
+        );
+    }
+
+    #[test]
+    fn an_unanswered_request_is_a_refusal() {
+        // The fail-closed rule, in the one place every approver inherits it:
+        // whatever a decision defaults to is what silence means.
+        assert_eq!(ApprovalDecision::default(), ApprovalDecision::Deny);
     }
 }

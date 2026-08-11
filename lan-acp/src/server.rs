@@ -61,13 +61,13 @@ use agent_client_protocol::{
 use crate::{
     approver::AcpApprover,
     history,
-    mode::{ModeError, ModedApprover},
+    mode::{ApprovalMode, ModeError, ModedApprover},
     session::{AcpSession, SessionRegistry},
     update::session_update,
 };
 use lan_core::{
-    ApprovalPolicy, Event, McpServer, PersistedSession, PreparedRun, RunConfig, RunError,
-    provider::ProviderError, run::EventSink,
+    Event, McpServer, PersistedSession, PreparedRun, RunConfig, RunError, provider::ProviderError,
+    run::EventSink,
 };
 
 /// Where an ACP session's [`PreparedRun`] comes from.
@@ -81,9 +81,9 @@ use lan_core::{
 ///
 /// A source that builds its own runtime owns its tool authorizer too, and a
 /// session mode only reaches calls that authorizer surfaces: install
-/// [`PolicyAuthorizer`](lan_core::approval::PolicyAuthorizer) at
-/// [`ApprovalPolicy::Prompt`] — which is what lan's own source does — or the
-/// client's mode picker will have nothing to decide.
+/// [`ApprovalGate`](lan_core::approval::ApprovalGate) — which is what lan's own
+/// source gets from [`prepare_without_prompt`](lan_core::run::prepare_without_prompt)
+/// — or the client's mode picker will have nothing to decide.
 #[async_trait::async_trait]
 pub trait SessionSource: Send + Sync + 'static {
     /// Opens a conversation in `cwd`, for `session/new`, with the MCP servers
@@ -131,6 +131,12 @@ struct ConfiguredSource {
 
 impl ConfiguredSource {
     /// Builds the config for one session, in the client's working directory.
+    ///
+    /// Nothing here says anything about approval. A runtime's authorizer is
+    /// fixed for its life, so lan-core installs one that surfaces every
+    /// consequential call and answers none of them; which of those the client
+    /// actually sees is the session's mode, which can still change (see
+    /// [`mode`](crate::mode)).
     fn config_for(&self, cwd: PathBuf, mcp: Vec<McpServer>) -> RunConfig {
         let config = match &self.template {
             Some(template) => {
@@ -145,17 +151,7 @@ impl ConfiguredSource {
         // for this session in particular. Discovery still runs, so a
         // `.mcp.json` the client said nothing about is still honored.
         let mcp = config.mcp.clone().with_supplied(mcp);
-        let config = config.with_mcp(mcp);
-
-        // A runtime's authorizer is fixed for its life, so it is set to
-        // surface every consequential call and the session's mode decides the
-        // answer — see [`mode`](crate::mode). A read-only session is the
-        // exception: its mode cannot leave `Never`, so there is nothing to
-        // decide and the authorizer refuses directly, with its own reason.
-        match config.approval {
-            ApprovalPolicy::Never => config,
-            _ => config.with_approval(ApprovalPolicy::Prompt),
-        }
+        config.with_mcp(mcp)
     }
 }
 
@@ -201,7 +197,7 @@ impl SessionSource for ConfiguredSource {
 pub struct ServeConfig {
     source: Arc<dyn SessionSource>,
     /// Where a new session's mode picker starts.
-    initial_mode: ApprovalPolicy,
+    initial_mode: ApprovalMode,
 }
 
 impl std::fmt::Debug for ServeConfig {
@@ -222,19 +218,19 @@ impl ServeConfig {
     /// Serves sessions built from `template`, whose workspace each session
     /// replaces with the `cwd` its client sent.
     ///
-    /// The template's [`ApprovalPolicy`] is the mode each session opens in.
-    /// With no template that is [`ApprovalPolicy::Prompt`] rather than lan's
-    /// library default: over ACP there is a client to ask, which is the whole
-    /// reason the protocol carries a permission request.
+    /// Sessions open at [`ApprovalMode::Prompt`] rather than at lan's library
+    /// default of allowing everything: over ACP there is a client to ask, which
+    /// is the whole reason the protocol carries a permission request. An
+    /// operator who wants otherwise says so with
+    /// [`with_initial_mode`](Self::with_initial_mode) — the template cannot
+    /// carry it, because a [`RunConfig`] no longer has an opinion about
+    /// approval to carry (ADR-0010).
     pub fn new(template: impl Into<Option<RunConfig>>) -> Self {
-        let template = template.into();
-        let initial_mode = template
-            .as_ref()
-            .map_or(ApprovalPolicy::Prompt, |config| config.approval);
-
         Self {
-            source: Arc::new(ConfiguredSource { template }),
-            initial_mode,
+            source: Arc::new(ConfiguredSource {
+                template: template.into(),
+            }),
+            initial_mode: ApprovalMode::default(),
         }
     }
 
@@ -242,12 +238,12 @@ impl ServeConfig {
     pub fn with_source(source: impl SessionSource) -> Self {
         Self {
             source: Arc::new(source),
-            initial_mode: ApprovalPolicy::Prompt,
+            initial_mode: ApprovalMode::default(),
         }
     }
 
-    /// Opens each session in `mode` instead of the template's policy.
-    pub fn with_initial_mode(self, mode: ApprovalPolicy) -> Self {
+    /// Opens each session in `mode` instead of asking every time.
+    pub fn with_initial_mode(self, mode: ApprovalMode) -> Self {
         Self {
             initial_mode: mode,
             ..self
@@ -1046,55 +1042,21 @@ mod tests {
     }
 
     #[test]
-    fn an_acp_session_surfaces_every_consequential_call_to_its_mode() {
-        for configured in [ApprovalPolicy::Always, ApprovalPolicy::Prompt] {
-            let source = ConfiguredSource {
-                template: Some(RunConfig::new("/placeholder", "").with_approval(configured)),
-            };
-
-            assert_eq!(
-                source
-                    .config_for(PathBuf::from("/repo"), Vec::new())
-                    .approval,
-                ApprovalPolicy::Prompt,
-                "the runtime asks so the mode can answer; {configured:?} is the mode, not the authorizer"
-            );
-        }
-    }
-
-    #[test]
-    fn a_read_only_session_keeps_its_refusal_in_the_authorizer() {
-        // Nothing to decide, so the authorizer denies with its own reason
-        // rather than routing a request through a mode that cannot allow it.
-        let source = ConfiguredSource {
-            template: Some(RunConfig::new("/placeholder", "").with_approval(ApprovalPolicy::Never)),
-        };
-
+    fn a_session_opens_asking_unless_the_operator_says_otherwise() {
+        // The library default is to allow everything, which is right for a
+        // headless run and wrong here: a client that can be asked should be.
+        assert_eq!(ServeConfig::default().initial_mode, ApprovalMode::Prompt);
         assert_eq!(
-            source
-                .config_for(PathBuf::from("/repo"), Vec::new())
-                .approval,
-            ApprovalPolicy::Never
-        );
-    }
-
-    #[test]
-    fn the_templates_policy_is_the_mode_a_session_opens_in() {
-        let config =
-            ServeConfig::new(RunConfig::new("/repo", "").with_approval(ApprovalPolicy::Never));
-
-        assert_eq!(config.initial_mode, ApprovalPolicy::Never);
-        assert_eq!(
-            ServeConfig::default().initial_mode,
-            ApprovalPolicy::Prompt,
-            "over ACP there is a client to ask, unlike lan's library default"
+            ServeConfig::new(RunConfig::new("/repo", "")).initial_mode,
+            ApprovalMode::Prompt,
+            "a template says what a run is, not how much it may do without asking"
         );
         assert_eq!(
-            config
-                .with_initial_mode(ApprovalPolicy::Always)
+            ServeConfig::default()
+                .with_initial_mode(ApprovalMode::Never)
                 .initial_mode,
-            ApprovalPolicy::Always,
-            "a host supplying its own source has no template to read this from"
+            ApprovalMode::Never,
+            "`lan acp --approve never` opens every session read-only"
         );
     }
 

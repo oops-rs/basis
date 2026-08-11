@@ -20,8 +20,7 @@ pub enum ShellAccess {
     /// For a run that inspects a workspace and reports on it. Worth being
     /// precise about what this is: one route closed, not a boundary. The file
     /// tools still write, and the process still runs as its user — see
-    /// [`ApprovalPolicy::Never`](crate::ApprovalPolicy::Never) for a run that
-    /// changes nothing at all.
+    /// [`DenyAll`](crate::DenyAll) for a run that changes nothing at all.
     Denied,
     /// Commands allowed.
     ///

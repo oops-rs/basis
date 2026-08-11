@@ -21,8 +21,10 @@
 //!   turning lan's existing [`Approver`](lan_core::Approver) seam into
 //!   `session/request_permission` with no new plumbing.
 //! - [`SessionModes`] is the client's permission switch: ACP session modes over
-//!   lan's [`ApprovalPolicy`](lan_core::ApprovalPolicy), applied in front of the
-//!   approver so it can still change mid-session.
+//!   lan's [`Approver`](lan_core::Approver) seam, applied in front of the
+//!   approver so the answer can still change mid-session. The three modes are
+//!   [`ApprovalMode`], which is lan-acp's own because an enumerable mode list
+//!   is a protocol concept — the core has the trait and nothing else.
 //! - `history` replays a resumed conversation, which is what separates
 //!   `session/load` from `session/resume`.
 //! - [`SessionRegistry`] holds the open conversations, keyed by mentra's
@@ -48,7 +50,7 @@ mod update;
 pub use approver::AcpApprover;
 pub use commands::available_commands;
 pub use mcp::from_acp;
-pub use mode::{ModeError, ModedApprover, SessionModes};
+pub use mode::{ApprovalMode, ModeError, ModedApprover, SessionModes};
 pub use server::{ServeConfig, SessionSource, serve};
 pub use session::{AcpSession, SessionRegistry};
 pub use stdio::{StdioError, serve_stdio};

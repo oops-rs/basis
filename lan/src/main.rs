@@ -47,8 +47,8 @@ use std::{
 use clap::{Parser, Subcommand};
 use lan_acp::StdioError;
 use lan_core::{
-    ApprovalPolicy, Event, JsonlWriter, RunConfig, RunOutcome, RunReport, ShellAccess, Snapshot,
-    provider,
+    AllowAll, Approver, DenyAll, Event, JsonlWriter, RunConfig, RunOutcome, RunReport, ShellAccess,
+    Snapshot, provider,
     run::{EventSink, FnSink},
 };
 use mentra::ModelSelector;
@@ -310,7 +310,27 @@ pub(crate) enum ApproveMode {
     Never,
 }
 
-impl From<ApproveMode> for ApprovalPolicy {
+impl ApproveMode {
+    /// The approver this mode installs.
+    ///
+    /// The three words on the command line are three implementations of one
+    /// trait, which is all approval is since ADR-0010. Boxed because they are
+    /// different types and the choice is made at runtime — a host writing Rust
+    /// names the one it wants and skips this.
+    fn approver(self) -> Box<dyn Approver> {
+        match self {
+            Self::Always => Box::new(AllowAll),
+            // Asks on stderr and reads stdin, so it works under either
+            // renderer — and denies outright when stdin is not a terminal,
+            // which is what makes `--approve prompt` safe to leave in a script
+            // that turns out to have nobody watching it.
+            Self::Prompt => Box::new(TerminalApprover::new()),
+            Self::Never => Box::new(DenyAll),
+        }
+    }
+}
+
+impl From<ApproveMode> for lan_acp::ApprovalMode {
     fn from(mode: ApproveMode) -> Self {
         match mode {
             ApproveMode::Always => Self::Always,
@@ -485,15 +505,13 @@ fn acp_config(args: AcpArgs) -> Result<lan_acp::ServeConfig, String> {
         config = config.with_model(ModelSelector::Id(model));
     }
 
-    config = config
-        .with_shell(ShellAccess::from_flag(!args.no_shell))
-        .with_approval(ApprovalPolicy::from(args.approve));
+    config = config.with_shell(ShellAccess::from_flag(!args.no_shell));
 
     if let Some(effort) = args.effort {
         config = config.with_effort(effort.into());
     }
 
-    Ok(lan_acp::ServeConfig::new(config))
+    Ok(lan_acp::ServeConfig::new(config).with_initial_mode(args.approve.into()))
 }
 
 async fn execute_run(args: RunArgs) -> Result<ExitCode, String> {
@@ -518,9 +536,6 @@ async fn execute_run(args: RunArgs) -> Result<ExitCode, String> {
 
     config = config.with_shell(ShellAccess::from_flag(!args.no_shell));
 
-    let approval = ApprovalPolicy::from(args.approve);
-    config = config.with_approval(approval);
-
     if let Some(effort) = args.effort {
         config = config.with_effort(effort.into());
     }
@@ -538,9 +553,9 @@ async fn execute_run(args: RunArgs) -> Result<ExitCode, String> {
         config = config.with_token_budget(token_budget);
     }
 
-    // Prompting writes the question to stderr and reads stdin, so it works
-    // alongside either renderer.
-    let approver = TerminalApprover::new();
+    // Every consequential call is put to this one, and nothing else decides:
+    // `always` allows, `never` refuses, `prompt` asks the person.
+    let approver = args.approve.approver();
 
     if args.json {
         let report = lan_core::run_with_approver(config, JsonlWriter::new(io::stdout()), approver)

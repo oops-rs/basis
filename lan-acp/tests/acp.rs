@@ -35,8 +35,7 @@ use agent_client_protocol::{
 };
 use lan_acp::{ServeConfig, SessionSource};
 use lan_core::{
-    ApprovalPolicy, PreparedRun, RunConfig, RunError, approval::PolicyAuthorizer,
-    run::prepare_with_session,
+    PreparedRun, RunConfig, RunError, approval::ApprovalGate, run::prepare_with_session,
 };
 use mentra::{
     RuntimePolicy,
@@ -358,7 +357,7 @@ fn writing_mock(workspace: &tempfile::TempDir) -> MockRuntime {
         .runtime_identifier(MOCK_RUNTIME)
         // Not permissive: the authorizer must have something to prompt about.
         .with_policy(RuntimePolicy::workspace_bounded(workspace.path()))
-        .with_tool_authorizer(PolicyAuthorizer::new(ApprovalPolicy::Prompt))
+        .with_tool_authorizer(ApprovalGate::new())
         .tool_calls(vec![MockToolCall::new(
             "files",
             serde_json::json!({

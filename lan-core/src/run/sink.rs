@@ -11,8 +11,12 @@ use crate::event::{Event, JsonlWriter};
 /// A destination for run events.
 ///
 /// Emission happens on a background task, so a sink must be `Send`. Returning
-/// an error stops forwarding for the rest of the run — a client that has gone
+/// an error stops emission for the rest of the run — a client that has gone
 /// away should not cost the run a full transcript of failed writes.
+///
+/// The run itself carries on. That task is also the one answering approval
+/// requests, and mentra blocks the turn until one is answered, so giving up on
+/// it would turn a broken pipe into a hung agent.
 pub trait EventSink: Send + 'static {
     fn emit(&mut self, event: Event) -> std::io::Result<()>;
 }

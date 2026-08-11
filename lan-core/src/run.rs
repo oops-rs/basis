@@ -27,12 +27,13 @@ use mentra::{
 };
 use thiserror::Error;
 
+#[cfg(feature = "mcp")]
+use crate::mcp::{self, McpConfig, McpError};
 use crate::{
-    approval::{ApprovalPolicy, Approver, PolicyAuthorizer},
+    approval::{ApprovalGate, Approver},
     context::{ContextConfig, ContextError, WorkspaceContext},
-    event::RunOutcome,
+    event::{ContextFile, RunOutcome},
     hooks::{self, HookRunner, HooksConfig},
-    mcp::{self, McpConfig, McpError},
     provider::{self, ProviderError},
     shell::ShellAccess,
     skills::{self, SkillsConfig},
@@ -92,6 +93,7 @@ pub struct RunConfig {
     pub context: ContextConfig,
     pub skills: SkillsConfig,
     /// Which MCP servers this run connects, and where to look for more.
+    #[cfg(feature = "mcp")]
     pub mcp: McpConfig,
     /// Where to look for prompt templates. Discovered, never executed here —
     /// a template becomes a prompt only when something renders it.
@@ -101,8 +103,6 @@ pub struct RunConfig {
     pub hooks: HooksConfig,
     /// Whether the agent may run commands. Granted by default; see ADR-0013.
     pub shell: ShellAccess,
-    /// When the agent must ask before doing something consequential.
-    pub approval: ApprovalPolicy,
     /// How hard the model should think. `None` leaves the provider's default;
     /// unsupported provider/model levels fail instead of being downgraded.
     pub effort: Option<Effort>,
@@ -135,6 +135,7 @@ impl RunConfig {
             model: ModelSelector::NewestAvailable,
             context: ContextConfig::default(),
             skills: SkillsConfig::default(),
+            #[cfg(feature = "mcp")]
             mcp: McpConfig::default(),
             templates: TemplatesConfig::default(),
             hooks: HooksConfig::default(),
@@ -142,7 +143,6 @@ impl RunConfig {
             // than from anything ambient: what a run may do is stated here, in
             // the config, not read out of the environment behind the caller.
             shell: ShellAccess::default(),
-            approval: ApprovalPolicy::default(),
             effort: None,
             deadline: None,
             tool_budget: None,
@@ -186,6 +186,7 @@ impl RunConfig {
     /// Servers arrive from three places — the caller's own list, the
     /// workspace's `.mcp.json`, and the global one — and this is where the
     /// first of those goes. See [`crate::mcp`] for the precedence.
+    #[cfg(feature = "mcp")]
     pub fn with_mcp(self, mcp: McpConfig) -> Self {
         Self { mcp, ..self }
     }
@@ -210,14 +211,6 @@ impl RunConfig {
     /// this run does, never a claim about what the process could do.
     pub fn with_shell(self, shell: ShellAccess) -> Self {
         Self { shell, ..self }
-    }
-
-    /// Sets when the agent must ask before acting.
-    ///
-    /// [`ApprovalPolicy::Prompt`] only means anything if the run is given an
-    /// approver — see [`PreparedRun::execute_with_approver`].
-    pub fn with_approval(self, approval: ApprovalPolicy) -> Self {
-        Self { approval, ..self }
     }
 
     /// Asks the model to think harder, where the provider supports it.
@@ -352,6 +345,7 @@ pub enum RunError {
     Skills(#[from] mentra::SkillLoadError),
 
     #[error(transparent)]
+    #[cfg(feature = "mcp")]
     Mcp(#[from] McpError),
 
     #[error("failed to load prompt templates: {0}")]
@@ -362,6 +356,14 @@ pub enum RunError {
 }
 
 /// Runs one prompt to completion, streaming events into `sink`.
+///
+/// Consequential calls are approved by [`AllowAll`](crate::AllowAll), which is
+/// what a headless run needs: there is nobody to ask, and a question nothing
+/// answers is a hang. It asserts nothing about the run being confined — with
+/// commands on by default (ADR-0013) an unattended run carries its user's full
+/// authority, so an *attended* one is usually better served by
+/// [`run_with_approver`], and anything that needs a real boundary gets it from
+/// the OS.
 ///
 /// A setup failure — no credential, unreachable model, unreadable workspace —
 /// is an `Err`. A failure *during* the turn is reported as
@@ -375,10 +377,13 @@ pub async fn run<S: EventSink>(config: RunConfig, sink: S) -> Result<RunReport<S
     prepare(config).await?.execute(sink).await
 }
 
-/// Runs one prompt, routing approval requests to `approver`.
+/// Runs one prompt, putting every consequential call to `approver`.
 ///
-/// Only meaningful with [`ApprovalPolicy::Prompt`]; under the other policies
-/// nothing is ever asked.
+/// The approver is the whole of lan's approval story (ADR-0010):
+/// [`DenyAll`](crate::approval::DenyAll) for a run that may change nothing,
+/// the binary's terminal prompter for a person at a TTY, or a host's own — one
+/// that allows edits and denies the network, or asks a team over Slack. Note
+/// the contract it inherits: an approver that cannot answer must deny.
 pub async fn run_with_approver<S: EventSink, A: Approver>(
     config: RunConfig,
     sink: S,
@@ -461,7 +466,7 @@ struct Resolved {
     skills: Vec<LoadedSkill>,
     templates_dirs: Vec<PathBuf>,
     templates: Vec<Template>,
-    mcp_files: Vec<crate::event::ContextFile>,
+    mcp_files: Vec<ContextFile>,
     mcp_servers: Vec<String>,
 }
 
@@ -500,8 +505,9 @@ async fn resolve(config: &RunConfig) -> Result<Resolved, RunError> {
             .allow_background_commands(config.shell.is_granted()),
         )
         // Without an authorizer mentra allows every call unconditionally, and
-        // no permission request can ever be raised.
-        .with_tool_authorizer(PolicyAuthorizer::new(config.approval));
+        // no permission request can ever be raised — so the gate goes on even
+        // for a run that approves everything (see `crate::approval`).
+        .with_tool_authorizer(ApprovalGate::new());
 
     // Loaded before the build so a hooks file that does not parse fails the run
     // loudly, rather than at the first tool call — or worse, never.
@@ -517,33 +523,27 @@ async fn resolve(config: &RunConfig) -> Result<Resolved, RunError> {
         builder.with_pre_hook(HookRunner::new(&config.workspace, hooks))
     };
 
-    // MCP servers are registered on the builder and connected by `build_async`,
-    // so this must happen before the build. mentra's `McpRegistration` is
-    // private, which is why the fold matches here rather than in `crate::mcp`.
-    //
-    // Discovery is run for its own sake as well: the header names which files
-    // took effect, and an `.mcp.json` is the last thing that should apply
-    // invisibly — it says which programs to spawn.
-    let mcp_files: Vec<crate::event::ContextFile> = mcp::discover(&config.workspace, &config.mcp)?
-        .iter()
-        .map(|source| crate::event::ContextFile {
-            path: source.path.clone(),
-            scope: source.scope.label(),
-        })
-        .collect();
+    // Both lists reach the header whether or not this build has MCP in it: what
+    // a run reports is a schema clients parse, and a field that vanished with a
+    // cargo feature would make the stream's shape depend on how lan was built.
+    #[cfg(feature = "mcp")]
+    let (builder, mcp_files, mcp_servers) = {
+        let (files, servers) = discovered_mcp(config)?;
+        let names: Vec<String> = servers
+            .iter()
+            .map(|server| server.name().to_string())
+            .collect();
+        let builder = servers
+            .into_iter()
+            .fold(builder, |builder, server| match server {
+                mcp::McpServer::Stdio(server) => builder.with_mcp_server(server),
+                mcp::McpServer::Sse(server) => builder.with_mcp_sse_server(server),
+            });
 
-    let servers = mcp::servers(&config.workspace, &config.mcp)?;
-    let mcp_servers: Vec<String> = servers
-        .iter()
-        .map(|server| server.name().to_string())
-        .collect();
-
-    let builder = servers
-        .into_iter()
-        .fold(builder, |builder, server| match server {
-            mcp::McpServer::Stdio(server) => builder.with_mcp_server(server),
-            mcp::McpServer::Sse(server) => builder.with_mcp_sse_server(server),
-        });
+        (builder, files, names)
+    };
+    #[cfg(not(feature = "mcp"))]
+    let (mcp_files, mcp_servers): (Vec<ContextFile>, Vec<String>) = (Vec::new(), Vec::new());
 
     let runtime = match &choice.base_url {
         Some(base_url) => {
@@ -590,6 +590,28 @@ async fn resolve(config: &RunConfig) -> Result<Resolved, RunError> {
         mcp_files,
         mcp_servers,
     })
+}
+
+/// Registers the MCP servers this run connects, and reports what took effect.
+///
+/// Servers are registered on the builder and connected by `build_async`, so
+/// this must happen before the build. mentra's `McpRegistration` is private,
+/// which is why the fold matches here rather than in [`crate::mcp`].
+///
+/// Discovery runs for its own sake as well: the header names which files took
+/// effect, and an `.mcp.json` is the last thing that should apply invisibly —
+/// it says which programs to spawn.
+#[cfg(feature = "mcp")]
+fn discovered_mcp(config: &RunConfig) -> Result<(Vec<ContextFile>, Vec<mcp::McpServer>), RunError> {
+    let files: Vec<ContextFile> = mcp::discover(&config.workspace, &config.mcp)?
+        .iter()
+        .map(|source| ContextFile {
+            path: source.path.clone(),
+            scope: source.scope.label(),
+        })
+        .collect();
+
+    Ok((files, mcp::servers(&config.workspace, &config.mcp)?))
 }
 
 /// Prepares a run against a session the caller already built, so a host with

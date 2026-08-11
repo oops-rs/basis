@@ -236,6 +236,11 @@ impl PreparedRun {
 
     /// Sends the configured prompt and streams the turn into `sink`.
     ///
+    /// Consequential calls are approved by [`AllowAll`], the default for a run
+    /// that was given no approver of its own;
+    /// [`execute_with_approver`](Self::execute_with_approver) is where anything
+    /// stricter goes.
+    ///
     /// The stream always opens with [`Event::RunStarted`] and always closes
     /// with [`Event::RunFinished`], including when the turn fails: by then the
     /// stream has content a client needs to be able to finish reading.
@@ -246,12 +251,13 @@ impl PreparedRun {
         self.execute_with_approver(sink, AllowAll).await
     }
 
-    /// Sends the configured prompt, streaming into `sink` and routing any
-    /// approval request to `approver`.
+    /// Sends the configured prompt, streaming into `sink` and putting every
+    /// consequential call to `approver`.
     ///
     /// The approver runs on the forwarding task while the turn is blocked
     /// waiting on it, which is what makes an interactive answer possible at
-    /// all — and what means an approver must answer rather than defer.
+    /// all — and what means an approver must answer rather than defer. One that
+    /// cannot answer denies; see [`Approver`].
     pub async fn execute_with_approver<S: EventSink, A: Approver>(
         &mut self,
         sink: S,
@@ -440,6 +446,12 @@ fn header_for(session_id: &str, run: &RunContext) -> Event {
 
 /// Drains the session's event stream into the sink until the turn is done,
 /// then drains whatever is still queued and hands the sink back.
+///
+/// This task also answers permission requests, and mentra blocks the turn until
+/// one is answered — so it runs to the end of the turn even when the sink stops
+/// accepting events. A forwarder that returned on the first failed write would
+/// hang the next consequential call rather than merely stop narrating it, which
+/// is what `lan run --json | head` would do to every run.
 async fn forward_events<S: EventSink, A: Approver>(
     mut receiver: SessionEventReceiver,
     mut sink: S,
@@ -448,6 +460,9 @@ async fn forward_events<S: EventSink, A: Approver>(
     permissions: SessionPermissionHandle,
 ) -> S {
     tokio::pin!(done);
+    // Cleared by the first failed write, and never set again: a sink that
+    // refused one event is not asked to take the rest.
+    let mut writing = true;
 
     loop {
         tokio::select! {
@@ -459,16 +474,12 @@ async fn forward_events<S: EventSink, A: Approver>(
                 match received {
                     Ok(event) => {
                         resolve_if_permission(&event, &mut approver, &permissions).await;
-                        if !emit_session_event(&mut sink, &event) {
-                            return sink;
-                        }
+                        writing = writing && emit_session_event(&mut sink, &event);
                     }
                     // Lagging is recoverable — the receiver keeps working, it
                     // just skipped ahead. Say so and carry on.
                     Err(RecvError::Lagged(dropped)) => {
-                        if !emit(&mut sink, lag_notice(dropped)) {
-                            return sink;
-                        }
+                        writing = writing && emit(&mut sink, lag_notice(dropped));
                     }
                     // A closed channel means the session is gone; nothing more
                     // can arrive, so stop without waiting for the signal.
@@ -476,7 +487,7 @@ async fn forward_events<S: EventSink, A: Approver>(
                 }
             }
             _ = &mut done => {
-                drain(&mut receiver, &mut sink, &mut approver, &permissions).await;
+                drain(&mut receiver, &mut sink, &mut approver, &permissions, writing).await;
                 return sink;
             }
         }
@@ -489,19 +500,16 @@ async fn drain<S: EventSink, A: Approver>(
     sink: &mut S,
     approver: &mut A,
     permissions: &SessionPermissionHandle,
+    mut writing: bool,
 ) {
     loop {
         match receiver.try_recv() {
             Ok(event) => {
                 resolve_if_permission(&event, approver, permissions).await;
-                if !emit_session_event(sink, &event) {
-                    return;
-                }
+                writing = writing && emit_session_event(sink, &event);
             }
             Err(TryRecvError::Lagged(dropped)) => {
-                if !emit(sink, lag_notice(dropped)) {
-                    return;
-                }
+                writing = writing && emit(sink, lag_notice(dropped));
             }
             Err(TryRecvError::Empty | TryRecvError::Closed) => return,
         }

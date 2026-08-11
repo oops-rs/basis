@@ -30,8 +30,8 @@ use std::{
 
 use agent_client_protocol::schema::v1::SessionId;
 
-use crate::mode::SessionModes;
-use lan_core::{PreparedRun, approval::ApprovalPolicy, run::TurnOptions};
+use crate::mode::{ApprovalMode, SessionModes};
+use lan_core::{PreparedRun, run::TurnOptions};
 use mentra::runtime::CancellationToken;
 
 /// One open conversation.
@@ -51,7 +51,7 @@ pub struct AcpSession {
 impl AcpSession {
     /// Opens a session at `initial_mode`, which is where the client's mode
     /// picker starts.
-    pub fn new(run: PreparedRun, initial_mode: ApprovalPolicy) -> Self {
+    pub fn new(run: PreparedRun, initial_mode: ApprovalMode) -> Self {
         Self {
             id: SessionId::new(run.agent_id().to_string()),
             run: Arc::new(tokio::sync::Mutex::new(run)),

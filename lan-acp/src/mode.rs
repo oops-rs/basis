@@ -1,23 +1,32 @@
 //! The session's permission mode, and the client's switch for it.
 //!
 //! ACP lets an agent name its own modes and lets a client change them mid
-//! session. lan already has that vocabulary: [`ApprovalPolicy`] is *always
-//! allow*, *ask*, *refuse*. So the mapping is one to one, and the ids on the
-//! wire are lan's own names for its own policies rather than a second set to
-//! keep in sync.
+//! session. lan offers three — [`ApprovalMode`]: always allow, ask, refuse —
+//! spelled with the same three words as `lan --approve`, so the protocol and
+//! the command line name one set of things.
+//!
+//! # Why the modes live here and not in the core
+//!
+//! lan-core has no such enum. Approval there is the
+//! [`Approver`] trait alone (ADR-0010): "always allow" is
+//! [`AllowAll`](lan_core::AllowAll), "refuse" is [`DenyAll`](lan_core::DenyAll),
+//! and "ask" is whatever the host installs. What ACP needs that a trait cannot
+//! give it is an *enumerable* set — `session/new` reports every available mode
+//! with an id, a name and a description, and the client picks one by id. That
+//! list is a protocol binding, so it belongs with the protocol.
 //!
 //! # Where the mode is applied, and why not on the authorizer
 //!
 //! mentra takes a `ToolAuthorizer` when a runtime is built and never hands it
-//! back, so a policy chosen there is fixed for the session's life — which is
-//! precisely what a switchable mode cannot be. An ACP session therefore runs
-//! its runtime at [`ApprovalPolicy::Prompt`], meaning only "surface every
-//! consequential call", and the mode decides the answer *here*, where it can
-//! still change between one call and the next.
+//! back, so a decision made there is fixed for the session's life — which is
+//! precisely what a switchable mode cannot be. lan-core's
+//! [`ApprovalGate`](lan_core::approval::ApprovalGate) therefore surfaces every
+//! consequential call without answering any, and the mode decides *here*, where
+//! it can still change between one call and the next.
 //!
-//! That is why [`ModedApprover`] wraps the approver that asks the client
-//! rather than replacing it: `Always` and `Never` answer without asking, and
-//! `Prompt` asks.
+//! That is why [`ModedApprover`] wraps the approver that asks the client rather
+//! than replacing it: `Always` and `Never` answer without asking, and `Prompt`
+//! asks.
 //!
 //! # Why lan remembers "for this session" itself
 //!
@@ -36,52 +45,70 @@ use std::{
 
 use agent_client_protocol::schema::v1::{SessionMode, SessionModeId, SessionModeState};
 
-use lan_core::approval::{ApprovalDecision, ApprovalPolicy, ApprovalRequest, Approver};
+use lan_core::approval::{ApprovalDecision, ApprovalRequest, Approver};
+
+/// What a session does about a call that changes state outside the process.
+///
+/// The three answers a person at a client can hold an opinion about. Each is a
+/// way of answering an [`Approver`]'s question rather than a policy the runtime
+/// enforces — see the module docs on where the mode is applied.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub enum ApprovalMode {
+    /// Act without asking.
+    Always,
+    /// Ask the client, every time. The default over ACP: there is a client to
+    /// ask, which is the whole reason the protocol carries a permission
+    /// request.
+    #[default]
+    Prompt,
+    /// Refuse, so the session can read a workspace and report and cannot touch
+    /// it.
+    Never,
+}
 
 /// Mode ids on the wire. lan chooses them, a client echoes them back, and
-/// [`policy_for`] reads them — a contract with ourselves, so it lives in one
-/// place. They are spelled as [`ApprovalPolicy`]'s own variants so the protocol
-/// and `lan --approve` name the same three things.
+/// [`mode_for`] reads them — a contract with ourselves, so it lives in one
+/// place.
 const ALWAYS: &str = "always";
 const PROMPT: &str = "prompt";
 const NEVER: &str = "never";
 
-/// The policy a mode id selects, or `None` for an id lan never offered.
-fn policy_for(id: &str) -> Option<ApprovalPolicy> {
+/// The mode an id selects, or `None` for an id lan never offered.
+fn mode_for(id: &str) -> Option<ApprovalMode> {
     match id {
-        ALWAYS => Some(ApprovalPolicy::Always),
-        PROMPT => Some(ApprovalPolicy::Prompt),
-        NEVER => Some(ApprovalPolicy::Never),
+        ALWAYS => Some(ApprovalMode::Always),
+        PROMPT => Some(ApprovalMode::Prompt),
+        NEVER => Some(ApprovalMode::Never),
         _ => None,
     }
 }
 
-fn mode_id(policy: ApprovalPolicy) -> SessionModeId {
-    SessionModeId::new(match policy {
-        ApprovalPolicy::Always => ALWAYS,
-        ApprovalPolicy::Prompt => PROMPT,
-        ApprovalPolicy::Never => NEVER,
+fn mode_id(mode: ApprovalMode) -> SessionModeId {
+    SessionModeId::new(match mode {
+        ApprovalMode::Always => ALWAYS,
+        ApprovalMode::Prompt => PROMPT,
+        ApprovalMode::Never => NEVER,
     })
 }
 
 /// How each mode is described in a client's picker.
-fn describe(policy: ApprovalPolicy) -> SessionMode {
-    let (name, description) = match policy {
-        ApprovalPolicy::Always => (
+fn describe(mode: ApprovalMode) -> SessionMode {
+    let (name, description) = match mode {
+        ApprovalMode::Always => (
             "Always allow",
             "Act without asking. What a confined or unattended session wants.",
         ),
-        ApprovalPolicy::Prompt => (
+        ApprovalMode::Prompt => (
             "Ask each time",
             "Ask before anything that changes state outside this process.",
         ),
-        ApprovalPolicy::Never => (
+        ApprovalMode::Never => (
             "Read only",
             "Refuse anything that changes state outside this process.",
         ),
     };
 
-    SessionMode::new(mode_id(policy), name).description(description)
+    SessionMode::new(mode_id(mode), name).description(description)
 }
 
 /// Why a `session/set_mode` was refused.
@@ -116,7 +143,7 @@ pub struct SessionModes {
 }
 
 struct State {
-    current: ApprovalPolicy,
+    current: ApprovalMode,
     /// False when the session was opened read-only. See [`SessionModes::new`].
     switchable: bool,
     /// Tools the client answered "…for this session" about, and how.
@@ -126,23 +153,23 @@ struct State {
 impl SessionModes {
     /// Opens a session at `initial`.
     ///
-    /// A session that starts at [`ApprovalPolicy::Never`] offers no other mode.
+    /// A session that starts at [`ApprovalMode::Never`] offers no other mode.
     /// The other two both permit consequential work and differ only in
     /// ceremony, so moving between them is the person at the client changing
     /// their mind — the same authority they already exercise by answering a
     /// permission request. `Never` is a prohibition the operator set outside
     /// the protocol, and a client cannot lift what it was never given.
-    pub fn new(initial: ApprovalPolicy) -> Self {
+    pub fn new(initial: ApprovalMode) -> Self {
         Self {
             inner: Arc::new(Mutex::new(State {
                 current: initial,
-                switchable: !matches!(initial, ApprovalPolicy::Never),
+                switchable: !matches!(initial, ApprovalMode::Never),
                 remembered: HashMap::new(),
             })),
         }
     }
 
-    pub fn current(&self) -> ApprovalPolicy {
+    pub fn current(&self) -> ApprovalMode {
         self.lock().current
     }
 
@@ -152,9 +179,9 @@ impl SessionModes {
         let state = self.lock();
         let available = if state.switchable {
             vec![
-                describe(ApprovalPolicy::Always),
-                describe(ApprovalPolicy::Prompt),
-                describe(ApprovalPolicy::Never),
+                describe(ApprovalMode::Always),
+                describe(ApprovalMode::Prompt),
+                describe(ApprovalMode::Never),
             ]
         } else {
             vec![describe(state.current)]
@@ -169,17 +196,17 @@ impl SessionModes {
     /// statement about how the rest of the session should behave, and a stale
     /// allow that outlived it would be exactly the override this design exists
     /// to prevent.
-    pub fn set(&self, id: &SessionModeId) -> Result<ApprovalPolicy, ModeError> {
-        let policy = policy_for(&id.0).ok_or(ModeError::Unknown)?;
+    pub fn set(&self, id: &SessionModeId) -> Result<ApprovalMode, ModeError> {
+        let mode = mode_for(&id.0).ok_or(ModeError::Unknown)?;
 
         let mut state = self.lock();
-        if !state.switchable && policy != state.current {
+        if !state.switchable && mode != state.current {
             return Err(ModeError::NotOffered);
         }
 
-        state.current = policy;
+        state.current = mode;
         state.remembered.clear();
-        Ok(policy)
+        Ok(mode)
     }
 
     fn remember(&self, tool_name: &str, allow: bool) {
@@ -216,13 +243,13 @@ impl<A> ModedApprover<A> {
 #[async_trait::async_trait]
 impl<A: Approver> Approver for ModedApprover<A> {
     async fn approve(&mut self, request: &ApprovalRequest) -> ApprovalDecision {
-        // Read-only calls never reach here: the runtime's authorizer allows
-        // them outright, because prompting for reads trains people to approve
+        // Read-only calls never reach here: lan-core's gate allows them
+        // outright, because prompting for reads trains people to approve
         // without reading.
         match self.modes.current() {
-            ApprovalPolicy::Always => ApprovalDecision::Allow,
-            ApprovalPolicy::Never => ApprovalDecision::Deny,
-            ApprovalPolicy::Prompt => self.ask(request).await,
+            ApprovalMode::Always => ApprovalDecision::Allow,
+            ApprovalMode::Never => ApprovalDecision::Deny,
+            ApprovalMode::Prompt => self.ask(request).await,
         }
     }
 }
@@ -286,7 +313,7 @@ mod tests {
     }
 
     fn gate(
-        initial: ApprovalPolicy,
+        initial: ApprovalMode,
         answer: ApprovalDecision,
     ) -> (SessionModes, ModedApprover<Counting>, Arc<AtomicUsize>) {
         let modes = SessionModes::new(initial);
@@ -302,15 +329,15 @@ mod tests {
     }
 
     #[test]
-    fn every_offered_mode_maps_back_to_a_policy() {
+    fn every_offered_mode_maps_back_to_one_lan_can_read() {
         // An id lan sends but cannot read would be a switch that silently does
         // nothing.
-        for mode in SessionModes::new(ApprovalPolicy::Prompt)
+        for mode in SessionModes::new(ApprovalMode::Prompt)
             .state()
             .available_modes
         {
             assert!(
-                policy_for(&mode.id.0).is_some(),
+                mode_for(&mode.id.0).is_some(),
                 "offered {} but cannot read it back",
                 mode.id.0
             );
@@ -319,7 +346,7 @@ mod tests {
 
     #[test]
     fn the_state_reports_the_current_mode_and_all_three() {
-        let state = SessionModes::new(ApprovalPolicy::Prompt).state();
+        let state = SessionModes::new(ApprovalMode::Prompt).state();
 
         assert_eq!(&*state.current_mode_id.0, PROMPT);
         assert_eq!(state.available_modes.len(), 3);
@@ -327,7 +354,7 @@ mod tests {
 
     #[test]
     fn a_read_only_session_offers_nothing_else() {
-        let modes = SessionModes::new(ApprovalPolicy::Never);
+        let modes = SessionModes::new(ApprovalMode::Never);
         let state = modes.state();
 
         assert_eq!(state.available_modes.len(), 1);
@@ -340,19 +367,19 @@ mod tests {
     }
 
     #[test]
-    fn switching_reports_the_new_policy() {
-        let modes = SessionModes::new(ApprovalPolicy::Prompt);
+    fn switching_reports_the_new_mode() {
+        let modes = SessionModes::new(ApprovalMode::Prompt);
 
         assert_eq!(
             modes.set(&SessionModeId::new(ALWAYS)),
-            Ok(ApprovalPolicy::Always)
+            Ok(ApprovalMode::Always)
         );
-        assert_eq!(modes.current(), ApprovalPolicy::Always);
+        assert_eq!(modes.current(), ApprovalMode::Always);
     }
 
     #[test]
     fn an_unknown_mode_is_refused() {
-        let modes = SessionModes::new(ApprovalPolicy::Prompt);
+        let modes = SessionModes::new(ApprovalMode::Prompt);
 
         assert_eq!(
             modes.set(&SessionModeId::new("architect")),
@@ -360,31 +387,31 @@ mod tests {
         );
         assert_eq!(
             modes.current(),
-            ApprovalPolicy::Prompt,
+            ApprovalMode::Prompt,
             "a refused switch must leave the session where it was"
         );
     }
 
     #[tokio::test]
     async fn allow_and_refuse_answer_without_asking() {
-        for (policy, expected) in [
-            (ApprovalPolicy::Always, ApprovalDecision::Allow),
-            (ApprovalPolicy::Never, ApprovalDecision::Deny),
+        for (mode, expected) in [
+            (ApprovalMode::Always, ApprovalDecision::Allow),
+            (ApprovalMode::Never, ApprovalDecision::Deny),
         ] {
-            let (_modes, mut approver, asked) = gate(policy, ApprovalDecision::Allow);
+            let (_modes, mut approver, asked) = gate(mode, ApprovalDecision::Allow);
 
             assert_eq!(approver.approve(&request("shell")).await, expected);
             assert_eq!(
                 asked.load(Ordering::SeqCst),
                 0,
-                "{policy:?} has nothing to ask about"
+                "{mode:?} has nothing to ask about"
             );
         }
     }
 
     #[tokio::test]
     async fn asking_puts_the_request_to_the_client() {
-        let (_modes, mut approver, asked) = gate(ApprovalPolicy::Prompt, ApprovalDecision::Allow);
+        let (_modes, mut approver, asked) = gate(ApprovalMode::Prompt, ApprovalDecision::Allow);
 
         assert_eq!(
             approver.approve(&request("shell")).await,
@@ -396,7 +423,7 @@ mod tests {
     #[tokio::test]
     async fn an_answer_for_the_session_is_not_asked_twice() {
         let (_modes, mut approver, asked) =
-            gate(ApprovalPolicy::Prompt, ApprovalDecision::AllowForSession);
+            gate(ApprovalMode::Prompt, ApprovalDecision::AllowForSession);
 
         // Collapsed to a plain allow so mentra does not store a rule of its
         // own — the one lan keeps is the one a mode change can clear.
@@ -421,7 +448,7 @@ mod tests {
     #[tokio::test]
     async fn changing_mode_forgets_what_was_allowed_for_the_session() {
         let (modes, mut approver, _asked) =
-            gate(ApprovalPolicy::Prompt, ApprovalDecision::AllowForSession);
+            gate(ApprovalMode::Prompt, ApprovalDecision::AllowForSession);
 
         approver.approve(&request("shell")).await;
         modes.set(&SessionModeId::new(NEVER)).expect("switches");
@@ -444,7 +471,7 @@ mod tests {
     #[tokio::test]
     async fn a_refusal_for_the_session_is_also_remembered() {
         let (_modes, mut approver, asked) =
-            gate(ApprovalPolicy::Prompt, ApprovalDecision::DenyForSession);
+            gate(ApprovalMode::Prompt, ApprovalDecision::DenyForSession);
 
         assert_eq!(
             approver.approve(&request("shell")).await,

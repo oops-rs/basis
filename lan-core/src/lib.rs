@@ -18,6 +18,14 @@
 //! The core has no opinions: task-specific behavior enters through data — the
 //! prompt, the workspace (AGENTS.md, skills, templates, `.mcp.json`), and
 //! config — never through code in this crate.
+//!
+//! # Features
+//!
+//! - **`mcp`** (default) — `.mcp.json` discovery and the MCP binding of the
+//!   tool contract. Built without it, the crate has no MCP concept at all: no
+//!   `McpConfig` on a run, no servers registered, and a run header that names
+//!   none (ADR-0012). Custom tools remain, because MCP was only ever one of the
+//!   ways to reach them.
 
 pub mod approval;
 pub mod branch;
@@ -25,6 +33,7 @@ pub mod context;
 pub mod event;
 pub mod fingerprint;
 pub mod hooks;
+#[cfg(feature = "mcp")]
 pub mod mcp;
 mod paths;
 pub mod provider;
@@ -34,9 +43,7 @@ pub mod skills;
 pub mod store;
 pub mod templates;
 
-pub use approval::{
-    AllowAll, ApprovalDecision, ApprovalPolicy, ApprovalRequest, Approver, DenyAll,
-};
+pub use approval::{AllowAll, ApprovalDecision, ApprovalGate, ApprovalRequest, Approver, DenyAll};
 pub use branch::{BranchError, EntryKind, TranscriptEntry};
 pub use context::{
     ContextConfig, ContextDocument, ContextError, ContextScope, DEFAULT_CONTEXT_FILE,
@@ -53,6 +60,7 @@ pub use hooks::{
     HOOK_SCHEMA_VERSION, HookCall, HookConfigError, HookOutcome, HookRequest, HookResponse,
     HookRunner, HookSpec, HooksConfig, HooksSource, OnFailure,
 };
+#[cfg(feature = "mcp")]
 pub use mcp::{
     DEFAULT_GLOBAL_MCP_FILE, DEFAULT_WORKSPACE_MCP_FILE, McpConfig, McpError, McpServer, McpSource,
 };
