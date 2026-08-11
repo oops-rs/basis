@@ -11,7 +11,10 @@
 //! Everything settled here is settled for the life of the [`Workspace`]. What a
 //! caller can still change per run lives in [`RunSpec`](super::RunSpec).
 
-use std::path::{Path, PathBuf};
+use std::{
+    path::{Path, PathBuf},
+    sync::Arc,
+};
 
 use mentra::{
     BuiltinProvider, ModelSelector, ProviderId, Runtime, RuntimePolicy,
@@ -25,7 +28,7 @@ use crate::{
     approval::ApprovalGate,
     context::{ContextConfig, WorkspaceContext},
     event::ContextFile,
-    hooks::{self, HookRunner, HooksConfig},
+    hooks::{self, HookRunner, HooksConfig, Interceptor},
     provider,
     run::{LoadedSkill, RunError},
     shell::ShellAccess,
@@ -58,6 +61,7 @@ pub struct WorkspaceBuilder {
     mcp: McpConfig,
     templates: TemplatesConfig,
     hooks: HooksConfig,
+    interceptors: Vec<Arc<dyn Interceptor>>,
     shell: ShellAccess,
     store_dir: Option<PathBuf>,
 }
@@ -76,6 +80,14 @@ impl std::fmt::Debug for WorkspaceBuilder {
             .field("skills", &self.skills)
             .field("templates", &self.templates)
             .field("hooks", &self.hooks)
+            .field(
+                "interceptors",
+                &self
+                    .interceptors
+                    .iter()
+                    .map(|interceptor| interceptor.name())
+                    .collect::<Vec<_>>(),
+            )
             .field("shell", &self.shell)
             .field("store_dir", &self.store_dir)
             .finish_non_exhaustive()
@@ -96,6 +108,7 @@ impl WorkspaceBuilder {
             mcp: McpConfig::default(),
             templates: TemplatesConfig::default(),
             hooks: HooksConfig::default(),
+            interceptors: Vec::new(),
             // Granted, per ADR-0013, and from the enum's own default rather
             // than from anything ambient: what a run may do is stated here, in
             // configuration, not read out of the environment behind the caller.
@@ -176,9 +189,51 @@ impl WorkspaceBuilder {
     ///
     /// A hook is an external command that gets a say over each tool call; see
     /// [`crate::hooks`] for the wire contract and for what happens when one
-    /// breaks.
+    /// breaks. [`with_interceptor`](Self::with_interceptor) is the same say,
+    /// in this process.
     pub fn with_hooks(self, hooks: HooksConfig) -> Self {
         Self { hooks, ..self }
+    }
+
+    /// Gives the host's own code a say over each tool call.
+    ///
+    /// The in-process binding of ADR-0012's interception contract, and the
+    /// sibling of [`with_hooks`](Self::with_hooks): same vocabulary — allow,
+    /// deny with a reason, modify with a replacement input — and the same
+    /// chain. What it buys is the case a subprocess answers badly, because the
+    /// judgement needs something the embedding program is already holding: the
+    /// vault handle, the token it just exchanged, the policy it parsed at
+    /// startup. Redacting a credential out of a tool's input is the worked
+    /// example.
+    ///
+    /// Appends, so a host may register several; they are consulted in the order
+    /// registered, and **before** any subprocess hook. The rule is that the
+    /// further a participant is from the workspace's own data, the earlier it
+    /// speaks — an interceptor is compiled into this program, while
+    /// `.lan/hooks.json` came with a repository — and since the first refusal
+    /// short-circuits, that is what lets the host's own guard stop a
+    /// repository's program from being spawned at all. It is not a claim of
+    /// precedence: a hook still sees, and can still refuse, whatever an
+    /// interceptor rewrote.
+    ///
+    /// Fail-closed carries over unchanged: an interceptor that returns an error
+    /// or panics denies the call, and says which one it was.
+    ///
+    /// Deliberately absent from [`RunConfig`](crate::RunConfig), for the reason
+    /// its `api_key` and `store_dir` are: a one-prompt config describes an
+    /// invocation and is shaped by an environment, and in-process code cannot
+    /// ride on one. A one-shot caller that needs an interceptor takes the
+    /// builder from [`RunConfig::split`](crate::RunConfig::split), which is the
+    /// documented migration path.
+    pub fn with_interceptor(self, interceptor: impl Interceptor + 'static) -> Self {
+        Self {
+            interceptors: {
+                let mut interceptors = self.interceptors;
+                interceptors.push(Arc::new(interceptor));
+                interceptors
+            },
+            ..self
+        }
     }
 
     /// Grants or denies command execution, for every run this workspace mints.
@@ -241,6 +296,26 @@ impl WorkspaceBuilder {
     /// This is the expensive call, and the only one. Everything it settles is
     /// fixed for the life of the returned [`Workspace`]; a run minted from that
     /// workspace does no I/O of its own.
+    ///
+    /// # What this workspace's conversations are tagged with
+    ///
+    /// Every agent persisted from here carries
+    /// [`store::runtime_identifier`](crate::store::runtime_identifier) for this
+    /// workspace, which is what makes [`store::list`](crate::store::list) — and
+    /// therefore ACP's `session/list` — able to answer *which conversations
+    /// belong to this repository*. Until this was set, lan wrote every
+    /// conversation under mentra's `"default"` tag while listing filtered on
+    /// the workspace's, so listing had never returned anything.
+    ///
+    /// Rows written before the fix keep the `"default"` tag and do not appear
+    /// in any workspace's list. That is deliberately not migrated, and it costs
+    /// nothing measurable: listing never worked, so no client has ever seen
+    /// those conversations, and none of them stops being *resumable* —
+    /// mentra loads an agent by id alone (`load_agent`), never by identifier,
+    /// so [`Workspace::resume`](super::Workspace::resume) still finds them.
+    /// Better still, mentra re-tags an agent from the live runtime each time it
+    /// persists, so an old conversation joins its workspace's list the first
+    /// time it is resumed and used.
     pub async fn open(self) -> Result<Workspace, RunError> {
         let context = WorkspaceContext::discover_with(&self.path, &self.context)?;
         let choice = provider::resolve_with(
@@ -250,6 +325,11 @@ impl WorkspaceBuilder {
         )?;
 
         let builder = Runtime::builder()
+            // Which conversations belong to this workspace, which is the only
+            // question `session/list` can honestly answer (see `crate::store`).
+            // Unset, mentra tags every agent `"default"` and lan's own listing
+            // — which filters on this — finds nothing, whatever was persisted.
+            .with_runtime_identifier(store::runtime_identifier(&self.path))
             // Path roots are hygiene, not a boundary: per ADR-0004 that is the
             // kernel's job, and per ADR-0013 lan ships no instance of one. What
             // the caller said about commands is passed through as written.
@@ -275,16 +355,22 @@ impl WorkspaceBuilder {
         // Loaded before the build so a hooks file that does not parse fails the
         // open loudly, rather than at the first tool call — or worse, never.
         //
-        // One runner for every hook rather than one registration each:
-        // `with_pre_hook` appends, so both work, but lan wants the ordering and
-        // the short-circuit to be its own (see `crate::hooks`). A workspace
-        // with no hooks registers nothing, so the mechanism costs nothing until
-        // someone writes the file.
+        // One runner for both bindings rather than one registration each:
+        // `with_pre_hook` appends, so several would work, but lan wants the
+        // ordering and the short-circuit to be its own (see `crate::hooks`). A
+        // workspace with neither an interceptor nor a hooks file registers
+        // nothing, so the mechanism costs nothing until someone asks for it.
         let hooks = hooks::load(&self.path, &self.hooks)?;
-        let builder = if hooks.is_empty() {
+        let runner = self
+            .interceptors
+            .into_iter()
+            .fold(HookRunner::new(&self.path, hooks), |runner, interceptor| {
+                runner.with_interceptor(interceptor)
+            });
+        let builder = if runner.is_empty() {
             builder
         } else {
-            builder.with_pre_hook(HookRunner::new(&self.path, hooks))
+            builder.with_pre_hook(runner)
         };
 
         // Both lists reach the header whether or not this build has MCP in it:
@@ -499,201 +585,4 @@ fn agent_config(workspace: &Path, context: &WorkspaceContext) -> AgentConfig {
 }
 
 #[cfg(test)]
-mod tests {
-    use std::borrow::Cow;
-    use std::collections::BTreeMap;
-    use std::io::{Read, Write};
-    use std::net::{TcpListener, TcpStream};
-    use std::thread;
-
-    use crate::context::{ContextDocument, ContextScope};
-
-    use super::*;
-
-    fn read_http_request(stream: &mut TcpStream) -> String {
-        let mut bytes = Vec::new();
-        let mut buffer = [0_u8; 4096];
-        let mut header_end = None;
-        let mut content_length = 0_usize;
-
-        loop {
-            let read = stream.read(&mut buffer).expect("read request");
-            if read == 0 {
-                break;
-            }
-            bytes.extend_from_slice(&buffer[..read]);
-            if header_end.is_none()
-                && let Some(index) = bytes.windows(4).position(|window| window == b"\r\n\r\n")
-            {
-                let end = index + 4;
-                header_end = Some(end);
-                let headers = String::from_utf8_lossy(&bytes[..end]);
-                content_length = headers
-                    .lines()
-                    .find_map(|line| {
-                        let (name, value) = line.split_once(':')?;
-                        name.eq_ignore_ascii_case("content-length")
-                            .then(|| value.trim().parse::<usize>().expect("content length"))
-                    })
-                    .unwrap_or_default();
-            }
-            if header_end.is_some_and(|end| bytes.len() >= end + content_length) {
-                break;
-            }
-        }
-
-        String::from_utf8(bytes).expect("request should be utf8")
-    }
-
-    fn spawn_two_response_server() -> (String, thread::JoinHandle<Vec<String>>) {
-        let listener = TcpListener::bind("127.0.0.1:0").expect("bind test server");
-        let address = listener.local_addr().expect("read server address");
-        let handle = thread::spawn(move || {
-            let mut requests = Vec::new();
-            for index in 1..=2 {
-                let (mut stream, _) = listener.accept().expect("accept request");
-                requests.push(read_http_request(&mut stream));
-                let response_id = format!("resp_{index}");
-                let body = format!(
-                    concat!(
-                        "data: {{\"type\":\"response.created\",\"response\":{{\"id\":\"{}\",\"model\":\"gpt-5\",\"status\":\"in_progress\"}}}}\n\n",
-                        "data: {{\"type\":\"response.completed\",\"response\":{{\"id\":\"{}\",\"model\":\"gpt-5\",\"status\":\"completed\"}}}}\n\n"
-                    ),
-                    response_id, response_id
-                );
-                let response = format!(
-                    concat!(
-                        "HTTP/1.1 200 OK\r\n",
-                        "connection: close\r\n",
-                        "content-type: text/event-stream\r\n",
-                        "content-length: {}\r\n\r\n",
-                        "{}"
-                    ),
-                    body.len(),
-                    body
-                );
-                stream
-                    .write_all(response.as_bytes())
-                    .expect("write response");
-            }
-            requests
-        });
-
-        (format!("http://{address}/"), handle)
-    }
-
-    #[tokio::test]
-    async fn compatible_provider_skips_automatic_previous_response_id_chaining() {
-        let (base_url, handle) = spawn_two_response_server();
-        let provider = compatible_provider(&base_url, "test-key");
-
-        for (index, message) in ["first", "second"].into_iter().enumerate() {
-            let request = mentra::provider_core::Request {
-                model: Cow::Borrowed("gpt-5"),
-                system: None,
-                messages: Cow::Owned(vec![mentra::Message::user(mentra::ContentBlock::text(
-                    message,
-                ))]),
-                tools: Cow::Owned(Vec::new()),
-                tool_choice: None,
-                temperature: None,
-                max_output_tokens: None,
-                metadata: Cow::Owned(BTreeMap::new()),
-                provider_request_options: Default::default(),
-            };
-            let mut stream = provider
-                .session()
-                .stream_response(request)
-                .await
-                .expect("compatible provider should stream");
-            while let Some(event) = stream.recv().await {
-                event.expect("response event should decode");
-            }
-            if index == 0 {
-                assert_eq!(
-                    provider.session().latest_response_id().as_deref(),
-                    Some("resp_1"),
-                    "the second request must have provider state available to suppress"
-                );
-            }
-        }
-
-        let requests = handle.join().expect("server should capture requests");
-        for request in requests {
-            let body = request.split("\r\n\r\n").nth(1).unwrap_or_default();
-            let payload: serde_json::Value =
-                serde_json::from_str(body).expect("request body should be json");
-            assert!(payload.get("previous_response_id").is_none());
-        }
-    }
-
-    #[test]
-    fn context_becomes_the_system_prompt_and_the_workspace_is_scoped() {
-        let context = WorkspaceContext::from_documents(vec![ContextDocument {
-            path: PathBuf::from("/repo/AGENTS.md"),
-            scope: ContextScope::Workspace,
-            content: "house rules".to_string(),
-        }]);
-
-        let agent = agent_config(Path::new("/repo"), &context);
-
-        assert!(
-            agent
-                .system
-                .expect("a system prompt")
-                .contains("house rules")
-        );
-        assert_eq!(agent.workspace.base_dir, PathBuf::from("/repo"));
-    }
-
-    #[test]
-    fn an_empty_workspace_context_leaves_the_system_prompt_unset() {
-        let agent = agent_config(Path::new("/repo"), &WorkspaceContext::default());
-
-        assert_eq!(agent.system, None);
-    }
-
-    #[test]
-    fn commands_are_available_unless_the_caller_says_otherwise() {
-        // ADR-0013: the first `lan "run the tests"` has to work.
-        assert!(WorkspaceBuilder::new("/repo").shell.is_granted());
-    }
-
-    #[test]
-    fn builders_return_new_values() {
-        let base = WorkspaceBuilder::new("/repo");
-        let derived = base.with_provider(BuiltinProvider::Anthropic);
-
-        assert_eq!(derived.provider, Some(BuiltinProvider::Anthropic));
-        assert_eq!(
-            WorkspaceBuilder::new("/repo").provider,
-            None,
-            "a fresh builder detects the provider"
-        );
-    }
-
-    #[test]
-    fn history_goes_where_mentra_puts_it_unless_the_caller_says_otherwise() {
-        // The default must stay the default: a host with conversations already
-        // in mentra's database would lose sight of them if opening a workspace
-        // started relocating the store on its own.
-        assert_eq!(WorkspaceBuilder::new("/repo").store_dir, None);
-        assert_eq!(
-            WorkspaceBuilder::new("/repo")
-                .with_store_dir("/elsewhere")
-                .store_dir,
-            Some(PathBuf::from("/elsewhere"))
-        );
-    }
-
-    #[test]
-    fn a_supplied_credential_is_not_printed() {
-        let printed = format!(
-            "{:?}",
-            WorkspaceBuilder::new("/repo").with_api_key("sk-secret-value")
-        );
-
-        assert!(!printed.contains("sk-secret-value"));
-        assert!(printed.contains("redacted"));
-    }
-}
+mod tests;

@@ -1,10 +1,17 @@
-//! The hook wire contract: one JSON object in, one JSON object out.
+//! The subprocess binding's encoding: one JSON object in, one JSON object out.
+//!
+//! What crosses the pipe, and nothing else. The types being encoded live in
+//! [`contract`](super::contract) and are shared with the in-process binding —
+//! this module is how they reach a program that is not compiled against lan
+//! (ADR-0012: one contract, transports are adapters).
 //!
 //! Versioned the way [`crate::event`] versions its stream, and for the same
 //! reason: a hook is written once against a shape and must be able to tell when
 //! that shape has moved. Every request carries [`HOOK_SCHEMA_VERSION`] as
 //! `hook_schema`, so the first thing a hook can check is whether it still
-//! understands lan.
+//! understands lan. An [`Interceptor`](super::Interceptor) needs no such check —
+//! it is compiled against this crate and cannot skew — which is the one place
+//! the two bindings genuinely differ.
 //!
 //! # Request (lan → hook, on stdin)
 //!
@@ -20,10 +27,11 @@
 //! }
 //! ```
 //!
-//! Field names match [`Event::ToolQueued`](crate::event::Event::ToolQueued) so
-//! a hook and a stream consumer describe a tool call the same way. `input` is
-//! the parsed tool input when it is valid JSON, and the raw string when it is
-//! not — the same rule the event stream follows.
+//! That is [`HookRequest`] serialized. Field names match
+//! [`Event::ToolQueued`](crate::event::Event::ToolQueued) so a hook and a
+//! stream consumer describe a tool call the same way. `input` is the parsed
+//! tool input when it is valid JSON, and the raw string when it is not — the
+//! same rule the event stream follows.
 //!
 //! # Response (hook → lan, on stdout)
 //!
@@ -50,115 +58,32 @@
 //! converge, because the model is told "no" without being told what would have
 //! been acceptable.
 //!
-//! Three rules, matching what mentra does across its own hooks so that lan's
-//! chain and mentra's behave identically:
-//!
-//! - **Modifications compose.** Each hook receives `input` as its predecessors
-//!   left it, never the original.
-//! - **A later hook can still deny.** `modify` is not a way to route a call
-//!   past a hook that runs after it.
-//! - **A modify lan cannot use blocks the call**, rather than falling back to
-//!   the original — running the original would silently ignore a hook that
-//!   believed it had intervened. That covers a `modify` with no `input` at all
-//!   and an `input` that is not a JSON object, since a tool's input never is
-//!   anything else.
+//! The rules a modification obeys are the chain's, not this transport's, and
+//! they are written down once, on [`HookRunner`](super::HookRunner) — they hold
+//! identically for an interceptor, which is the point of there being one
+//! contract.
 //!
 //! `reason` is for the audit trail; it does not reach the model, because the
 //! model is not being told "no" — it is simply running with different input.
 
-use std::path::{Path, PathBuf};
-
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
 
-use super::HookEvent;
+/// The types a subprocess hook is handed, re-exported at the path a hook
+/// author's code already names them by. They belong to the contract both
+/// bindings speak; this module only encodes them.
+pub use super::contract::{HookCall, HookRequest};
 
 /// Version of the hook wire format. Bumped when a change would break a hook
 /// that reads the current shape.
 pub const HOOK_SCHEMA_VERSION: u32 = 1;
 
-/// The tool call a hook is asked about.
-///
-/// lan's own type rather than a re-export of mentra's `PreExecutionContext`,
-/// for the same reason [`Event`](crate::event::Event) and
-/// [`TurnOptions`](crate::run::TurnOptions) are lan's own: lan owns its
-/// surface. It is field-for-field what mentra's pre-execution context carries,
-/// so the adapter that will bridge them is a move, not a translation.
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub struct HookCall {
-    pub agent_id: String,
-    pub tool_name: String,
-    pub tool_call_id: String,
-    /// The tool's input as the runtime hands it over: JSON text.
-    pub input_json: String,
-}
-
-impl HookCall {
-    pub fn new(
-        agent_id: impl Into<String>,
-        tool_name: impl Into<String>,
-        tool_call_id: impl Into<String>,
-        input_json: impl Into<String>,
-    ) -> Self {
-        Self {
-            agent_id: agent_id.into(),
-            tool_name: tool_name.into(),
-            tool_call_id: tool_call_id.into(),
-            input_json: input_json.into(),
-        }
-    }
-}
-
-/// What lan asks a hook about.
-#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
-pub struct HookRequest {
-    pub hook_schema: u32,
-    pub event: HookEvent,
-    /// The workspace root the run is scoped to, and the hook's working
-    /// directory.
-    pub workspace: PathBuf,
-    pub agent_id: String,
-    pub tool_call_id: String,
-    pub tool_name: String,
-    /// Parsed tool input when it is valid JSON, else the raw string.
-    pub input: Value,
-}
-
-impl HookRequest {
-    /// Builds a request from the call the runtime is about to make.
-    ///
-    /// The call carries `input_json` as a string. Parsing it here rather than
-    /// passing it through means a hook reads `.input.command` instead of
-    /// decoding a nested document; when it is not valid JSON there is nothing
-    /// to parse and the raw string is carried instead, which is what
-    /// [`Event::ToolQueued`](crate::event::Event::ToolQueued) does with the
-    /// same value.
-    ///
-    /// The call has no working directory of its own — mentra's context does not
-    /// carry one — so `workspace` is the root lan scoped the run to.
-    pub fn from_call(event: HookEvent, workspace: &Path, call: &HookCall) -> Self {
-        Self {
-            hook_schema: HOOK_SCHEMA_VERSION,
-            event,
-            workspace: workspace.to_path_buf(),
-            agent_id: call.agent_id.clone(),
-            tool_call_id: call.tool_call_id.clone(),
-            tool_name: call.tool_name.clone(),
-            input: serde_json::from_str(&call.input_json)
-                .unwrap_or_else(|_| Value::String(call.input_json.clone())),
-        }
-    }
-
-    /// The same request with a different tool input.
-    ///
-    /// What threading a modification through the chain is made of: the next
-    /// hook is asked about the call as the previous one left it.
-    pub fn with_input(self, input: Value) -> Self {
-        Self { input, ..self }
-    }
-}
-
 /// What a hook answered.
+///
+/// The wire spelling of [`HookOutcome`](super::HookOutcome), which is what an
+/// in-process [`Interceptor`](super::Interceptor) returns directly. Two shapes
+/// for one vocabulary, because JSON has no enums and a shell script has no
+/// `serde_json::Value` — everything past the parse is shared.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[serde(tag = "decision", rename_all = "snake_case")]
 pub enum HookResponse {
@@ -190,35 +115,6 @@ pub enum HookResponse {
 mod tests {
     use super::*;
     use serde_json::json;
-
-    fn context(input_json: &str) -> HookCall {
-        HookCall::new("agent-1", "shell", "call-1", input_json)
-    }
-
-    #[test]
-    fn a_request_carries_the_schema_version_first() {
-        let request = HookRequest::from_call(
-            HookEvent::PreToolUse,
-            Path::new("/repo"),
-            &context(r#"{"command":"ls"}"#),
-        );
-        let json = serde_json::to_value(&request).expect("serializes");
-
-        assert_eq!(json["hook_schema"], HOOK_SCHEMA_VERSION);
-        assert_eq!(json["event"], "pre_tool_use");
-        assert_eq!(json["workspace"], "/repo");
-        assert_eq!(json["tool_name"], "shell");
-        assert_eq!(json["tool_call_id"], "call-1");
-        assert_eq!(json["input"]["command"], "ls");
-    }
-
-    #[test]
-    fn input_that_is_not_json_is_carried_as_the_raw_string() {
-        let request =
-            HookRequest::from_call(HookEvent::PreToolUse, Path::new("/repo"), &context("ls -l"));
-
-        assert_eq!(request.input, json!("ls -l"));
-    }
 
     #[test]
     fn a_bare_decision_parses() {
@@ -266,25 +162,6 @@ mod tests {
             serde_json::from_str::<HookResponse>(r#"{"decision":"modify"}"#).is_err(),
             "a hook that meant to intervene and did not say how must reach the failure path"
         );
-    }
-
-    #[test]
-    fn a_request_can_be_rebuilt_around_a_new_input() {
-        let original = HookRequest::from_call(
-            HookEvent::PreToolUse,
-            Path::new("/repo"),
-            &context(r#"{"command":"rm -rf /"}"#),
-        );
-
-        let next = original.clone().with_input(json!({"command": "ls"}));
-
-        assert_eq!(
-            original.input,
-            json!({"command": "rm -rf /"}),
-            "the original must be untouched"
-        );
-        assert_eq!(next.input, json!({"command": "ls"}));
-        assert_eq!(next.tool_call_id, original.tool_call_id);
     }
 
     #[test]

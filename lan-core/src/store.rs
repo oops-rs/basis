@@ -24,9 +24,12 @@
 //!
 //! Changing the identifier does not move the store — mentra's default path is
 //! independent of it — so nothing already written is lost. Rows created before
-//! this scheme simply carry `"default"` and do not appear in any workspace's
-//! list, which is the correct answer for a conversation whose workspace was
-//! never recorded.
+//! this scheme carry `"default"` and do not appear in any workspace's list,
+//! which is the correct answer for a conversation whose workspace was never
+//! recorded. They are not stranded either: mentra loads an agent by id alone,
+//! so resuming one still works, and it re-tags itself the next time it
+//! persists. [`WorkspaceBuilder::open`](crate::WorkspaceBuilder::open) is where
+//! the tag is set, and where that ruling is written down.
 //!
 //! # Where the file goes
 //!

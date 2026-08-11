@@ -33,9 +33,12 @@ use std::{
 
 use lan_core::{
     CollectingSink, ContextConfig, RunOutcome, Snapshot, Workspace, WorkspaceBuilder,
-    hooks::HooksConfig, skills::SkillsConfig, templates::TemplatesConfig,
+    hooks::HooksConfig, skills::SkillsConfig, store, templates::TemplatesConfig,
 };
-use mentra::ModelSelector;
+use mentra::{
+    BuiltinProvider, ContentBlock, ModelSelector, agent::AgentConfig, runtime::SqliteRuntimeStore,
+    test::MockRuntime,
+};
 
 mod common;
 
@@ -195,6 +198,156 @@ async fn a_conversation_is_found_again_only_through_the_directory_it_was_written
         reopened.resume(&agent_id, "again").is_err(),
         "a different directory is a different history"
     );
+}
+
+/// Every conversation a workspace mints is tagged with that workspace, which
+/// is the whole of what makes listing possible.
+///
+/// The tag is mentra's runtime identifier and lan derives it from the
+/// workspace path ([`store::runtime_identifier`]). Until `WorkspaceBuilder::open`
+/// set one, everything lan persisted carried mentra's `"default"` while
+/// `store::list_in` filtered on the workspace's — so listing had never returned
+/// a conversation lan itself had written, and no test noticed because none of
+/// them wrote one and then looked.
+#[tokio::test]
+async fn a_conversation_is_listed_for_the_workspace_that_minted_it() {
+    let dir = tempfile::tempdir().expect("tempdir");
+    write(&dir.path().join("AGENTS.md"), "house rules");
+    let store_dir = tempfile::tempdir().expect("tempdir");
+
+    let workspace = offline(dir.path())
+        .with_store_dir(store_dir.path())
+        .open()
+        .await
+        .expect("opens");
+    let agent_id = workspace
+        .prepare("go")
+        .expect("mints")
+        .agent_id()
+        .to_string();
+
+    let listed = store::list_in(store_dir.path(), dir.path()).expect("lists");
+
+    assert_eq!(
+        listed
+            .iter()
+            .map(|session| session.agent_id.as_str())
+            .collect::<Vec<_>>(),
+        vec![agent_id.as_str()],
+        "a conversation this workspace minted must be one this workspace lists"
+    );
+}
+
+#[tokio::test]
+async fn one_workspace_does_not_list_anothers_conversations() {
+    // The discriminating half: two workspaces sharing one store file, which is
+    // the arrangement every lan on one machine is in by default.
+    let mine = tempfile::tempdir().expect("tempdir");
+    let theirs = tempfile::tempdir().expect("tempdir");
+    write(&mine.path().join("AGENTS.md"), "house rules");
+    write(&theirs.path().join("AGENTS.md"), "other rules");
+    let store_dir = tempfile::tempdir().expect("tempdir");
+
+    let workspace = offline(mine.path())
+        .with_store_dir(store_dir.path())
+        .open()
+        .await
+        .expect("opens");
+    workspace.prepare("go").expect("mints");
+
+    assert!(
+        store::list_in(store_dir.path(), theirs.path())
+            .expect("lists")
+            .is_empty(),
+        "offering a person another repository's conversations is worse than offering none"
+    );
+}
+
+/// A conversation written before workspaces were tagged is still resumable, and
+/// joins its workspace's list the first time it is used.
+///
+/// The back-compat question the tag raised, answered forward-only: nothing
+/// migrates old rows, because nothing has to. mentra loads an agent by id alone
+/// (`RuntimeStore::load_agent` is `WHERE id = ?1`), so the identifier never
+/// gated resuming; and it re-derives the tag from the live runtime every time
+/// it persists (`Agent::persisted_record`, and the upsert's
+/// `runtime_identifier = excluded.runtime_identifier`), so using an old
+/// conversation is what files it. Since listing never worked, no client has
+/// ever seen these rows to miss them in the meantime.
+#[tokio::test]
+async fn a_conversation_tagged_before_workspaces_were_is_resumable_and_files_itself() {
+    let dir = tempfile::tempdir().expect("tempdir");
+    write(&dir.path().join("AGENTS.md"), "house rules");
+    let store_dir = tempfile::tempdir().expect("tempdir");
+
+    // What every lan before this fix wrote: mentra's own default tag.
+    let agent_id = {
+        let mock = MockRuntime::builder()
+            .model("test-model", BuiltinProvider::OpenAI)
+            .runtime_identifier("default")
+            .with_store(SqliteRuntimeStore::new(
+                store_dir.path().join(store_filename()),
+            ))
+            .text("from before")
+            .build()
+            .expect("the mock runtime builds");
+        let mut session = mock
+            .runtime()
+            .create_session_with_config("old", mock.model(), AgentConfig::default())
+            .expect("session");
+        session
+            .append_turn(vec![ContentBlock::text("hello")])
+            .await
+            .expect("a scripted turn completes");
+
+        session.agent_id().to_string()
+    };
+
+    assert!(
+        store::list_in(store_dir.path(), dir.path())
+            .expect("lists")
+            .is_empty(),
+        "an untagged conversation is not claimed by a workspace it never recorded"
+    );
+
+    let endpoint = ScriptedEndpoint::start();
+    let workspace = offline(dir.path())
+        .with_base_url(&endpoint.base_url)
+        .with_store_dir(store_dir.path())
+        .open()
+        .await
+        .expect("opens");
+    let report = workspace
+        .resume(&agent_id, "again")
+        .expect("an old conversation is still resumable")
+        .execute(CollectingSink::default())
+        .await
+        .expect("the resumed run completes");
+
+    assert!(matches!(report.outcome, RunOutcome::Ok));
+    assert_eq!(
+        store::list_in(store_dir.path(), dir.path())
+            .expect("lists")
+            .into_iter()
+            .map(|session| session.agent_id)
+            .collect::<Vec<_>>(),
+        vec![agent_id],
+        "using an old conversation is what files it under its workspace"
+    );
+}
+
+/// The filename lan puts inside a store directory.
+///
+/// Taken from mentra's default rather than spelled out, because lan chooses
+/// mentra's own name (`store::store_in`) precisely so that pointing a workspace
+/// at the default directory is a no-op — a literal here would be a second place
+/// to keep that true.
+fn store_filename() -> PathBuf {
+    SqliteRuntimeStore::default()
+        .path()
+        .file_name()
+        .expect("mentra's default store is a file")
+        .into()
 }
 
 #[tokio::test]

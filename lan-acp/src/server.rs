@@ -178,10 +178,12 @@ impl SessionSource for ConfiguredSource {
     /// would resolve a model over the network to answer a question about a
     /// SQLite table.
     ///
-    /// This depends on `run::resolve` tagging each conversation with
-    /// [`store::runtime_identifier`](lan_core::store::runtime_identifier) for its
-    /// workspace. Without that, conversations are written under mentra's
-    /// `"default"` tag and no workspace's list will find them.
+    /// This depends on
+    /// [`WorkspaceBuilder::open`](lan_core::WorkspaceBuilder::open) tagging each
+    /// conversation with
+    /// [`store::runtime_identifier`](lan_core::store::runtime_identifier) for
+    /// its workspace. Until it did, conversations were written under mentra's
+    /// `"default"` tag and no workspace's list found any of them.
     async fn list_sessions(&self, cwd: PathBuf) -> Result<Vec<PersistedSession>, RunError> {
         lan_core::store::list(&cwd)
     }

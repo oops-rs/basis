@@ -124,8 +124,10 @@ impl SessionSource for MockSource {
     ///
     /// Scoped by the mock's runtime identifier rather than by `cwd`: what is
     /// under test here is the protocol — that a client asks, and gets back the
-    /// conversations as `SessionInfo` — not lan's workspace-scoping scheme,
-    /// which `store.rs` covers on its own.
+    /// conversations as `SessionInfo` — not lan's workspace-scoping scheme.
+    /// That scheme is what `ConfiguredSource` uses in the served binary, and
+    /// `lan-core`'s `tests/workspace.rs` is where a conversation is actually
+    /// written and then found again under its workspace's tag.
     async fn list_sessions(
         &self,
         _cwd: PathBuf,
@@ -767,8 +769,15 @@ async fn a_closed_session_is_forgotten() {
     );
 }
 
+/// A conversation the client just opened comes back from `session/list`.
+///
+/// The protocol half only: this source enumerates its own store, so what is
+/// pinned here is that the request reaches it, that the answer arrives as
+/// `SessionInfo`, and that the `cwd` a client is told is the one it asked
+/// about. Whether the *right* conversations are enumerated for a workspace is
+/// `lan-core`'s question, and `lan-core/tests/workspace.rs` answers it.
 #[tokio::test]
-async fn listing_reports_the_conversations_a_workspace_has() {
+async fn a_conversation_just_opened_comes_back_from_listing() {
     let workspace = workspace();
     let mock = Arc::new(text_mock(&["hello"]));
     let cwd = workspace.path().to_path_buf();
@@ -794,12 +803,12 @@ async fn listing_reports_the_conversations_a_workspace_has() {
         .sessions
         .iter()
         .find(|info| info.session_id == opened)
-        .expect("the conversation just had must be in its workspace's list");
+        .expect("the conversation just had must come back from listing");
 
     assert_eq!(
         found.cwd,
         workspace.path(),
-        "a conversation is listed for the workspace it belongs to"
+        "a client is told the workspace it asked about"
     );
     assert!(
         listed.next_cursor.is_none(),

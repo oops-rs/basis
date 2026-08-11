@@ -84,8 +84,9 @@ pub use event::{
 // as its result.
 pub use fingerprint::{Fingerprint, Snapshot};
 pub use hooks::{
-    HOOK_SCHEMA_VERSION, HookCall, HookConfigError, HookOutcome, HookRequest, HookResponse,
-    HookRunner, HookSpec, HooksConfig, HooksSource, OnFailure,
+    HOOK_SCHEMA_VERSION, HookCall, HookConfigError, HookEvent, HookOutcome, HookRequest,
+    HookResponse, HookRunner, HookSpec, HooksConfig, HooksSource, Interceptor, InterceptorError,
+    OnFailure,
 };
 #[cfg(feature = "mcp")]
 pub use mcp::{

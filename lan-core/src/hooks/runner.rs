@@ -1,14 +1,34 @@
-//! Turning configured commands into one decision.
+//! Turning both bindings' participants into one decision.
 //!
-//! [`HookRunner`] is the single [`PreExecutionHook`] lan registers. It walks
-//! the configured hooks in order, spawns the ones that apply, threads any
-//! modification through the rest, and stops at the first refusal.
+//! [`HookRunner`] is the single [`PreExecutionHook`] lan registers. It walks the
+//! in-process interceptors and then the configured subprocess hooks, threading
+//! any modification through the rest, and stops at the first refusal.
 //!
-//! One runner rather than one registration per hook, even though
+//! One runner rather than one registration per participant, even though
 //! `RuntimeBuilder::with_pre_hook` appends: lan wants the ordering and the
-//! short-circuit to be its own, so a global hook's denial can stop a workspace
+//! short-circuit to be its own, so an interceptor's denial can stop a workspace
 //! hook from being spawned at all. Handing mentra a list would compose the same
 //! way but hand that control over with it.
+//!
+//! What an answer *means* is not decided here — that is [`chain`](super::chain),
+//! one implementation for both bindings. This module is two adapters and a
+//! thread: asking a subprocess blocks, asking an interceptor awaits, and the
+//! answers meet in the same [`Chain`].
+//!
+//! # The order participants speak in
+//!
+//! In-process interceptors first, in registration order; then hooks, global
+//! before workspace. One rule underneath: **the further a participant is from
+//! the workspace's own data, the earlier it speaks.** An interceptor is
+//! compiled into the embedding program, a global hook belongs to the person at
+//! the machine, and `.lan/hooks.json` arrived with a repository that may have
+//! been cloned five minutes ago. Since the first refusal short-circuits, that
+//! ordering is what lets the host's own guard stop a repository-supplied
+//! program from being spawned at all — the same argument that already puts
+//! global hooks before workspace ones (see [`crate::hooks`]).
+//!
+//! It is not a claim that a later participant is powerless. A hook still sees,
+//! and can still refuse, whatever an interceptor rewrote.
 
 use std::{fmt, path::PathBuf, sync::Arc, time::Duration};
 
@@ -16,43 +36,21 @@ use mentra::{
     error::RuntimeError,
     runtime::{HookDecision, PreExecutionContext, PreExecutionHook},
 };
-use serde_json::Value;
 use thiserror::Error;
 
 use super::{
-    HookEvent, HookSpec, OnFailure,
+    HookEvent, HookSpec, Interceptor,
+    chain::{Answer, Chain, Participant},
+    contract::{HookCall, HookOutcome, HookRequest},
     exec::{self, Completion},
-    wire::{HookCall, HookRequest, HookResponse},
+    wire::HookResponse,
 };
 
-/// What the configured hooks decided about a call.
-///
-/// lan's own type, shaped like mentra's `HookDecision` so the adapter bridging
-/// them is a `match` and nothing more — but carrying the replacement input as
-/// parsed JSON rather than a string, because an in-process host reading this
-/// should not have to parse a document back out of it.
-#[derive(Debug, Clone, PartialEq)]
-pub enum HookOutcome {
-    /// No hook objected. Not the same as "no hook ran".
-    Allow,
-    /// Blocked, with a reason meant to be read — by the model, which sees it as
-    /// the tool's error, and by whoever has to work out what happened.
-    Deny(String),
-    /// Run the tool with this input instead.
-    ///
-    /// `input` is what the chain left behind after every modification, and
-    /// `reason` names each hook that changed something — "the input is not what
-    /// the model wrote" is exactly what an audit trail is for.
-    Modify {
-        input: Value,
-        reason: Option<String>,
-    },
-}
-
-/// Runs every configured hook against a tool call.
+/// Runs every registered interceptor and configured hook against a tool call.
 #[derive(Clone)]
 pub struct HookRunner {
     workspace: PathBuf,
+    interceptors: Vec<Arc<dyn Interceptor>>,
     hooks: Vec<HookSpec>,
     report: Arc<dyn Fn(&str) + Send + Sync>,
 }
@@ -61,18 +59,39 @@ impl HookRunner {
     pub fn new(workspace: impl Into<PathBuf>, hooks: Vec<HookSpec>) -> Self {
         Self {
             workspace: workspace.into(),
+            interceptors: Vec::new(),
             hooks,
             report: Arc::new(|message| eprintln!("lan: {message}")),
         }
     }
 
+    /// Adds an in-process participant, after any already registered.
+    ///
+    /// Appends rather than replaces, and the order of the calls is the order
+    /// they are consulted in — see the module docs for where that sits relative
+    /// to subprocess hooks, and why.
+    ///
+    /// [`WorkspaceBuilder::with_interceptor`](crate::WorkspaceBuilder::with_interceptor)
+    /// is how a host normally reaches this; the constructor is here for a host
+    /// building a runner for a runtime of its own.
+    pub fn with_interceptor(self, interceptor: impl Interceptor + 'static) -> Self {
+        Self {
+            interceptors: {
+                let mut interceptors = self.interceptors;
+                interceptors.push(Arc::new(interceptor));
+                interceptors
+            },
+            ..self
+        }
+    }
+
     /// Redirects failure reports somewhere other than stderr.
     ///
-    /// A broken hook is an operator's problem, not the model's, so it is said
-    /// out loud by default — including when [`OnFailure::Allow`] means the turn
-    /// carries on, which is the case where nothing else would ever mention it.
-    /// A host that owns its own logging replaces the destination; it cannot
-    /// remove it.
+    /// A broken participant is an operator's problem, not the model's, so it is
+    /// said out loud by default — including when
+    /// [`OnFailure::Allow`](super::OnFailure::Allow) means the turn carries on,
+    /// which is the case where nothing else would ever mention it. A host that
+    /// owns its own logging replaces the destination; it cannot remove it.
     pub fn with_reporter(self, report: impl Fn(&str) + Send + Sync + 'static) -> Self {
         Self {
             report: Arc::new(report),
@@ -80,122 +99,160 @@ impl HookRunner {
         }
     }
 
+    /// Whether this runner would consult anybody at all.
     pub fn is_empty(&self) -> bool {
-        self.hooks.is_empty()
+        self.hooks.is_empty() && self.interceptors.is_empty()
     }
 
-    /// Consults every applicable hook, in order, until one refuses.
+    /// Consults every applicable **subprocess hook**, in order, until one
+    /// refuses.
     ///
     /// Never fails: every way a hook can go wrong ends as a [`HookOutcome`]
     /// carrying words, because an error here would reach the model as a bare
     /// blocked call with the reason thrown away.
     ///
-    /// Blocking: it spawns subprocesses and waits for them. Callers on an
-    /// async runtime should reach it through
-    /// [`decide_async`](Self::decide_async) rather than calling it directly.
+    /// Blocking: it spawns subprocesses and waits for them. Callers on an async
+    /// runtime should reach it through [`decide_async`](Self::decide_async)
+    /// rather than calling it directly.
+    ///
+    /// A runner with interceptors registered **denies here rather than
+    /// deciding**. An [`Interceptor`] is async by contract and there is nowhere
+    /// in a synchronous call to await one; skipping them would silently drop a
+    /// control the host believes is in place, which is the one failure this
+    /// whole module is arranged to avoid.
     pub fn decide(&self, call: &HookCall) -> HookOutcome {
+        if !self.interceptors.is_empty() {
+            return HookOutcome::Deny(
+                "in-process interceptors are registered and cannot be consulted synchronously; \
+                 this call belongs on HookRunner::decide_async"
+                    .to_string(),
+            );
+        }
+
         if self.hooks.is_empty() {
             return HookOutcome::Allow;
         }
 
-        let request = HookRequest::from_call(HookEvent::PreToolUse, &self.workspace, call);
-
-        self.consult(request)
+        match self.consult_hooks(Chain::new(self.request(call))) {
+            Ok(chain) => chain.outcome(),
+            Err(outcome) => outcome,
+        }
     }
 
-    /// [`decide`](Self::decide), off the async runtime's own threads.
+    /// Consults everybody: interceptors first, then hooks.
     ///
-    /// Hooks are subprocesses, so deciding blocks for as long as they take.
+    /// Hooks are subprocesses, so asking them blocks for as long as they take.
     /// `spawn_blocking` puts that on a thread meant for it, which works on
     /// every runtime flavor — the previous `block_in_place` dance existed only
     /// because mentra's hook trait was synchronous and there was nowhere else
-    /// to put the wait (oops-rs/mentra#16, fixed in 0.16).
+    /// to put the wait (oops-rs/mentra#16, fixed in 0.16). Interceptors are
+    /// awaited instead, on the caller's own runtime, because they are async by
+    /// contract and a blocking thread is exactly where a future cannot go.
     pub async fn decide_async(&self, call: &HookCall) -> HookOutcome {
-        if self.hooks.is_empty() {
+        if self.is_empty() {
             return HookOutcome::Allow;
         }
 
-        let runner = self.clone();
-        let call = call.clone();
+        let chain = match self
+            .consult_interceptors(Chain::new(self.request(call)))
+            .await
+        {
+            Ok(chain) => chain,
+            Err(outcome) => return outcome,
+        };
 
-        match tokio::task::spawn_blocking(move || runner.decide(&call)).await {
-            Ok(outcome) => outcome,
+        if self.hooks.is_empty() {
+            return chain.outcome();
+        }
+
+        let runner = self.clone();
+
+        match tokio::task::spawn_blocking(move || runner.consult_hooks(chain)).await {
+            Ok(Ok(chain)) => chain.outcome(),
+            Ok(Err(outcome)) => outcome,
             // The blocking task panicked, which a hook cannot cause — every
-            // failure inside `consult` is already an outcome. Denying keeps
-            // "a broken guard never silently allows" true even here.
+            // failure inside `consult_hooks` is already an outcome. Denying
+            // keeps "a broken guard never silently allows" true even here.
             Err(error) => HookOutcome::Deny(format!("hook runner failed: {error}")),
         }
     }
 
-    fn consult(&self, request: HookRequest) -> HookOutcome {
-        // Rebound whenever a hook rewrites the input, so the next hook is asked
-        // about the call as its predecessors left it. That is what makes
-        // modifications compose, and it is why a modification cannot route a
-        // call past a hook that runs after it.
-        let mut request = request;
-        let mut modifiers: Vec<String> = Vec::new();
+    fn request(&self, call: &HookCall) -> HookRequest {
+        HookRequest::from_call(HookEvent::PreToolUse, &self.workspace, call)
+    }
+
+    /// The in-process binding's adapter: ask, translate, fold.
+    async fn consult_interceptors(&self, chain: Chain) -> Result<Chain, HookOutcome> {
+        let mut chain = chain;
+
+        for interceptor in &self.interceptors {
+            let answer = match self.ask_interceptor(interceptor, chain.request()).await {
+                Ok(HookOutcome::Allow) => Answer::Allow,
+                Ok(HookOutcome::Deny(reason)) => Answer::Deny(Some(reason)),
+                Ok(HookOutcome::Modify { input, reason }) => Answer::Modify { input, reason },
+                Err(failure) => Answer::Broken(failure),
+            };
+
+            chain = chain.advance(
+                Participant::interceptor(interceptor.name()),
+                answer,
+                &*self.report,
+            )?;
+        }
+
+        Ok(chain)
+    }
+
+    /// The subprocess binding's adapter: spawn, parse, fold.
+    fn consult_hooks(&self, chain: Chain) -> Result<Chain, HookOutcome> {
+        let mut chain = chain;
 
         for spec in &self.hooks {
-            // Which hooks apply is a function of the tool, and no hook can
-            // change that — only the input moves.
-            if !spec.applies_to(request.event, &request.tool_name) {
+            // Which hooks apply is a function of the tool, and no participant
+            // can change that — only the input moves.
+            if !spec.applies_to(chain.request().event, &chain.request().tool_name) {
                 continue;
             }
 
-            match self.ask(spec, &request) {
-                Ok(HookResponse::Allow { .. }) => continue,
-                Ok(HookResponse::Deny { reason }) => {
-                    return HookOutcome::Deny(denial(&spec.name, reason));
-                }
-                Ok(HookResponse::Modify { input, reason }) => {
-                    // A tool's input is an object. Anything else fails inside
-                    // the tool with a worse message, and running the original
-                    // instead would ignore a hook that believed it had
-                    // intervened — so it takes the failure path, like any other
-                    // answer lan cannot use.
-                    if !input.is_object() {
-                        if let Some(outcome) = self.failed(spec, HookFailure::ModifiedInputShape) {
-                            return outcome;
-                        }
-                        continue;
-                    }
+            let answer = match self.ask(spec, chain.request()) {
+                Ok(HookResponse::Allow { .. }) => Answer::Allow,
+                Ok(HookResponse::Deny { reason }) => Answer::Deny(reason),
+                Ok(HookResponse::Modify { input, reason }) => Answer::Modify { input, reason },
+                Err(failure) => Answer::Broken(failure.to_string()),
+            };
 
-                    modifiers.push(attribution(&spec.name, reason));
-                    request = request.with_input(input);
-                }
-                Err(failure) => {
-                    if let Some(outcome) = self.failed(spec, failure) {
-                        return outcome;
-                    }
-                }
-            }
+            chain = chain.advance(
+                Participant::hook(&spec.name, spec.on_failure),
+                answer,
+                &*self.report,
+            )?;
         }
 
-        if modifiers.is_empty() {
-            return HookOutcome::Allow;
-        }
-
-        HookOutcome::Modify {
-            input: request.input,
-            // Every hook that changed something, not just the last one: the
-            // question an audit trail asks is who touched this call, and a
-            // single name would answer it wrongly.
-            reason: Some(modifiers.join("; ")),
-        }
+        Ok(chain)
     }
 
-    /// Reports a broken hook, then applies its configured failure mode.
+    /// Puts the call to one interceptor, on a task of its own.
     ///
-    /// `Some` denies the call; `None` means carry on to the next hook.
-    fn failed(&self, spec: &HookSpec, failure: HookFailure) -> Option<HookOutcome> {
-        (self.report)(&format!("hook '{}' {failure}", spec.name));
+    /// The task is what turns a panic into a denial rather than into a lost
+    /// turn — the same trick [`decide_async`](Self::decide_async) already
+    /// relies on for the blocking half. It costs the interceptor the ability to
+    /// be cancelled with the turn, which a check answering in milliseconds does
+    /// not need.
+    async fn ask_interceptor(
+        &self,
+        interceptor: &Arc<dyn Interceptor>,
+        request: &HookRequest,
+    ) -> Result<HookOutcome, String> {
+        let interceptor = Arc::clone(interceptor);
+        let request = request.clone();
 
-        match spec.on_failure {
-            OnFailure::Deny => Some(HookOutcome::Deny(format!(
-                "hook '{}' could not answer and denies on failure: {failure}",
-                spec.name
-            ))),
-            OnFailure::Allow => None,
+        match tokio::spawn(async move { interceptor.intercept(&request).await }).await {
+            Ok(Ok(outcome)) => Ok(outcome),
+            Ok(Err(error)) => Err(format!("answered with an error: {error}")),
+            Err(error) if error.is_panic() => {
+                Err(format!("panicked: {}", panic_message(error.into_panic())))
+            }
+            Err(error) => Err(format!("could not be asked: {error}")),
         }
     }
 
@@ -261,11 +318,11 @@ impl PreExecutionHook for HookRunner {
             HookOutcome::Deny(reason) => HookDecision::Deny(reason),
             HookOutcome::Modify { input, reason } => match serde_json::to_string(&input) {
                 Ok(input_json) => HookDecision::Modify { input_json, reason },
-                // Unreachable in practice — `input` was parsed out of a hook's
-                // stdout, so it re-encodes. Denying rather than unwrapping is
-                // what keeps "a runner never panics" true by construction.
+                // Unreachable in practice — `input` is a `Value`, and every
+                // `Value` re-encodes. Denying rather than unwrapping is what
+                // keeps "a runner never panics" true by construction.
                 Err(error) => HookDecision::Deny(format!(
-                    "a hook's replacement input could not be re-encoded: {error}"
+                    "a replacement input could not be re-encoded: {error}"
                 )),
             },
         })
@@ -277,6 +334,14 @@ impl fmt::Debug for HookRunner {
         f.debug_struct("HookRunner")
             .field("workspace", &self.workspace)
             .field(
+                "interceptors",
+                &self
+                    .interceptors
+                    .iter()
+                    .map(|interceptor| interceptor.name())
+                    .collect::<Vec<_>>(),
+            )
+            .field(
                 "hooks",
                 &self.hooks.iter().map(|spec| &spec.name).collect::<Vec<_>>(),
             )
@@ -284,18 +349,20 @@ impl fmt::Debug for HookRunner {
     }
 }
 
-fn denial(name: &str, reason: Option<String>) -> String {
-    match reason {
-        Some(reason) => format!("denied by hook '{name}': {reason}"),
-        None => format!("denied by hook '{name}'"),
+/// Whatever a panicking interceptor was panicking about.
+///
+/// A panic payload is `Any`, and the two shapes `panic!` produces are the two
+/// handled here. Anything else is a payload nobody can read, so it is named
+/// rather than guessed at.
+fn panic_message(payload: Box<dyn std::any::Any + Send>) -> String {
+    if let Some(message) = payload.downcast_ref::<&str>() {
+        return (*message).to_string();
     }
-}
+    if let Some(message) = payload.downcast_ref::<String>() {
+        return message.clone();
+    }
 
-fn attribution(name: &str, reason: Option<String>) -> String {
-    match reason {
-        Some(reason) => format!("hook '{name}': {reason}"),
-        None => format!("hook '{name}'"),
-    }
+    "with a payload that is not a message".to_string()
 }
 
 /// Why a hook did not produce a decision.
@@ -324,9 +391,6 @@ enum HookFailure {
         source: serde_json::Error,
     },
 
-    #[error("asked to replace the tool input with something that is not a JSON object")]
-    ModifiedInputShape,
-
     #[error("could not be asked, because the request would not serialize: {0}")]
     Payload(#[source] serde_json::Error),
 }
@@ -340,375 +404,5 @@ fn stderr_tail(stderr: &str) -> String {
     }
 }
 
-// Gated to unix for the same reason as `exec`'s tests: the fixtures are
-// `/bin/sh` scripts.
 #[cfg(all(test, unix))]
-mod tests {
-    use super::*;
-    use serde_json::json;
-    use std::sync::Mutex;
-
-    fn call(tool_name: &str) -> HookCall {
-        HookCall::new("agent-1", tool_name, "call-1", r#"{"command":"ls"}"#)
-    }
-
-    fn sh(name: &str, script: &str) -> HookSpec {
-        HookSpec::new(
-            name,
-            vec!["/bin/sh".to_string(), "-c".to_string(), script.to_string()],
-        )
-    }
-
-    /// A reporter that remembers, so a test can prove a failure was announced.
-    #[derive(Default, Clone)]
-    struct Reports(Arc<Mutex<Vec<String>>>);
-
-    impl Reports {
-        fn install(&self, runner: HookRunner) -> HookRunner {
-            let sink = self.0.clone();
-            runner.with_reporter(move |message| {
-                sink.lock().expect("not poisoned").push(message.to_string())
-            })
-        }
-
-        fn all(&self) -> Vec<String> {
-            self.0.lock().expect("not poisoned").clone()
-        }
-    }
-
-    fn decide(hooks: Vec<HookSpec>) -> (HookOutcome, Vec<String>) {
-        let reports = Reports::default();
-        let runner = reports.install(HookRunner::new(".", hooks));
-
-        let outcome = runner.decide(&call("shell"));
-
-        (outcome, reports.all())
-    }
-
-    fn denied(outcome: HookOutcome) -> String {
-        match outcome {
-            HookOutcome::Deny(reason) => reason,
-            other => panic!("expected a denial, got {other:?}"),
-        }
-    }
-
-    #[test]
-    fn no_hooks_means_no_subprocess_and_no_opinion() {
-        let (outcome, reports) = decide(Vec::new());
-
-        assert_eq!(outcome, HookOutcome::Allow);
-        assert!(reports.is_empty());
-    }
-
-    #[test]
-    fn a_hook_that_allows_lets_the_call_through() {
-        let (outcome, reports) = decide(vec![sh("ok", r#"echo '{"decision":"allow"}'"#)]);
-
-        assert_eq!(outcome, HookOutcome::Allow);
-        assert!(reports.is_empty(), "a working hook is not news");
-    }
-
-    #[test]
-    fn a_denial_carries_the_hook_name_and_its_reason() {
-        let (outcome, _) = decide(vec![sh(
-            "guard",
-            r#"echo '{"decision":"deny","reason":"not here"}'"#,
-        )]);
-
-        assert_eq!(
-            outcome,
-            HookOutcome::Deny("denied by hook 'guard': not here".to_string())
-        );
-    }
-
-    #[test]
-    fn the_hook_is_told_what_the_tool_wants() {
-        // Echoing the request back proves the wire contract reached stdin.
-        let (outcome, _) = decide(vec![sh(
-            "echoer",
-            r#"printf '{"decision":"deny","reason":%s}' "\"$(cat | tr -d '\n' | cut -c1-200)\"" "#,
-        )]);
-
-        let reason = denied(outcome);
-        assert!(reason.contains("hook_schema"));
-        assert!(reason.contains("pre_tool_use"));
-        assert!(reason.contains("call-1"));
-    }
-
-    #[test]
-    fn the_first_refusal_stops_the_chain() {
-        let (outcome, _) = decide(vec![
-            sh("first", r#"echo '{"decision":"deny","reason":"mine"}'"#),
-            sh(
-                "second",
-                r#"echo '{"decision":"deny","reason":"also mine"}'"#,
-            ),
-        ]);
-
-        assert_eq!(
-            outcome,
-            HookOutcome::Deny("denied by hook 'first': mine".to_string()),
-            "a hook that already denied makes the next spawn pointless"
-        );
-    }
-
-    #[test]
-    fn a_hook_only_hears_about_the_tools_it_asked_for() {
-        let runner = HookRunner::new(
-            ".",
-            vec![
-                sh("guard", r#"echo '{"decision":"deny"}'"#).with_tools(vec!["files".to_string()]),
-            ],
-        )
-        .with_reporter(|_| {});
-
-        assert_eq!(runner.decide(&call("shell")), HookOutcome::Allow);
-        assert_eq!(
-            runner.decide(&call("files")),
-            HookOutcome::Deny("denied by hook 'guard'".to_string())
-        );
-    }
-
-    #[test]
-    fn a_modify_replaces_the_input() {
-        let (outcome, reports) = decide(vec![sh(
-            "redact",
-            r#"echo '{"decision":"modify","input":{"command":"ls"},"reason":"stripped the token"}'"#,
-        )]);
-
-        assert_eq!(
-            outcome,
-            HookOutcome::Modify {
-                input: json!({"command": "ls"}),
-                reason: Some("hook 'redact': stripped the token".to_string()),
-            }
-        );
-        assert!(reports.is_empty(), "modifying is not a failure");
-    }
-
-    #[test]
-    fn modifications_compose_in_order() {
-        // The second hook answers differently depending on what it was shown,
-        // so its output proves it was asked about the rewritten call.
-        let (outcome, _) = decide(vec![
-            sh(
-                "first",
-                r#"echo '{"decision":"modify","input":{"command":"once"}}'"#,
-            ),
-            sh(
-                "second",
-                r#"
-                request=$(cat)
-                case "$request" in
-                    *'"command":"once"'*)
-                        echo '{"decision":"modify","input":{"command":"twice"}}' ;;
-                    *) echo '{"decision":"deny","reason":"saw the original"}' ;;
-                esac
-                "#,
-            ),
-        ]);
-
-        let HookOutcome::Modify { input, reason } = outcome else {
-            panic!("expected a modification");
-        };
-        assert_eq!(input, json!({"command": "twice"}));
-        assert_eq!(
-            reason,
-            Some("hook 'first'; hook 'second'".to_string()),
-            "every hand that touched the call belongs in the trail"
-        );
-    }
-
-    #[test]
-    fn a_later_hook_can_still_deny_a_modified_call() {
-        let (outcome, _) = decide(vec![
-            sh(
-                "rewriter",
-                r#"echo '{"decision":"modify","input":{"command":"sneaky"}}'"#,
-            ),
-            sh("guard", r#"echo '{"decision":"deny","reason":"still no"}'"#),
-        ]);
-
-        assert_eq!(
-            outcome,
-            HookOutcome::Deny("denied by hook 'guard': still no".to_string()),
-            "modify must not be a way past a hook that runs later"
-        );
-    }
-
-    #[test]
-    fn a_replacement_that_is_not_an_object_is_refused() {
-        let (outcome, reports) = decide(vec![sh(
-            "confused",
-            r#"echo '{"decision":"modify","input":"ls -l"}'"#,
-        )]);
-
-        assert!(
-            denied(outcome).contains("not a JSON object"),
-            "running the original would ignore a hook that believed it intervened"
-        );
-        assert_eq!(reports.len(), 1);
-    }
-
-    #[test]
-    fn a_broken_hook_denies_by_default_and_says_so() {
-        let cases = [
-            ("gone", sh("gone", "exit 7"), "exited with code 7"),
-            ("silent", sh("silent", "true"), "printed nothing"),
-            (
-                "babbling",
-                sh("babbling", "echo not json"),
-                "not a decision",
-            ),
-            (
-                "half-modifying",
-                sh("half-modifying", r#"echo '{"decision":"modify"}'"#),
-                "not a decision",
-            ),
-        ];
-
-        for (name, spec, expected) in cases {
-            let (outcome, reports) = decide(vec![spec]);
-
-            let reason = denied(outcome);
-            assert!(
-                reason.contains(expected),
-                "{name}: denial must say what broke, got {reason}"
-            );
-            assert_eq!(reports.len(), 1, "{name}: a broken hook must be announced");
-            assert!(reports[0].contains(expected));
-        }
-    }
-
-    #[test]
-    fn a_hooks_stderr_reaches_the_reason() {
-        let (outcome, _) = decide(vec![sh("noisy", "echo 'no python' >&2; exit 1")]);
-
-        assert!(denied(outcome).contains("no python"));
-    }
-
-    #[test]
-    fn a_hanging_hook_denies_rather_than_hanging_the_turn() {
-        let (outcome, reports) = decide(vec![
-            sh("stuck", "sleep 30").with_timeout(Duration::from_millis(150)),
-        ]);
-
-        assert!(denied(outcome).contains("150ms"));
-        assert_eq!(reports.len(), 1);
-    }
-
-    #[test]
-    fn an_observer_can_choose_to_fail_open() {
-        let (outcome, reports) = decide(vec![
-            sh("logger", "exit 1").with_on_failure(OnFailure::Allow),
-            sh("guard", r#"echo '{"decision":"allow"}'"#),
-        ]);
-
-        assert_eq!(
-            outcome,
-            HookOutcome::Allow,
-            "fail-open is a per-hook choice, written down rather than inferred"
-        );
-        assert_eq!(
-            reports.len(),
-            1,
-            "carrying on is not the same as staying quiet"
-        );
-    }
-
-    #[test]
-    fn a_command_is_never_handed_to_a_shell() {
-        // `;` is shell syntax; as argv it is just an argument. If lan ever
-        // started interpreting the command, `touch` would run.
-        let tmp = tempfile::tempdir().expect("tempdir");
-        let marker = tmp.path().join("ran");
-        let spec = HookSpec::new(
-            "argv",
-            vec![
-                "/bin/echo".to_string(),
-                format!("{{\"decision\":\"allow\"}}; touch {}", marker.display()),
-            ],
-        );
-
-        let (outcome, _) = decide(vec![spec]);
-
-        // The whole line is echoed, so it is not a decision — which is itself
-        // the proof that nothing split it on the semicolon.
-        assert!(matches!(outcome, HookOutcome::Deny(_)));
-        assert!(!marker.exists(), "a hook command must not reach a shell");
-    }
-
-    /// Puts a call to the runner the way mentra does.
-    async fn hook_decision(hooks: Vec<HookSpec>) -> HookDecision {
-        HookRunner::new(".", hooks)
-            .with_reporter(|_| {})
-            .pre_tool_execution(&PreExecutionContext {
-                agent_id: "agent-1".to_string(),
-                tool_name: "shell".to_string(),
-                tool_call_id: "call-1".to_string(),
-                input_json: r#"{"command":"ls"}"#.to_string(),
-                working_directory: std::path::PathBuf::from("."),
-            })
-            .await
-            .expect("a runner never errors")
-    }
-
-    #[tokio::test]
-    async fn the_runtime_seam_carries_every_outcome() {
-        assert_eq!(
-            hook_decision(vec![sh("ok", r#"echo '{"decision":"allow"}'"#)]).await,
-            HookDecision::Allow
-        );
-
-        assert_eq!(
-            hook_decision(vec![sh("no", r#"echo '{"decision":"deny","reason":"x"}'"#)]).await,
-            HookDecision::Deny("denied by hook 'no': x".to_string())
-        );
-
-        // The replacement crosses back as JSON text, which is mentra's shape.
-        assert_eq!(
-            hook_decision(vec![sh(
-                "rewrite",
-                r#"echo '{"decision":"modify","input":{"command":"safe"}}'"#,
-            )])
-            .await,
-            HookDecision::Modify {
-                input_json: r#"{"command":"safe"}"#.to_string(),
-                reason: Some("hook 'rewrite'".to_string()),
-            }
-        );
-    }
-
-    /// Both flavors, because a hook waits on a subprocess and where that wait
-    /// happens has to be right on either. `spawn_blocking` works on both;
-    /// `block_in_place`, which this used to need, panics on current_thread.
-    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
-    async fn a_hook_runs_from_inside_a_multi_thread_runtime() {
-        let runner = HookRunner::new(".", vec![sh("ok", r#"echo '{"decision":"allow"}'"#)]);
-
-        assert_eq!(
-            runner.decide_async(&call("shell")).await,
-            HookOutcome::Allow
-        );
-    }
-
-    #[tokio::test(flavor = "current_thread")]
-    async fn a_hook_runs_from_inside_a_current_thread_runtime() {
-        let runner = HookRunner::new(".", vec![sh("ok", r#"echo '{"decision":"allow"}'"#)]);
-
-        assert_eq!(
-            runner.decide_async(&call("shell")).await,
-            HookOutcome::Allow
-        );
-    }
-
-    #[test]
-    fn the_debug_view_names_the_hooks_without_leaking_the_reporter() {
-        let runner = HookRunner::new("/repo", vec![sh("guard", "true")]);
-
-        let shown = format!("{runner:?}");
-
-        assert!(shown.contains("guard"));
-        assert!(shown.contains("/repo"));
-    }
-}
+mod tests;
