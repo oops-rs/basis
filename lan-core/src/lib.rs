@@ -90,10 +90,19 @@ pub use mcp::{
     DEFAULT_GLOBAL_MCP_FILE, DEFAULT_WORKSPACE_MCP_FILE, McpConfig, McpError, McpServer, McpSource,
 };
 pub use run::{
-    Bound, CollectingSink, Effort, EventSink, FnSink, NullSink, PreparedRun, RunConfig, RunContext,
-    RunError, RunReport, TurnOptions, resume, run, run_with_approver,
+    Bound, CancellationToken, CollectingSink, Effort, EventFanIn, EventSink, FnSink, MergedEvents,
+    NullSink, OutputReport, OutputSpec, PreparedRun, RunConfig, RunContext, RunError, RunReport,
+    RunUsage, TaggedEvent, TaggedSink, TurnOptions, resume, run, run_with_approver,
 };
 pub use shell::ShellAccess;
+// Mentra's, deliberately. These three are the types lan's own surface asks a
+// caller to *name* — a model to resolve, a provider to prefer, a token to stop
+// a turn with — and re-exporting them is what keeps that from meaning "add
+// mentra to your manifest, pinned to whatever version lan-core happens to
+// resolve". A skew there is a type error with no explanation in it. Everything
+// else mentra owns stays behind `mentra::`, where an embedder that wants the
+// runtime itself already is.
+pub use mentra::{BuiltinProvider, ModelSelector};
 pub use skills::{SkillsConfig, SkillsSource};
 // `store::list` keeps its module: at the crate root `list` would not say what
 // is being listed, and `PersistedSession` is only meaningful beside it.

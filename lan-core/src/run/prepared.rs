@@ -7,33 +7,26 @@
 //! whole pipeline against a scripted runtime, so the event contract is checked
 //! without a network call.
 
-use std::{
-    path::PathBuf,
-    time::{Duration, SystemTime},
-};
+use std::path::PathBuf;
 
-use mentra::{ContentBlock, Session, SessionEvent, SessionEventReceiver, runtime::RunOptions};
-use tokio::sync::{
-    broadcast::error::{RecvError, TryRecvError},
-    oneshot,
-};
+use mentra::{ContentBlock, Session};
+use serde::de::DeserializeOwned;
+use serde_json::Value;
+use tokio::sync::oneshot;
 
-use mentra::{
-    SessionPermissionHandle,
-    runtime::CancellationToken,
-    session::{PermissionDecision, PermissionRuleScope},
+use self::forward::forward_events;
+use super::{
+    Bound, EventSink, OutputReport, OutputSpec, RunError, RunReport, RunUsage, TurnOptions,
+    turn::bounded,
 };
-
-use super::{Bound, EventSink, RunError, RunReport};
 use crate::{
-    approval::{AllowAll, ApprovalAnswer, ApprovalDecision, ApprovalRequest, Approver},
+    approval::{AllowAll, Approver},
     context::WorkspaceContext,
-    event::{
-        ContextFile, EVENT_SCHEMA_VERSION, Event, NoticeSeverity, RunOutcome, SkillSummary,
-        TemplateSummary,
-    },
+    event::{ContextFile, EVENT_SCHEMA_VERSION, Event, RunOutcome, SkillSummary, TemplateSummary},
     templates::Template,
 };
+
+mod forward;
 
 /// What a run is about, once the runtime questions are settled.
 #[derive(Debug, Clone)]
@@ -65,80 +58,6 @@ pub struct LoadedSkill {
     pub name: String,
     pub description: String,
     pub path: PathBuf,
-}
-
-/// Limits and stop signals for a single turn.
-///
-/// lan's own type rather than a re-export of mentra's `RunOptions`: the same
-/// reasoning as [`Event`] — lan owns its surface so mentra's internals can move
-/// without breaking lan's callers. Only the knobs a harness actually needs are
-/// exposed; the rest stay at mentra's defaults.
-#[derive(Debug, Clone, Default)]
-pub struct TurnOptions {
-    /// Trips to abandon the turn. The turn fails and is rolled back — what a
-    /// client's stop button means.
-    pub cancel: Option<CancellationToken>,
-    /// Trips to end the turn gracefully at the next round boundary, keeping
-    /// what the model has already committed.
-    pub stop: Option<CancellationToken>,
-    /// Gives up on the turn after this long.
-    pub deadline: Option<Duration>,
-    /// Caps how many tool calls one turn may make.
-    pub tool_budget: Option<usize>,
-    /// Caps the tokens one turn may report using, input plus output.
-    ///
-    /// Soft by construction: usage is only known once a round has streamed in
-    /// full, so the round that crosses the line is always allowed to finish.
-    /// It ends the turn *gracefully* at the next boundary — what the model
-    /// already committed is kept, so the work is not thrown away for being one
-    /// round too long.
-    pub token_budget: Option<u64>,
-}
-
-impl TurnOptions {
-    /// A turn that can be cancelled through the returned token.
-    pub fn cancellable() -> (Self, CancellationToken) {
-        let token = CancellationToken::default();
-        (
-            Self {
-                cancel: Some(token.clone()),
-                ..Self::default()
-            },
-            token,
-        )
-    }
-
-    pub fn with_deadline(self, deadline: Duration) -> Self {
-        Self {
-            deadline: Some(deadline),
-            ..self
-        }
-    }
-
-    pub fn with_tool_budget(self, tool_budget: usize) -> Self {
-        Self {
-            tool_budget: Some(tool_budget),
-            ..self
-        }
-    }
-
-    pub fn with_token_budget(self, token_budget: u64) -> Self {
-        Self {
-            token_budget: Some(token_budget),
-            ..self
-        }
-    }
-
-    fn into_run_options(self) -> RunOptions {
-        RunOptions {
-            cancellation: self.cancel,
-            stop: self.stop,
-            deadline: self.deadline.map(|after| SystemTime::now() + after),
-            tool_budget: self.tool_budget,
-            token_budget: self.token_budget,
-            ..RunOptions::default()
-        }
-    }
 }
 
 /// A session and the prompt to send it. Nothing has been sent yet.
@@ -263,9 +182,36 @@ impl PreparedRun {
         sink: S,
         approver: A,
     ) -> Result<RunReport<S>, RunError> {
-        let prompt = self.run.prompt.clone();
-        self.turn(prompt, sink, approver, TurnOptions::default())
+        self.execute_with_approver_and_options(sink, approver, TurnOptions::default())
             .await
+    }
+
+    /// Sends the configured prompt with explicit run options — a cancellation
+    /// token, a deadline, a tool budget.
+    ///
+    /// The one-shot path is bounded by its config but had no way to be
+    /// *stopped*: a token belongs to one call, so it cannot travel in a config
+    /// that mints many. This is where it arrives, and it is what a host driving
+    /// a one-prompt run behind a UI needs, exactly as
+    /// [`send_with_options`](Self::send_with_options) serves a conversation.
+    pub async fn execute_with_options<S: EventSink>(
+        &mut self,
+        sink: S,
+        options: TurnOptions,
+    ) -> Result<RunReport<S>, RunError> {
+        self.execute_with_approver_and_options(sink, AllowAll, options)
+            .await
+    }
+
+    /// Sends the configured prompt with both an approver and explicit options.
+    pub async fn execute_with_approver_and_options<S: EventSink, A: Approver>(
+        &mut self,
+        sink: S,
+        approver: A,
+        options: TurnOptions,
+    ) -> Result<RunReport<S>, RunError> {
+        let prompt = self.run.prompt.clone();
+        self.turn(prompt, sink, approver, options).await
     }
 
     /// Sends a further prompt on the same conversation.
@@ -303,6 +249,111 @@ impl PreparedRun {
         self.turn(prompt.into(), sink, approver, options).await
     }
 
+    /// Sends a prompt whose answer must be a value of type `T` rather than
+    /// prose.
+    ///
+    /// ADR-0010's structured output, and the primitive a workflow is built on:
+    /// the model is handed one terminal tool whose input *is* the answer, is
+    /// required to call it, and `T` is deserialized from what it sent. The
+    /// caller writes the schema — see [`OutputSpec`] for why lan derives
+    /// nothing.
+    ///
+    /// The stream is unchanged. Header, forwarded events, permissions put to
+    /// the approver, `RunFinished`: a client reading events cannot tell a typed
+    /// turn from any other, which is the point — only the return value differs.
+    /// The answer travels as the terminal tool's
+    /// [`ToolQueued`](Event::ToolQueued) input and
+    /// [`ToolCompleted`](Event::ToolCompleted) summary, and
+    /// [`RunReport::final_message`] stays `None`, because a typed turn's
+    /// committed final message is that tool result — putting a JSON payload in
+    /// a field named for the assistant's prose would have every client render
+    /// it as speech. Prose the model wrote alongside the call, usually none,
+    /// arrives as [`Event::AssistantMessage`].
+    ///
+    /// Where a plain turn reports its failure on the stream and still returns
+    /// `Ok`, this returns `Err`: a typed turn without a value has nothing to
+    /// hand back.
+    ///
+    /// - [`RunError::OutputMismatch`] — an answer arrived that `T` did not
+    ///   accept. mentra commits the exchange before lan reads it, so the
+    ///   transcript keeps the attempt and a follow-up turn can say what was
+    ///   wrong with it.
+    /// - [`RunError::Runtime`] — the turn failed, *or* it finished without ever
+    ///   calling the terminal tool. mentra reports both as
+    ///   `MalformedProviderEvent` and lan will not read error prose to tell
+    ///   them apart.
+    ///
+    /// The stream is complete and closed in every one of those cases, so a sink
+    /// with somewhere to put events — a file, a channel — has the whole run.
+    /// Only the sink *value* is lost, because it comes back inside the report.
+    ///
+    /// ```no_run
+    /// use serde::Deserialize;
+    /// use serde_json::json;
+    ///
+    /// #[derive(Deserialize)]
+    /// struct Review {
+    ///     verdict: String,
+    /// }
+    ///
+    /// # async fn example(run: &mut lan_core::PreparedRun) -> Result<(), lan_core::RunError> {
+    /// let spec = lan_core::OutputSpec::new(
+    ///     "submit_review",
+    ///     "call this once you have read every changed file",
+    ///     json!({
+    ///         "type": "object",
+    ///         "properties": {
+    ///             "verdict": { "type": "string", "description": "ship or hold" }
+    ///         },
+    ///         "required": ["verdict"]
+    ///     }),
+    /// );
+    ///
+    /// let output = run
+    ///     .output::<Review, _, _>(
+    ///         "review the diff on this branch",
+    ///         spec,
+    ///         lan_core::NullSink,
+    ///         lan_core::AllowAll,
+    ///     )
+    ///     .await?;
+    ///
+    /// // A value, not a paragraph to parse — and what it cost, for a caller
+    /// // adding runs up against a budget.
+    /// println!("{} ({} tokens)", output.value.verdict, output.report.usage.total_tokens());
+    /// # Ok(())
+    /// # }
+    /// ```
+    pub async fn output<T: DeserializeOwned, S: EventSink, A: Approver>(
+        &mut self,
+        prompt: impl Into<String>,
+        spec: OutputSpec,
+        sink: S,
+        approver: A,
+    ) -> Result<OutputReport<T, S>, RunError> {
+        self.typed_turn(prompt.into(), spec, sink, approver, TurnOptions::default())
+            .await
+    }
+
+    /// A typed turn with explicit run options.
+    ///
+    /// Same relationship to [`output`](Self::output) as
+    /// [`send_with_options`](Self::send_with_options) has to
+    /// [`send`](Self::send): a typed turn is cancellable and boundable like any
+    /// other, and a fan-out that gives each of its runs a deadline should not
+    /// have to give up types to get one.
+    pub async fn output_with_options<T: DeserializeOwned, S: EventSink, A: Approver>(
+        &mut self,
+        prompt: impl Into<String>,
+        spec: OutputSpec,
+        sink: S,
+        approver: A,
+        options: TurnOptions,
+    ) -> Result<OutputReport<T, S>, RunError> {
+        self.typed_turn(prompt.into(), spec, sink, approver, options)
+            .await
+    }
+
     /// One turn, start to finish: header, forwarded events, outcome.
     async fn turn<S: EventSink, A: Approver>(
         &mut self,
@@ -311,6 +362,84 @@ impl PreparedRun {
         approver: A,
         options: TurnOptions,
     ) -> Result<RunReport<S>, RunError> {
+        let turn = self.begin(&prompt, sink, approver)?;
+
+        let result = self
+            .session
+            .append_turn_with_options(
+                vec![ContentBlock::text(prompt)],
+                bounded(options, &self.bounds).into_run_options(),
+            )
+            .await;
+
+        let ended = match &result {
+            Ok(message) => Ended::Answered(Some(message.text())),
+            Err(error) => Ended::Failed(error),
+        };
+        self.finish(turn, ended).await
+    }
+
+    /// One typed turn. Identical to [`turn`](Self::turn) but for the one call
+    /// in the middle — which is the whole reason both are written this way,
+    /// since a second copy of the header-and-forwarding dance is a second thing
+    /// to keep in step with the stream contract.
+    ///
+    /// mentra is asked for a [`Value`] rather than for `T` directly, and lan
+    /// deserializes. That costs nothing (the payload is already JSON) and buys
+    /// the error distinction: a value that does not fit `T` is lan's own
+    /// finding, reported as [`RunError::OutputMismatch`], instead of arriving
+    /// as one more `MalformedProviderEvent` indistinguishable from a provider
+    /// that misbehaved.
+    async fn typed_turn<T: DeserializeOwned, S: EventSink, A: Approver>(
+        &mut self,
+        prompt: String,
+        spec: OutputSpec,
+        sink: S,
+        approver: A,
+        options: TurnOptions,
+    ) -> Result<OutputReport<T, S>, RunError> {
+        let turn = self.begin(&prompt, sink, approver)?;
+
+        let result = self
+            .session
+            .append_turn_to_output::<Value>(
+                vec![ContentBlock::text(prompt)],
+                bounded(options, &self.bounds).into_run_options(),
+                spec.into_terminal_spec(),
+            )
+            .await;
+
+        let typed = match result {
+            Ok(output) => Ok(serde_json::from_value::<T>(output.value)),
+            Err(error) => Err(error),
+        };
+        let ended = match &typed {
+            Ok(Ok(_)) => Ended::Answered(None),
+            Ok(Err(mismatch)) => Ended::Mismatched(mismatch),
+            Err(error) => Ended::Failed(error),
+        };
+
+        let report = self.finish(turn, ended).await?;
+
+        match typed {
+            Ok(Ok(value)) => Ok(OutputReport { value, report }),
+            Ok(Err(mismatch)) => Err(RunError::OutputMismatch(mismatch)),
+            Err(error) => Err(RunError::Runtime(error)),
+        }
+    }
+
+    /// Opens a turn: checks the prompt, emits the header, starts forwarding.
+    ///
+    /// Split from [`finish`](Self::finish) so that everything between them is
+    /// exactly one call to mentra. Every entry point above shares this pair, so
+    /// no turn can announce itself differently from the others — the same split
+    /// mentra makes internally, and for the same reason.
+    fn begin<S: EventSink, A: Approver>(
+        &self,
+        prompt: &str,
+        sink: S,
+        approver: A,
+    ) -> Result<Turn<S>, RunError> {
         if prompt.trim().is_empty() {
             return Err(RunError::EmptyPrompt);
         }
@@ -322,7 +451,7 @@ impl PreparedRun {
         let mut sink = sink;
         sink.emit(header_for(&session_id, &self.run))?;
 
-        let (done_tx, done_rx) = oneshot::channel();
+        let (done, done_rx) = oneshot::channel();
         let forwarder = tokio::spawn(forward_events(
             receiver,
             sink,
@@ -331,28 +460,55 @@ impl PreparedRun {
             permissions,
         ));
 
-        let turn = self
-            .session
-            .append_turn_with_options(
-                vec![ContentBlock::text(prompt)],
-                bounded(options, &self.bounds).into_run_options(),
-            )
-            .await;
+        Ok(Turn {
+            session_id,
+            done,
+            forwarder,
+        })
+    }
+
+    /// Closes a turn opened by [`begin`](Self::begin): stops forwarding, states
+    /// the outcome on the stream, and reports.
+    ///
+    /// Classifying `ended` here rather than at each call site is what keeps one
+    /// answer to "did this run succeed" — a second site would be a second
+    /// opinion.
+    async fn finish<S: EventSink>(
+        &self,
+        turn: Turn<S>,
+        ended: Ended<'_>,
+    ) -> Result<RunReport<S>, RunError> {
+        let Turn {
+            session_id,
+            done,
+            forwarder,
+        } = turn;
 
         // The forwarder stops on this signal rather than on the channel
         // closing, so a sender clone held elsewhere in the runtime cannot
         // strand the task.
-        let _ = done_tx.send(());
-        let mut sink = forwarder.await?;
+        let _ = done.send(());
+        let (mut sink, usage) = forwarder.await?;
 
-        let (final_message, outcome, stopped_by) = match turn {
-            Ok(message) => (Some(message.text()), RunOutcome::Ok, None),
-            Err(error) => (
+        let (final_message, outcome, stopped_by) = match ended {
+            Ended::Answered(final_message) => (final_message, RunOutcome::Ok, None),
+            Ended::Failed(error) => (
                 None,
                 RunOutcome::Error {
                     message: error.to_string(),
                 },
-                tripped_bound(&error),
+                tripped_bound(error),
+            ),
+            // The turn itself completed, so mentra kept the exchange — but the
+            // caller asked for a shape and did not get one, and a stream that
+            // said "ok" while its caller received an error would be describing
+            // a different run from the one that happened.
+            Ended::Mismatched(mismatch) => (
+                None,
+                RunOutcome::Error {
+                    message: format!("output did not match the requested type: {mismatch}"),
+                },
+                None,
             ),
         };
 
@@ -367,9 +523,32 @@ impl PreparedRun {
             final_message,
             outcome,
             stopped_by,
+            usage,
             sink,
         })
     }
+}
+
+/// A turn in flight: the forwarding task, and the signal that ends it.
+struct Turn<S> {
+    session_id: String,
+    done: oneshot::Sender<()>,
+    forwarder: tokio::task::JoinHandle<(S, RunUsage)>,
+}
+
+/// How a turn ended, in the terms the stream reports.
+///
+/// Borrowed rather than owned so a caller can hand the failure over for
+/// classification and still return it: the error a typed turn reports to its
+/// caller and the message the stream carries have to be the same error.
+enum Ended<'a> {
+    /// mentra completed the turn. Carries the assistant's final prose, when the
+    /// turn had any — a typed turn's answer is not prose and is not put here.
+    Answered(Option<String>),
+    /// mentra failed the turn.
+    Failed(&'a mentra::error::RuntimeError),
+    /// The turn completed, but its answer did not fit the requested type.
+    Mismatched(&'a serde_json::Error),
 }
 
 /// Which of the run's own bounds ended the turn, if one did.
@@ -384,20 +563,6 @@ fn tripped_bound(error: &mentra::error::RuntimeError) -> Option<Bound> {
         // Everything else is a failure of the work, not of the allowance: a
         // provider error, a cancelled turn, an unreadable transcript.
         _ => None,
-    }
-}
-
-/// Fills in whatever `options` left unset from the run's configured bounds.
-///
-/// A caller that passes options in order to attach a cancellation token has
-/// said nothing about limits, and reading that silence as "no deadline" would
-/// unbound a run whose config asked for one.
-fn bounded(options: TurnOptions, bounds: &TurnOptions) -> TurnOptions {
-    TurnOptions {
-        deadline: options.deadline.or(bounds.deadline),
-        tool_budget: options.tool_budget.or(bounds.tool_budget),
-        token_budget: options.token_budget.or(bounds.token_budget),
-        ..options
     }
 }
 
@@ -444,173 +609,10 @@ fn header_for(session_id: &str, run: &RunContext) -> Event {
     }
 }
 
-/// Drains the session's event stream into the sink until the turn is done,
-/// then drains whatever is still queued and hands the sink back.
-///
-/// This task also answers permission requests, and mentra blocks the turn until
-/// one is answered — so it runs to the end of the turn even when the sink stops
-/// accepting events. A forwarder that returned on the first failed write would
-/// hang the next consequential call rather than merely stop narrating it, which
-/// is what `lan run --json | head` would do to every run.
-async fn forward_events<S: EventSink, A: Approver>(
-    mut receiver: SessionEventReceiver,
-    mut sink: S,
-    done: oneshot::Receiver<()>,
-    mut approver: A,
-    permissions: SessionPermissionHandle,
-) -> S {
-    tokio::pin!(done);
-    // Cleared by the first failed write, and never set again: a sink that
-    // refused one event is not asked to take the rest.
-    let mut writing = true;
-
-    loop {
-        tokio::select! {
-            // Biased so queued events always win over the shutdown signal:
-            // the turn finishing must not truncate the stream.
-            biased;
-
-            received = receiver.recv() => {
-                match received {
-                    Ok(event) => {
-                        resolve_if_permission(&event, &mut approver, &permissions).await;
-                        writing = writing && emit_session_event(&mut sink, &event);
-                    }
-                    // Lagging is recoverable — the receiver keeps working, it
-                    // just skipped ahead. Say so and carry on.
-                    Err(RecvError::Lagged(dropped)) => {
-                        writing = writing && emit(&mut sink, lag_notice(dropped));
-                    }
-                    // A closed channel means the session is gone; nothing more
-                    // can arrive, so stop without waiting for the signal.
-                    Err(RecvError::Closed) => return sink,
-                }
-            }
-            _ = &mut done => {
-                drain(&mut receiver, &mut sink, &mut approver, &permissions, writing).await;
-                return sink;
-            }
-        }
-    }
-}
-
-/// Empties whatever the broadcast channel still holds.
-async fn drain<S: EventSink, A: Approver>(
-    receiver: &mut SessionEventReceiver,
-    sink: &mut S,
-    approver: &mut A,
-    permissions: &SessionPermissionHandle,
-    mut writing: bool,
-) {
-    loop {
-        match receiver.try_recv() {
-            Ok(event) => {
-                resolve_if_permission(&event, approver, permissions).await;
-                writing = writing && emit_session_event(sink, &event);
-            }
-            Err(TryRecvError::Lagged(dropped)) => {
-                writing = writing && emit(sink, lag_notice(dropped));
-            }
-            Err(TryRecvError::Empty | TryRecvError::Closed) => return,
-        }
-    }
-}
-
-/// Answers a pending permission request.
-///
-/// The turn is blocked inside mentra waiting for this, so failing to resolve
-/// would hang the run — which is what happened before lan answered at all.
-async fn resolve_if_permission<A: Approver>(
-    event: &SessionEvent,
-    approver: &mut A,
-    permissions: &SessionPermissionHandle,
-) {
-    let SessionEvent::PermissionRequested {
-        request_id,
-        tool_call_id,
-        tool_name,
-        description,
-        preview,
-    } = event
-    else {
-        return;
-    };
-
-    let answer = approver
-        .approve(&ApprovalRequest {
-            request_id: request_id.clone(),
-            tool_call_id: tool_call_id.clone(),
-            tool_name: tool_name.clone(),
-            description: description.clone(),
-            input: serde_json::from_str(preview)
-                .unwrap_or_else(|_| serde_json::Value::String(preview.clone())),
-        })
-        .await;
-
-    // A failure here means the request was already resolved or withdrawn;
-    // there is nothing useful left to do about it.
-    let _ = permissions.resolve_permission(request_id, permission_decision(answer));
-}
-
-/// Restates an approver's answer in the terms mentra resolves with.
-///
-/// The reason rides along on refusals, because mentra puts it in the tool
-/// result the model reads; a refusal that gives none keeps mentra's own
-/// wording.
-fn permission_decision(answer: ApprovalAnswer) -> PermissionDecision {
-    let decision = match answer.decision {
-        ApprovalDecision::Allow => PermissionDecision::allow(),
-        ApprovalDecision::Deny => PermissionDecision::deny(),
-        ApprovalDecision::AllowForSession => {
-            PermissionDecision::allow_and_remember(PermissionRuleScope::Session)
-        }
-        ApprovalDecision::DenyForSession => {
-            PermissionDecision::deny_and_remember(PermissionRuleScope::Session)
-        }
-    };
-
-    match answer.reason {
-        Some(reason) => decision.with_reason(reason),
-        None => decision,
-    }
-}
-
-/// Maps and emits one session event. Returns `false` when the sink has failed
-/// and forwarding should stop.
-fn emit_session_event<S: EventSink>(sink: &mut S, event: &SessionEvent) -> bool {
-    match Event::from_session_event(event) {
-        Some(mapped) => emit(sink, mapped),
-        None => true,
-    }
-}
-
-fn emit<S: EventSink>(sink: &mut S, event: Event) -> bool {
-    sink.emit(event).is_ok()
-}
-
-/// A dropped-event notice. The alternative — staying quiet — would leave a
-/// client with a stream that silently disagrees with what happened.
-fn lag_notice(dropped: u64) -> Event {
-    Event::Notice {
-        severity: NoticeSeverity::Warning,
-        message: format!("event stream lagged; {dropped} event(s) dropped"),
-    }
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
     use crate::context::{ContextDocument, ContextScope};
-
-    #[test]
-    fn a_lag_notice_says_how_many_were_lost() {
-        let Event::Notice { severity, message } = lag_notice(12) else {
-            panic!("expected a notice");
-        };
-
-        assert_eq!(severity, NoticeSeverity::Warning);
-        assert!(message.contains("12"));
-    }
 
     #[test]
     fn the_header_lists_context_files_weakest_first() {
@@ -638,44 +640,6 @@ mod tests {
 
         assert_eq!(files[0].scope, "ancestor:2");
         assert_eq!(files[1].scope, "workspace");
-    }
-
-    #[test]
-    fn attaching_a_token_does_not_unbound_a_configured_run() {
-        // What ACP does on every turn: options exist only to carry a stop
-        // button. Reading that as "and no deadline either" would silently
-        // remove the bound an unattended caller asked for.
-        let configured = TurnOptions::default()
-            .with_deadline(Duration::from_secs(600))
-            .with_tool_budget(12);
-        let (options, token) = TurnOptions::cancellable();
-
-        let merged = bounded(options, &configured);
-
-        assert_eq!(merged.deadline, Some(Duration::from_secs(600)));
-        assert_eq!(merged.tool_budget, Some(12));
-        assert!(merged.cancel.is_some(), "the token still arrives");
-        assert!(!token.is_cancelled());
-    }
-
-    #[test]
-    fn an_explicit_bound_wins_over_the_configured_one() {
-        let configured = TurnOptions::default().with_deadline(Duration::from_secs(600));
-        let explicit = TurnOptions::default().with_deadline(Duration::from_secs(30));
-
-        assert_eq!(
-            bounded(explicit, &configured).deadline,
-            Some(Duration::from_secs(30))
-        );
-    }
-
-    #[test]
-    fn a_prepared_run_is_unbounded_until_it_is_bounded() {
-        let unset = TurnOptions::default();
-
-        assert_eq!(bounded(TurnOptions::default(), &unset).deadline, None);
-        assert_eq!(bounded(TurnOptions::default(), &unset).tool_budget, None);
-        assert_eq!(bounded(TurnOptions::default(), &unset).token_budget, None);
     }
 
     #[test]

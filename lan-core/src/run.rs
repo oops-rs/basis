@@ -17,8 +17,11 @@
 //! A host that already owns a mentra runtime skips to [`prepare_with_session`]
 //! and keeps its own.
 
+mod output;
 mod prepared;
 mod sink;
+mod turn;
+mod usage;
 
 use std::{path::PathBuf, time::Duration};
 
@@ -42,8 +45,33 @@ use crate::{
     },
 };
 
-pub use prepared::{LoadedSkill, PreparedRun, RunContext, TurnOptions};
-pub use sink::{CollectingSink, EventSink, FnSink, NullSink};
+pub use output::{OutputReport, OutputSpec};
+pub use prepared::{LoadedSkill, PreparedRun, RunContext};
+pub use sink::{
+    CollectingSink, EventFanIn, EventSink, FnSink, MergedEvents, NullSink, TaggedEvent, TaggedSink,
+};
+pub use turn::TurnOptions;
+pub use usage::RunUsage;
+
+/// The signal a caller trips to stop a turn.
+///
+/// Re-exported rather than restated, and the reason is the one thing lan cannot
+/// wrap: a token is an *identity*, not a value. The turn holds one half and the
+/// caller the other, and a lan-owned copy would have to forward the trip to
+/// mentra's — a second object that can disagree with the first about whether
+/// the stop button was pressed. So this is a deliberate leak, like
+/// [`ModelSelector`] and [`BuiltinProvider`] on [`RunConfig`].
+///
+/// Re-exporting it is what makes the leak cheap. A host embedding `lan-core`
+/// should not have to add mentra to its own manifest — and pin the same
+/// version — to name a type lan's own API asks it for; a skew there fails to
+/// compile with no hint that two crates disagree about one struct. Hence the
+/// rule: every mentra type lan's surface makes a caller *name*, lan re-exports.
+///
+/// Two of them go on a turn and they mean different things —
+/// [`TurnOptions::cancel`] abandons it, [`TurnOptions::stop`] ends it
+/// gracefully.
+pub use mentra::runtime::CancellationToken;
 
 /// How hard the model should think before answering.
 ///
@@ -347,11 +375,16 @@ pub struct RunReport<S> {
     pub session_id: String,
     pub model: String,
     pub provider: String,
-    /// The assistant's final message, absent when the run failed.
+    /// The assistant's final message, absent when the run failed — and absent
+    /// on a typed turn, where the answer is
+    /// [`OutputReport::value`] rather than prose.
     pub final_message: Option<String>,
     pub outcome: RunOutcome,
     /// Which bound ended the run, when one did rather than the work.
     pub stopped_by: Option<Bound>,
+    /// What the run reported spending. Present whether it succeeded or not: a
+    /// turn that failed on its fourth round still spent the first three.
+    pub usage: RunUsage,
     pub sink: S,
 }
 
@@ -383,6 +416,18 @@ pub enum RunError {
 
     #[error("runtime error: {0}")]
     Runtime(#[from] mentra::error::RuntimeError),
+
+    /// A typed turn answered, but not in the shape that was asked for.
+    ///
+    /// Separate from [`Runtime`](Self::Runtime) because the two call for
+    /// different reactions and lan can tell them apart honestly: this one is
+    /// lan's own verdict. The typed path asks mentra for the raw payload and
+    /// deserializes it here, so a value that does not fit `T` is a schema or
+    /// prompt problem — retry with a clearer schema — while a provider failure
+    /// is not. The exchange stays in the session's transcript either way; see
+    /// [`PreparedRun::output`].
+    #[error("the run's output did not match the requested type: {0}")]
+    OutputMismatch(#[source] serde_json::Error),
 
     #[error("failed to write an event: {0}")]
     Sink(#[from] std::io::Error),

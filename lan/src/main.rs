@@ -1001,6 +1001,7 @@ mod tests {
             final_message: None,
             outcome,
             stopped_by,
+            usage: lan_core::RunUsage::default(),
             sink: (),
         }
     }

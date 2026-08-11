@@ -3,10 +3,18 @@
 //! `lan run --json` writes JSONL to stdout; an in-process host wants a
 //! callback or a buffer; P2's ACP server will want a protocol notification.
 //! All of them are the same stream, so they are all the same trait.
+//!
+//! A host running many runs at once wants one view of all of them; that is
+//! [`fan_in`](mod@fan_in), which is the same trait again with a tag on the
+//! front.
+
+mod fan_in;
 
 use std::io::Write;
 
 use crate::event::{Event, JsonlWriter};
+
+pub use fan_in::{EventFanIn, MergedEvents, TaggedEvent, TaggedSink};
 
 /// A destination for run events.
 ///
@@ -19,6 +27,17 @@ use crate::event::{Event, JsonlWriter};
 /// it would turn a broken pipe into a hung agent.
 pub trait EventSink: Send + 'static {
     fn emit(&mut self, event: Event) -> std::io::Result<()>;
+}
+
+/// A boxed sink is a sink, so a host can choose one at runtime — `--json` or a
+/// progress pane or nothing — and still satisfy the `S: EventSink` that
+/// [`execute`](super::PreparedRun::execute) asks for. Without this the choice
+/// has to be made in the type system, which is to say at every call site that
+/// forwards it.
+impl EventSink for Box<dyn EventSink> {
+    fn emit(&mut self, event: Event) -> std::io::Result<()> {
+        (**self).emit(event)
+    }
 }
 
 impl<W: Write + Send + 'static> EventSink for JsonlWriter<W> {
@@ -140,5 +159,18 @@ mod tests {
 
         let written = String::from_utf8(sink.into_inner()).expect("utf-8");
         assert!(written.contains("\"type\":\"assistant_delta\""));
+    }
+
+    #[test]
+    fn a_sink_chosen_at_runtime_is_still_a_sink() {
+        // What a host with a `--json` flag actually has: one variable, two
+        // possible destinations, and a run that only knows it takes a sink.
+        let mut sink: Box<dyn EventSink> = if cfg!(test) {
+            Box::new(CollectingSink::new())
+        } else {
+            Box::new(NullSink)
+        };
+
+        sink.emit(delta("boxed")).expect("emits");
     }
 }
