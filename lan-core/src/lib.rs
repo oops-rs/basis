@@ -106,6 +106,12 @@ pub use shell::ShellAccess;
 // else mentra owns stays behind `mentra::`, where an embedder that wants the
 // runtime itself already is.
 pub use mentra::{BuiltinProvider, ModelSelector};
+// The attribute both of lan's async traits make an implementor spell:
+// `Approver` and `Interceptor` are `#[async_trait]`, so without this line
+// writing either impl means adding `async-trait` to the host's own manifest —
+// a dependency lan's docs used to ask for without saying so. Same rule as the
+// mentra types above, applied to a macro.
+pub use async_trait::async_trait;
 pub use skills::{SkillsConfig, SkillsSource};
 // `store::list` keeps its module: at the crate root `list` would not say what
 // is being listed, and `PersistedSession` is only meaningful beside it.

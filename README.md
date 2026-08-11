@@ -300,7 +300,7 @@ gets the say, which is what you want when the guard needs a vault handle, a toke
 minted, or a regex that lives in a config struct:
 
 ```rust
-#[async_trait::async_trait]
+#[lan_core::async_trait]
 impl lan_core::Interceptor for Redact {
     fn name(&self) -> &str { "redact" }
 

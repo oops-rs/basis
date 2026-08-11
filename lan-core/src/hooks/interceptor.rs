@@ -16,11 +16,13 @@
 //! *is*.
 //!
 //! ```no_run
-//! use lan_core::{HookOutcome, HookRequest, Interceptor, InterceptorError, Workspace};
+//! use lan_core::{
+//!     HookOutcome, HookRequest, Interceptor, InterceptorError, Workspace, async_trait,
+//! };
 //!
 //! struct Redact;
 //!
-//! #[async_trait::async_trait]
+//! #[async_trait]
 //! impl Interceptor for Redact {
 //!     fn name(&self) -> &str {
 //!         "redact"
@@ -81,7 +83,10 @@ pub type InterceptorError = Box<dyn std::error::Error + Send + Sync>;
 ///
 /// Async because mentra's own hook trait is, and for the reason it gives: a
 /// participant that reads a file, asks a service, or takes a lock would
-/// otherwise block a runtime worker for its whole duration.
+/// otherwise block a runtime worker for its whole duration. The attribute to
+/// spell that with is re-exported at the crate root —
+/// [`async_trait`](crate::async_trait) — so writing an impl costs no manifest
+/// line of the host's own.
 ///
 /// # Fail closed
 ///

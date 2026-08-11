@@ -105,7 +105,10 @@ impl From<ApprovalDecision> for ApprovalAnswer {
 /// Async because answering genuinely takes time and the caller is an async
 /// task: an ACP approver awaits a round trip to the client, and a terminal one
 /// waits on a person. A synchronous signature would force both to block a
-/// runtime worker thread — which tokio rejects outright for the ACP case.
+/// runtime worker thread — which tokio rejects outright for the ACP case. The
+/// attribute to spell an impl with is re-exported at the crate root —
+/// [`async_trait`](crate::async_trait) — so it costs no manifest line of the
+/// host's own.
 ///
 /// # Fail closed
 ///
