@@ -258,6 +258,15 @@ impl PreparedRun {
     /// caller writes the schema — see [`OutputSpec`] for why lan derives
     /// nothing.
     ///
+    /// **A typed turn is a shaping turn, not a working one.** That one terminal
+    /// tool is the *only* tool the turn holds — no files, no shell, no MCP — so
+    /// it can answer only from the conversation it already has. Asking it to
+    /// review code in the same call returns a structurally valid answer from a
+    /// model that read nothing, reported as a success: do the work on an
+    /// ordinary turn ([`send`](Self::send) or [`execute`](Self::execute)),
+    /// then ask for the shape on the next. `examples/review_workflow.rs` is
+    /// the pattern written out.
+    ///
     /// The stream is unchanged. Header, forwarded events, permissions put to
     /// the approver, `RunFinished`: a client reading events cannot tell a typed
     /// turn from any other, which is the point — only the return value differs.
@@ -299,7 +308,7 @@ impl PreparedRun {
     /// # async fn example(run: &mut lan_core::PreparedRun) -> Result<(), lan_core::RunError> {
     /// let spec = lan_core::OutputSpec::new(
     ///     "submit_review",
-    ///     "call this once you have read every changed file",
+    ///     "call this once you have weighed everything you read on the last turn",
     ///     json!({
     ///         "type": "object",
     ///         "properties": {
@@ -309,9 +318,11 @@ impl PreparedRun {
     ///     }),
     /// );
     ///
+    /// // The reading happened on an ordinary turn; this one only shapes it.
+    /// run.execute(lan_core::NullSink).await?;
     /// let output = run
     ///     .output::<Review, _, _>(
-    ///         "review the diff on this branch",
+    ///         "submit your review of what you just read",
     ///         spec,
     ///         lan_core::NullSink,
     ///         lan_core::AllowAll,

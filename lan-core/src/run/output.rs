@@ -12,6 +12,12 @@
 //! [`TurnOptions`](super::TurnOptions) exist: lan's surface should not move
 //! when mentra's does.
 //!
+//! One consequence of that mechanism shapes every use of it: while a run is
+//! answering into a schema, the terminal tool is the *only* tool it holds.
+//! A typed turn cannot read a file, run a command, or reach an MCP server —
+//! it shapes what earlier turns on the same run already gathered. The work
+//! happens on an ordinary turn; the type comes after.
+//!
 //! The schema is the caller's to write. lan derives nothing — no
 //! `schemars`, no proc macro — because a derived schema is a second
 //! description of the type that drifts from the first, and because the schema
@@ -36,8 +42,10 @@ pub struct OutputSpec {
     /// stream will not show this string verbatim.
     pub name: String,
     /// What the tool is for, in the imperative. The model reads this to decide
-    /// when it is finished, so "call this once you have reviewed every file" is
-    /// worth more than "returns findings".
+    /// what a complete answer looks like, so "one entry per problem you saw on
+    /// the last turn" is worth more than "returns findings". It cannot ask for
+    /// work — the typed turn holds no tool but this one — so describe the
+    /// answer, not a task.
     pub description: String,
     /// JSON Schema for the answer. The field descriptions in it are read by the
     /// model, not just validated against.
