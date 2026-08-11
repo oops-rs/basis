@@ -32,9 +32,12 @@ use mentra::{
         Provider, ProviderDescriptor, ProviderError, ProviderEventStream, Request, Response,
         provider_event_stream_from_response,
     },
+    runtime::SqliteRuntimeStore,
 };
 use serde::Deserialize;
 use serde_json::{Value, json};
+
+mod common;
 
 /// The shape the caller asks for.
 #[derive(Debug, Deserialize, PartialEq, Eq)]
@@ -167,6 +170,9 @@ fn prepared(
     let model = provider.model.clone();
     let runtime = Runtime::builder()
         .with_provider_instance(provider)
+        .with_store(SqliteRuntimeStore::new(
+            common::scratch_store().join("runtime.sqlite"),
+        ))
         .with_policy(RuntimePolicy::workspace_bounded(dir.path()))
         .build()
         .expect("runtime builds");
@@ -419,6 +425,9 @@ async fn usage_is_summed_across_every_round_of_a_turn() {
             inner,
             rounds: Arc::clone(&calls),
         })
+        .with_store(SqliteRuntimeStore::new(
+            common::scratch_store().join("runtime.sqlite"),
+        ))
         .with_policy(RuntimePolicy::workspace_bounded(dir.path()))
         .build()
         .expect("runtime builds");

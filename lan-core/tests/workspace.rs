@@ -37,6 +37,8 @@ use lan_core::{
 };
 use mentra::ModelSelector;
 
+mod common;
+
 /// A port nothing listens on. Reaching it would be a test failure rather than a
 /// hang, but no code path here should try.
 const CLOSED_PORT: &str = "http://127.0.0.1:1/v1";
@@ -47,12 +49,15 @@ const CLOSED_PORT: &str = "http://127.0.0.1:1/v1";
 /// The credential is supplied rather than read from the environment, so the
 /// suite behaves the same whether or not the person running it has a key
 /// exported. An explicit model id short-circuits model resolution, which is the
-/// only part of opening a workspace that would otherwise make a request.
+/// only part of opening a workspace that would otherwise make a request. The
+/// store is the test's own, so nothing here writes to the database under the
+/// user's data directory (see [`common::scratch_store`]).
 fn offline(workspace: &Path) -> WorkspaceBuilder {
     Workspace::builder(workspace)
         .with_base_url(CLOSED_PORT)
         .with_api_key("test-key")
         .with_model(ModelSelector::Id("test-model".to_string()))
+        .with_store_dir(common::scratch_store())
         .with_context(ContextConfig {
             file_name: "AGENTS.md".to_string(),
             global_dir: None,
@@ -137,6 +142,59 @@ async fn a_spec_bounds_only_the_run_it_was_given_to() {
 
     assert_eq!(bounded.bounds().deadline, Some(Duration::from_secs(30)));
     assert_eq!(unbounded.bounds().deadline, None);
+}
+
+/// Conversations are persisted where the caller said, and nowhere else.
+///
+/// The discriminating half is the last one: without a store directory both
+/// workspaces would fall back to the same machine-wide default and *every*
+/// resume would succeed, so a test that only opened the store twice would pass
+/// whether or not the knob did anything.
+#[tokio::test]
+async fn a_conversation_is_found_again_only_through_the_directory_it_was_written_to() {
+    let dir = tempfile::tempdir().expect("tempdir");
+    write(&dir.path().join("AGENTS.md"), "house rules");
+    let store = tempfile::tempdir().expect("tempdir");
+    let elsewhere = tempfile::tempdir().expect("tempdir");
+
+    let opened = offline(dir.path())
+        .with_store_dir(store.path())
+        .open()
+        .await
+        .expect("opens");
+    let agent_id = opened.prepare("go").expect("mints").agent_id().to_string();
+    drop(opened);
+
+    assert!(
+        std::fs::read_dir(store.path())
+            .expect("the store directory was created")
+            .next()
+            .is_some(),
+        "minting a run persists an agent, and it persists it where the caller said"
+    );
+
+    let reopened = offline(dir.path())
+        .with_store_dir(store.path())
+        .open()
+        .await
+        .expect("opens");
+    assert_eq!(
+        reopened
+            .resume(&agent_id, "again")
+            .expect("the conversation is in the store it was written to")
+            .agent_id(),
+        agent_id
+    );
+
+    let reopened = offline(dir.path())
+        .with_store_dir(elsewhere.path())
+        .open()
+        .await
+        .expect("opens");
+    assert!(
+        reopened.resume(&agent_id, "again").is_err(),
+        "a different directory is a different history"
+    );
 }
 
 #[tokio::test]

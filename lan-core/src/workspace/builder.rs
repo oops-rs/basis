@@ -30,6 +30,7 @@ use crate::{
     run::{LoadedSkill, RunError},
     shell::ShellAccess,
     skills::{self, SkillsConfig},
+    store,
     templates::{self, Template, TemplatesConfig},
 };
 
@@ -58,6 +59,7 @@ pub struct WorkspaceBuilder {
     templates: TemplatesConfig,
     hooks: HooksConfig,
     shell: ShellAccess,
+    store_dir: Option<PathBuf>,
 }
 
 /// Hand-written so a supplied credential cannot reach a log through a
@@ -75,6 +77,7 @@ impl std::fmt::Debug for WorkspaceBuilder {
             .field("templates", &self.templates)
             .field("hooks", &self.hooks)
             .field("shell", &self.shell)
+            .field("store_dir", &self.store_dir)
             .finish_non_exhaustive()
     }
 }
@@ -97,6 +100,7 @@ impl WorkspaceBuilder {
             // than from anything ambient: what a run may do is stated here, in
             // configuration, not read out of the environment behind the caller.
             shell: ShellAccess::default(),
+            store_dir: None,
         }
     }
 
@@ -189,6 +193,48 @@ impl WorkspaceBuilder {
         Self { shell, ..self }
     }
 
+    /// Keeps this workspace's conversations in `dir` rather than in the
+    /// machine-wide default.
+    ///
+    /// Unset, mentra chooses, and what it chooses is keyed by the **process's
+    /// current directory** rather than by the workspace lan opened — so a host
+    /// that opens two workspaces from one place writes both histories to one
+    /// file, and a test suite writes to a real database under the user's data
+    /// directory whatever temp directory it opened. Two callers want to say
+    /// otherwise: a host that keeps lan's history inside its own application
+    /// data, and a test that wants no persistent side effect at all. Both are
+    /// asking the same question — *where* — so that is what this takes.
+    ///
+    /// Not the store itself, though mentra's `RuntimeBuilder::with_store` would
+    /// take one. `RuntimeStore` is a composition of nine traits, and under the
+    /// rule written on [`CancellationToken`](crate::CancellationToken) — every
+    /// mentra type lan's surface makes a caller *name*, lan re-exports — that
+    /// shape would cost the re-export of all nine plus the record types they
+    /// pass. What it would buy is a choice nobody can make: mentra's stores are
+    /// SQLite files, and both of them are constructed from a path. A caller
+    /// that genuinely wants its own backend still has one, on
+    /// [`Workspace::runtime`](super::Workspace::runtime)'s side of the bargain:
+    /// build the `Runtime` and drive it directly.
+    ///
+    /// The directory is created on first write, and lan names the file inside
+    /// it — [`store::list_in`](crate::store::list_in) is how the same
+    /// conversations are read back, and it has to be able to find them.
+    /// Pointing this at [`store::default_directory`](crate::store::default_directory)
+    /// is exactly the default.
+    ///
+    /// Deliberately absent from [`RunConfig`](crate::RunConfig), for the reason
+    /// its `api_key` is: a one-prompt config describes an invocation, and where
+    /// a machine keeps its history is not something an invocation decides. A
+    /// one-shot caller that needs it takes the builder from
+    /// [`RunConfig::split`](crate::RunConfig::split), which is the documented
+    /// migration path.
+    pub fn with_store_dir(self, dir: impl Into<PathBuf>) -> Self {
+        Self {
+            store_dir: Some(dir.into()),
+            ..self
+        }
+    }
+
     /// Does all of it: discovery, credential, runtime, model, skills,
     /// templates, hooks, MCP connections.
     ///
@@ -217,6 +263,14 @@ impl WorkspaceBuilder {
             // on even for a workspace whose runs approve everything (see
             // `crate::approval`).
             .with_tool_authorizer(ApprovalGate::new());
+
+        // Left alone unless the caller said where, because mentra's default is
+        // a real database a host may already have history in — moving it is a
+        // thing to be asked for, never a thing to happen by upgrade.
+        let builder = match &self.store_dir {
+            Some(dir) => builder.with_store(store::store_in(dir)),
+            None => builder,
+        };
 
         // Loaded before the build so a hooks file that does not parse fails the
         // open loudly, rather than at the first tool call — or worse, never.
@@ -615,6 +669,20 @@ mod tests {
             WorkspaceBuilder::new("/repo").provider,
             None,
             "a fresh builder detects the provider"
+        );
+    }
+
+    #[test]
+    fn history_goes_where_mentra_puts_it_unless_the_caller_says_otherwise() {
+        // The default must stay the default: a host with conversations already
+        // in mentra's database would lose sight of them if opening a workspace
+        // started relocating the store on its own.
+        assert_eq!(WorkspaceBuilder::new("/repo").store_dir, None);
+        assert_eq!(
+            WorkspaceBuilder::new("/repo")
+                .with_store_dir("/elsewhere")
+                .store_dir,
+            Some(PathBuf::from("/elsewhere"))
         );
     }
 

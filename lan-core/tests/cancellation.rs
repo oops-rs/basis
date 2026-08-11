@@ -30,8 +30,11 @@ use mentra::{
         Provider, ProviderDescriptor, ProviderError, ProviderEventStream, Request, Response,
         provider_event_stream_from_response,
     },
+    runtime::SqliteRuntimeStore,
 };
 use serde_json::json;
+
+mod common;
 
 /// A cancelled turn must end promptly. Exceeding this means the token was never
 /// noticed and the turn ran to completion instead.
@@ -98,6 +101,9 @@ fn scripted_write(workspace: &Path) -> (Runtime, ModelInfo) {
 
     let runtime = Runtime::builder()
         .with_provider_instance(provider)
+        .with_store(SqliteRuntimeStore::new(
+            common::scratch_store().join("runtime.sqlite"),
+        ))
         .with_policy(RuntimePolicy::workspace_bounded(workspace))
         .with_tool_authorizer(ApprovalGate::new())
         .build()

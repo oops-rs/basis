@@ -38,6 +38,8 @@ use lan_core::{
 };
 use mentra::ModelSelector;
 
+mod common;
+
 /// What every scripted response reports spending. Input plus output is what the
 /// budget counts, so one round of this costs a pool 120 tokens.
 const INPUT_TOKENS: u64 = 100;
@@ -50,6 +52,7 @@ fn offline(workspace: &Path) -> WorkspaceBuilder {
     Workspace::builder(workspace)
         .with_api_key("test-key")
         .with_model(ModelSelector::Id("test-model".to_string()))
+        .with_store_dir(common::scratch_store())
         .with_context(ContextConfig {
             file_name: "AGENTS.md".to_string(),
             global_dir: None,
