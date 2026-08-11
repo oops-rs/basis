@@ -65,6 +65,7 @@ pub mod shell;
 pub mod skills;
 pub mod store;
 pub mod templates;
+pub mod tools;
 pub mod workspace;
 
 pub use approval::{
@@ -117,4 +118,8 @@ pub use skills::{SkillsConfig, SkillsSource};
 // is being listed, and `PersistedSession` is only meaningful beside it.
 pub use store::PersistedSession;
 pub use templates::{Template, TemplateError, TemplateSource, TemplatesConfig};
+// `tools::spawn` keeps its module: `SpawnTool` at the crate root would sit
+// beside a dozen types that are not tools, and the name an operator writes in a
+// rule or a hook is only meaningful next to the tool it names.
+pub use tools::SpawnTool;
 pub use workspace::{RunSpec, Workspace, WorkspaceBuilder};

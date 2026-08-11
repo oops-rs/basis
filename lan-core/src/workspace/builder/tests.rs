@@ -157,6 +157,40 @@ fn an_empty_workspace_context_leaves_the_system_prompt_unset() {
 }
 
 #[test]
+fn the_two_doors_spawn_replaces_leave_the_roster() {
+    // ADR-0016. Left alongside `spawn` they would restore what it removed:
+    // three names arriving at one approval gate, and three rule namespaces,
+    // for a question an operator asks once.
+    let agent = agent_config(Path::new("/repo"), &WorkspaceContext::default());
+
+    for replaced in ["shell", "background_run", "task"] {
+        assert!(
+            !agent.tool_profile.allows(replaced),
+            "{replaced} is still offered to the model"
+        );
+    }
+    assert!(
+        agent.tool_profile.allows(crate::tools::SPAWN),
+        "the door that replaces them has to be open"
+    );
+}
+
+#[test]
+fn hiding_is_a_roster_fact_and_not_a_capability_one() {
+    // What lets `spawn` still reach the command executor underneath: nothing
+    // here is an allow-list, so the tools stay registered on the runtime and
+    // only stop being *offered*. A profile that named an allowed set instead
+    // would take the capability away with the listing.
+    let agent = agent_config(Path::new("/repo"), &WorkspaceContext::default());
+
+    assert_eq!(
+        agent.tool_profile.allowed_tools, None,
+        "an allow-list here would silently drop every tool nobody thought to name"
+    );
+    assert!(agent.tool_profile.allows("files"));
+}
+
+#[test]
 fn commands_are_available_unless_the_caller_says_otherwise() {
     // ADR-0013: the first `lan "run the tests"` has to work.
     assert!(WorkspaceBuilder::new("/repo").shell.is_granted());

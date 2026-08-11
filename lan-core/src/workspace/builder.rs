@@ -18,7 +18,7 @@ use std::{
 
 use mentra::{
     BuiltinProvider, ModelSelector, ProviderId, Runtime, RuntimePolicy,
-    agent::{AgentConfig, WorkspaceConfig as MentraWorkspaceConfig},
+    agent::{AgentConfig, ToolProfile, WorkspaceConfig as MentraWorkspaceConfig},
     provider_core::{StaticCredentialSource, responses, responses::ResponsesProvider},
 };
 
@@ -35,6 +35,7 @@ use crate::{
     skills::{self, SkillsConfig},
     store,
     templates::{self, Template, TemplatesConfig},
+    tools::SpawnTool,
 };
 
 use super::Workspace;
@@ -404,7 +405,12 @@ impl WorkspaceBuilder {
             // and no permission request can ever be raised — so the gate goes
             // on even for a workspace whose runs approve everything (see
             // `crate::approval`).
-            .with_tool_authorizer(ApprovalGate::new());
+            .with_tool_authorizer(ApprovalGate::new())
+            // The one tool lan registers (ADR-0016). It has to be on the
+            // runtime rather than on a session, because a subagent shares its
+            // parent's runtime registry and `spawn` must reach the model at
+            // every depth — the uniformity the ADR calls recursive.
+            .with_tool(SpawnTool::new());
 
         // Left alone unless the caller said something, because mentra's default
         // is a real database a host may already have history in — moving it, or
@@ -632,14 +638,33 @@ fn git_protected(policy: RuntimePolicy, workspace: &Path) -> RuntimePolicy {
         .with_denied_write_root(git.join("config"))
 }
 
-/// Turns discovered context into the agent's system prompt, and scopes the
-/// agent to the workspace. Everything else stays at mentra's defaults —
-/// opinions belong in the prompt and the workspace, not here.
+/// Turns discovered context into the agent's system prompt, scopes the agent to
+/// the workspace, and settles which tools the model is offered. Everything else
+/// stays at mentra's defaults — opinions belong in the prompt and the
+/// workspace, not here.
+///
+/// # Why three tools leave the roster
+///
+/// ADR-0016 gives the model one door for *do something I cannot do by
+/// thinking*: [`spawn`](crate::tools::spawn). `shell` and `background_run` and
+/// `task` are the doors it replaces, and leaving them alongside it would
+/// restore exactly what the ADR removed — three names at the approval gate, and
+/// three rule namespaces, for one question.
+///
+/// **Hidden is a roster fact, not a capability fact.** All three stay
+/// registered on the runtime, which is precisely why `spawn` can still reach
+/// the command executor underneath. What a caller said about commands is still
+/// decided by [`ShellAccess`] and mentra's policy, on the path `spawn` uses:
+/// `--no-shell` shuts commands off for `spawn` exactly as it did for `shell`.
+///
+/// The hidden set travels: `DisposableSubagentTemplate::from_agent` clones this
+/// whole config, so a subagent of a subagent is offered the same one door.
 ///
 /// Built once and cloned per run, because none of its inputs are per-run.
 fn agent_config(workspace: &Path, context: &WorkspaceContext) -> AgentConfig {
     AgentConfig {
         system: context.render(),
+        tool_profile: ToolProfile::hide(REPLACED_TOOLS),
         workspace: MentraWorkspaceConfig {
             base_dir: workspace.to_path_buf(),
             ..Default::default()
@@ -647,6 +672,9 @@ fn agent_config(workspace: &Path, context: &WorkspaceContext) -> AgentConfig {
         ..Default::default()
     }
 }
+
+/// The tools `spawn` replaces, by the names mentra registers them under.
+const REPLACED_TOOLS: [&str; 3] = ["shell", "background_run", "task"];
 
 #[cfg(test)]
 mod tests;
