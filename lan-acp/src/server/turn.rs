@@ -2,13 +2,13 @@
 //!
 //! Alone in a module because it is the only handler that runs the agent: it
 //! holds the session's turn lock for as long as the model takes, asks the
-//! client for permission through [`AcpApprover`](crate::AcpApprover), and
-//! forwards every event on the way past. Everything else a client can ask for
-//! is bookkeeping around it, in [`lifecycle`](super::lifecycle).
+//! client for permission through [`AcpApprover`], and forwards every event on
+//! the way past. Everything else a client can ask for is bookkeeping around
+//! it, in [`lifecycle`](super::lifecycle).
 //!
-//! [`NotificationSink`] is here rather than beside
-//! [`session_update`](crate::session_update) because it is that mapping bound
-//! to one connection and one session, which is a thing only a turn has.
+//! [`NotificationSink`] is here rather than beside [`session_update`] because
+//! it is that mapping bound to one connection and one session, which is a
+//! thing only a turn has.
 
 use agent_client_protocol::{
     Client, ConnectionTo,
