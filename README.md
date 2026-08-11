@@ -142,7 +142,36 @@ MCP is a default-on `mcp` feature rather than a fixed part of the core:
 `default-features = false` compiles a `lan-core` with no MCP concept at all — no `.mcp.json`
 discovery, no servers registered ([ADR-0012](docs/adr/0012-one-contract-many-bindings.md)).
 
-The same run is then one call — the binary is a thin shell over this:
+### A workspace opens once and mints runs
+
+Opening a workspace settles everything that belongs to the repository rather than to the
+prompt — context documents, the credential, the resolved model, skills, templates, hooks,
+MCP connections. Minting a run from it is then synchronous, because nothing is left to
+await ([ADR-0010](docs/adr/0010-the-crate-is-the-workflow-surface.md)):
+
+```rust
+let workspace = lan_core::Workspace::open("/repo").await?;
+
+let mut run = workspace.prepare("what does this repo do?")?;
+let report = run.execute(lan_core::CollectingSink::default()).await?;
+```
+
+That is the shape to reach for whenever a host sends more than one prompt at a repository:
+twenty runs read `AGENTS.md` once, resolve the model once, and share one set of MCP
+connections. A `Workspace` is `Send + Sync`, so the runs can be spawned tasks.
+
+For a conversation rather than a one-shot, keep the run and send again — the session
+survives the turn, so the model sees everything said so far:
+
+```rust
+run.send("and which of those is riskiest?", sink, lan_core::AllowAll).await?;
+```
+
+`run.agent_id()` is the handle `Workspace::resume` takes, so a later process can pick the
+same conversation back up.
+
+When one prompt really is the whole job, the free functions are the same path with the
+workspace opened and dropped around it — the binary is a thin shell over this:
 
 ```rust
 let report = lan_core::run(
@@ -151,9 +180,10 @@ let report = lan_core::run(
 ).await?;
 ```
 
-The bounds are builders on the same config, and `report.stopped_by` carries the distinction
-the exit code makes — `Some(lan_core::Bound::Deadline)`, `Some(lan_core::Bound::ToolBudget)`,
-or `None` when the work is what ended the run:
+The bounds are builders on either shape — `RunConfig` for a one-shot, `RunSpec` for a run
+minted from a workspace — and `report.stopped_by` carries the distinction the exit code
+makes: `Some(lan_core::Bound::Deadline)`, `Some(lan_core::Bound::ToolBudget)`, or `None`
+when the work is what ended the run:
 
 ```rust
 let config = lan_core::RunConfig::new("/repo", "bump the deps and fix the fallout")
@@ -162,23 +192,109 @@ let config = lan_core::RunConfig::new("/repo", "bump the deps and fix the fallou
     .with_token_budget(200_000);
 ```
 
-For a conversation rather than a one-shot, keep the prepared run and send again — the
-session survives the turn, so the model sees everything said so far:
+### Answers you can branch on
+
+A run that answers in prose composes with nothing, because the next step has to parse
+English to find out what happened. `output::<T>()` asks for a declared shape instead:
 
 ```rust
-let mut run = lan_core::run::prepare(config).await?;
-run.execute(lan_core::NullSink).await?;
-run.send("and which of those is riskiest?", sink, lan_core::AllowAll).await?;
+let output = run
+    .output::<Findings, _, _>(
+        "submit what you found, one entry per problem",
+        findings_spec(),          // name, description, and a JSON Schema you write
+        sink,
+        lan_core::AllowAll,
+    )
+    .await?;
+
+for finding in output.value.findings.iter().filter(|f| f.blocking) { … }
 ```
 
-`run.agent_id()` is the handle `lan_core::run::resume` takes, so a later process can pick
-the same conversation back up.
+The schema is yours to write rather than derived from the type, because its field
+descriptions are a *prompt* — they are what the model reads to decide what belongs in each
+field. One thing to know before using it: while a run is answering into a schema it holds
+exactly one tool, the one that *is* the answer. It cannot read a file or run a command on
+that turn, so a reviewer reads on an ordinary turn and shapes on the next.
+
+### One allowance, many runs
+
+Dividing a limit across a fan-out starves the runs with something to say; granting it per
+run multiplies the bill by N. A `BudgetPool` is the single figure in between — attach it and
+every drawing run reports into one counter:
+
+```rust
+let pool = lan_core::BudgetPool::new(500_000);
+let mut reviewer = workspace.prepare(pool.spec("review the tests"))?;
+```
+
+It is soft, and honestly so: usage is known only once a round has streamed, so the round
+that crosses the line finishes, and a job lands at up to the limit plus one in-flight round
+per concurrent run. `pool.spent()` reads the live number the turns are actually stopped
+against. A turn drawing on a spent pool is refused with `RunError::BudgetExhausted` before
+its prompt is sent — a decision with its own name, so a fan-out stops minting on it instead
+of retrying it like a provider error.
+
+Both the pool and `RunReport::usage` count what providers *report*. One that reports
+nothing spends nothing as far as either is concerned, and work a run delegates through
+mentra's `task` tool is invisible to both.
+
+### One stream for many runs
+
+Each run wants a sink of its own; a host wants one view of all of them without losing which
+run said what. `EventFanIn` mints one tagged sink per run and merges them:
+
+```rust
+let fan = lan_core::EventFanIn::new();
+let mut tests = workspace.prepare("review the tests")?;
+let mut docs = workspace.prepare("review the docs")?;
+let (a, b) = (fan.sink("tests"), fan.sink("docs"));
+let mut merged = fan.into_events();          // minting closes here
+
+let runs = async move {
+    let (tests, docs) = tokio::join!(tests.execute(a), docs.execute(b));
+    // Taking the answers out drops the reports, and their sinks with them —
+    // which is what tells `merged` the stream is over.
+    Ok::<_, lan_core::RunError>((tests?.final_message, docs?.final_message))
+};
+let watch = async {
+    while let Some(tagged) = merged.recv().await {
+        println!("[{}] {:?}", tagged.tag, tagged.event);
+    }
+};
+let (answers, ()) = tokio::join!(runs, watch);
+```
+
+The tag rides outside `Event`, so the versioned wire schema stays exactly what its version
+number promises. The stream ends when the last sink is dropped — and a finished run hands
+its sink back inside its report, so a report held past the join is a branch of the stream
+held open, and the join would wait on a stream waiting on the join. That is the one sharp
+edge in the design, and the comment above is how to stay on the right side of it.
+
+### Stopping a turn
+
+Two signals, and they differ in what happens to the work. `cancellable()` abandons the turn
+and rolls it back, which is what a client's stop button means; `stoppable()` ends it at the
+next round boundary and keeps everything the model committed:
+
+```rust
+let (options, stop) = lan_core::TurnOptions::stoppable();
+tokio::spawn(async move { on_stop_pressed().await; stop.cancel(); });
+
+let report = run.execute_with_options(sink, options).await?;
+```
+
+One caveat worth stating: a graceful stop landing after a tool round comes back as a failed
+turn even though nothing was discarded, because mentra still owes a final assistant message
+and the last committed one was a tool result. The work is kept either way; the report is
+what disagrees.
 
 See [`lan-core/examples/embed.rs`](lan-core/examples/embed.rs) for a host that reacts to
-events as they arrive, and
-[`lan-core/examples/conversation.rs`](lan-core/examples/conversation.rs) for the two-turn
-version (`cargo run -p lan-core --example embed -- "<prompt>"`, with a provider key set as
-above).
+events as they arrive, [`conversation.rs`](lan-core/examples/conversation.rs) for the
+two-turn version, [`watch.rs`](lan-core/examples/watch.rs) for the recurring-run loop, and
+[`review_workflow.rs`](lan-core/examples/review_workflow.rs) for the whole fan-out — one
+workspace, one budget, typed findings, one merged stream, and a verdict folded out of them
+(`cargo run -p lan-core --example embed -- "<prompt>"`, with a provider key set as above).
+
 
 ## ACP
 
@@ -258,6 +374,11 @@ while a false "unchanged" would silently stop the loop doing anything at all. Re
 baseline only after a run you consider successful is the caller's policy, because the caller
 is where the definition of "successful" lives — above, that is the `0` arm.
 
+In-process the same loop is nine lines of host code against one long-lived `Workspace`, with
+`Workspace::fingerprint()` in place of the subcommand:
+[`lan-core/examples/watch.rs`](lan-core/examples/watch.rs) is it, kept in the tree as a
+standing check that it stays that short.
+
 ## What the workspace contributes
 
 - **`AGENTS.md`** — discovered from a global config directory, then each ancestor of the
@@ -315,8 +436,10 @@ above. [docs/REDESIGN.md](docs/REDESIGN.md) is the honest ledger of that transit
 `lan run`, the fingerprint kept as a utility, shell on by default, the shipped container
 replaced by documented patterns, and the CLI grammar with its exit codes. **Phase B has
 landed** too — the split into `lan-core`, `lan-acp`, and the binary, MCP behind a feature,
-and approval as the `Approver` trait alone. Phases C (the SDK proper) and D (bindings) are
-open, and this README describes only what is built.
+and approval as the `Approver` trait alone. **So has Phase C, the SDK proper** — the
+`Workspace` / run split, typed output, cancellation on every entry point, the shared
+`BudgetPool`, tagged sinks with a fan-in, and the two acceptance examples that were its
+criterion. Phase D (bindings) is open, and this README describes only what is built.
 
 Still open, and named honestly: compaction tuning, the packages convention, and provider
 OAuth remain, and **nobody has driven this from Zed or JetBrains yet** — it is verified

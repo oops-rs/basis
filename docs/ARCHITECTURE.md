@@ -1,16 +1,18 @@
 # lan — Architecture
 
-> rev 8 · 2026-08-11 · **lan** — **L**ightweight **A**gent **N**ucleus
+> rev 9 · 2026-08-11 · **lan** — **L**ightweight **A**gent **N**ucleus
 > The *how*. For the *why* — problem, idea, bets — see [`PROPOSAL.md`](PROPOSAL.md);
 > locked decisions live in [`adr/`](adr/); deferred ideas in [`proposals/`](proposals/);
 > research grounding in [`p0-groundwork.md`](p0-groundwork.md).
 > **Note (2026-08-11):** ADR-0010…0015 redirect the design toward an SDK-first
-> shape. **Phases A and B of that transition have landed** — watch retired,
+> shape. **Phases A, B and C of that transition have landed** — watch retired,
 > bounds moved onto runs, shell default flipped, no shipped container, the CLI
-> grammar of ADR-0015, and the split into `lan-core` / `lan-acp` / the binary
-> with MCP behind a feature and approval as a trait — and §2 and §4 below
-> describe the state after them. The SDK proper (Phase C) and bindings (Phase D)
-> are not built; where this document still describes the P0–P4 shape it says so.
+> grammar of ADR-0015; the split into `lan-core` / `lan-acp` / the binary with
+> MCP behind a feature and approval as a trait; and the SDK proper — a
+> `Workspace` opened once that mints runs, typed output, cancellation, a shared
+> budget, and tagged event fan-in — and §2 and §4 below describe the state after
+> them. Bindings (Phase D) are not built; where this document still describes
+> the P0–P4 shape it says so.
 > The ledger and phases are in [`REDESIGN.md`](REDESIGN.md).
 > Reference bar: [pi](https://github.com/earendil-works/pi) (earendil-works) — minimal core, complete harness.
 > General-purpose: no domain assumptions. Periodic bug-checking is one use case, never a design input.
@@ -49,7 +51,7 @@ hot-reloadable extensions. Two pi decisions independently validate ours:
 | Extensions (custom tools, event interception) | MCP servers + subprocess hooks, allow/deny/modify (§3) ✅ | built |
 | Packages (shareable bundles) | Directory convention over skills/templates/hooks/MCP — defer | later |
 | RPC / headless mode | `run --json` event stream + **ACP** (standard, not bespoke) ✅ | built |
-| SDK | `lan-core`, a Rust crate on Mentra — embed in-process; other languages use ACP | free |
+| SDK | `lan-core`: a `Workspace` opened once, runs minted from it with typed output, bounds, cancellation ✅ — other languages use ACP | built |
 | TUI / themes / keybindings | Out of scope by design — ACP clients own presentation | — |
 | Provider OAuth login flows | API-key auth first; OAuth per provider later | later |
 
@@ -70,7 +72,9 @@ lan fingerprint                    # the workspace's hash, for a caller's own lo
 
 The grammar is ADR-0015's and is the whole CLI. Recurrence is not in it: an interval is the
 host's (cron, systemd, CI, a tokio task), and the two pieces that are easy to get wrong — the
-fingerprint and per-run bounds — are a subcommand and three flags on `run` (ADR-0014).
+fingerprint and per-run bounds — are a subcommand and three flags on `run` (ADR-0014). In
+process they are `Workspace::fingerprint()` and the bounds on a `RunSpec`, which is the same
+loop without the subprocess: [`lan-core/examples/watch.rs`](../lan-core/examples/watch.rs).
 
 ## 3. Extension model (without embedding a scripting language)
 
@@ -104,9 +108,11 @@ flowchart LR
     srv["server · session mapping · modes"]
   end
   subgraph lib["lan-core — the SDK"]
-    sess["sessions · branching · compaction"]
+    ws["Workspace — opened once: context · model · MCP · seams"]
     ctx["context: AGENTS.md · skills · templates"]
     ext["hooks · MCP client (mcp feature)"]
+    runs["runs — minted cheaply: typed output · bounds · cancel · fan-in"]
+    sess["sessions · branching · compaction"]
     rt["Mentra runtime"]
   end
   subgraph box["host OS — isolation, if any, is the operator's"]
@@ -123,9 +129,12 @@ flowchart LR
   srv --> lib
   rt --> wsp
   rt --> llm
+  ctx --> ws
+  ext --> ws
+  ws --> runs
+  ws --> rt
+  runs --> sess
   sess --> rt
-  ctx --> rt
-  ext --> rt
 ```
 
 - **Crate layering mirrors pi's package layering**: mentra-provider ≈ pi-ai, mentra ≈
@@ -140,6 +149,19 @@ flowchart LR
   for lan.
 - **ACP is the default mode** — running `lan` with no subcommand serves the protocol, because
   the embedded case is the primary case.
+- **A workspace is opened once and mints runs** (ADR-0010). Everything that belongs to a
+  repository rather than to a prompt — context documents, the credential and resolved
+  model, skills, templates, hooks, MCP connections, the approval gate — is settled by
+  `Workspace::open`, and `prepare` mints a run from it *synchronously*, because nothing is
+  left to await. A twenty-way fan-out therefore reads `AGENTS.md` once. What a run carries
+  of its own is the honestly per-run half: the prompt, the session name, the effort, and
+  the bounds. The free functions (`run`, `prepare`, `resume`) are wrappers that open a
+  workspace, mint one run, and drop it — one resolution path, not two.
+- **A run answers with a value when asked.** `PreparedRun::output::<T>()` runs a turn that
+  must answer through a generated terminal tool whose input *is* the answer, which is what
+  makes a workflow composable in host Rust rather than in prose-parsing. The stream is
+  unchanged; only the return value differs. The cost, and it is upstream's stated contract:
+  that turn holds exactly one tool, so reading and shaping are two turns.
 - **Sessions**: an ACP session *is* a mentra agent — lan uses the persisted agent id as the
   protocol's session id, so `session/load` is `Runtime::resume_session` and lan stores no
   mapping of its own (ADR-0007). A session outlives a turn, which is what makes conversation
@@ -188,8 +210,9 @@ flowchart LR
 
 This table is the record of how lan was built, not the current plan. What follows P5 is the
 SDK-first transition of ADR-0010…0015, phased in [`REDESIGN.md`](REDESIGN.md) §3: Phase A
-(posture and pruning) and Phase B (structure — the crate split, the `mcp` feature, approval
-as a trait) have landed; C (the SDK) and D (bindings) are open.
+(posture and pruning), Phase B (structure — the crate split, the `mcp` feature, approval
+as a trait) and Phase C (the SDK — the `Workspace` / run split, typed output, cancellation,
+the shared budget, event fan-in) have landed; D (bindings) is open.
 
 Validation stays deliberately varied — a refactor, a doc task, a test-writing task, *and* a
 periodic check — so no single use case bends the API toward itself.
@@ -206,6 +229,9 @@ periodic check — so no single use case bends the API toward itself.
   workarounds. The discipline is direction, not permission — capabilities generic enough for
   any harness land in mentra; lan keeps only harness-specific glue. Track each gap as a mentra
   issue even when fixing it immediately, so the API story stays legible to other mentra users.
+  Five stand named and unfiled in [`REDESIGN.md`](REDESIGN.md) §2's footnotes; none blocks
+  lan, and the two from Phase C are both about token accounting a harness cannot do from
+  outside.
 - **Compaction quality.** Mentra has the primitive; behavior under long sessions is unproven.
   pi's compaction doc is the reference to study in P0.
 - **Name collision.** `lan` collides with the networking acronym; searchability will be poor.
