@@ -17,13 +17,28 @@ categories = ["development-tools"]
 # `mcpServers` on `session/new` is the protocol's own concept.
 #
 # What this cannot drop is the weight underneath: mentra's MCP client is
-# unconditional upstream (its features are `openai-oauth` and `test-utils`), so
-# there is nothing to forward. Gating lan's half still delivers the contract
-# point — one seam, one adapter, droppable at compile time — and the day mentra
-# grows a feature, this is where it gets forwarded.
+# unconditional upstream, so there is nothing to forward. Gating lan's half
+# still delivers the contract point — one seam, one adapter, droppable at
+# compile time — and the day mentra gates its MCP client too, this is where
+# that gets forwarded.
 [features]
 default = ["mcp"]
 mcp = []
+
+# mentra streams the Responses wire format over HTTP+SSE or over a websocket,
+# and the second transport is the only reason tokio-tungstenite was ever in
+# this crate's tree.
+#
+# Off by default, which is a statement about reachability rather than a
+# preference: the transport is chosen per request through mentra's
+# `ProviderRequestOptions`, lan never sets that field, and the `AgentConfig`
+# that would carry it is private to workspace construction. No lan run can
+# select it, so the default build linked a websocket client for a code path it
+# cannot enter. Kept nameable rather than cut outright, for an embedder driving
+# lan-core against an endpoint where that transport is the point; enabling it
+# forwards to mentra, which forwards to mentra-provider, which compiles the
+# transport back in.
+responses-websocket = ["mentra/responses-websocket"]
 
 [dependencies]
 mentra.workspace = true
