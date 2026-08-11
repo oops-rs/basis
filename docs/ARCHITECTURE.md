@@ -1,6 +1,6 @@
 # lan — Architecture
 
-> rev 10 · 2026-08-11 · **lan** — **L**ightweight **A**gent **N**ucleus
+> rev 11 · 2026-08-11 · **lan** — **L**ightweight **A**gent **N**ucleus
 > The *how*. For the *why* — problem, idea, bets — see [`PROPOSAL.md`](PROPOSAL.md);
 > locked decisions live in [`adr/`](adr/); deferred ideas in [`proposals/`](proposals/);
 > research grounding in [`p0-groundwork.md`](p0-groundwork.md).
@@ -15,7 +15,10 @@
 > says. §2, §3 and §4 below describe the state after them. One Phase D item is
 > held rather than built (declared subprocess tools, for want of a concrete use
 > case); where this document still describes the P0–P4 shape it says so.
-> The ledger and phases are in [`REDESIGN.md`](REDESIGN.md).
+> A later wave belonging to no phase closed the last five upstream candidates,
+> which is what rev 11 records: a typed turn can now keep its tools, a run
+> names the bound that ended it, and `lan-core`'s graph carries no websocket
+> stack. The ledger and phases are in [`REDESIGN.md`](REDESIGN.md).
 > Reference bar: [pi](https://github.com/earendil-works/pi) (earendil-works) — minimal core, complete harness.
 > General-purpose: no domain assumptions. Periodic bug-checking is one use case, never a design input.
 
@@ -77,6 +80,9 @@ host's (cron, systemd, CI, a tokio task), and the two pieces that are easy to ge
 fingerprint and per-run bounds — are a subcommand and three flags on `run` (ADR-0014). In
 process they are `Workspace::fingerprint()` and the bounds on a `RunSpec`, which is the same
 loop without the subprocess: [`lan-core/examples/watch.rs`](../lan-core/examples/watch.rs).
+A run that a bound ended says which one, both as `RunReport::stopped_by` in process and as
+`run_finished`'s `stopped_by` on the stream, and the CLI exits `3` for all three of them —
+the exit-code contract of ADR-0015 is answerable without parsing prose.
 
 ## 3. Extension model (without embedding a scripting language)
 
@@ -177,9 +183,13 @@ flowchart LR
 - **A run answers with a value when asked.** `PreparedRun::output::<T>()` runs a turn that
   must answer through a generated terminal tool whose input *is* the answer, which is what
   makes a workflow composable in host Rust rather than in prose-parsing. The stream is
-  unchanged; only the return value differs. The cost, and it is upstream's stated contract:
-  that turn holds exactly one tool, so reading and shaping are two turns — asked to do both
-  at once it answers in shape, having opened nothing, and the run reports success.
+  unchanged; only the return value differs. That turn *shapes* by default: it holds the
+  answering tool alone, so reading and shaping are two turns, and asked to do both at once
+  it answers in shape having opened nothing, with the run reporting success.
+  `OutputSpec::with_tools` is the other mode — the ordinary toolset stays on the turn, one
+  call reads and then answers, and what it trades away is the forcing, since nothing makes
+  a working turn stop and answer. Neither is right for the other's job, so the choice sits
+  on the spec rather than in a default.
 - **Sessions**: an ACP session *is* a mentra agent — lan uses the persisted agent id as the
   protocol's session id, so `session/load` is `Runtime::resume_session` and lan stores no
   mapping of its own (ADR-0007). A session outlives a turn, which is what makes conversation
@@ -258,10 +268,11 @@ periodic check — so no single use case bends the API toward itself.
   workarounds. The discipline is direction, not permission — capabilities generic enough for
   any harness land in mentra; lan keeps only harness-specific glue. Track each gap as a mentra
   issue even when fixing it immediately, so the API story stays legible to other mentra users.
-  Eight stand named in [`REDESIGN.md`](REDESIGN.md) §2's footnotes across Phases B–D; none
-  blocks lan. Phase D is the evidence the discipline works rather than only accumulates:
-  two were fixed upstream (delegated `task` accounting, and a store opened eagerly before
-  the builder could rebind it), one is in flight, and five remain open.
+  Nine stand named in [`REDESIGN.md`](REDESIGN.md) §2's footnotes across Phases B–D, and as
+  of the wave after Phase D **all nine are closed** — eight fixed upstream, one built in lan
+  where it belonged. That is the first clean tally the ledger has had, and it measures the
+  discipline rather than mentra's completeness: three further candidates were named on the
+  way through and none is built, and footnote 8 remains open.
 - **Compaction quality.** Mentra has the primitive; behavior under long sessions is unproven.
   pi's compaction doc is the reference to study in P0.
 - **Name collision.** `lan` collides with the networking acronym; searchability will be poor.

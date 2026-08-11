@@ -6,12 +6,14 @@
 
 ## Context
 
-The single `lan` crate unconditionally depends on `agent-client-protocol` and
-`tokio-tungstenite`, so a Rust host embedding the harness in-process compiles a
-JSON-RPC server and a websocket stack it never runs. ADR-0003 said "library
-first"; the packaging never caught up. The seam already exists internally —
-ADR-0007 routes ACP through the same event stream that feeds JSONL — so the
-split is recognizing a boundary, not inventing one.
+The single `lan` crate unconditionally depends on `agent-client-protocol` and —
+through mentra-provider's Responses websocket transport, which was itself
+unconditional when this was written and is now the default-on
+`responses-websocket` feature — on `tokio-tungstenite`, so a Rust host embedding
+the harness in-process compiles a JSON-RPC server and a websocket stack it never
+runs. ADR-0003 said "library first"; the packaging never caught up. The seam
+already exists internally — ADR-0007 routes ACP through the same event stream
+that feeds JSONL — so the split is recognizing a boundary, not inventing one.
 
 Cargo features could gate the same code, but features leak transitively and
 make the layering invisible; separate crates make it auditable.

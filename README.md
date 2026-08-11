@@ -89,7 +89,10 @@ lan run --deadline 10m --tool-budget 40 --token-budget 200000 "bump the deps and
 Every bound ends the run *gracefully* rather than discarding it: the event stream closes the
 way it always does, and whatever the model committed is kept. `--token-budget` is soft by
 construction — usage is only known once a round has streamed in full, so the round that
-crosses the line finishes and the run ends having succeeded.
+crosses the line finishes and the answer it produced is real. A run that was refused a
+further round reports the bound that did it and exits `3`, so "the allowance ran out" never
+looks like "the model was done"; a run whose model finished inside the crossing round exits
+`0`, because nothing was refused it.
 
 Any OpenAI-compatible endpoint works too — a gateway, a proxy, or a local
 server. Paste the URL as published; the trailing `/v1` is handled:
@@ -216,11 +219,25 @@ for finding in output.value.findings.iter().filter(|f| f.blocking) { … }
 
 The schema is yours to write rather than derived from the type, because its field
 descriptions are a *prompt* — they are what the model reads to decide what belongs in each
-field. One thing to know before using it: while a run is answering into a schema it holds
-exactly one tool, the one that *is* the answer. It cannot read a file or run a command on
-that turn, so a reviewer reads on an ordinary turn and shapes on the next. Asking for both
-in one call does not fail loudly — it returns a well-formed answer from a model that opened
-nothing, reported as a success.
+field.
+
+By default a typed turn *shapes* rather than works: the answering tool is the only tool it
+holds, and it is required to call it, so the turn can answer only from what earlier turns
+on the same run already gathered. Ask for both at once and it does not fail loudly — it
+returns a well-formed answer from a model that opened nothing, reported as a success. So
+either do the reading on an ordinary turn and ask for the shape on the next, or hand the
+turn its tools back:
+
+```rust
+run.output::<Findings, _, _>(prompt, findings_spec().with_tools(), sink, lan_core::AllowAll)
+```
+
+`with_tools()` keeps the ordinary toolset beside the answering tool, so one call reads and
+then answers. What it gives up is the forcing: nothing makes a working turn stop and
+answer, so it can reply in prose or run out of budget mid-gather, and on those paths there
+is no value and `output` returns `Err`. Put the stopping condition in the description —
+"call this once you have read every changed file" — which is exactly the wording the
+default mode warns you against.
 
 ### One allowance, many runs
 
@@ -332,8 +349,9 @@ and modify mean one thing whichever side said it. They are consulted interceptor
 registration order, then global hooks, then workspace hooks — the further a participant is
 from the workspace's own data, the earlier it speaks — and since the first refusal
 short-circuits, that is what lets your own guard refuse before a repository's program is
-spawned at all. A participant that errors or panics **denies**. The trait is `async`, so
-your crate needs `async-trait` to spell the attribute.
+spawned at all. A participant that errors or panics **denies**. The trait is `async`, and
+`lan_core::async_trait` is the attribute to spell it with — re-exported, so implementing a
+lan trait costs your manifest nothing.
 
 The other seam is `Approver`, and the two are deliberately not merged: an approver answers
 *may this happen* and feeds the permission machinery a person drives, while an interceptor

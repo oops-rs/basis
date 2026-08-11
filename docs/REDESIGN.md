@@ -1,6 +1,6 @@
 # lan — Redesign plan
 
-> rev 5 · 2026-08-11 · The transition from the P0–P4 harness to the SDK-first
+> rev 6 · 2026-08-11 · The transition from the P0–P4 harness to the SDK-first
 > shape decided in [ADR-0010](adr/0010-the-crate-is-the-workflow-surface.md)
 > through [ADR-0015](adr/0015-cli-grammar.md). This document is the honest
 > ledger of that transition: what exists, what is in between, what is not
@@ -10,6 +10,12 @@
 > subprocess tools — deliberately **held** rather than built, because no
 > concrete use case exists for it on record and the phase's own rule is that
 > its items ship only against one (Bet 7).
+> **Rev 6 records a wave that built no phase.** The five upstream candidates
+> §2's tally still had open were closed in mentra and met on lan's side, so the
+> footnotes below are records of fixed holes rather than of open ones. What the
+> wave did not do is make this document shorter: each fix is written with what
+> it cost and what it newly exposes, and §2's tally names the candidates the
+> work created on its way to closing the old ones.
 
 ## 1. The target in one paragraph
 
@@ -37,9 +43,21 @@ output, cancellation, usage, fan-in, over mentra `fce664a`), `e21d632` (the
 — `f3529be` (credential redaction and a resolution that answers to no shell),
 `397ca13` (`with_store_dir`), `e81e5d8` (the interception seam's in-process
 binding, and `session/list` working at all), `71cc59d`
-(`with_ephemeral_history`), `f76617d` (the last rustdoc warning) — over two
-mentra fixes, `0436bae` (delegated task accounting) and `b1a83de` (store
-recovery deferred to build).
+(`with_ephemeral_history`), `f76617d` (the last rustdoc warning) — over three
+mentra fixes, `0436bae` (delegated task accounting), `b1a83de` (store recovery
+deferred to build) and `aa206b7` (the mock's volatile store).
+
+Rev 6's wave belongs to no phase. It closed the five upstream candidates the
+tally below had been carrying, in five mentra commits — `c04986a`
+(`RuntimeBuilder` nameable), `5a2a68e` (a run records the bound it ended on),
+`c30fa9c` (the Responses websocket transport behind a feature), `be65c00` (a
+typed turn can keep its tools), `b895ea0` (a remembered refusal says why) — and
+met each on lan's side: `ff5fc70` (the `async-trait` re-export), `27ab4c8` (the
+websocket gate closed here too), `8e35f3e` and `a2d170a` (the token budget's
+exit code, and the same fact on the stream), `b782e75` (the working typed
+turn). Three refactors rode along, splitting the files footnote 19 had named —
+`89ccce4` (`lan-acp/src/server.rs`), `665ced6` (`lan/src/main.rs`), `e37f4f3`
+(the ACP integration suite).
 
 | Piece | Decided in | Status today |
 |---|---|---|
@@ -50,13 +68,13 @@ recovery deferred to build).
 | `watch` deletion | 0014 | **Built** (`4fbe1fd`) — `watch.rs`, `watch/`, `watch_cli.rs`, the subcommand, and its tests are gone |
 | Bounds on `RunConfig` / `lan run` | 0014 | **Built** (`4fbe1fd`) — `with_deadline` / `with_tool_budget` / `with_token_budget` and the three `lan run` flags, all defaulting to unset |
 | `Workspace::fingerprint()` + `lan fingerprint` | 0014 | **Built** (`4fbe1fd`, `8b52ebf`) — `fingerprint.rs` with ADR-0008's semantics intact, plus the subcommand; the method landed on `Workspace` itself once Phase C had one to put it on, reading the tree as it is now rather than as it was at open |
-| Exit-code contract | 0015 | **Built** (`35c9ccb`) — 0 ok / 1 failed / 2 usage / 3 bound tripped, with `RunReport::stopped_by` carrying the same distinction in-process |
+| Exit-code contract | 0015 | **Built** (`35c9ccb`, `8e35f3e`, `a2d170a`) — 0 ok / 1 failed / 2 usage / 3 bound tripped, and `3` now covers all three bounds rather than two, since a run records which one ended it. `RunReport::stopped_by` carries the distinction in-process and `run_finished` carries it on the stream [11] |
 | `lan "<prompt>"` shorthand, `run -`, ACP first-line signpost | 0015 | **Built** (`35c9ccb`) — a positional naming no subcommand is a prompt, `--` escapes, `run -` reads stdin, and a first line that is not JSON-RPC exits with the signpost |
-| Crate split (`lan-core` / `lan-acp` / binary) | 0011 | **Built** (`fbcacb4`) — three crates on one version; `agent-client-protocol` and `blocking` are out of `lan-core`'s graph, the bridge stays in the binary marked extractable [1] |
+| Crate split (`lan-core` / `lan-acp` / binary) | 0011 | **Built** (`fbcacb4`, `27ab4c8`) — three crates on one version; `agent-client-protocol`, `blocking` and — since the upstream gate exists — `tokio-tungstenite` are all out of `lan-core`'s graph, the bridge stays in the binary marked extractable [1] |
 | MCP behind a feature | 0011/0012 | **Built** (`a4c259c`) — `mcp`, default-on; `default-features = false` compiles a `lan-core` with no MCP concept at all [2] |
 | Approval enum → trait impls | 0010 | **Built** (`a4c259c`, `6192230`) — `ApprovalPolicy` is gone: `ApprovalGate` authorizes, `AllowAll` / `DenyAll` decide, the terminal approver is the binary's, and `lan_acp::ApprovalMode` holds the protocol's mode list. `--approve` is unchanged [3] [4] [5] |
 | `Workspace` / run split | 0010 | **Built** (`8b52ebf`) — `Workspace::open` settles context, credential, model, skills, templates, hooks, MCP connections and the approval gate once; `prepare(RunSpec)` mints a run *synchronously*, which is the honest signal that nothing is left to await. `Workspace::fingerprint()` lands on the type its row above promised it to. The free functions stay, as wrappers over `RunConfig::split` [6] [7] [14] |
-| `.output::<T>()` structured output | 0010 | **Built** (`07cf4d1`, over mentra `fce664a`; docs corrected in `dae4765`) — `PreparedRun::output::<T>()` and `output_with_options`, with `OutputSpec` / `OutputReport` lan's own and the schema the caller's to write. lan asks mentra for the raw `Value` and deserializes itself, which buys `RunError::OutputMismatch` [9] [12] |
+| `.output::<T>()` structured output | 0010 | **Built** (`07cf4d1`, over mentra `fce664a`; docs corrected in `dae4765`; the second mode in `b782e75` over mentra `be65c00`) — `PreparedRun::output::<T>()` and `output_with_options`, with `OutputSpec` / `OutputReport` lan's own and the schema the caller's to write. lan asks mentra for the raw `Value` and deserializes itself, which buys `RunError::OutputMismatch`. `OutputSpec::with_tools()` keeps the ordinary toolset on the turn, so read-then-shape is a choice rather than a ceremony [9] [12] |
 | `BudgetPool` | 0010 | **Built** (`e21d632`) — the pool *is* mentra's shared `token_usage` counter, so `spent()` is the number the turns are stopped against rather than a tally reconciled later. `RunSpec::with_budget` / `TurnOptions::with_budget` attach one; an exhausted pool refuses the turn with `RunError::BudgetExhausted` before the prompt is sent [10] [11] |
 | Tagged sinks / event fan-in | 0010 | **Built** (`07cf4d1`) — `EventFanIn` mints one `TaggedSink` per run and merges them into `MergedEvents`; the tag rides outside `Event`, so the versioned wire schema is untouched [13] |
 | Cancellation on the public API | 0010 | **Built** (`07cf4d1`) — `TurnOptions::cancellable()` / `stoppable()` / `with_cancel` / `with_stop`, `execute_with_options` and its neighbours on every entry point, and `CancellationToken` re-exported under the rule the commit writes down: every mentra type lan's surface makes a caller *name*, lan re-exports [8] |
@@ -71,40 +89,81 @@ recovery deferred to build).
 Footnotes on the Phase B, C and D rows, because a ledger that records only
 the wins is not a ledger:
 
-1. `cargo tree -p lan-core` still shows `tokio-tungstenite`. It arrives
-   through mentra-provider, which requires it unconditionally for the
-   Responses websocket transport, so there is no lan-side gate to close. It is
-   an upstream feature-gate candidate under ADR-0005 rather than something to
-   paper over here, and Phase B's acceptance names it instead of quietly
-   dropping the clause.
+1. **`cargo tree -p lan-core` showed `tokio-tungstenite`, and now does not.**
+   The defect as Phase B recorded it: mentra-provider required the crate
+   unconditionally for the Responses websocket transport, so there was no
+   lan-side gate to close, and Phase B's acceptance named the clause it could
+   not satisfy instead of quietly dropping it. mentra `c30fa9c` built the gate
+   — `responses-websocket`, default-on at every level so an upgrade takes
+   nothing away, with mentra's own provider dependency set to
+   `default-features = false` so the forwarding bites — and lan `27ab4c8`
+   closed lan's side: the workspace dependency turns the default off and
+   `lan-core` re-offers the feature for an embedder who wants it. The Phase B
+   acceptance clause is met in full for the first time.
+   Two facts are worth keeping, because both are easy to get backwards. First,
+   **the reason lan cannot reach that transport is not a missing capability**:
+   `openai_definition()` advertises `supports_websockets: true`
+   (`mentra-provider/src/responses.rs`). It is that the transport is chosen
+   per request through `ProviderRequestOptions.responses.transport`, lan never
+   sets that field, and the `AgentConfig` that would carry it is private to
+   workspace construction — so the default field value, `HttpSse`, is the only
+   one a lan run can have. Off by default is therefore a finding about
+   reachability, not a preference, and a build without the feature does not
+   silently fall back: selecting the websocket transport answers with a typed
+   `UnsupportedCapability` naming the feature to rebuild with. Second, the
+   `lan` **binary** still links tungstenite, through its own direct dependency
+   for the bridge's websocket server. That is a different subsystem, it is
+   what the bridge is, and it stays.
 2. The `mcp` feature drops lan's half only. mentra has no `mcp` feature to
    forward — its client is unconditional — so the dependency graph does not
    shrink yet. What the feature delivers is the contract point of ADR-0012:
    one seam, one adapter, droppable at compile time. The day mentra grows a
    feature of its own, `lan-core`'s manifest is where it gets forwarded.
-3. A mentra papercut the split surfaced: `RuntimeBuilder` is `pub` inside a
+3. **`RuntimeBuilder` could not be named by any downstream code, and now can
+   be.** The defect the split surfaced: `RuntimeBuilder` was `pub` inside a
    *private* `mod builder`, re-exported neither by `mentra::runtime` nor at
-   the crate root, so no downstream code can write its type at all.
-   `lan_core::run::resolve` gets by on inference — `let builder =
-   Runtime::builder()`, rebound as it goes — but a helper taking or returning
-   one cannot be written. An upstream re-export is the fix; an issue under
-   ADR-0005.
+   the crate root, so `Runtime::builder()` returned a type no caller could
+   write. Inference carried a chained build through — `lan_core::run::resolve`
+   got by on `let builder = Runtime::builder()`, rebound as it went — but a
+   helper *taking or returning* a half-built runtime could not state its
+   signature at all. Fixed upstream rather than worked around, per ADR-0005:
+   mentra `c04986a` re-exports it where `Runtime` already is, at
+   `mentra::runtime::RuntimeBuilder` and the crate root, and pins it from
+   outside the crate in `tests/public_api.rs`, where compiling *is* the claim.
+   Footnote 7 is the same candidate's second sighting and closes with it.
 4. The deny-reason gap was fixed upstream rather than worked around. `a4c259c`
    knowingly lost lan's descriptive denial, because `PermissionDecision`
    carried no reason field; mentra `15fdcfe` added one, and `6192230` restored
    the wording through `ApprovalAnswer`. That ordering is ADR-0005 working as
    written — the gap went upstream and lan waited for it.
-5. A remembered refusal says why only once. The first denial carries the
-   approver's reason; later calls never reach the approver — mentra's
-   `RuleStore` answers them from a `RememberedRule` that keeps the verdict
-   and its scope but no reason, so the model reads "blocked by remembered
-   session rule". lan-acp masks it: `ModedApprover` remembers the "…for this
-   session" answers itself and restates the reason each time, so the gap
-   shows only for an embedding host whose `Approver` returns
-   `DenyForSession` — the one path that reaches `deny_and_remember`.
-   Threading a reason through `RememberedRule` was wider than `15fdcfe`
-   needed to be; deliberately left as the third upstream candidate under
-   ADR-0005.
+5. **A remembered refusal said why only once, and now says why every time.**
+   The defect: the first denial carried the approver's reason, but later calls
+   never reached the approver — mentra's `RuleStore` answered them from a
+   `RememberedRule` that kept the verdict and its scope and no reason, so the
+   model read "blocked by remembered session rule". Nothing actionable in it,
+   and nothing to stop the model asking again. lan-acp masked the gap:
+   `ModedApprover` remembers the "…for this session" answers itself and
+   restates the reason each time, so the gap showed only for an embedding host
+   whose `Approver` returns `DenyForSession` — the one path that reaches
+   `deny_and_remember`. Threading a reason through `RememberedRule` was wider
+   than mentra `15fdcfe` needed to be, so it was left as the third upstream
+   candidate under ADR-0005 rather than papered over.
+   mentra `b895ea0` closes it. The rule carries the refusal's reason, written
+   at remember time — refusals only, since an allow explains itself by
+   happening — and a remembered denial restates it as
+   "«original reason» — remembered from an earlier refusal, so asking again
+   will not change it", with the original words in front because they are the
+   part that says what to do instead. `RuleStore::matching_rule` hands back the
+   whole rule where `check()` gave only the verdict, on the same
+   glob-over-bare precedence. Old rows load reasonless and keep the old generic
+   message; the SQLite store grows the nullable column on open by the same
+   migration pattern `project_id` used, and a new-code database still opens
+   under old code, whose queries name their columns.
+   One consequence for lan, named and **not** acted on: `ModedApprover`'s
+   masking is now redundant on the `DenyForSession` path, since the reason
+   survives without it. That makes it a simplification candidate, not a
+   finished one — the wrapper does other work for the mode list, and nobody
+   has checked what else depends on it restating the reason itself.
 6. **The suite wrote a real database under the user's data directory** — and
    Phase D closed it end-to-end, so this footnote is now a record of a fixed
    hole rather than an open one. A runtime with no store configured takes
@@ -139,14 +198,16 @@ the wins is not a ledger:
    under the binary's, 110 under the workspace root's — are the historical
    accumulation, and nothing deletes them; the claim is about what a run adds
    from here, which is nothing.
-7. `RuntimeBuilder`'s privacy (footnote 3) bit again, in the place the split
-   made most visible. `WorkspaceBuilder::open` folds the discovered MCP
-   servers into the builder inline (`lan-core/src/workspace/builder.rs`,
-   the `servers.into_iter().fold(builder, …)` block) because a helper taking
-   or returning a half-built `RuntimeBuilder` still cannot name its type —
-   `mod builder` is private in `mentra/src/runtime.rs` and the type is
-   imported there privately, never re-exported. Same candidate, second
-   sighting.
+7. **The second sighting of footnote 3, in the place the split made most
+   visible — and it closes with it.** `WorkspaceBuilder::open` folded the
+   discovered MCP servers into the builder inline
+   (`lan-core/src/workspace/builder.rs`, the
+   `servers.into_iter().fold(builder, …)` block) because a helper taking or
+   returning a half-built `RuntimeBuilder` could not name its type. mentra
+   `c04986a` makes the type nameable, so the fold is now an inline expression
+   by choice rather than by constraint. Recorded rather than deleted, because
+   two independent sightings of one papercut is what made the case for fixing
+   it upstream.
 8. **A graceful stop after a tool round reports a failed turn, though the work
    is kept.** `TurnOptions::stop` ends a turn at the next round boundary and
    nothing is rolled back — but mentra still owes its caller a final assistant
@@ -200,49 +261,117 @@ the wins is not a ledger:
     apart is that it reached for `task` where they read files directly. One
     gateway, one model, no reduction — recorded because the delegating path is
     where the unknowns were.
-11. **A crossed token budget is a silent success upstream**, which is why two
-    lan decisions look the way they do. `mentra/src/agent/runner.rs` answers
-    `options.token_budget_exceeded()` with a plain `return Ok(())` at the
-    round boundary: the transcript is kept and the turn is over, but nothing
-    typed says *why* it ended. lan cannot report a stop it cannot observe, so
-    `Bound` has no `TokenBudget` variant and `--token-budget` cannot produce
-    exit `3` — the exit-code table in `README.md` says so, and this footnote is
-    the reason behind it rather than a preference. It also settles a tension
-    Phase A left standing: ADR-0014 calls `--token-budget` a bound and ADR-0015
-    promises "distinct nonzero codes for run failure and for a tripped bound",
-    which read together would have exit `3` cover all three flags. It covers
-    two, because the third is a bound lan cannot observe being tripped, and a
-    code invented for it would be a guess dressed as a contract.
-    The same softness makes `token_budget: Some(0)` a trap: mentra compares
-    `reported >= budget`, so a zero budget is already crossed before the first
-    round, the run does nothing, and the missing final message surfaces as
-    `EmptyAssistantResponse` — a provider-shaped error for an accounting
-    decision, with the prompt already committed to the transcript. Pinned by
-    `lan-core/tests/budget.rs::a_zero_token_budget_is_what_refusing_avoids`,
-    and the reason lan refuses with `BudgetExhausted` before the turn instead
-    of passing the zero through.
-12. **A typed turn is a shaping turn, not a working one.** While a run answers
-    into a schema it holds exactly one tool: registering the generated terminal
-    tool opens a gate on the agent (`mentra/src/agent/terminal_output.rs`), and
-    while that gate is open `tools()` filters the whole toolset down to that
-    one tool and `tool_choice()` forces it (`mentra/src/agent.rs`). It cannot
-    read a file, run a command, or reach an MCP server on that turn — so asking
-    a reviewer for findings in one `output` call returns an empty list from a
-    model that opened nothing, *and returns it as a success*. That is not
+11. **A crossed token budget was a silent success upstream, and is now a
+    reported one.** The defect, and it shaped two lan decisions for two
+    phases: `mentra/src/agent/runner.rs` answered
+    `options.token_budget_exceeded()` with a plain `return Ok(())` at the round
+    boundary — the transcript kept, the turn over, and nothing typed saying
+    *why* it ended. lan cannot report a stop it cannot observe, so `Bound` had
+    no `TokenBudget` variant and `--token-budget` could not produce exit `3`.
+    That also left a tension standing from Phase A: ADR-0014 calls
+    `--token-budget` a bound and ADR-0015 promises "distinct nonzero codes for
+    run failure and for a tripped bound", which read together would have exit
+    `3` cover all three flags. It covered two, because the third was a bound
+    lan could not observe being tripped, and a code invented for it would have
+    been a guess dressed as a contract.
+    mentra `5a2a68e` supplies the observation. `EarlyEnd` is a write-once slot
+    on `RunOptions`, the counterpart of the `token_usage` counter on the same
+    struct — same `Arc` sharing, same read-from-a-clone rule (`ended_early()`)
+    — and the runner records at both boundary shapes. The combined
+    stop-or-budget check is split so that the order which *decides* is also the
+    order which *reports*, with stop winning when both held: an instruction the
+    caller issued outranks an ambient bound that merely also held. `child()`
+    derives a fresh slot, so a delegated run's ending is never read as the
+    parent's. lan `8e35f3e` maps it to `Bound::TokenBudget` and consults the
+    runner's own record on both finish arms, because the load-bearing case is
+    an `Ok`: a run can end on its budget with an answer already committed, and
+    nothing else in that result tells "the model was done" from "the allowance
+    ran out". `EarlyEnd::StopRequested` maps to nothing on purpose — a caller's
+    own stop button does not belong on the same exit code as running out of
+    budget. lan `a2d170a` puts the same fact on the stream: `run_finished`
+    carries `stopped_by` (`"deadline" | "tool_budget" | "token_budget"`) when a
+    bound ended the run and **omits the key otherwise** — absent, not null, so
+    an unbounded finish is byte-identical to what a schema-1 consumer already
+    reads and the wire version does not move.
+    Four things about the shipped signal are worth more than the headline.
+    **The bound reports only when the runner decided something.** A run whose
+    model finishes inside the round that crosses the line exits `0`, because
+    the runner never refused a round — verified live both ways against the
+    gateway, a tool-round crossing giving `3` and a one-round answer giving
+    `0`. That is narrower than "the budget was exceeded", and it is the honest
+    reading: the exit code names a decision, not an arithmetic fact.
+    **The zero-budget pin changed its answer, honestly.**
+    `lan-core/tests/budget.rs::a_zero_token_budget_is_what_refusing_avoids`
+    used to show a provider-shaped `EmptyAssistantResponse` for an accounting
+    decision, because mentra compares `reported >= budget` and a zero budget is
+    already crossed before the first round. The run still does nothing, but the
+    report now names the bound — so what a `BudgetPool`'s pre-refusal with
+    `RunError::BudgetExhausted` buys is narrower than it was, and still real:
+    refusing before the prompt is committed beats committing it and reporting
+    why afterwards.
+    **On a bound-ended typed turn the stream is the sole carrier.** A typed
+    turn with no value returns `Err`, and the report that would otherwise carry
+    `stopped_by` is not handed back — there is nothing to hand it back with. So
+    the only place the bound is named is `Event::RunFinished`, pinned by
+    `lan-core/tests/output.rs::a_working_turn_out_of_budget_says_so_on_the_stream`.
+    A host that drives typed turns and reads only reports will see a
+    `RunError::Runtime` with no bound in it.
+    **A run that answers *and* is bounded exits `3` printing nothing on
+    stderr.** `lan/src/run.rs` announces on stderr only from the
+    `RunOutcome::Error` arm, so an `Ok` result that carries a bound exits `3`
+    silently. It is unreachable from today's CLI — reaching it needs a queued
+    steer sitting behind a committed final message, and lan has no steering
+    surface — but it becomes live the day lan grows one, and it is named here
+    rather than discovered then.
+12. **A typed turn was a shaping turn and nothing else; it can now be a working
+    one.** The defect, and it cost a live fan-out before it was understood:
+    while a run answered into a schema it held exactly one tool. Registering
+    the generated terminal tool opened a gate on the agent
+    (`mentra/src/agent/terminal_output.rs`), and while that gate was open
+    `tools()` filtered the whole toolset down to that one tool and
+    `tool_choice()` forced it (`mentra/src/agent.rs`). It could not read a
+    file, run a command, or reach an MCP server on that turn — so asking a
+    reviewer for findings in one `output` call returned an empty list from a
+    model that had opened nothing, *and returned it as a success*. Not
     hypothetical: the first live fan-out did exactly that, and the wording that
     invited it was lan's own — the doctest asked a typed turn to "review the
     diff on this branch", and the guidance on `OutputSpec::description` held up
     "call this once you have reviewed every file" as the description to
-    imitate. `dae4765` corrected three doc sites to say what the turn can
-    actually do. Read-then-shape is two turns, which is what
-    `examples/review_workflow.rs` documents at length and what every live run
-    since has exercised. The mechanism is upstream's stated contract rather
-    than an oversight — `run_to_output`'s own rustdoc says it "exposes only one
-    forced terminal tool during this run" — so nothing here is a defect. It is
-    still an ADR-0005 candidate, on ergonomics rather than truth: a mode that
-    kept the ordinary toolset alongside the terminal tool would remove the
-    two-turn ceremony, and a contract that needed three doc corrections in one
-    commit to state plainly is one worth making harder to get wrong.
+    imitate. `dae4765` corrected three doc sites to say what the turn could
+    actually do, and read-then-shape as two turns is what
+    `examples/review_workflow.rs` documents at length.
+    The mechanism was upstream's stated contract rather than an oversight, so
+    this was filed as an ADR-0005 candidate on *ergonomics* rather than on
+    truth: a mode that kept the ordinary toolset alongside the terminal tool
+    would remove the two-turn ceremony, and a contract needing three doc
+    corrections in one commit to state plainly is one worth making harder to
+    get wrong. mentra `be65c00` built that mode as
+    `TerminalOutputSpec::with_tools()`, and lan `b782e75` surfaced it as
+    `OutputSpec::with_tools()`. The default is unchanged; the ceremony is now a
+    choice.
+    What the working mode gives up is **the forcing**, and that is the whole
+    trade. A shaping turn is *made* to answer. A working turn narrows nothing
+    and forces nothing — `Auto` uniformly, since forcing the terminal tool
+    would end the turn before any work happened and a configured `Tool{..}`
+    would keep it from ever reaching the call that ends it — so it can settle
+    for prose, or be refused another round by a bound while it is still
+    gathering. On both of those paths there is no value, `output` returns
+    `Err`, and the report is dropped, which makes the event stream the sole
+    carrier of why (footnote 11). Two turns also stay the better shape when the
+    reading should *not* share a context with the answering: one reader per
+    reviewer, as `examples/review_workflow.rs` still does it.
+    The live check reproduced the original shape both ways against the gateway.
+    Default mode: zero findings from a model that read nothing, reported as a
+    success, at 290 tokens. `with_tools`: both planted bugs found and named
+    specifically, in one call, at 3,876 tokens. That ratio is the honest
+    summary of the trade — the working turn costs an order of magnitude more
+    and answers the question. The three doc sites that used to teach only the
+    old contract now teach both modes, keeping the original warning for the
+    default and adding its inverse for the working turn: nothing makes it stop
+    and answer, so the description is where the stopping condition belongs.
+    One reporting change reaches the default mode as well — a typed run whose
+    provider answered nothing is now reported as the missing terminal call it
+    is, rather than as `EmptyAssistantResponse`.
 13. **A held `RunReport` holds a fan-in's merged stream open.** A finished run
     hands its sink back inside the report, so a report kept alive is a branch
     of `MergedEvents` kept alive — and a host that awaits its runs and its
@@ -267,14 +396,20 @@ the wins is not a ledger:
     unaffected, so nothing that worked before this change behaves differently;
     what changed is that a *new* combination fails closed rather than quietly.
     `lan-core/src/hooks/runner.rs`.
-16. **Implementing a lan trait costs the host an `async-trait` dependency.**
-    `Interceptor` and `Approver` are both `#[async_trait]`, and `lan-core` does
-    not re-export the macro, so a host writing either impl adds
-    `async-trait = "0.1"` to its own manifest to spell the attribute. A
-    consistent papercut rather than a defect — mentra's own hook trait has the
-    same shape and the reason is the same one (a participant that reads a file
-    or takes a lock must not block a runtime worker) — but it is a line of
-    someone else's `Cargo.toml` that lan's docs ask for without saying so.
+16. **Implementing a lan trait used to cost the host an `async-trait`
+    dependency.** `Interceptor` and `Approver` are both `#[async_trait]`, and
+    `lan-core` did not re-export the macro, so a host writing either impl added
+    `async-trait = "0.1"` to its own manifest to spell an attribute lan's docs
+    asked for without saying so. A consistent papercut rather than a defect —
+    mentra's own hook trait has the same shape and the reason is the same one
+    (a participant that reads a file or takes a lock must not block a runtime
+    worker) — but it was a line of someone else's `Cargo.toml`. Closed lan-side
+    in `ff5fc70`: `lan_core::async_trait` is re-exported at the crate root under
+    the rule already governing `BuiltinProvider` and `ModelSelector` — a name
+    lan's surface makes a caller write is a name lan re-exports, and the rule
+    reads the same for a macro as for a type. The interceptor doctest and the
+    README example spell it `#[lan_core::async_trait]`, which is what pins the
+    re-export rather than merely asserting it.
 17. **`session/list` had never worked, and the fix is forward-only on purpose.**
     lan filtered listings on the workspace's runtime identifier
     (`store::runtime_identifier`) while `WorkspaceBuilder::open` never set one,
@@ -313,13 +448,39 @@ the wins is not a ledger:
     set and unset, and the `env -u` ritual that used to precede every
     invocation is retired.
 19. **Tests move to their own file at the 800-line ceiling**, adopted as a
-    convention this phase rather than declared: `lan-core/src/hooks/runner.rs`
+    convention in Phase D rather than declared: `lan-core/src/hooks/runner.rs`
     and `lan-core/src/workspace/builder.rs` both ended `mod tests;` with the
     cases in `runner/tests.rs` and `builder/tests.rs`, which is what kept them
-    under the limit while growing. Two pre-existing files are still over it and
-    are not pretending otherwise — `lan-acp/src/server.rs` at 1,089 lines and
-    `lan/src/main.rs` at 1,073. Neither was touched this phase; both are named
-    here so the ceiling stays a real number rather than an aspiration.
+    under the limit while growing. Three files were named as still over it and
+    all three have since been split, each at a seam that already existed rather
+    than at a line count. `lan-acp/src/server.rs`, 1,089 lines, became 337 plus
+    four modules (`89ccce4`): `config.rs` holds `ServeConfig` and the
+    `SessionSource` seam, `lifecycle.rs` the handshake and session bookkeeping,
+    `turn.rs` the one handler that runs the agent, and the tests their own
+    file. `lan/src/main.rs`, 1,073 lines, became 104 plus six (`665ced6`) —
+    the grammar stays whole in `cli.rs` because ADR-0015 defines it as a unit,
+    and the exit-code contract got `exit.rs` so the whole promise fits on one
+    screen. `lan-acp/tests/acp.rs`, 872 lines, was the case the convention's
+    own remedy could not reach, since it already *was* a tests file; `e37f4f3`
+    made it `tests/acp/main.rs` plus six modules as **one** test crate,
+    deliberately — the mock runtime and the scripted client are 380 of those
+    lines and every test needs both ends, so separate `tests/*.rs` crates would
+    compile the harness once per file and a shared `common/` would need a
+    dead-code allow that hides genuinely dead scaffolding forever. One Rust
+    detail that cost time and is worth writing down: a `mod` declared in
+    `tests/acp.rs` resolves against `tests/`, not against `tests/acp/`, because
+    that file is a crate root — which is why the directory form takes a
+    `main.rs`.
+    **The ceiling is nonetheless not held today, and by this wave's own work.**
+    `b782e75` took `lan-core/tests/output.rs` from 474 lines to **841** and
+    `lan-core/src/run/prepared.rs` from 797 to **808**, and
+    `lan-core/src/run.rs` sits at exactly **800**. So the score is three files
+    brought under and two pushed over in the same series of commits, which is
+    the honest shape of a convention that is real but not enforced by anything
+    — no lint, no CI gate, only a number in a footnote somebody has to look at.
+    Named here on the same rule as before: the ceiling stays a real number
+    rather than an aspiration only if the misses are written down as
+    faithfully as the hits.
 20. **mentra's `MockRuntime` littered, and could collide.** With no store
     configured, `MockRuntime::builder().build()` minted
     `$TMPDIR/mentra-mock-runtime-<nanos>.sqlite` (`mentra/src/test.rs`) and
@@ -335,8 +496,32 @@ the wins is not a ledger:
     and was never reduced to a failing case, so the honest statement is that
     the collision was possible in principle and unproven in this instance.
     The mentra fix — `MockRuntime` defaulting to the volatile store, with the
-    SQLite path kept as an explicit `with_store` — landed as mentra `aa206b7`,
-    and with it the same before/after delta is zero.
+    SQLite path kept as an explicit `with_store`, and an atomic counter beside
+    the timestamp because a wall clock alone is not a source of uniqueness —
+    landed as mentra `aa206b7`, and with it the same before/after delta is
+    zero.
+    **A standing observation, carried because sightings accumulate faster than
+    explanations.** Three unexplained single-run test failures are now on
+    record rather than dismissed. `aa206b7`'s gate saw one test fail once in a
+    full-workspace run and pass in five subsequent runs, without reproducing
+    and without printing a name. `be65c00`'s gate saw a single lib-test flake
+    that did not recur across seven full-suite reruns. The third came from
+    rev 6's own docs gate and is the first with a name attached:
+    `lan-core/tests/hooks.rs::a_hook_is_told_which_schema_it_is_talking_to`
+    failed in a `cargo test --workspace` run with
+    `hook 'version' … did not answer within 5000ms and was killed`, then passed
+    twenty-for-twenty across five consecutive runs of that target alone, which
+    complete in about 0.3 s each. A hook subprocess missing a five-second
+    deadline in a file that finishes in a third of a second is a margin of
+    roughly four orders of magnitude, so the mechanism it points at is
+    scheduling starvation on a loaded machine — that run shared the box with
+    several concurrent agents — rather than anything in `exec.rs`.
+    That is a *candidate* mechanism for the other two and not an explanation of
+    them: neither was reduced, one has no name, and the three span two
+    repositories and three suites. What it does suggest is a class — the suite
+    is full of subprocess and timeout assertions, `NOT_STUCK` among them, and
+    those are exactly the assertions that turn machine load into a red test.
+    Worth knowing before a fourth sighting is read as a regression.
 
 Discoveries that shrank the plan: structured output and per-run bounds +
 cancellation were assumed to be new mentra work; both already exist upstream
@@ -349,28 +534,53 @@ turn would emit the same events as any other, and mentra grew
 `Session::append_turn_to_output` (`fce664a`) rather than lan reaching past the
 session to the agent. Phase D made three more, and they are the first that
 fixed something *already wrong* upstream rather than adding a door lan needed:
-`0436bae`, `b1a83de`, and `aa206b7`.
+`0436bae`, `b1a83de`, and `aa206b7`. Rev 6's wave made five, and they are the
+first that were *scheduled* — the tally below is what scheduled them.
 
-What Phase C mostly discovered, though, is where the honest edges are — and
-Phase D is where two of them stopped being edges. The running tally, because a
-list of "candidates" that only grows says nothing about whether the ADR-0005
-discipline works. **Nine named across Phases B–D. Three fixed upstream this
-phase**: `task`-delegated accounting, which now shares the parent's handle and
-relays its usage (mentra `0436bae`, footnote 10); the eager default-store
+What Phase C mostly discovered, though, is where the honest edges are, and the
+two revs since are where they stopped being edges. The running tally, because
+a list of "candidates" that only grows says nothing about whether the ADR-0005
+discipline works. **Nine were named across Phases B–D. Eight are fixed
+upstream** — `task`-delegated accounting, which now shares the parent's handle
+and relays its usage (mentra `0436bae`, footnote 10); the eager default-store
 open, which now waits for the store the builder ends with (mentra `b1a83de`,
-footnote 6); and `MockRuntime` defaulting to the volatile store, which took
-the temp litter and a possible identifier collision with it (mentra `aa206b7`,
-footnote 20). **Five still open**, none of them blocking: a crossed token
-budget returns an untyped `Ok`, so lan cannot report a stop it cannot observe
-(footnote 11); `RuntimeBuilder` is public inside a private module, so no
-downstream code can name it (footnotes 3 and 7); a `RememberedRule` keeps a
-verdict without its reason (footnote 5); `tokio-tungstenite` is unconditional
-in mentra-provider, so there is no lan-side gate to close (footnote 1); and a
-typed turn holds only its terminal tool, which is upstream's documented
-contract and still costs every workflow a turn of reading before it can shape
-(footnote 12). One edge on that Phase C list was lan's own rather than
-mentra's — a store knob on `WorkspaceBuilder` — and `397ca13` plus `71cc59d`
-built it (footnote 6).
+footnote 6); `MockRuntime` defaulting to the volatile store, which took the
+temp litter and a possible identifier collision with it (mentra `aa206b7`,
+footnote 20); a run that ends on a bound now recording which one, so lan can
+report a stop it can finally observe (mentra `5a2a68e`, footnote 11);
+the Responses websocket transport behind a feature, so `lan-core`'s graph no
+longer carries a websocket stack it cannot reach (mentra `c30fa9c`, footnote
+1); a typed turn that can keep its tools, so read-then-shape is a choice
+(mentra `be65c00`, footnote 12); a `RememberedRule` that carries its refusal's
+reason (mentra `b895ea0`, footnote 5); and `RuntimeBuilder` re-exported where
+downstream code can name it (mentra `c04986a`, footnotes 3 and 7). **The
+ninth was lan's own** rather than mentra's — a store knob on `WorkspaceBuilder`
+— and `397ca13` plus `71cc59d` built it (footnote 6). **Zero are open.**
+
+That is the first time this ledger has been clean, and it is worth being
+precise about what it measures. Not that mentra is finished, and not that lan
+found everything: it measures ADR-0005's discipline — that a gap lan hits goes
+upstream and lan waits for it, instead of growing a lan-side workaround that
+nobody else ever benefits from and that quietly becomes the API. Nine gaps,
+nine fixes at the layer that owned them, no workarounds carried. A tally that
+only accumulated would have said the discipline was a filing cabinet.
+
+A clean tally is also the moment a ledger is most tempted to stop being one, so
+the candidates this wave *created* are named here rather than waiting for
+someone to hit them. Three are new, none blocking, none built. On a typed turn
+ended by a bound the report is dropped, so the event stream is the sole carrier
+of which bound it was — a host reading only reports sees an untyped failure
+(footnotes 11 and 12). A run that answers *and* is bounded exits `3` with
+nothing on stderr; unreachable from today's CLI, live the day lan grows a
+steering surface (footnote 11). And `ModedApprover`'s masking of the remembered
+refusal gap is now redundant on the `DenyForSession` path, which makes it a
+simplification candidate and **not** a finished one — nobody has checked what
+else depends on it restating the reason itself (footnote 5). Older and still
+open, on a list of its own: footnote 8, where a graceful stop after a tool
+round reports a failed turn though the work is kept. It is the one
+upstream-shaped edge the tally never counted, because it was written down as a
+pinned behavior rather than filed as a candidate — which is its own small
+dishonesty, and easier to see now that the counted column is empty.
 
 ## 3. Phases
 
@@ -410,15 +620,17 @@ by the contract — and no sentence in `README.md` describes deleted machinery.
    approval as trait + impls), `ARCHITECTURE.md` §4 (layering and diagram), and
    this ledger.
 
-Acceptance: met in substance, with the one clause it cannot literally satisfy
-named rather than quietly dropped. `cargo tree -p lan-core` is free of
-`agent-client-protocol` and of `blocking`; `tokio-tungstenite` is still in
-there, reached through mentra-provider's unconditional Responses websocket
-transport, which is an upstream gate to ask for and not a lan defect
-(footnote 1). `cargo build -p lan-core --examples` compiles both embedder
-examples against `lan-core` alone, and
-`cargo check -p lan-core --no-default-features --all-targets` is clean — the
-crate really does build with no MCP concept in it.
+Acceptance: **met in full, and only as of rev 6.** For two revs this read "met
+in substance, with the one clause it cannot literally satisfy named rather than
+quietly dropped": `cargo tree -p lan-core` was free of `agent-client-protocol`
+and of `blocking`, but `tokio-tungstenite` was still in there through
+mentra-provider's unconditional Responses websocket transport. That was an
+upstream gate to ask for rather than a lan defect, and asking for it is what
+eventually got it — mentra `c30fa9c` built the feature and lan `27ab4c8` turned
+it off here, so the graph is now free of all three (footnote 1). `cargo build
+-p lan-core --examples` compiles both embedder examples against `lan-core`
+alone, and `cargo check -p lan-core --no-default-features --all-targets` is
+clean — the crate really does build with no MCP concept in it.
 
 ### Phase C — The SDK (the point of the exercise) — **landed**
 
@@ -453,14 +665,18 @@ in the tree as a standing acceptance test: if that loop ever stops being
 trivial, the regression is in the API.
 
 One thing the examples taught rather than confirmed, and it belongs here
-rather than in a footnote alone: a typed turn holds exactly one tool, so
-reading and shaping are two turns (footnote 12). The first live fan-out is how
-that was learned — reviewers submitted empty findings, having read nothing, and
-the runs reported success — and lan's own rustdoc had been asking for exactly
-that mistake, so `dae4765` corrected three sites to describe what the turn can
+rather than in a footnote alone: a typed turn held exactly one tool, so reading
+and shaping were two turns (footnote 12). The first live fan-out is how that
+was learned — reviewers submitted empty findings, having read nothing, and the
+runs reported success — and lan's own rustdoc had been asking for exactly that
+mistake, so `dae4765` corrected three sites to describe what the turn could
 actually do. A fact about the surface the acceptance criterion could not have
 predicted, found by writing the example and paid for in doc corrections rather
-than in API changes.
+than in API changes. Rev 6 is the second half of that story: the constraint
+became a default rather than a law (`OutputSpec::with_tools()`, over mentra
+`be65c00`), which is the outcome ADR-0005 is for. The examples still spend two
+turns, deliberately — a fan-out wants each reviewer's reading in a context of
+its own — so what changed is the ceremony's status, not this example's shape.
 
 ### Phase D — Bindings (evidence-gated) — **landed, less the item held**
 
@@ -504,19 +720,61 @@ Each Phase D item ships only against a concrete use case, per Bet 7. Gaps
 found here are filed as mentra issues even when fixed immediately (ADR-0005).
 
 Acceptance: met, with item 1 held rather than claimed. `cargo test --workspace`
-is 625 passed, 0 failed, and it is that in both directions — with
-`LAN_API_KEY`/`LAN_BASE_URL` exported and with them scrubbed, which is the
-claim `f3529be` makes and the reason the `env -u` ritual is retired. The
-data-directory probe is zero: across a full suite run, agent rows in the
-machine-wide default database move by zero and no `runtime.sqlite` under any of
-lan's four candidate paths changes mtime (footnote 6), and no temp directory is
-left behind. `RUSTDOCFLAGS="-D warnings" cargo doc -p lan-core --no-deps` is
-clean, which `f76617d` is the last commit of, and the ten `lan-core` doctests
-pass under the scrubbed environment. Two hygiene notes belong with that rather
-than in the win column: the phase adopted tests-in-their-own-file at the
-800-line ceiling and named the two files still over it (footnote 19), and
+was 625 passed, 0 failed at the time this was written, and it was that in both
+directions — with `LAN_API_KEY`/`LAN_BASE_URL` exported and with them scrubbed,
+which is the claim `f3529be` makes and the reason the `env -u` ritual is
+retired. The data-directory probe is zero: across a full suite run, agent rows
+in the machine-wide default database move by zero and no `runtime.sqlite` under
+any of lan's four candidate paths changes mtime (footnote 6), and no temp
+directory is left behind. `RUSTDOCFLAGS="-D warnings" cargo doc -p lan-core
+--no-deps` is clean, which `f76617d` is the last commit of, and the `lan-core`
+doctests pass under the scrubbed environment. Two hygiene notes belong with
+that rather than in the win column: the phase adopted tests-in-their-own-file
+at the 800-line ceiling and named the files then over it (footnote 19), and
 mentra's `MockRuntime` left 58 stray SQLite files in the temp directory per
-suite run until the fix now in flight, which takes that to zero (footnote 20).
+suite run until `aa206b7`, which takes that to zero (footnote 20).
+
+### Rev 6 — the upstream wave (no phase) — **landed**
+
+Not a phase and deliberately not numbered as one: nothing in ADR-0010…0015
+called for this work. It is the tally in §2 being spent rather than filed. Each
+of the five open upstream candidates was closed in mentra and met on lan's
+side, and each footnote above now reads as a record of a fixed hole with its
+original defect intact.
+
+1. ✅ `RuntimeBuilder` re-exported where downstream code can name it. — mentra
+   `c04986a` (footnotes 3, 7)
+2. ✅ A run that ends on a bound records which one; lan maps it to
+   `Bound::TokenBudget`, `lan run --token-budget` exits `3`, and `run_finished`
+   carries `stopped_by`. — mentra `5a2a68e`, lan `8e35f3e`, `a2d170a`
+   (footnote 11)
+3. ✅ The Responses websocket transport behind `responses-websocket`;
+   `cargo tree -p lan-core` is tungstenite-free and Phase B's last acceptance
+   clause is met. — mentra `c30fa9c`, lan `27ab4c8` (footnote 1)
+4. ✅ A typed turn can keep its tools, so read-then-shape is a choice rather
+   than a constraint. — mentra `be65c00`, lan `b782e75` (footnote 12)
+5. ✅ A remembered refusal carries its reason. — mentra `b895ea0` (footnote 5)
+
+Riding along, because the ceiling footnote 19 named was the one piece of
+housekeeping nothing else was going to do: `lan-acp/src/server.rs` (`89ccce4`),
+`lan/src/main.rs` (`665ced6`) and `lan-acp/tests/acp.rs` (`e37f4f3`) split at
+seams they already had, zero behavior change each. Also `ff5fc70`, which
+re-exports `lan_core::async_trait` and closes footnote 16 — lan's own papercut
+rather than mentra's, and the only one on this list that needed no upstream
+change at all.
+
+Acceptance: the tally in §2 reaches zero open candidates, which is the whole
+claim and is checked by reading it. `cargo test --workspace` is 641 passed, 0
+failed. Three things are deliberately not claimed. The wave left the 800-line
+ceiling **worse** than it found it in net terms — three files brought under,
+two pushed over by the typed-turn work in the same series (footnote 19). A
+clean tally is a measurement of discipline, not of completeness: three new
+candidates were named on the way through and none was built, footnote 8 stays
+open, and both facts are in §2 rather than here so the tally and its caveats
+stay on one page. And the suite went red once on the way to that 641, in
+`lan-core/tests/hooks.rs`, on a five-second subprocess deadline that the same
+target clears in a third of a second when run alone — the third such sighting,
+recorded in footnote 20 rather than rerun until green and forgotten.
 
 ## 4. Explicitly not planned
 
@@ -540,19 +798,24 @@ suite run until the fix now in flight, which takes that to zero (footnote 20).
   the churn was most of the diff, and the suite stayed green through it.*
 - **~~`run_to_output` is unproven in lan's flow.~~** *Retired in `07cf4d1`.*
   lan drives it now, through the session-level entry point mentra grew for it
-  (`fce664a`). The spike found what a spike is for: a typed turn holds exactly
-  one tool, so read-then-shape is two turns (footnote 12), and mentra reports
+  (`fce664a`). The spike found what a spike is for: a typed turn held exactly
+  one tool, so read-then-shape was two turns (footnote 12), and mentra reports
   "never called the terminal tool" with the same error as a malformed stream
   (footnote 9). Neither cost a surface change; the first cost three doc
-  corrections (`dae4765`), which is the cheap way to find that out.
+  corrections (`dae4765`), which is the cheap way to find that out — and then,
+  a rev later, an upstream mode (`be65c00`, `b782e75`) that made the ceremony
+  optional. The doc corrections were not wasted: they are still what the
+  default mode needs said about it.
 - **Token accounting is honest about less than it looks like** — narrower now
-  than when this line was written. `RunUsage`, a `--token-budget` and a
-  `BudgetPool` all count what providers *report*, and that caveat is
-  permanent. What is no longer true is the second half: all three were blind to
-  what a run delegated through `task`, and mentra `0436bae` closed that in both
-  directions, accounting and event stream (footnote 10). The numbers are real;
-  their scope is "what was reported for this run and everything it delegated",
-  which is most of the way to "what this job cost", and the rustdoc on each says
-  so.
+  than when this line was written, in two steps. `RunUsage`, a `--token-budget`
+  and a `BudgetPool` all count what providers *report*, and that caveat is
+  permanent. What is no longer true is the rest. All three were blind to what a
+  run delegated through `task`, and mentra `0436bae` closed that in both
+  directions, accounting and event stream (footnote 10). And a crossed budget
+  used to end a run without saying so, which mentra `5a2a68e` and lan `8e35f3e`
+  fixed, so the bound is now reported where it is spent (footnote 11). The
+  numbers are real; their scope is "what was reported for this run and
+  everything it delegated", which is most of the way to "what this job cost",
+  and the rustdoc on each says so.
 - **Bridge limbo.** Neither core nor extracted; revisit when acp-ui usage is
   real or an upstream home appears.
