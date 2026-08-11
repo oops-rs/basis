@@ -29,6 +29,11 @@ implementation.
   compaction lifecycle, hook points, MCP client) belong in mentra, not here. lan keeps
   conventions and protocol: context discovery, ACP mapping, the CLI grammar. When lan
   hits a mentra gap, file a mentra issue even if fixing it immediately.
+- **Three crates, split by dependency weight** (ADR-0011), so new code has one right home:
+  `lan-core` is the SDK and carries no protocol, no transport, and no TTY code; `lan-acp`
+  is the ACP adapter over it; `lan` is the binary over both. Anything that would put a
+  JSON-RPC, websocket, or terminal dependency into `lan-core` belongs in one of the other
+  two. MCP lives behind `lan-core`'s default-on `mcp` feature (ADR-0012).
 
 ## Workflow Discipline
 

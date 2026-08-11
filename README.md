@@ -7,7 +7,7 @@ A full-functional, embeddable agent harness built on [Mentra](https://github.com
 
 Library first, binary second. No TUI — embedding is the front door:
 
-1. **In-process** — depend on the `lan` crate (Rust hosts).
+1. **In-process** — depend on the `lan-core` crate (Rust hosts).
 2. **ACP** — `lan` with no subcommand serves the [Agent Client Protocol](https://agentclientprotocol.com)
    (JSON-RPC 2.0 over stdio) for editors (Zed, JetBrains) and web UIs
    ([acp-ui](https://github.com/formulahendry/acp-ui)).
@@ -127,21 +127,36 @@ Exit codes are contract, so a caller branches without parsing anything:
 refused the request" call for different reactions. A crossed `--token-budget` is absent from
 that row on purpose — it ends the run gracefully, so the run succeeded and exits `0`.
 
-In-process, the same run is one call — the binary is a thin shell over this:
+In-process, the harness is **`lan-core`** — the run lifecycle, workspace discovery, the
+event stream, and the seams, with no protocol, no transport, and no terminal code in the
+graph. `lan-acp` is the ACP adapter over it and the `lan` binary is the CLI over both, so
+an embedding host compiles only what it runs
+([ADR-0011](docs/adr/0011-layered-crates.md)):
+
+```toml
+[dependencies]
+lan-core = "0.1"   # unpublished so far — a git or path dependency until it isn't
+```
+
+MCP is a default-on `mcp` feature rather than a fixed part of the core:
+`default-features = false` compiles a `lan-core` with no MCP concept at all — no `.mcp.json`
+discovery, no servers registered ([ADR-0012](docs/adr/0012-one-contract-many-bindings.md)).
+
+The same run is then one call — the binary is a thin shell over this:
 
 ```rust
-let report = lan::run(
-    lan::RunConfig::new("/repo", "summarize the recent changes"),
-    lan::CollectingSink::new(),
+let report = lan_core::run(
+    lan_core::RunConfig::new("/repo", "summarize the recent changes"),
+    lan_core::CollectingSink::new(),
 ).await?;
 ```
 
 The bounds are builders on the same config, and `report.stopped_by` carries the distinction
-the exit code makes — `Some(lan::Bound::Deadline)`, `Some(lan::Bound::ToolBudget)`, or
-`None` when the work is what ended the run:
+the exit code makes — `Some(lan_core::Bound::Deadline)`, `Some(lan_core::Bound::ToolBudget)`,
+or `None` when the work is what ended the run:
 
 ```rust
-let config = lan::RunConfig::new("/repo", "bump the deps and fix the fallout")
+let config = lan_core::RunConfig::new("/repo", "bump the deps and fix the fallout")
     .with_deadline(Duration::from_secs(600))
     .with_tool_budget(40)
     .with_token_budget(200_000);
@@ -151,17 +166,19 @@ For a conversation rather than a one-shot, keep the prepared run and send again 
 session survives the turn, so the model sees everything said so far:
 
 ```rust
-let mut run = lan::run::prepare(config).await?;
-run.execute(lan::NullSink).await?;
-run.send("and which of those is riskiest?", sink, lan::AllowAll).await?;
+let mut run = lan_core::run::prepare(config).await?;
+run.execute(lan_core::NullSink).await?;
+run.send("and which of those is riskiest?", sink, lan_core::AllowAll).await?;
 ```
 
-`run.agent_id()` is the handle `lan::run::resume` takes, so a later process can pick the
-same conversation back up.
+`run.agent_id()` is the handle `lan_core::run::resume` takes, so a later process can pick
+the same conversation back up.
 
-See [`lan/examples/embed.rs`](lan/examples/embed.rs) for a host that reacts to events as
-they arrive, and [`lan/examples/conversation.rs`](lan/examples/conversation.rs) for the
-two-turn version (`cargo run -p lan --example embed -- "<prompt>"`).
+See [`lan-core/examples/embed.rs`](lan-core/examples/embed.rs) for a host that reacts to
+events as they arrive, and
+[`lan-core/examples/conversation.rs`](lan-core/examples/conversation.rs) for the two-turn
+version (`cargo run -p lan-core --example embed -- "<prompt>"`, with a provider key set as
+above).
 
 ## ACP
 
@@ -264,7 +281,11 @@ is where the definition of "successful" lives — above, that is the `0` arm.
 - **Approval** — `--approve prompt` puts every consequential call to you first, with the
   command or the changed keys shown; `always` (the default on the CLI) and `never` are the
   other two settings. Over ACP the default is `prompt`, since there is a client to ask.
-  Embedders implement `Approver` to answer however they like.
+  In-process there is no policy setting to pass: `Approver` is the seam, `AllowAll` (what a
+  run with no approver gets) and `DenyAll` ship in `lan-core`, and everything between them —
+  allow edits but deny the network, ask over Slack with a timeout, escalate after the third
+  refusal — is an impl ([ADR-0010](docs/adr/0010-the-crate-is-the-workflow-surface.md)). A
+  refusal names its reason, since that reason is what the model reads as the call's result.
 - **`.git` carve-out** — `.git/hooks` and `.git/config` are denied to the file tools by
   default: a file written there runs on the next commit, which turns an edit into code
   execution outside anything approval covers. The rest of `.git` stays writable, since git
@@ -292,9 +313,10 @@ is the workflow surface, the host owns the boundary, and the binary keeps only t
 above. [docs/REDESIGN.md](docs/REDESIGN.md) is the honest ledger of that transition.
 **Phase A has landed** — `watch` retired with its bounds moved onto `RunConfig` and
 `lan run`, the fingerprint kept as a utility, shell on by default, the shipped container
-replaced by documented patterns, and the CLI grammar with its exit codes. Phases B (crate
-split), C (the SDK proper) and D (bindings) are open, and this README describes only what
-is built.
+replaced by documented patterns, and the CLI grammar with its exit codes. **Phase B has
+landed** too — the split into `lan-core`, `lan-acp`, and the binary, MCP behind a feature,
+and approval as the `Approver` trait alone. Phases C (the SDK proper) and D (bindings) are
+open, and this README describes only what is built.
 
 Still open, and named honestly: compaction tuning, the packages convention, and provider
 OAuth remain, and **nobody has driven this from Zed or JetBrains yet** — it is verified

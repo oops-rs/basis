@@ -1,16 +1,17 @@
 # lan — Architecture
 
-> rev 7 · 2026-08-11 · **lan** — **L**ightweight **A**gent **N**ucleus
+> rev 8 · 2026-08-11 · **lan** — **L**ightweight **A**gent **N**ucleus
 > The *how*. For the *why* — problem, idea, bets — see [`PROPOSAL.md`](PROPOSAL.md);
 > locked decisions live in [`adr/`](adr/); deferred ideas in [`proposals/`](proposals/);
 > research grounding in [`p0-groundwork.md`](p0-groundwork.md).
 > **Note (2026-08-11):** ADR-0010…0015 redirect the design toward an SDK-first
-> shape. **Phase A of that transition has landed** — watch retired, bounds moved
-> onto runs, shell default flipped, no shipped container, the CLI grammar of
-> ADR-0015 — and §2 and §4 below describe the state after it. The crate split
-> (Phase B) and the SDK work (Phase C) are not built; where this document still
-> describes the P0–P4 shape it says so. The ledger and phases are in
-> [`REDESIGN.md`](REDESIGN.md).
+> shape. **Phases A and B of that transition have landed** — watch retired,
+> bounds moved onto runs, shell default flipped, no shipped container, the CLI
+> grammar of ADR-0015, and the split into `lan-core` / `lan-acp` / the binary
+> with MCP behind a feature and approval as a trait — and §2 and §4 below
+> describe the state after them. The SDK proper (Phase C) and bindings (Phase D)
+> are not built; where this document still describes the P0–P4 shape it says so.
+> The ledger and phases are in [`REDESIGN.md`](REDESIGN.md).
 > Reference bar: [pi](https://github.com/earendil-works/pi) (earendil-works) — minimal core, complete harness.
 > General-purpose: no domain assumptions. Periodic bug-checking is one use case, never a design input.
 
@@ -48,7 +49,7 @@ hot-reloadable extensions. Two pi decisions independently validate ours:
 | Extensions (custom tools, event interception) | MCP servers + subprocess hooks, allow/deny/modify (§3) ✅ | built |
 | Packages (shareable bundles) | Directory convention over skills/templates/hooks/MCP — defer | later |
 | RPC / headless mode | `run --json` event stream + **ACP** (standard, not bespoke) ✅ | built |
-| SDK | The harness is a Rust crate on Mentra — embed in-process; other languages use ACP | free |
+| SDK | `lan-core`, a Rust crate on Mentra — embed in-process; other languages use ACP | free |
 | TUI / themes / keybindings | Out of scope by design — ACP clients own presentation | — |
 | Provider OAuth login flows | API-key auth first; OAuth per provider later | later |
 
@@ -82,7 +83,7 @@ Rust binary. Equivalent coverage, Rust-native:
 | Event interception (block/modify tool calls) | **Hooks**: Mentra's authorization/policy layer in-process + subprocess hooks (exec a command, JSON in/out, allow/deny/modify) |
 | Custom commands | Prompt templates, surfaced as ACP commands |
 | Custom UI | ACP client's job (permission requests, input prompts are protocol messages) |
-| In-process extension with full API access | The Rust crate: the harness is a library first, binary second |
+| In-process extension with full API access | The `lan-core` crate: the harness is a library first, binary second |
 
 > If subprocess hooks + MCP prove too coarse, an embedded scripting layer (wasm or rhai) is the
 > escalation path — decided by evidence, not up front.
@@ -93,26 +94,33 @@ Rust binary. Equivalent coverage, Rust-native:
 flowchart LR
   subgraph clients["ACP clients (adopted)"]
     zed["Zed · JetBrains"]
-    web["acp-ui (web) via ws bridge"]
+    web["acp-ui (web)"]
   end
-  subgraph bin["lan binary"]
-    acp["ACP server"]
-    headless["run"]
+  subgraph bin["lan — the binary"]
+    entry["CLI grammar · terminal approver"]
+    br["ws bridge (extractable)"]
   end
-  subgraph lib["lan crate (the SDK)"]
+  subgraph adapter["lan-acp — the ACP adapter"]
+    srv["server · session mapping · modes"]
+  end
+  subgraph lib["lan-core — the SDK"]
     sess["sessions · branching · compaction"]
     ctx["context: AGENTS.md · skills · templates"]
-    ext["hooks · MCP client"]
+    ext["hooks · MCP client (mcp feature)"]
     rt["Mentra runtime"]
   end
   subgraph box["host OS — isolation, if any, is the operator's"]
     wsp[("workspace  rw")]
   end
   llm[("providers")]
-  zed -- stdio --> acp
-  web --> acp
-  acp --> lib
-  headless --> lib
+  host["a Rust host, in-process"]
+  zed -- stdio --> entry
+  web -- ws --> br
+  br --> srv
+  entry --> srv
+  entry --> lib
+  host --> lib
+  srv --> lib
   rt --> wsp
   rt --> llm
   sess --> rt
@@ -121,8 +129,15 @@ flowchart LR
 ```
 
 - **Crate layering mirrors pi's package layering**: mentra-provider ≈ pi-ai, mentra ≈
-  pi-agent-core, lan ≈ pi-coding-agent minus TUI. The lan crate is the in-process SDK; the
-  binary is a thin shell over it.
+  pi-agent-core, lan ≈ pi-coding-agent minus TUI. Since ADR-0011 lan is itself three crates,
+  split by dependency weight rather than by release schedule (they share one version):
+  **`lan-core`** is the in-process SDK and carries no protocol, no transport, and no TTY
+  code; **`lan-acp`** is the ACP adapter over its event stream and seams, opt-in by
+  dependency; **`lan`** is the binary over both, and still what an editor spawns. MCP is a
+  default-on `mcp` feature of `lan-core`, so an embedder can compile a core that has never
+  heard of it (ADR-0012). The websocket bridge stays in the binary, marked extractable: it
+  is ACP-ecosystem tooling with no lan-specific knowledge, and never an identity argument
+  for lan.
 - **ACP is the default mode** — running `lan` with no subcommand serves the protocol, because
   the embedded case is the primary case.
 - **Sessions**: an ACP session *is* a mentra agent — lan uses the persisted agent id as the
@@ -173,7 +188,8 @@ flowchart LR
 
 This table is the record of how lan was built, not the current plan. What follows P5 is the
 SDK-first transition of ADR-0010…0015, phased in [`REDESIGN.md`](REDESIGN.md) §3: Phase A
-(posture and pruning) has landed; B (crate split), C (the SDK), and D (bindings) are open.
+(posture and pruning) and Phase B (structure — the crate split, the `mcp` feature, approval
+as a trait) have landed; C (the SDK) and D (bindings) are open.
 
 Validation stays deliberately varied — a refactor, a doc task, a test-writing task, *and* a
 periodic check — so no single use case bends the API toward itself.
