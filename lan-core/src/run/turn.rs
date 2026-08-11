@@ -32,6 +32,12 @@ pub struct TurnOptions {
     /// back as a failed turn even though nothing was rolled back. The work is
     /// kept either way; the report is what disagrees. `lan-core`'s
     /// `tests/cancellation.rs` pins that behavior so a change to it is noticed.
+    ///
+    /// A stopped turn reports no [`Bound`](crate::Bound), unlike
+    /// [`token_budget`](Self::token_budget) below. A bound is an allowance the
+    /// run outgrew, and a script is right to retry one with a bigger number; a
+    /// stop is an instruction whoever holds this token issued, and retrying it
+    /// would undo their decision.
     pub stop: Option<CancellationToken>,
     /// Gives up on the turn after this long.
     pub deadline: Option<Duration>,
@@ -43,7 +49,14 @@ pub struct TurnOptions {
     /// full, so the round that crosses the line is always allowed to finish.
     /// It ends the turn *gracefully* at the next boundary — what the model
     /// already committed is kept, so the work is not thrown away for being one
-    /// round too long.
+    /// round too long — and the report names
+    /// [`Bound::TokenBudget`](crate::Bound::TokenBudget) as what ended it.
+    ///
+    /// The caveat on [`stop`](Self::stop) about *how* a graceful end is
+    /// reported applies here too, and matters more: a turn stopped after a tool
+    /// round comes back failed for want of a final message, and without the
+    /// named bound that failure is indistinguishable from a provider's.
+    /// `lan-core`'s `tests/token_budget.rs` drives exactly that shape.
     pub token_budget: Option<u64>,
     /// An allowance this turn shares with every other run drawing on it.
     ///

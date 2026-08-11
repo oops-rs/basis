@@ -26,9 +26,14 @@ pub(crate) const EXIT_BOUNDED: u8 = 3;
 
 /// The exit code a finished run earns.
 ///
-/// A tripped bound is checked first because it also failed: the outcome on the
-/// stream is an error either way, and "you ran out of the time you set" is the
-/// more useful of the two things that are true (ADR-0015).
+/// A tripped bound is read first and answers on its own. Usually the run also
+/// failed — a deadline or a tool budget ends it with no final message — and
+/// "you ran out of the time you set" is the more useful of the two things that
+/// are true (ADR-0015). A token budget is the case where they come apart: it
+/// ends the run gracefully, so a run can answer *and* be bounded, and that
+/// still earns [`EXIT_BOUNDED`]. The answer reached stdout either way, and a
+/// script that read `0` would take a run that stopped for want of allowance as
+/// one that finished its work.
 pub(crate) fn exit_code<S>(report: &RunReport<S>) -> u8 {
     match report.stopped_by {
         Some(_) => EXIT_BOUNDED,
@@ -85,6 +90,29 @@ mod tests {
             exit_code(&failed),
             exit_code(&bounded),
             "a shell script must be able to tell the two apart"
+        );
+    }
+
+    #[test]
+    fn a_run_that_answered_on_a_spent_token_budget_still_exits_bounded() {
+        // The bound that ends a run gracefully: the transcript is committed and
+        // the answer is real, so `outcome` is `Ok` while `stopped_by` names the
+        // allowance. `Some(_)` already covers it, but only this says which
+        // answer that is — and it is the one a caller of `--token-budget` sees,
+        // where every other signal says the run finished.
+        let answered = report(RunOutcome::Ok, Some(lan_core::Bound::TokenBudget));
+        let unanswered = report(
+            RunOutcome::Error {
+                message: "run completed without a final assistant message".to_string(),
+            },
+            Some(lan_core::Bound::TokenBudget),
+        );
+
+        assert_eq!(exit_code(&answered), EXIT_BOUNDED);
+        assert_eq!(
+            exit_code(&unanswered),
+            EXIT_BOUNDED,
+            "the same bound earns the same code whether or not prose came back"
         );
     }
 }

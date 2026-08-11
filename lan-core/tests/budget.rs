@@ -190,6 +190,12 @@ async fn a_zero_token_budget_is_what_refusing_avoids() {
     // without a final assistant message" — a provider-shaped failure for an
     // accounting decision, with the prompt left committed.
     //
+    // One part of that has since improved: mentra records which bound ended a
+    // run, so the report names the token budget even though the message still
+    // does not. What refusing avoids is narrower for it and no less real — a
+    // turn that spent a slot in the conversation on nothing, failing over a
+    // limit it could have been told about before the prompt went out.
+    //
     // If this ever stops being true, the argument on `BudgetPool` for refusing
     // instead needs rewriting rather than silently going stale.
     let endpoint = ScriptedEndpoint::start();
@@ -211,7 +217,11 @@ async fn a_zero_token_budget_is_what_refusing_avoids() {
         message.contains("without a final assistant message"),
         "the failure reads as a provider problem: {message}"
     );
-    assert_eq!(report.stopped_by, None, "and names no bound as the cause");
+    assert_eq!(
+        report.stopped_by,
+        Some(lan_core::Bound::TokenBudget),
+        "though the bound names itself, which is what tells the two apart"
+    );
     assert_eq!(endpoint.served(), 0, "no round ever ran");
     assert_eq!(
         run.history().len(),

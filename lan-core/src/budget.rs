@@ -105,8 +105,17 @@ use crate::{
 /// nothing, and because it owes its caller a final assistant message that never
 /// arrived, it surfaces as `EmptyAssistantResponse` — a provider-shaped error
 /// for an accounting decision, with the user's prompt left committed to the
-/// transcript. `lan-core/tests/budget.rs` pins that upstream behavior so the
+/// transcript. The report does name
+/// [`Bound::TokenBudget`](crate::Bound::TokenBudget) now that mentra records
+/// which bound ended a run, so the error is at least not mistaken for a broken
+/// provider; the wasted turn and the stranded prompt are what refusing still
+/// avoids. `lan-core/tests/budget.rs` pins that upstream behavior so the
 /// reasoning stays checkable.
+///
+/// A run already *underway* when the pool drains is stopped rather than
+/// refused: it ends at its next round boundary, keeps what it committed, and
+/// reports [`Bound::TokenBudget`](crate::Bound::TokenBudget). Two answers on
+/// purpose — the refusal says nothing was spent, the bound says something was.
 ///
 /// A caller that would rather not mint at all asks first, since both readings
 /// are honest live numbers:

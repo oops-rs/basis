@@ -286,7 +286,10 @@ impl RunConfig {
     /// Caps the tokens the run may report using, input plus output.
     ///
     /// Soft: the round that crosses the line is allowed to finish, because
-    /// usage is only known once a round has streamed in full.
+    /// usage is only known once a round has streamed in full. The run ends at
+    /// that boundary keeping everything it committed, and says so —
+    /// [`Bound::TokenBudget`] on the report, exit `3` from the CLI — whether or
+    /// not the work it kept amounts to an answer.
     pub fn with_token_budget(self, token_budget: u64) -> Self {
         Self {
             token_budget: Some(token_budget),
@@ -355,16 +358,15 @@ impl RunConfig {
 
 /// A bound that ended a run before its work did.
 ///
-/// Separate from [`RunOutcome`] because the two answer different questions. A
-/// bounded run *failed* in the sense that no final message arrived, and it is
-/// reported that way on the stream; but "the model ran out of the time you gave
-/// it" and "the provider refused the request" call for different reactions, and
-/// a caller — the CLI's exit code, or a script driving many runs — should not
-/// have to read an error message to tell them apart (ADR-0015).
-///
-/// A token budget is deliberately absent: crossing it ends the turn *gracefully*
-/// at the next round boundary, so the run finishes with [`RunOutcome::Ok`] and
-/// keeps what it committed. There is nothing to distinguish.
+/// Separate from [`RunOutcome`] because the two answer different questions.
+/// "The model ran out of the time you gave it" and "the provider refused the
+/// request" call for different reactions, and a caller — the CLI's exit code,
+/// or a script driving many runs — should not have to read an error message to
+/// tell them apart (ADR-0015). The outcome says whether an answer arrived; this
+/// says whether an allowance is what ended the run, and the two are
+/// independent. [`Deadline`](Self::Deadline) and [`ToolBudget`](Self::ToolBudget)
+/// always arrive alongside [`RunOutcome::Error`], because no final message
+/// does; [`TokenBudget`](Self::TokenBudget) can arrive on a run that answered.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 #[non_exhaustive]
 pub enum Bound {
@@ -372,6 +374,27 @@ pub enum Bound {
     Deadline,
     /// [`RunConfig::with_tool_budget`] — the run made all the calls it had.
     ToolBudget,
+    /// [`RunConfig::with_token_budget`], or a [`BudgetPool`](crate::BudgetPool)
+    /// the run drew dry — it spent its allowance and was refused another round.
+    ///
+    /// The odd one out, and worth knowing why before branching on it. This
+    /// bound is *graceful*: mentra ends the run at a round boundary keeping
+    /// everything committed so far, exactly as if the model had finished. So a
+    /// run can report [`RunOutcome::Ok`] with an ordinary answer *and* this
+    /// bound, which is the honest description of "you got an answer, and the
+    /// allowance is why there is not more of one". Whether an answer arrives
+    /// comes down to what the last committed message was: prose, and the turn
+    /// succeeds; a tool result, and it fails owing a final message it never
+    /// got.
+    ///
+    /// Reportable at all only because mentra records the decision at the
+    /// boundary it makes it
+    /// ([`RunOptions::ended_early`](mentra::runtime::RunOptions::ended_early)).
+    /// Comparing usage against the budget afterwards would answer a different
+    /// question — what is true now, rather than what the runner decided on —
+    /// and a pooled run can cross the line without being the run that was
+    /// stopped by it.
+    TokenBudget,
 }
 
 /// What a completed run produced, alongside the sink it wrote to.
@@ -386,6 +409,10 @@ pub struct RunReport<S> {
     pub final_message: Option<String>,
     pub outcome: RunOutcome,
     /// Which bound ended the run, when one did rather than the work.
+    ///
+    /// Neither field implies the other: a bounded run usually failed for want
+    /// of a final message, but see [`Bound::TokenBudget`], which a run that
+    /// answered can carry.
     pub stopped_by: Option<Bound>,
     /// What the run reported spending. Present whether it succeeded or not: a
     /// turn that failed on its fourth round still spent the first three.

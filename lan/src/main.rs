@@ -46,11 +46,12 @@
 //! | [`EXIT_OK`](exit::EXIT_OK) | the run finished |
 //! | [`EXIT_FAILED`](exit::EXIT_FAILED) | the run failed, or lan could not start it |
 //! | [`EXIT_USAGE`](exit::EXIT_USAGE) | the invocation was wrong |
-//! | [`EXIT_BOUNDED`](exit::EXIT_BOUNDED) | a bound tripped: `--deadline` or `--tool-budget` |
+//! | [`EXIT_BOUNDED`](exit::EXIT_BOUNDED) | a bound tripped: `--deadline`, `--tool-budget`, or `--token-budget` |
 //!
-//! A `--token-budget` is absent from the last row on purpose: crossing it ends
-//! the run gracefully with everything it committed, so the run *succeeded* and
-//! exits `0`.
+//! `--token-budget` is the one that can land on a run which *answered*: it ends
+//! the run gracefully at a round boundary, so the prose is real and reaches
+//! stdout, and the code is what says the allowance rather than the model
+//! decided there would be no more of it.
 
 mod approver;
 mod bridge;

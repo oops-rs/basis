@@ -121,11 +121,12 @@ Exit codes are contract, so a caller branches without parsing anything:
 | `0` | the run finished |
 | `1` | the run failed, or lan could not start it |
 | `2` | the invocation was wrong |
-| `3` | a bound tripped (`--deadline`, `--tool-budget`); committed work was kept |
+| `3` | a bound tripped (`--deadline`, `--tool-budget`, `--token-budget`); committed work was kept |
 
 `3` is deliberately not `1`: "the model ran out of the time you gave it" and "the provider
-refused the request" call for different reactions. A crossed `--token-budget` is absent from
-that row on purpose — it ends the run gracefully, so the run succeeded and exits `0`.
+refused the request" call for different reactions. `--token-budget` is the bound worth
+reading twice, because it ends a run *gracefully* — the answer so far is real and goes to
+stdout, and `3` is what says the allowance, not the model, is why there is not more of it.
 
 In-process, the harness is **`lan-core`** — the run lifecycle, workspace discovery, the
 event stream, and the seams, with no protocol, no transport, and no terminal code in the
@@ -182,8 +183,8 @@ let report = lan_core::run(
 
 The bounds are builders on either shape — `RunConfig` for a one-shot, `RunSpec` for a run
 minted from a workspace — and `report.stopped_by` carries the distinction the exit code
-makes: `Some(lan_core::Bound::Deadline)`, `Some(lan_core::Bound::ToolBudget)`, or `None`
-when the work is what ended the run:
+makes: `Some(lan_core::Bound::Deadline)`, `Some(lan_core::Bound::ToolBudget)`,
+`Some(lan_core::Bound::TokenBudget)`, or `None` when the work is what ended the run:
 
 ```rust
 let config = lan_core::RunConfig::new("/repo", "bump the deps and fix the fallout")

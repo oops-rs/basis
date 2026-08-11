@@ -9,7 +9,10 @@
 
 use std::path::PathBuf;
 
-use mentra::{ContentBlock, Session};
+use mentra::{
+    ContentBlock, Session,
+    runtime::{EarlyEnd, RunOptions},
+};
 use serde::de::DeserializeOwned;
 use serde_json::Value;
 use tokio::sync::oneshot;
@@ -377,16 +380,22 @@ impl PreparedRun {
         drawable(&options)?;
         let turn = self.begin(&prompt, sink, approver)?;
 
+        // Kept rather than passed straight in: mentra takes the options by
+        // value, and the clone is how the run's own account of why it ended
+        // gets back here. See [`ended_on`].
+        let run_options = options.into_run_options();
+        let observed = run_options.clone();
+
         let result = self
             .session
-            .append_turn_with_options(vec![ContentBlock::text(prompt)], options.into_run_options())
+            .append_turn_with_options(vec![ContentBlock::text(prompt)], run_options)
             .await;
 
         let ended = match &result {
             Ok(message) => Ended::Answered(Some(message.text())),
             Err(error) => Ended::Failed(error),
         };
-        self.finish(turn, ended).await
+        self.finish(turn, ended, &observed).await
     }
 
     /// One typed turn. Identical to [`turn`](Self::turn) but for the one call
@@ -412,11 +421,17 @@ impl PreparedRun {
         drawable(&options)?;
         let turn = self.begin(&prompt, sink, approver)?;
 
+        // The same clone the untyped turn keeps, for the same reason: a typed
+        // turn is boundable like any other and owes the same account of why it
+        // ended.
+        let run_options = options.into_run_options();
+        let observed = run_options.clone();
+
         let result = self
             .session
             .append_turn_to_output::<Value>(
                 vec![ContentBlock::text(prompt)],
-                options.into_run_options(),
+                run_options,
                 spec.into_terminal_spec(),
             )
             .await;
@@ -431,7 +446,7 @@ impl PreparedRun {
             Err(error) => Ended::Failed(error),
         };
 
-        let report = self.finish(turn, ended).await?;
+        let report = self.finish(turn, ended, &observed).await?;
 
         match typed {
             Ok(Ok(value)) => Ok(OutputReport { value, report }),
@@ -484,11 +499,14 @@ impl PreparedRun {
     ///
     /// Classifying `ended` here rather than at each call site is what keeps one
     /// answer to "did this run succeed" — a second site would be a second
-    /// opinion.
+    /// opinion. `observed` is the caller's clone of the options the run was
+    /// given, and is what the same single answer to "and what ended it" is read
+    /// from.
     async fn finish<S: EventSink>(
         &self,
         turn: Turn<S>,
         ended: Ended<'_>,
+        observed: &RunOptions,
     ) -> Result<RunReport<S>, RunError> {
         let Turn {
             session_id,
@@ -503,13 +521,15 @@ impl PreparedRun {
         let (mut sink, usage) = forwarder.await?;
 
         let (final_message, outcome, stopped_by) = match ended {
-            Ended::Answered(final_message) => (final_message, RunOutcome::Ok, None),
+            Ended::Answered(final_message) => {
+                (final_message, RunOutcome::Ok, ended_on(observed, None))
+            }
             Ended::Failed(error) => (
                 None,
                 RunOutcome::Error {
                     message: error.to_string(),
                 },
-                tripped_bound(error),
+                ended_on(observed, Some(error)),
             ),
             // The turn itself completed, so mentra kept the exchange — but the
             // caller asked for a shape and did not get one, and a stream that
@@ -561,6 +581,31 @@ enum Ended<'a> {
     Failed(&'a mentra::error::RuntimeError),
     /// The turn completed, but its answer did not fit the requested type.
     Mismatched(&'a serde_json::Error),
+}
+
+/// Which bound ended the turn, if one did.
+///
+/// Two sources, asked in this order because only one of them is the runner's
+/// own account. mentra records a graceful early end at the boundary it decides
+/// on — reachable here through the caller's clone of the options — while
+/// [`tripped_bound`] can only read a failure after the fact. So the record is
+/// consulted first and on *both* arms: a run that ends on its token budget with
+/// the assistant's answer already committed returns an ordinary `Ok` carrying
+/// ordinary prose, and nothing in that result says an allowance is why there is
+/// no more of it.
+///
+/// [`EarlyEnd::StopRequested`] deliberately maps to nothing. A stop is an
+/// instruction the caller issued rather than an allowance the run outgrew, and
+/// lan has no `Bound` for it — inventing one would put a caller's own stop
+/// button on the same exit code as running out of budget.
+fn ended_on(observed: &RunOptions, error: Option<&mentra::error::RuntimeError>) -> Option<Bound> {
+    match observed.ended_early() {
+        Some(EarlyEnd::TokenBudget) => Some(Bound::TokenBudget),
+        // `EarlyEnd` is non-exhaustive, and a variant lan has not been taught
+        // is not a bound lan can name. Falling through leaves the failure to
+        // speak for itself rather than guessing.
+        _ => error.and_then(tripped_bound),
+    }
 }
 
 /// Which of the run's own bounds ended the turn, if one did.
@@ -671,5 +716,81 @@ mod tests {
         // retried it as if it had merely run out of time would retry forever.
         assert_eq!(tripped_bound(&RuntimeError::EmptyAssistantResponse), None);
         assert_eq!(tripped_bound(&RuntimeError::Cancelled), None);
+    }
+
+    /// The options a run that ended on `end` hands back to whoever kept a clone.
+    fn recorded(end: EarlyEnd) -> RunOptions {
+        let slot = std::sync::OnceLock::new();
+        let _ = slot.set(end);
+        RunOptions {
+            early_end: std::sync::Arc::new(slot),
+            ..RunOptions::default()
+        }
+    }
+
+    #[test]
+    fn a_run_that_answered_still_names_the_budget_that_ended_it() {
+        // The case that makes reading mentra's record load-bearing rather than
+        // decorative, and the reason both arms consult it: the turn returns an
+        // ordinary `Ok` carrying ordinary prose, so nothing in the result tells
+        // "the model was done" from "the allowance ran out" except what the
+        // runner wrote down at the boundary it decided at.
+        //
+        // Checked here rather than end to end because lan cannot reach the
+        // shape from outside: mentra only re-checks the budget after a
+        // committed final message when a steer or a follow-up is queued behind
+        // it, and lan-core exposes neither.
+        assert_eq!(
+            ended_on(&recorded(EarlyEnd::TokenBudget), None),
+            Some(Bound::TokenBudget)
+        );
+    }
+
+    #[test]
+    fn a_budget_that_ends_a_run_owing_an_answer_is_not_read_as_a_provider_failure() {
+        // The shape a driven run reaches — `tests/token_budget.rs` — where the
+        // failure is real but the reason for it is the allowance. Classifying
+        // by error alone would exit 1 here, sending someone after a broken
+        // provider when the fix is a larger budget.
+        use mentra::error::RuntimeError;
+
+        assert_eq!(
+            ended_on(
+                &recorded(EarlyEnd::TokenBudget),
+                Some(&RuntimeError::EmptyAssistantResponse)
+            ),
+            Some(Bound::TokenBudget)
+        );
+    }
+
+    #[test]
+    fn a_graceful_stop_is_not_reported_as_a_bound() {
+        // A caller's own stop button is an instruction, not an allowance the
+        // run outgrew. lan has no `Bound` for it, and borrowing one would give
+        // a client's stop the exit code of a run that ran out of budget.
+        use mentra::error::RuntimeError;
+
+        assert_eq!(ended_on(&recorded(EarlyEnd::StopRequested), None), None);
+        assert_eq!(
+            ended_on(
+                &recorded(EarlyEnd::StopRequested),
+                Some(&RuntimeError::EmptyAssistantResponse)
+            ),
+            None
+        );
+    }
+
+    #[test]
+    fn a_run_that_recorded_nothing_is_classified_by_its_failure_alone() {
+        use mentra::error::RuntimeError;
+
+        assert_eq!(ended_on(&RunOptions::default(), None), None);
+        assert_eq!(
+            ended_on(
+                &RunOptions::default(),
+                Some(&RuntimeError::DeadlineExceeded)
+            ),
+            Some(Bound::Deadline)
+        );
     }
 }
