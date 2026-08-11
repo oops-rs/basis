@@ -42,7 +42,7 @@ its reason again, over mentra `15fdcfe`) — and its rows carry those.
 | `lan "<prompt>"` shorthand, `run -`, ACP first-line signpost | 0015 | **Built** (`35c9ccb`) — a positional naming no subcommand is a prompt, `--` escapes, `run -` reads stdin, and a first line that is not JSON-RPC exits with the signpost |
 | Crate split (`lan-core` / `lan-acp` / binary) | 0011 | **Built** (`fbcacb4`) — three crates on one version; `agent-client-protocol` and `blocking` are out of `lan-core`'s graph, the bridge stays in the binary marked extractable [1] |
 | MCP behind a feature | 0011/0012 | **Built** (`a4c259c`) — `mcp`, default-on; `default-features = false` compiles a `lan-core` with no MCP concept at all [2] |
-| Approval enum → trait impls | 0010 | **Built** (`a4c259c`, `6192230`) — `ApprovalPolicy` is gone: `ApprovalGate` authorizes, `AllowAll` / `DenyAll` decide, the terminal approver is the binary's, and `lan_acp::ApprovalMode` holds the protocol's mode list. `--approve` is unchanged [3] [4] |
+| Approval enum → trait impls | 0010 | **Built** (`a4c259c`, `6192230`) — `ApprovalPolicy` is gone: `ApprovalGate` authorizes, `AllowAll` / `DenyAll` decide, the terminal approver is the binary's, and `lan_acp::ApprovalMode` holds the protocol's mode list. `--approve` is unchanged [3] [4] [5] |
 | `Workspace` / run split | 0010 | **Not started** — single `RunConfig`, `prepare()` re-discovers per run |
 | `.output::<T>()` structured output | 0010 | **In between** — mentra ships `Agent::run_to_output` + `TerminalOutputSpec`; lan does not surface it |
 | `BudgetPool` | 0010 | **Not started** (per-run bounds exist upstream; the shared pool does not) |
@@ -80,12 +80,16 @@ not a ledger:
    the wording through `ApprovalAnswer`. That ordering is ADR-0005 working as
    written — the gap went upstream and lan waited for it.
 5. A remembered refusal says why only once. The first denial carries the
-   approver's reason; later calls are answered by mentra's `RuleStore`, whose
-   "blocked by remembered session rule" has no reason field of its own.
-   lan-acp masks it — `ModedApprover` remembers session answers itself — so
-   it shows only for a host calling `deny_and_remember` directly. Threading a
-   reason through `RememberedRule` was wider than `15fdcfe` needed to be;
-   deliberately left as the third upstream candidate under ADR-0005.
+   approver's reason; later calls never reach the approver — mentra's
+   `RuleStore` answers them from a `RememberedRule` that keeps the verdict
+   and its scope but no reason, so the model reads "blocked by remembered
+   session rule". lan-acp masks it: `ModedApprover` remembers the "…for this
+   session" answers itself and restates the reason each time, so the gap
+   shows only for an embedding host whose `Approver` returns
+   `DenyForSession` — the one path that reaches `deny_and_remember`.
+   Threading a reason through `RememberedRule` was wider than `15fdcfe`
+   needed to be; deliberately left as the third upstream candidate under
+   ADR-0005.
 
 Discoveries that shrank the plan: structured output and per-run bounds +
 cancellation were assumed to be new mentra work; both already exist upstream
