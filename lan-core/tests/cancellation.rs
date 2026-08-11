@@ -208,7 +208,8 @@ async fn a_turn_cancelled_mid_flight_reports_a_failed_run() {
         matches!(
             events.last(),
             Some(Event::RunFinished {
-                outcome: RunOutcome::Error { .. }
+                outcome: RunOutcome::Error { .. },
+                ..
             })
         ),
         "a cancelled turn must still close the stream a client is reading"

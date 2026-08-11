@@ -127,6 +127,9 @@ Exit codes are contract, so a caller branches without parsing anything:
 refused the request" call for different reactions. `--token-budget` is the bound worth
 reading twice, because it ends a run *gracefully* — the answer so far is real and goes to
 stdout, and `3` is what says the allowance, not the model, is why there is not more of it.
+A `--json` consumer reads the same fact off the stream instead: a bounded run's
+`run_finished` line carries `"stopped_by":"deadline" | "tool_budget" | "token_budget"`,
+and an unbounded one omits the key, so existing consumers see the lines they always saw.
 
 In-process, the harness is **`lan-core`** — the run lifecycle, workspace discovery, the
 event stream, and the seams, with no protocol, no transport, and no terminal code in the

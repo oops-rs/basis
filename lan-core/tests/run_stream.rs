@@ -75,7 +75,8 @@ async fn a_run_streams_deltas_between_the_bookends() {
         matches!(
             events.last(),
             Some(Event::RunFinished {
-                outcome: RunOutcome::Ok
+                outcome: RunOutcome::Ok,
+                ..
             })
         ),
         "the stream must close with the outcome"
@@ -344,7 +345,8 @@ async fn a_failing_turn_still_closes_the_stream() {
         matches!(
             events.last(),
             Some(Event::RunFinished {
-                outcome: RunOutcome::Error { .. }
+                outcome: RunOutcome::Error { .. },
+                ..
             })
         ),
         "a failed turn must still terminate the stream"
@@ -382,7 +384,8 @@ async fn a_tripped_bound_is_reported_as_a_bound_not_just_a_failure() {
         matches!(
             report.sink.into_events().last(),
             Some(Event::RunFinished {
-                outcome: RunOutcome::Error { .. }
+                outcome: RunOutcome::Error { .. },
+                ..
             })
         ),
         "a bounded run must still terminate the stream"

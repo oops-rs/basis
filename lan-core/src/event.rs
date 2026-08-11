@@ -303,6 +303,12 @@ pub enum Event {
     RunFinished {
         #[serde(flatten)]
         outcome: RunOutcome,
+        /// The bound that ended the run, when one did — the same fact the
+        /// CLI's exit `3` carries, for a consumer reading the stream instead
+        /// of the exit code. Absent, not null, on an unbounded finish, so a
+        /// schema-1 consumer that never heard of it reads the line unchanged.
+        #[serde(skip_serializing_if = "Option::is_none", default)]
+        stopped_by: Option<crate::run::Bound>,
     },
 }
 
@@ -410,11 +416,18 @@ mod tests {
             3,
             Event::RunFinished {
                 outcome: RunOutcome::Ok,
+                stopped_by: None,
             },
         ))
         .expect("serializes");
         assert_eq!(ok["type"], "run_finished");
         assert_eq!(ok["status"], "ok");
+        assert!(
+            !ok.as_object()
+                .expect("an object")
+                .contains_key("stopped_by"),
+            "an unbounded finish is byte-identical to what a schema-1 consumer already reads"
+        );
 
         let failed = serde_json::to_value(EventLine::new(
             3,
@@ -422,11 +435,32 @@ mod tests {
                 outcome: RunOutcome::Error {
                     message: "boom".to_string(),
                 },
+                stopped_by: None,
             },
         ))
         .expect("serializes");
         assert_eq!(failed["status"], "error");
         assert_eq!(failed["message"], "boom");
+    }
+
+    #[test]
+    fn a_bounded_finish_names_its_bound_on_the_stream() {
+        // The exit code says `3`; this is the same fact for a consumer reading
+        // the stream instead. It rides `run_finished` rather than a new event
+        // because a bound is a property of how the run ended, and it can
+        // accompany either status — a token budget can end a run that answered.
+        let line = serde_json::to_value(EventLine::new(
+            2,
+            Event::RunFinished {
+                outcome: RunOutcome::Ok,
+                stopped_by: Some(crate::run::Bound::TokenBudget),
+            },
+        ))
+        .expect("serializes");
+
+        assert_eq!(line["type"], "run_finished");
+        assert_eq!(line["status"], "ok");
+        assert_eq!(line["stopped_by"], "token_budget");
     }
 
     #[test]

@@ -546,6 +546,7 @@ impl PreparedRun {
 
         sink.emit(Event::RunFinished {
             outcome: outcome.clone(),
+            stopped_by,
         })?;
 
         Ok(RunReport {

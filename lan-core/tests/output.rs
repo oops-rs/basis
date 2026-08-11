@@ -267,7 +267,8 @@ async fn a_typed_turn_streams_the_same_bookends_as_any_other() {
     assert!(matches!(
         events.last(),
         Some(Event::RunFinished {
-            outcome: RunOutcome::Ok
+            outcome: RunOutcome::Ok,
+            ..
         })
     ));
 

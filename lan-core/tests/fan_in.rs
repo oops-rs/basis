@@ -139,7 +139,8 @@ async fn two_runs_merge_into_one_stream_and_keep_their_own_order() {
             matches!(
                 events.last(),
                 Some(Event::RunFinished {
-                    outcome: RunOutcome::Ok
+                    outcome: RunOutcome::Ok,
+                    ..
                 })
             ),
             "{tag} must close with its own outcome"

@@ -97,6 +97,7 @@ mod tests {
         writer
             .write(Event::RunFinished {
                 outcome: RunOutcome::Ok,
+                stopped_by: None,
             })
             .expect("writes");
 

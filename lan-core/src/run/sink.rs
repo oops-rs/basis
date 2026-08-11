@@ -133,7 +133,8 @@ mod tests {
 
         assert!(
             sink.emit(Event::RunFinished {
-                outcome: RunOutcome::Ok
+                outcome: RunOutcome::Ok,
+                stopped_by: None
             })
             .is_ok()
         );

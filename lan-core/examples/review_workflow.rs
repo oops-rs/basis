@@ -291,7 +291,7 @@ async fn narrate(merged: &mut MergedEvents<&'static str>) {
         match event {
             Event::ToolQueued { tool_name, .. } => println!("[{tag}] {tool_name}"),
             Event::Notice { severity, message } => println!("[{tag}] {severity:?}: {message}"),
-            Event::RunFinished { outcome } => println!("[{tag}] finished: {outcome:?}"),
+            Event::RunFinished { outcome, .. } => println!("[{tag}] finished: {outcome:?}"),
             _ => {}
         }
     }

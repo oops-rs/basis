@@ -367,7 +367,8 @@ impl RunConfig {
 /// independent. [`Deadline`](Self::Deadline) and [`ToolBudget`](Self::ToolBudget)
 /// always arrive alongside [`RunOutcome::Error`], because no final message
 /// does; [`TokenBudget`](Self::TokenBudget) can arrive on a run that answered.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+#[serde(rename_all = "snake_case")]
 #[non_exhaustive]
 pub enum Bound {
     /// [`RunConfig::with_deadline`] — the run took longer than it was given.

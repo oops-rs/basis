@@ -129,7 +129,8 @@ async fn each_turn_gets_its_own_bookends() {
             matches!(
                 events.last(),
                 Some(Event::RunFinished {
-                    outcome: RunOutcome::Ok
+                    outcome: RunOutcome::Ok,
+                    ..
                 })
             ),
             "the {label} turn must close with an outcome"

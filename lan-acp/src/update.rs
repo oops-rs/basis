@@ -228,7 +228,8 @@ mod tests {
     fn lan_bookends_are_not_acp_updates() {
         assert_eq!(
             session_update(&Event::RunFinished {
-                outcome: RunOutcome::Ok
+                outcome: RunOutcome::Ok,
+                stopped_by: None
             }),
             None
         );
