@@ -214,7 +214,9 @@ The schema is yours to write rather than derived from the type, because its fiel
 descriptions are a *prompt* — they are what the model reads to decide what belongs in each
 field. One thing to know before using it: while a run is answering into a schema it holds
 exactly one tool, the one that *is* the answer. It cannot read a file or run a command on
-that turn, so a reviewer reads on an ordinary turn and shapes on the next.
+that turn, so a reviewer reads on an ordinary turn and shapes on the next. Asking for both
+in one call does not fail loudly — it returns a well-formed answer from a model that opened
+nothing, reported as a success.
 
 ### One allowance, many runs
 
@@ -377,7 +379,10 @@ is where the definition of "successful" lives — above, that is the `0` arm.
 In-process the same loop is nine lines of host code against one long-lived `Workspace`, with
 `Workspace::fingerprint()` in place of the subcommand:
 [`lan-core/examples/watch.rs`](lan-core/examples/watch.rs) is it, kept in the tree as a
-standing check that it stays that short.
+standing check that it stays that short. `fingerprint()` blocks — it spawns `git` and stats
+every tracked file — so a host with a runtime to keep responsive hands it to
+`tokio::task::spawn_blocking`, which needs `'static` and so an `Arc<Workspace>` to move in;
+the example calls it inline because that loop has nothing else to do while it waits.
 
 ## What the workspace contributes
 

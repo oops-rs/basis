@@ -47,7 +47,7 @@ output, cancellation, usage, fan-in, over mentra `fce664a`), `e21d632` (the
 | MCP behind a feature | 0011/0012 | **Built** (`a4c259c`) — `mcp`, default-on; `default-features = false` compiles a `lan-core` with no MCP concept at all [2] |
 | Approval enum → trait impls | 0010 | **Built** (`a4c259c`, `6192230`) — `ApprovalPolicy` is gone: `ApprovalGate` authorizes, `AllowAll` / `DenyAll` decide, the terminal approver is the binary's, and `lan_acp::ApprovalMode` holds the protocol's mode list. `--approve` is unchanged [3] [4] [5] |
 | `Workspace` / run split | 0010 | **Built** (`8b52ebf`) — `Workspace::open` settles context, credential, model, skills, templates, hooks, MCP connections and the approval gate once; `prepare(RunSpec)` mints a run *synchronously*, which is the honest signal that nothing is left to await. `Workspace::fingerprint()` lands on the type its row above promised it to. The free functions stay, as wrappers over `RunConfig::split` [6] [7] [14] |
-| `.output::<T>()` structured output | 0010 | **Built** (`07cf4d1`, over mentra `fce664a`) — `PreparedRun::output::<T>()` and `output_with_options`, with `OutputSpec` / `OutputReport` lan's own and the schema the caller's to write. lan asks mentra for the raw `Value` and deserializes itself, which buys `RunError::OutputMismatch` [9] [12] |
+| `.output::<T>()` structured output | 0010 | **Built** (`07cf4d1`, over mentra `fce664a`; docs corrected in `dae4765`) — `PreparedRun::output::<T>()` and `output_with_options`, with `OutputSpec` / `OutputReport` lan's own and the schema the caller's to write. lan asks mentra for the raw `Value` and deserializes itself, which buys `RunError::OutputMismatch` [9] [12] |
 | `BudgetPool` | 0010 | **Built** (`e21d632`) — the pool *is* mentra's shared `token_usage` counter, so `spent()` is the number the turns are stopped against rather than a tally reconciled later. `RunSpec::with_budget` / `TurnOptions::with_budget` attach one; an exhausted pool refuses the turn with `RunError::BudgetExhausted` before the prompt is sent [10] [11] |
 | Tagged sinks / event fan-in | 0010 | **Built** (`07cf4d1`) — `EventFanIn` mints one `TaggedSink` per run and merges them into `MergedEvents`; the tag rides outside `Event`, so the versioned wire schema is untouched [13] |
 | Cancellation on the public API | 0010 | **Built** (`07cf4d1`) — `TurnOptions::cancellable()` / `stoppable()` / `with_cancel` / `with_stop`, `execute_with_options` and its neighbours on every entry point, and `CancellationToken` re-exported under the rule the commit writes down: every mentra type lan's surface makes a caller *name*, lan re-exports [8] |
@@ -146,7 +146,14 @@ the wins is not a ledger:
     the way to share exactly that accounting, and mentra's own path does not
     use it; lan sets no `tool_profile`, so `task` is available to every run by
     default. The clearest upstream candidate Phase C found (ADR-0005) — lan
-    cannot infer a subagent's spending from outside.
+    cannot infer a subagent's spending from outside. One live observation
+    belongs on the same pile without being a claim about either crate: on the
+    gateway the acceptance runs used, one model failed *every* reading turn
+    with `malformed provider event: assistant turn ended before MessageStopped`
+    where two others on the same gateway did the same work, and what set it
+    apart is that it reached for `task` where they read files directly. One
+    gateway, one model, no reduction — recorded because the delegating path is
+    already where the unknowns are.
 11. **A crossed token budget is a silent success upstream**, which is why two
     lan decisions look the way they do. `mentra/src/agent/runner.rs` answers
     `options.token_budget_exceeded()` with a plain `return Ok(())` at the
@@ -169,22 +176,27 @@ the wins is not a ledger:
     and the reason lan refuses with `BudgetExhausted` before the turn instead
     of passing the zero through.
 12. **A typed turn is a shaping turn, not a working one.** While a run answers
-    into a schema it holds exactly one tool: mentra's terminal-tool gate
-    filters the whole toolset down to the generated tool and forces
-    `ToolChoice::Tool` on it (`mentra/src/agent.rs`, `tools()` and
-    `tool_choice()`). It cannot read a file, run a command, or reach an MCP
-    server on that turn — so asking a reviewer for findings in one `output`
-    call returns an empty list from a model that opened nothing, *and returns
-    it as a success*. Read-then-shape is therefore two turns, which is what
-    `examples/review_workflow.rs` documents at length and what the live run
-    exercised. This is upstream's stated contract rather than an oversight —
-    `run_to_output`'s own rustdoc says it exposes only one forced terminal
-    tool — and the evidence so far says the contract is honest: the session
-    carries the reading across, which is the whole reason a `PreparedRun`
-    outlives a turn. A mode that kept the ordinary toolset alongside the
-    terminal tool is nameable as an upstream ask, but nothing in Phase C
-    showed the two-turn shape costing anything, so it is recorded here rather
-    than filed.
+    into a schema it holds exactly one tool: registering the generated terminal
+    tool opens a gate on the agent (`mentra/src/agent/terminal_output.rs`), and
+    while that gate is open `tools()` filters the whole toolset down to that
+    one tool and `tool_choice()` forces it (`mentra/src/agent.rs`). It cannot
+    read a file, run a command, or reach an MCP server on that turn — so asking
+    a reviewer for findings in one `output` call returns an empty list from a
+    model that opened nothing, *and returns it as a success*. That is not
+    hypothetical: the first live fan-out did exactly that, and the wording that
+    invited it was lan's own — the doctest asked a typed turn to "review the
+    diff on this branch", and the guidance on `OutputSpec::description` held up
+    "call this once you have reviewed every file" as the description to
+    imitate. `dae4765` corrected three doc sites to say what the turn can
+    actually do. Read-then-shape is two turns, which is what
+    `examples/review_workflow.rs` documents at length and what every live run
+    since has exercised. The mechanism is upstream's stated contract rather
+    than an oversight — `run_to_output`'s own rustdoc says it "exposes only one
+    forced terminal tool during this run" — so nothing here is a defect. It is
+    still an ADR-0005 candidate, on ergonomics rather than truth: a mode that
+    kept the ordinary toolset alongside the terminal tool would remove the
+    two-turn ceremony, and a contract that needed three doc corrections in one
+    commit to state plainly is one worth making harder to get wrong.
 13. **A held `RunReport` holds a fan-in's merged stream open.** A finished run
     hands its sink back inside the report, so a report kept alive is a branch
     of `MergedEvents` kept alive — and a host that awaits its runs and its
@@ -212,15 +224,16 @@ turn would emit the same events as any other, and mentra grew
 session to the agent.
 
 What Phase C mostly discovered, though, is where the honest edges are — and
-they are cheaper to name than to close. Two candidates join ADR-0005's list
-and both are about accounting: a `task`-delegated subagent runs on default
-options, so its tokens are invisible to every bound lan can set (footnote 10),
-and a crossed token budget returns an untyped `Ok`, so lan cannot report a
-stop it cannot observe (footnote 11). Two more edges are lan's own to fix
-rather than mentra's — a store knob on `WorkspaceBuilder` (footnote 6) — or
-are upstream's stated contract rather than a gap (footnote 12). Together with
-Phase B's three, that is five upstream candidates named and none of them
-blocking.
+they are cheaper to name than to close. Three candidates join ADR-0005's list.
+Two are about accounting: a `task`-delegated subagent runs on default options,
+so its tokens are invisible to every bound lan can set (footnote 10), and a
+crossed token budget returns an untyped `Ok`, so lan cannot report a stop it
+cannot observe (footnote 11). The third is about ergonomics rather than truth:
+a typed turn holds only its terminal tool, which is upstream's documented
+contract and still costs every workflow a turn of reading before it can shape
+(footnote 12). One more edge is lan's own to fix rather than mentra's — a store
+knob on `WorkspaceBuilder` (footnote 6). Together with Phase B's three, that is
+six upstream candidates named and none of them blocking.
 
 ## 3. Phases
 
@@ -275,7 +288,8 @@ crate really does build with no MCP concept in it.
 1. ✅ `Workspace` / run split: context, skills, templates, MCP connections, and
    provider setup prepared once; runs minted cheaply from it. — `8b52ebf`
 2. ✅ `.output::<T>()` over mentra's typed-output path, which grew a
-   session-level entry point to carry it. — `07cf4d1`, over mentra `fce664a`
+   session-level entry point to carry it. — `07cf4d1`, over mentra `fce664a`;
+   its own docs corrected to the shaping-turn contract in `dae4765`
 3. ✅ Cancellation token on the run API — both signals, abandon and graceful
    stop, on every entry point. — `07cf4d1`
 4. ✅ `BudgetPool` shared across runs. — `e21d632`
@@ -291,15 +305,25 @@ both were run live against a local OpenAI-compatible gateway, and neither
 needed a private door — the surface did not change in `0ff745c`, which is what
 "if either fights the surface, the surface is wrong" was there to detect. The
 fan-out held the ship on a planted panic and reported 38,662 of 80,000 tokens
-spent; the watch ran its first tick and skipped its second at an unchanged
-fingerprint. `watch.rs` stays in the tree as a standing acceptance test: if
-that loop ever stops being trivial, the regression is in the API.
+spent. A separate run of the same example is the sharper evidence: against a
+scratch project with two bugs planted in one file, the correctness reviewer
+found both and invented no third, the folded verdict came back `ship: false`
+naming both, and the pool closed at 32,088 of 120,000 — precision, not only
+detection. The watch ran, skipped at an unchanged fingerprint, ran again after
+an edit, then skipped at the *new* fingerprint, which is the whole
+baseline-only-after-success policy demonstrated in one loop. `watch.rs` stays
+in the tree as a standing acceptance test: if that loop ever stops being
+trivial, the regression is in the API.
 
 One thing the examples taught rather than confirmed, and it belongs here
 rather than in a footnote alone: a typed turn holds exactly one tool, so
-reading and shaping are two turns (footnote 12). That is a fact about the
-surface the acceptance criterion could not have predicted, and writing the
-example is what found it.
+reading and shaping are two turns (footnote 12). The first live fan-out is how
+that was learned — reviewers submitted empty findings, having read nothing, and
+the runs reported success — and lan's own rustdoc had been asking for exactly
+that mistake, so `dae4765` corrected three sites to describe what the turn can
+actually do. A fact about the surface the acceptance criterion could not have
+predicted, found by writing the example and paid for in doc corrections rather
+than in API changes.
 
 ### Phase D — Bindings (evidence-gated)
 
@@ -341,7 +365,8 @@ found here are filed as mentra issues even when fixed immediately (ADR-0005).
   (`fce664a`). The spike found what a spike is for: a typed turn holds exactly
   one tool, so read-then-shape is two turns (footnote 12), and mentra reports
   "never called the terminal tool" with the same error as a malformed stream
-  (footnote 9). Neither cost a surface change.
+  (footnote 9). Neither cost a surface change; the first cost three doc
+  corrections (`dae4765`), which is the cheap way to find that out.
 - **Token accounting is honest about less than it looks like.** `RunUsage`, a
   `--token-budget` and a `BudgetPool` all count what providers *report*, and
   all three are blind to what a run delegates through `task` (footnote 10).

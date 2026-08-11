@@ -161,7 +161,8 @@ flowchart LR
   must answer through a generated terminal tool whose input *is* the answer, which is what
   makes a workflow composable in host Rust rather than in prose-parsing. The stream is
   unchanged; only the return value differs. The cost, and it is upstream's stated contract:
-  that turn holds exactly one tool, so reading and shaping are two turns.
+  that turn holds exactly one tool, so reading and shaping are two turns — asked to do both
+  at once it answers in shape, having opened nothing, and the run reports success.
 - **Sessions**: an ACP session *is* a mentra agent — lan uses the persisted agent id as the
   protocol's session id, so `session/load` is `Runtime::resume_session` and lan stores no
   mapping of its own (ADR-0007). A session outlives a turn, which is what makes conversation
@@ -229,9 +230,9 @@ periodic check — so no single use case bends the API toward itself.
   workarounds. The discipline is direction, not permission — capabilities generic enough for
   any harness land in mentra; lan keeps only harness-specific glue. Track each gap as a mentra
   issue even when fixing it immediately, so the API story stays legible to other mentra users.
-  Five stand named and unfiled in [`REDESIGN.md`](REDESIGN.md) §2's footnotes; none blocks
-  lan, and the two from Phase C are both about token accounting a harness cannot do from
-  outside.
+  Six stand named and unfiled in [`REDESIGN.md`](REDESIGN.md) §2's footnotes; none blocks
+  lan. Three come from Phase C: two about token accounting a harness cannot do from outside,
+  one about the typed turn holding no tool but its own answer.
 - **Compaction quality.** Mentra has the primitive; behavior under long sessions is unproven.
   pi's compaction doc is the reference to study in P0.
 - **Name collision.** `lan` collides with the networking acronym; searchability will be poor.
