@@ -69,16 +69,21 @@ use crate::{
 ///
 /// # What it sees, and what it does not
 ///
-/// Delegated work is inside the pool, which is recent enough to be worth
-/// saying plainly. mentra's `task` intrinsic drives its subagent on the
-/// parent run's [`RunOptions::child`](mentra::runtime::RunOptions::child),
-/// which carries the *same* accounting handle — this pool's counter — and the
-/// same bound, so a fan-out whose runs delegate draws on one figure at every
-/// depth rather than spending beside it. The child's usage reports are relayed
-/// onto the parent's stream too, so [`RunUsage`] agrees with what stopped the
-/// turn. Before mentra `0436bae` none of that held: `task` ran its child on
-/// fresh options, and a delegating fan-out spent more than this pool would
-/// ever admit to.
+/// Delegated work is inside the pool, whichever door it came through. mentra's
+/// `task` intrinsic and lan's own `spawn` (ADR-0016, the door the model
+/// actually holds) both drive the subagent on the parent run's
+/// [`RunOptions::child`](mentra::runtime::RunOptions::child), which carries the
+/// *same* accounting handle — this pool's counter — and the same bound, so a
+/// fan-out whose runs delegate draws on one figure at every depth rather than
+/// spending beside it. What the two doors do NOT share is the tally: `task`
+/// relays its child's usage reports onto the parent's stream, so [`RunUsage`]
+/// agrees with what stopped the turn — but the relay is `pub(crate)` in
+/// mentra, `spawn` cannot reach it, and a `spawn`-delegating run's `RunUsage`
+/// under-reports what the pool honestly charged. The bound is airtight; the
+/// receipt is not. Named as an open upstream candidate in the REDESIGN ledger.
+/// Before mentra `0436bae` none of the bounding held either: `task` ran its
+/// child on fresh options, and a delegating fan-out spent more than this pool
+/// would ever admit to.
 ///
 /// The edge that survives is a refusal rather than an overrun. A delegation
 /// issued once the pool is already crossed inherits an allowance with nothing

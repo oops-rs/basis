@@ -48,9 +48,17 @@ adaptive thinking only on models that support it. Provider/model combinations
 without a requested tier fail explicitly instead of silently lowering it;
 omitting the flag leaves the provider default unchanged.
 
-The agent can read and write files in the workspace and **run commands** — shell and
-background tasks — because a harness that cannot run the test suite does very little real
-work. `--no-shell` shuts the command tools for a run meant to read and report:
+The agent can read and write files in the workspace and **run commands**, and both of those
+reach it through one tool. `spawn` takes a single string: one that starts with `!` is a
+command (`!cargo test`), and anything else is a task handed to a subagent that works on it
+and reports back — one door for *do something I cannot do by thinking*, so an operator
+answers one question rather than two
+([ADR-0016](docs/adr/0016-one-delegation-surface.md)). A task whose own text starts with `!`
+is written `!!`. Commands are on by default because a harness that cannot run the test suite
+does very little real work, and neither mode is ever waved through as a read: `spawn`
+declares itself consequential, so every call is put to whoever answers approval for the run
+before anything happens. `--no-shell` shuts commands off entirely for a run meant to read
+and report:
 
 ```sh
 lan --no-shell "explain how the event stream is assembled"
@@ -74,9 +82,11 @@ lan --approve never  "what does this crate do?"   # look, don't touch
 ```
 
 Read-only calls are never queued for approval — prompting for them just trains you to
-approve without reading. Asking needs a terminal on stdin; without one a request is
-denied rather than silently granted, so an unattended run fails visibly instead of
-quietly doing as it pleases.
+approve without reading. A command is never one of those, and neither is a delegation, so
+both `spawn` modes reach you under `prompt` — and answering one of them "always allow"
+covers the other, since a remembered answer is stored against the tool's name and `spawn`
+is one name. Asking needs a terminal on stdin; without one a request is denied rather than
+silently granted, so an unattended run fails visibly instead of quietly doing as it pleases.
 
 A run nobody is watching should say so itself, with bounds — all unset by default, since an
 attended run has a person who tells "thinking hard" from "stuck" in a way no timer can
@@ -258,10 +268,15 @@ its prompt is sent — a decision with its own name, so a fan-out stops minting 
 of retrying it like a provider error.
 
 Both the pool and `RunReport::usage` count what providers *report*. One that reports
-nothing spends nothing as far as either is concerned. Work a run delegates through
-mentra's `task` tool *is* counted: the subagent runs on the parent's accounting handle and
-its usage reports are relayed onto the parent's stream, so the figure and the bound both
-cover it.
+nothing spends nothing as far as either is concerned. Work a run delegates through `spawn`
+is inside the **bound**: the subagent runs on the parent's accounting handle, so what it
+spends is what a `BudgetPool` meters and what a `--token-budget` stops the parent on. It is
+outside the **tally**: the relay that puts a child's usage on the parent's event stream is
+internal to mentra's own delegation intrinsic and a registered tool cannot reach it, so
+`RunReport::usage` reports what the parent's own rounds cost and under-reports any run that
+delegated. The number that stops a run and the number it says it spent are the same only
+when nothing was delegated; [docs/REDESIGN.md](docs/REDESIGN.md) carries the gap as an open
+upstream candidate rather than as a fixed one.
 
 ### One stream for many runs
 
@@ -376,9 +391,12 @@ want that later wants `with_store_dir` now.
 
 See [`lan-core/examples/embed.rs`](lan-core/examples/embed.rs) for a host that reacts to
 events as they arrive, [`conversation.rs`](lan-core/examples/conversation.rs) for the
-two-turn version, [`watch.rs`](lan-core/examples/watch.rs) for the recurring-run loop, and
+two-turn version, [`watch.rs`](lan-core/examples/watch.rs) for the recurring-run loop,
 [`review_workflow.rs`](lan-core/examples/review_workflow.rs) for the whole fan-out — one
 workspace, one budget, typed findings, one merged stream, and a verdict folded out of them
+— and [`reviewed_shell.rs`](lan-core/examples/reviewed_shell.rs) for an `Approver` that
+reviews the agent's commands with a cheap typed turn of its own, with a remembered rule
+answering the familiar ones before it is ever asked
 (`cargo run -p lan-core --example embed -- "<prompt>"`, with a provider key set as above).
 
 
@@ -496,7 +514,12 @@ the example calls it inline because that loop has nothing else to do while it wa
   replacement input. Any language, process-isolated. A hook that breaks denies by default,
   because a guard that fails open is a guard nobody knows is gone. This is the subprocess
   binding of the interception contract; an embedding host's own `Interceptor` is the other,
-  and both are folded by one chain (see above).
+  and both are folded by one chain (see above). **Migration:** an entry scoped
+  `"tools": ["shell"]` no longer fires. Nothing errors — the name the model calls is now
+  `spawn`, and a `tools` list matches on the exact name, so the hook simply stops running.
+  Match `spawn` instead; a hook that wants commands and not delegations reads the call's own
+  input, where `input` is the string the model wrote and a single leading `!` (never `!!`)
+  is what makes it a command.
 - **Approval** — `--approve prompt` puts every consequential call to you first, with the
   command or the changed keys shown; `always` (the default on the CLI) and `never` are the
   other two settings. Over ACP the default is `prompt`, since there is a client to ask.

@@ -13,8 +13,12 @@ use agent_client_protocol::schema::v1::{
     ContentBlock, ContentChunk, SessionUpdate, TextContent, ToolCall, ToolCallStatus,
     ToolCallUpdate, ToolCallUpdateFields, ToolKind,
 };
+use serde_json::Value;
 
-use lan_core::event::{Event, Mutability};
+use lan_core::{
+    event::{Event, Mutability},
+    tools::SPAWN,
+};
 
 /// Maps one lan event to an ACP session update.
 ///
@@ -47,7 +51,7 @@ pub fn session_update(event: &Event) -> Option<SessionUpdate> {
             input,
         } => SessionUpdate::ToolCall(
             ToolCall::new(tool_call_id.clone(), title(summary, tool_name))
-                .kind(tool_kind(tool_name, *mutability))
+                .kind(tool_kind(tool_name, *mutability, input))
                 .status(ToolCallStatus::Pending)
                 .raw_input(input.clone()),
         ),
@@ -150,11 +154,20 @@ fn title(summary: &str, tool_name: &str) -> String {
 
 /// Classifies a mentra tool for ACP's icon vocabulary.
 ///
-/// Name-based, because that is all the information there is — mentra reports a
-/// name and a mutability, not a category. Unknown names fall back to
-/// mutability, and then to `Other`: a wrong icon is worse than no icon, and a
-/// tool lan has never heard of is exactly the case where guessing is unwise.
-fn tool_kind(tool_name: &str, mutability: Mutability) -> ToolKind {
+/// Name-based, because for every tool but one that is all the information
+/// there is — mentra reports a name and a mutability, not a category. Unknown
+/// names fall back to mutability, and then to `Other`: a wrong icon is worse
+/// than no icon, and a tool lan has never heard of is exactly the case where
+/// guessing is unwise.
+///
+/// [`SPAWN`] is the exception, and the reason this takes the call's input at
+/// all. Since ADR-0016 one name carries two acts — a command and a delegation —
+/// so a name-keyed answer is necessarily wrong for one of them.
+fn tool_kind(tool_name: &str, mutability: Mutability, input: &Value) -> ToolKind {
+    if tool_name == SPAWN {
+        return spawn_kind(input);
+    }
+
     match tool_name {
         "shell" | "bash" | "command" | "background_command" => ToolKind::Execute,
         "files" | "read" | "read_file" => match mutability {
@@ -172,6 +185,60 @@ fn tool_kind(tool_name: &str, mutability: Mutability) -> ToolKind {
             Mutability::Mutating => ToolKind::Edit,
             Mutability::Unknown => ToolKind::Other,
         },
+    }
+}
+
+/// The field `spawn` takes its one string in.
+///
+/// A literal because `lan-core` keeps the name private; see [`spawn_kind`] for
+/// what that costs and what it does not.
+const SPAWN_INPUT: &str = "input";
+
+/// What ACP calls handing work to a subagent, which is nothing.
+///
+/// `ToolKind` in schema v1 offers `Read`, `Edit`, `Delete`, `Move`, `Search`,
+/// `Execute`, `Think`, `Fetch`, `SwitchMode` and `Other`, and none of them
+/// means delegation. `Think` is the nearest name and the wrong one: it promises
+/// internal reasoning with nothing outside the process changed, while a
+/// delegation is consequential enough that lan puts it to the approver, and the
+/// subagent on the other side of it holds `spawn` in its own turn. Rendering
+/// that as a thought would contradict the permission prompt the client has just
+/// been asked to answer.
+///
+/// So `Other` — the schema's own default, and an honest "no category" — until
+/// something can say `delegate`. ACP v2's `ToolKind::Unknown(String)` reserves
+/// leading-underscore values for exactly this kind of extension; v1, which this
+/// crate speaks, has no such escape.
+const DELEGATION: ToolKind = ToolKind::Other;
+
+/// `spawn`'s kind, which its *mode* decides rather than its name (ADR-0016).
+///
+/// The mode is re-derived from the raw string here, and that is a knowing
+/// second reading of the convention `lan_core::tools::spawn` parses exactly
+/// once. It is not free: if the two ever disagree — a new escape, a different
+/// trim — a client renders the wrong icon and nothing says so. What keeps it
+/// tolerable is that this path decides nothing. The typed `{mode, body, cwd}`
+/// is what reaches the approver, the rule store, the hooks and the audit trail;
+/// what reaches ACP is a `ToolQueued` event carrying the string the model
+/// wrote, and lan-core exports no reader for it. The fix is that reader,
+/// exported from the crate that owns the convention — not a second copy that
+/// grows.
+fn spawn_kind(input: &Value) -> ToolKind {
+    let Some(body) = input.get(SPAWN_INPUT).and_then(Value::as_str) else {
+        // Nothing to read, and spawn's own preview will refuse this call before
+        // it runs. Reported as the stronger of the two modes for the reason
+        // spawn's static descriptor is `Process`: a tool that can run commands
+        // should not describe itself as something milder when there is nothing
+        // per-call to go on.
+        return ToolKind::Execute;
+    };
+
+    match body.trim().strip_prefix('!') {
+        // `!!` is the escape a task whose own text starts with `!` is written
+        // with, so it is a delegation and not a command.
+        Some(rest) if rest.starts_with('!') => DELEGATION,
+        Some(_) => ToolKind::Execute,
+        None => DELEGATION,
     }
 }
 
@@ -350,20 +417,101 @@ mod tests {
 
     #[test]
     fn tool_kinds_follow_the_name_then_the_mutability() {
-        assert_eq!(tool_kind("shell", Mutability::Mutating), ToolKind::Execute);
-        assert_eq!(tool_kind("files", Mutability::ReadOnly), ToolKind::Read);
-        assert_eq!(tool_kind("files", Mutability::Mutating), ToolKind::Edit);
-        assert_eq!(tool_kind("grep", Mutability::ReadOnly), ToolKind::Search);
+        let no_input = json!({});
+
+        assert_eq!(
+            tool_kind("shell", Mutability::Mutating, &no_input),
+            ToolKind::Execute
+        );
+        assert_eq!(
+            tool_kind("files", Mutability::ReadOnly, &no_input),
+            ToolKind::Read
+        );
+        assert_eq!(
+            tool_kind("files", Mutability::Mutating, &no_input),
+            ToolKind::Edit
+        );
+        assert_eq!(
+            tool_kind("grep", Mutability::ReadOnly, &no_input),
+            ToolKind::Search
+        );
 
         // An unknown tool falls back to what mentra says it does, and admits
         // ignorance when mentra does not know either.
         assert_eq!(
-            tool_kind("something_new", Mutability::ReadOnly),
+            tool_kind("something_new", Mutability::ReadOnly, &no_input),
             ToolKind::Read
         );
         assert_eq!(
-            tool_kind("something_new", Mutability::Unknown),
+            tool_kind("something_new", Mutability::Unknown, &no_input),
             ToolKind::Other
         );
+    }
+
+    #[test]
+    fn spawn_is_classified_by_its_mode_rather_than_by_its_name() {
+        // The one tool whose name cannot answer for it. mentra reports
+        // `Unknown` mutability on every queued call, so before ADR-0016's map
+        // both of these rendered as `Other`.
+        assert_eq!(
+            tool_kind(
+                SPAWN,
+                Mutability::Unknown,
+                &json!({"input": "!cargo test -q"})
+            ),
+            ToolKind::Execute,
+            "a command is what `shell` always was"
+        );
+        assert_eq!(
+            tool_kind(
+                SPAWN,
+                Mutability::Unknown,
+                &json!({"input": "find every TODO under src/"})
+            ),
+            ToolKind::Other,
+            "ACP v1 has no kind meaning delegation, and `Think` would understate it"
+        );
+        assert_eq!(
+            tool_kind(
+                SPAWN,
+                Mutability::Unknown,
+                &json!({"input": "  !!urgent: rewrite the README"})
+            ),
+            ToolKind::Other,
+            "`!!` escapes a task whose own text starts with `!`; it is not a command"
+        );
+    }
+
+    #[test]
+    fn an_unreadable_spawn_call_reports_the_stronger_mode() {
+        // Nothing per-call to go on, so this answers as spawn's static
+        // descriptor does: `Process`, never the milder of the two.
+        for input in [json!({}), json!({"input": 7}), json!("!cargo test")] {
+            assert_eq!(
+                tool_kind(SPAWN, Mutability::Unknown, &input),
+                ToolKind::Execute,
+                "{input}"
+            );
+        }
+    }
+
+    #[test]
+    fn a_queued_spawn_command_reaches_the_client_as_an_execution() {
+        // The mode lives in the input, so this pins the wiring as well as the
+        // classifier: a call site that forgot to pass the input would still
+        // satisfy the tests above.
+        let update = session_update(&Event::ToolQueued {
+            tool_call_id: "c1".to_string(),
+            tool_name: SPAWN.to_string(),
+            summary: "Run 'cargo test'".to_string(),
+            mutability: Mutability::Unknown,
+            input: json!({"input": "!cargo test"}),
+        })
+        .expect("mapped");
+
+        let SessionUpdate::ToolCall(call) = update else {
+            panic!("expected a tool call");
+        };
+        assert_eq!(call.kind, ToolKind::Execute);
     }
 }

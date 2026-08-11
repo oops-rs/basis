@@ -1,9 +1,9 @@
 # lan — Redesign plan
 
-> rev 6 · 2026-08-11 · The transition from the P0–P4 harness to the SDK-first
+> rev 7 · 2026-08-12 · The transition from the P0–P4 harness to the SDK-first
 > shape decided in [ADR-0010](adr/0010-the-crate-is-the-workflow-surface.md)
-> through [ADR-0015](adr/0015-cli-grammar.md). This document is the honest
-> ledger of that transition: what exists, what is in between, what is not
+> through [ADR-0016](adr/0016-one-delegation-surface.md). This document is the
+> honest ledger of that transition: what exists, what is in between, what is not
 > started. `README.md` and `ARCHITECTURE.md` describe the *shipped* state and
 > are updated per phase as work lands — never ahead of it.
 > **Phases A, B, C and D have landed** (rev 5), with one Phase D item — declared
@@ -16,6 +16,11 @@
 > wave did not do is make this document shorter: each fix is written with what
 > it cost and what it newly exposes, and §2's tally names the candidates the
 > work created on its way to closing the old ones.
+> **Rev 7 builds ADR-0016**, which was decided after rev 6 and is the first ADR
+> here that made lan register a tool of its own. `spawn` is now the model's only
+> route to a command and to a subagent. It reopened the tally the day after it
+> reached zero — three new upstream candidates, all named in §2 — which is what
+> a new surface does when the discipline is working.
 
 ## 1. The target in one paragraph
 
@@ -59,6 +64,12 @@ turn). Three refactors rode along, splitting the files footnote 19 had named —
 `89ccce4` (`lan-acp/src/server.rs`), `665ced6` (`lan/src/main.rs`), `e37f4f3`
 (the ACP integration suite).
 
+Rev 7's wave belongs to no phase either, and to an ADR decided after rev 6:
+ADR-0016's `spawn`. It landed in two, `74ef59f` (the tool, the roster change,
+the depth floor, and the end-to-end suite behind them) and the commit carrying
+this revision (the ACP kind map, the auto-mode example, README and this
+ledger).
+
 | Piece | Decided in | Status today |
 |---|---|---|
 | Shell default-on | 0013 | **Built** (`35c9ccb`) — `ShellAccess::Granted` is the default, `--no-shell` disables |
@@ -81,11 +92,11 @@ turn). Three refactors rode along, splitting the files footnote 19 had named —
 | Recipe + review-workflow examples | 0010/0014 | **Built** (`0ff745c`) — `examples/watch.rs` and `examples/review_workflow.rs`, public-API only, both run live [12] |
 | Declared subprocess tools | 0012 | **Not started** — held for a concrete use case (Bet 7) |
 | Hooks re-founded as authorizer binding | 0012 | **Built** (`e81e5d8`) — interception is one contract with two bindings: an in-process `Interceptor` trait and subprocess hooks, folded by one `Chain` so first-refusal-wins and composing modifications hold for both by construction. `Approver` stays a *sibling* seam rather than a parent — asking a person and rewriting a call are different questions, and mentra keeps them apart for the same reason [15] [16] |
-| Subagents / teams surfaced | 0010 | **In between**, and for a smaller reason than before — `task` stays in the default reach and is now *accounted*: mentra `0436bae` runs the delegated subagent on the parent's `RunOptions::child()` and relays its usage, so delegated tokens reach both the parent's bounds and its stream. `team_*` is still reachable and still awaiting a concrete use case before lan surfaces it deliberately [10] |
+| Subagents / teams surfaced | 0010 | **Built for delegation, still open for teams.** `task` is no longer in the default reach at all: ADR-0016 hid it with `shell` and `background_run` and made delegation `spawn`'s agent mode, which is the deliberate surfacing this row asked for. The accounting that made "reachable by default" tolerable in the meantime is mentra `0436bae`, and half of it survives the change of route — a delegated run still shares the parent's handle and bounds, but the child's usage no longer reaches the parent's *stream*, because that relay is internal to the `task` intrinsic (new candidate, below). `team_*` is still reachable and still awaiting a concrete use case before lan surfaces it deliberately [10] |
 | History location on `WorkspaceBuilder` | 0010 | **Built** (`397ca13`, `71cc59d`) — `with_store_dir(dir)` says where, `with_ephemeral_history()` says nowhere, and `store::list_in` reads back what the first wrote. One private field, so last call wins structurally. Closes the data-directory hole footnote 6 had been recording since Phase C [6] |
 | `session/list` over ACP | 0007/0010 | **Built** (`e81e5d8`) — it had never worked: lan filtered on the workspace's runtime identifier while writing every agent under mentra's `"default"`. `WorkspaceBuilder::open` now tags what it persists. Forward-only, deliberately [17] |
 | Credentials never printed | — | **Built** (`f3529be`) — `ProviderChoice` and `McpServer`'s stdio env hand-write `Debug`: names kept so a misconfiguration stays fixable, values redacted. Provider resolution reads the environment through a passed-in lookup, so the suite passes identically with `LAN_API_KEY`/`LAN_BASE_URL` set and unset [18] |
-| One delegation surface (`spawn`) | 0016 | **Decided, not built** — the model's only door to delegation *and* commands: `spawn("!cmd")` parses once at the boundary into `{mode, body}`, command mode goes to the `Approver` and executes only on approval, a bare query spawns a subagent on `RunOptions::child()`. `shell`, `background_run` and `task` leave the model's roster via `ToolProfile::hide` while staying registered on the runtime, so ADR-0013's posture is untouched — the route changes, not the availability, and `--no-shell` still shuts it at the policy. The policy ladder is existing machinery tiered: pattern rules (`RuleKey { tool_name, pattern }` globbed against the input JSON, which makes a command allowlist expressible as data), then the `Approver` for the residue, then remembered rules that keep their reason. Auto-mode is an `Approver` impl running a toolless typed turn, not a new seam. **Blocked on a piece ADR-0012 decided and nobody built**: `lan-core` has no tool-registration surface — `WorkspaceBuilder::open` never calls `RuntimeBuilder::with_tool` and `ExecutableTool` is not re-exported — so `spawn` is the first tool lan would register. Declared subprocess tools stay held: adjacent binding of the same contract, not this use case |
+| One delegation surface (`spawn`) | 0016 | **Built** (`74ef59f`, with the ACP map, the auto-mode example and these lines in the commit that carries them) — the model's only door to delegation *and* commands. `spawn("!cmd")` is parsed once, at the boundary, into `{mode, body, cwd}`, and that typed triple is what `authorization_preview` presents — so the approver, the rule store, the hooks and the audit trail all dispatch on it and none of them re-reads the string. Both modes are consequential, so neither is waved through under the reads-are-never-asked rule; command mode executes only after the answer. `shell`, `background_run` and `task` left the model's roster via `ToolProfile::hide` while staying registered on the runtime, so ADR-0013's posture is untouched — the route changed, not the availability, and `--no-shell` still refuses at the policy on the path `spawn` calls, verified end to end. The depth guard is lan's own, since mentra's floor is name-specific and does not fire for a registered tool: an agent-id ledger with RAII cleanup, refusing *in the preview* so a remembered allow-rule cannot lift a structural floor (`MAX_DEPTH` 2). The policy ladder is existing machinery tiered — a pattern rule answers first and never reaches the approver, the `Approver` sees only the residue, and a remembered refusal now carries its own reason (mentra `b895ea0`) — and `lan-core/examples/reviewed_shell.rs` walks all three rungs live. Two things about the pattern tier are traps rather than features. mentra globs with `glob-match`, where a single `*` does not cross `/`, and the serialized input carries `cwd`, which is a path: a rule written with one star silently matches nothing, and the operator sees a reviewer they thought they had bypassed rather than an error. And a remembered *answer* is stored bare (`pattern: None`), so `AllowForSession` / `DenyForSession` on `spawn` covers both modes and every body — where an operator could once allow `task` and deny `shell` by name alone, drawing that line now means writing a pattern against the parsed `mode`, which is more expressive and less obvious. **Deviation from the ADR's sketch, deliberately**: no `WorkspaceBuilder::with_tool` and no `ExecutableTool` re-export. mentra's `RuntimeBuilder::with_tool` takes its tool by value and nothing upstream implements the trait for `Box` or `Arc`, so a public registration point would need a hand-forwarded shim — where forgetting `authorization_preview` would present a host's tool to the approver as its static descriptor, the exact failure this ADR exists to remove. `SpawnTool` is public instead; adding the method later is additive. Declared subprocess tools stay held: adjacent binding of the same contract, not this use case |
 
 Footnotes on the Phase B, C and D rows, because a ledger that records only
 the wins is not a ledger:
@@ -556,9 +567,11 @@ longer carries a websocket stack it cannot reach (mentra `c30fa9c`, footnote
 reason (mentra `b895ea0`, footnote 5); and `RuntimeBuilder` re-exported where
 downstream code can name it (mentra `c04986a`, footnotes 3 and 7). **The
 ninth was lan's own** rather than mentra's — a store knob on `WorkspaceBuilder`
-— and `397ca13` plus `71cc59d` built it (footnote 6). **Zero are open.**
+— and `397ca13` plus `71cc59d` built it (footnote 6). **Zero were open, for one
+day.** ADR-0016's first wave then found three more, all upstream-shaped and all
+open, named further down.
 
-That is the first time this ledger has been clean, and it is worth being
+That is still the first time this ledger has been clean, and it is worth being
 precise about what it measures. Not that mentra is finished, and not that lan
 found everything: it measures ADR-0005's discipline — that a gap lan hits goes
 upstream and lan waits for it, instead of growing a lan-side workaround that
@@ -581,7 +594,41 @@ open, on a list of its own: footnote 8, where a graceful stop after a tool
 round reports a failed turn though the work is kept. It is the one
 upstream-shaped edge the tally never counted, because it was written down as a
 pinned behavior rather than filed as a candidate — which is its own small
-dishonesty, and easier to see now that the counted column is empty.
+dishonesty, and easier to see on the one day the counted column was empty.
+
+**Then ADR-0016 put three back in it**, and a tally that only *drained* would
+say something as wrong as one that only accumulated. All three were found by
+registering a tool for the first time, which is exactly where a working
+discipline finds holes, and all three have the same shape: a door mentra opened
+for its own `task` intrinsic and has not opened for a registered tool.
+
+- **A delegated child's usage is bounded but invisible.** Agent mode drives its
+  subagent on `ToolContext::child_run_options`, so the spend counts against the
+  parent's counter and its bounds — but the relay that puts a child's
+  `UsageReport` on the parent's event bus is `pub(crate)`, written for the
+  intrinsic, and a host-registered tool cannot reach it. So a run can be stopped
+  by a total more than ten times what `RunReport::usage` admits to, which
+  `lan-core/tests/spawn.rs::delegated_spend_lands_on_the_budget_that_delegated_it`
+  asserts in both directions. It also makes footnote 10's second half — "an
+  observer summing lan's event stream gets the same total the accounting handle
+  reports" — true of `task` and no longer true of the route lan actually uses.
+- **A subagent's events reach no lan stream.** A delegation's inner turns are
+  visible only in that agent's own transcript, so a client watching a run sees
+  the tool call and its answer and nothing in between. Same root: the event bus
+  is per-agent and the bridge between two of them is mentra's to expose. Read
+  off a test rather than asserted by one —
+  `delegation_stops_at_the_floor` can only find the depth refusal by reading
+  the deepest agent's transcript, because it never reaches the parent.
+- **Delegation transcript artifacts are unwritable from a host tool.**
+  `DelegationArtifact` and `DelegationEdge` are public types, and
+  `Agent::record_delegation_request` / `record_delegation_result` — the only
+  things that write them — are `pub(crate)`. So the delegation `spawn` performs
+  leaves no edge in the transcript where mentra's own would, and this one is an
+  absence with nothing to assert against, which is why it is named here rather
+  than pinned.
+
+None is blocking and none is built. They go upstream rather than into a
+lan-side workaround, which is the whole of the discipline this tally measures.
 
 ## 3. Phases
 
@@ -701,12 +748,16 @@ its own — so what changed is the ceremony's status, not this example's shape.
    execution-policy-with-rewriting are sibling seams upstream, and merging them
    would trade two honest contracts for one vague one.
 3. ◐ Surface mentra `task`/`team_*` deliberately rather than by default.
-   **Half done, and the half that was urgent.** `task` is still in the default
-   reach — but the reason that mattered is gone: mentra `0436bae` makes a
-   delegated turn spend against the parent's bounds and report onto its stream
-   (footnote 10), so "reachable by default" no longer means "spends money
-   nobody can see". Deciding `team_*`'s place is what remains, and it waits on
-   a concrete use case like item 1.
+   **The `task` half is done, by ADR-0016 rather than by this phase.** It is
+   hidden from the model's roster along with `shell` and `background_run`, and
+   delegation is reached deliberately, as `spawn`'s agent mode, through a tool
+   lan wrote and governs. Between rev 6 and that change the reason this row was
+   tolerable was accounting: mentra `0436bae` made a delegated turn spend
+   against the parent's bounds (footnote 10), and that half still holds on the
+   new route — the half that does not is the child's usage reaching the
+   parent's *stream*, which is one of ADR-0016's three new candidates in §2.
+   Deciding `team_*`'s place is what remains, and it waits on a concrete use
+   case like item 1.
 
 Beyond the three planned items, Phase D shipped what the work turned up:
 `WorkspaceBuilder::with_store_dir` and `with_ephemeral_history` with
@@ -808,15 +859,20 @@ recorded in footnote 20 rather than rerun until green and forgotten.
   optional. The doc corrections were not wasted: they are still what the
   default mode needs said about it.
 - **Token accounting is honest about less than it looks like** — narrower now
-  than when this line was written, in two steps. `RunUsage`, a `--token-budget`
-  and a `BudgetPool` all count what providers *report*, and that caveat is
-  permanent. What is no longer true is the rest. All three were blind to what a
-  run delegated through `task`, and mentra `0436bae` closed that in both
-  directions, accounting and event stream (footnote 10). And a crossed budget
-  used to end a run without saying so, which mentra `5a2a68e` and lan `8e35f3e`
-  fixed, so the bound is now reported where it is spent (footnote 11). The
-  numbers are real; their scope is "what was reported for this run and
-  everything it delegated", which is most of the way to "what this job cost",
-  and the rustdoc on each says so.
+  than when this line was written, in two steps, and half a step wider again
+  since ADR-0016. `RunUsage`, a `--token-budget` and a `BudgetPool` all count
+  what providers *report*, and that caveat is permanent. What is no longer true
+  is the rest. All three were blind to what a run delegated through `task`, and
+  mentra `0436bae` closed that in both directions, accounting and event stream
+  (footnote 10). And a crossed budget used to end a run without saying so,
+  which mentra `5a2a68e` and lan `8e35f3e` fixed, so the bound is now reported
+  where it is spent (footnote 11). The half step back is that delegation no
+  longer runs through `task`: on `spawn`'s route the accounting direction still
+  holds and the event-stream direction does not, so a run that delegated is
+  bounded correctly and *reports* less than it spent (§2, first of ADR-0016's
+  three candidates). The numbers are real; their scope is "what was reported
+  for this run, plus everything it delegated where the bound is concerned and
+  not where the tally is", and the rustdoc on each is what has to keep saying
+  so.
 - **Bridge limbo.** Neither core nor extracted; revisit when acp-ui usage is
   real or an upstream home appears.
