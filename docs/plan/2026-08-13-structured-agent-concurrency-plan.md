@@ -44,3 +44,11 @@ Spec: [docs/spec/2026-08-13-structured-agent-concurrency.md](../spec/2026-08-13-
 - Shape: one worktree, serial slices, one commit per completed slice.
 - Confirmation required: no; the user explicitly authorized implementation.
 - Worktree: the named checkout `/Users/wendell/Developer/oops-rs/lan`.
+
+## Progress
+
+- [x] Slice 1 — lock the design (`b2ec36d`).
+- [x] Slice 2 — make the CLI grammar explicit (`f48c6de`).
+- [x] Slice 3 — introduce the lifecycle state machine (current slice).
+- [ ] Slice 4 — wire in-process spawn/wait.
+- [ ] Slice 5 — add IPC and messaging.
