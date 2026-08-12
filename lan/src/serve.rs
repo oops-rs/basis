@@ -33,7 +33,7 @@ use crate::{
 /// identical from here, so `cat prompt.txt | lan` cannot be detected as a
 /// prompt without breaking every editor. What can be done is answer, rather
 /// than wait silently, once the input proves it was never a client.
-pub(crate) const NOT_A_CLIENT: &str = "expected an ACP client on stdio; did you mean 'lan run -'?";
+pub(crate) const NOT_A_CLIENT: &str = "expected an ACP client on stdio; next: use `lan spawn -` for a prompt or `lan serve --acp` for ACP";
 
 pub(crate) async fn serve_acp(args: AcpArgs) -> ExitCode {
     let config = match acp_config(args) {
@@ -65,8 +65,8 @@ pub(crate) async fn serve_acp(args: AcpArgs) -> ExitCode {
 /// The bound address is printed before serving: with `--bind 127.0.0.1:0` it
 /// is the only way to learn the port, and with any bind it is the URL a client
 /// is configured with.
-pub(crate) async fn serve_bridge(args: BridgeArgs) -> ExitCode {
-    let config = match acp_config(args.acp) {
+pub(crate) async fn serve_bridge(acp: AcpArgs, args: BridgeArgs) -> ExitCode {
+    let config = match acp_config(acp) {
         Ok(config) => config,
         Err(message) => {
             eprintln!("lan: {message}");
@@ -74,7 +74,10 @@ pub(crate) async fn serve_bridge(args: BridgeArgs) -> ExitCode {
         }
     };
 
-    let mut bridge = bridge::BridgeConfig::new(args.bind).with_origins(args.allow_origin);
+    let bind = args
+        .bind
+        .unwrap_or_else(|| bridge::BridgeConfig::default().bind);
+    let mut bridge = bridge::BridgeConfig::new(bind).with_origins(args.allow_origin);
     if args.allow_non_loopback {
         bridge = bridge.allowing_non_loopback();
     }
@@ -154,7 +157,7 @@ mod tests {
         // A silent wait was the old failure. The message replaces it, and the
         // only part that matters is that it says what to type instead.
         assert!(
-            NOT_A_CLIENT.contains("lan run -"),
+            NOT_A_CLIENT.contains("lan spawn -"),
             "the signpost must name the fix: {NOT_A_CLIENT}"
         );
     }

@@ -5,10 +5,10 @@
 //! ADR-0015's, and it is five lines:
 //!
 //! ```text
-//! lan                       -> ACP server on stdio, for an editor to spawn
-//! lan "<prompt>"            -> shorthand: exactly `lan run "<prompt>"`
-//! lan run "<prompt>"        -> headless one-shot; `-` reads the prompt from stdin
-//! lan bridge                -> the same ACP server on a websocket, for a browser
+//! lan "<prompt>"            -> shorthand: exactly `lan spawn "<prompt>"`
+//! lan spawn "<prompt>"      -> headless one-shot; `-` reads the prompt from stdin
+//! lan serve --acp           -> ACP server on stdio, for an editor to spawn
+//! lan serve --bridge        -> the same ACP server on a websocket, for a browser
 //! lan fingerprint           -> the workspace's hash, for a caller's own loop
 //! ```
 //!
@@ -65,11 +65,11 @@ mod shorthand;
 
 use std::process::ExitCode;
 
-use clap::Parser;
+use clap::{CommandFactory, Parser};
 
 use crate::{
-    cli::{AcpArgs, Cli, Command},
-    exit::EXIT_FAILED,
+    cli::{Cli, Command},
+    exit::{EXIT_FAILED, EXIT_USAGE},
     fingerprint::execute_fingerprint,
     run::execute_run,
     serve::{serve_acp, serve_bridge},
@@ -78,10 +78,20 @@ use crate::{
 
 #[tokio::main]
 async fn main() -> ExitCode {
-    let cli = Cli::parse_from(normalize(std::env::args_os()));
+    let cli = match Cli::try_parse_from(normalize(std::env::args_os())) {
+        Ok(cli) => cli,
+        Err(error) => {
+            let code = error.exit_code();
+            eprint!("{error}");
+            if code == i32::from(EXIT_USAGE) {
+                eprintln!("next: use `lan spawn <PROMPT>` for work or `lan serve --acp` for ACP");
+            }
+            return ExitCode::from(code as u8);
+        }
+    };
 
     match cli.command {
-        Some(Command::Run(args)) => match execute_run(args).await {
+        Some(Command::Spawn(args)) => match execute_run(args).await {
             Ok(code) => code,
             Err(message) => {
                 eprintln!("lan: {message}");
@@ -95,10 +105,25 @@ async fn main() -> ExitCode {
                 ExitCode::from(EXIT_FAILED)
             }
         },
-        // No subcommand serves ACP: the embedded case is the primary case
-        // (ADR-0002, ADR-0003), so it is what you get by default.
-        Some(Command::Acp(args)) => serve_acp(args).await,
-        Some(Command::Bridge(args)) => serve_bridge(args).await,
-        None => serve_acp(AcpArgs::default()).await,
+        Some(Command::Serve(args)) if args.acp && args.has_bridge_options() => {
+            eprintln!(
+                "lan: bridge options require `lan serve --bridge`; next: remove the bridge flags or select `--bridge`"
+            );
+            ExitCode::from(EXIT_USAGE)
+        }
+        Some(Command::Serve(args)) if args.acp => serve_acp(args.acp_args).await,
+        Some(Command::Serve(args)) => serve_bridge(args.acp_args, args.bridge_args).await,
+        None => usage(),
     }
+}
+
+fn usage() -> ExitCode {
+    eprintln!(
+        "lan: a prompt or command is required; try `lan serve --acp` or `lan spawn <PROMPT>`"
+    );
+    eprintln!(
+        "next: use `lan spawn <PROMPT>` for work, `lan fingerprint` for the workspace hash, or `lan serve --acp` for ACP"
+    );
+    eprintln!("{}", Cli::command().render_usage());
+    ExitCode::from(EXIT_USAGE)
 }

@@ -3,7 +3,7 @@
 //! Bare `lan` speaks JSON-RPC on stdin, and from this process's seat an editor
 //! connecting looks exactly like a shell pipe: no arguments, stdin not a
 //! terminal. Nothing distinguishes them, so lan does not guess (ADR-0015) —
-//! prompt-from-stdin stays explicit, at `lan run -`.
+//! prompt-from-stdin stays explicit, at `lan spawn -`.
 //!
 //! What is left is the one case that is certainly a mistake: a first line that
 //! is not a message at all. Answering it costs a peek and turns an unexplained
@@ -28,7 +28,7 @@ pub enum StdioError {
     /// The first line was not a JSON-RPC message, so nothing was served.
     ///
     /// Its own variant rather than a message, because the caller is the one
-    /// who knows what to suggest instead — the binary names `lan run -`, an
+    /// who knows what to suggest instead — the binary names `lan spawn -`, an
     /// embedder would name itself.
     #[error("the first line on stdin was not a JSON-RPC message")]
     NotAClient,

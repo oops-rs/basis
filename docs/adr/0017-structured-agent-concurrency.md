@@ -77,6 +77,12 @@ Bare `lan` is usage output, not a server. ACP is an explicit adapter mode, so
 an editor or host must say which transport it is starting. Existing `run` is
 retained as a compatibility alias for `spawn` during migration.
 
+Every human-readable result that needs follow-up ends with one concise
+`next:` line naming valid commands. This is an affordance for agents consuming
+CLI output, not a second documentation system. Structured lifecycle results
+will carry the same hint as metadata; the existing run JSONL bookends remain
+unchanged until that lifecycle surface exists.
+
 ## Consequences
 
 - The common path is short without making a long-lived server accidental.

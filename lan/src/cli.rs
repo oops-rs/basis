@@ -1,22 +1,22 @@
 //! The grammar, as clap parses it.
 //!
-//! One module for all of it, because ADR-0015 defines it as one thing: five
-//! lines of usage, with every flag hanging off `run` so that `lan --json "hi"`
-//! means what it looks like. "What does lan accept" is a question worth being
-//! able to answer by reading one file, and the tests at the bottom check it the
-//! same way — as a grammar, not as four unrelated argument lists.
+//! One module for all of it, because ADR-0017 defines it as one thing: a
+//! prompt shorthand, explicit lifecycle verbs, and explicit server modes.
+//! "What does lan accept" is a question worth answering by reading one file,
+//! and the tests at the bottom check it the same way — as a grammar, not as
+//! unrelated argument lists.
 //!
 //! Only the shape lives here. What each command then *does* is in
 //! [`run`](crate::run), [`serve`](crate::serve) and
 //! [`fingerprint`](crate::fingerprint), which is why the fields are
 //! `pub(crate)`: those modules read them, and nothing outside this crate ever
-//! sees them. The rewrite that turns a bare prompt into a `run` happens before
+//! sees them. The rewrite that turns a bare prompt into a `spawn` happens before
 //! any of this, in [`shorthand`](crate::shorthand).
 //!
 //! The two enums are the exception to "only the shape". [`EffortArg`] and
 //! [`ApproveMode`] each convert into a type in the layer below, and both are
 //! named by two commands — keeping the conversion next to the spelling is what
-//! stops `run` and `acp` drifting into meaning different things by the same
+//! stops `spawn` and `serve` drifting into meaning different things by the same
 //! word.
 
 use std::{net::SocketAddr, path::PathBuf};
@@ -24,7 +24,7 @@ use std::{net::SocketAddr, path::PathBuf};
 use clap::{Parser, Subcommand};
 use lan_core::{AllowAll, Approver, DenyAll};
 
-use crate::{approver::TerminalApprover, bridge, duration_arg::DurationArg};
+use crate::{approver::TerminalApprover, duration_arg::DurationArg};
 
 #[derive(Debug, Parser)]
 #[command(
@@ -34,10 +34,11 @@ use crate::{approver::TerminalApprover, bridge, duration_arg::DurationArg};
     long_about = None,
     after_help = "\
 Shorthand:
-  lan \"fix the failing test\"    the same as: lan run \"fix the failing test\"
+  lan \"fix the failing test\"    the same as: lan spawn \"fix the failing test\"
   lan -- run                    a prompt that collides with a subcommand name
-  lan run -                     read the prompt from stdin
-  lan                           no arguments: the ACP server, on stdio
+  lan spawn -                   read the prompt from stdin
+  lan serve --acp               serve ACP on stdio
+  lan serve --bridge            serve ACP over a websocket
 
 Exit codes:
   0  the run finished
@@ -52,44 +53,58 @@ pub(crate) struct Cli {
 
 #[derive(Debug, Subcommand)]
 pub(crate) enum Command {
-    /// Run one prompt against a workspace and exit.
-    Run(RunArgs),
+    /// Spawn one prompt against a workspace and exit.
+    #[command(name = "spawn", alias = "run")]
+    Spawn(RunArgs),
     /// Print a hash of everything in the workspace a run could see.
     Fingerprint(FingerprintArgs),
-    /// Serve the Agent Client Protocol on stdio. Same as no subcommand.
-    Acp(AcpArgs),
-    /// Serve the same protocol on a websocket, for a client that cannot spawn
-    /// a process — a browser one. lan ships no web UI; adopt an ACP client.
-    Bridge(BridgeArgs),
+    /// Serve one explicit protocol transport.
+    Serve(ServeArgs),
 }
 
-/// Knobs for the websocket bridge: where to listen, and who to talk to.
+/// Selects which server transport to expose.
+#[derive(Debug, clap::Args)]
+pub(crate) struct ServeArgs {
+    /// Serve ACP over stdio.
+    #[arg(long, conflicts_with = "bridge", required_unless_present = "bridge")]
+    pub(crate) acp: bool,
+
+    /// Serve ACP over a websocket.
+    #[arg(long, conflicts_with = "acp", required_unless_present = "acp")]
+    pub(crate) bridge: bool,
+
+    #[command(flatten)]
+    pub(crate) acp_args: AcpArgs,
+
+    #[command(flatten)]
+    pub(crate) bridge_args: BridgeArgs,
+}
+
+/// Knobs for the websocket bridge. These fields are only valid with
+/// `serve --bridge`; clap enforces that relation at the command boundary.
 #[derive(Debug, clap::Args)]
 pub(crate) struct BridgeArgs {
     /// Address to listen on. Loopback unless --allow-non-loopback.
-    #[arg(long, value_name = "ADDR", default_value_t = bridge::BridgeConfig::default().bind)]
-    pub(crate) bind: SocketAddr,
+    #[arg(long, value_name = "ADDR", requires = "bridge")]
+    pub(crate) bind: Option<SocketAddr>,
 
     /// A web origin allowed to connect, e.g. http://localhost:5173.
     /// Repeatable, matched exactly.
-    ///
-    /// Without one, no page is served. A page can open a websocket to a
-    /// loopback port without asking anyone — the same-origin policy does not
-    /// apply to the handshake — so this list is what stands between a site the
-    /// user happened to visit and this workspace.
-    #[arg(long = "allow-origin", value_name = "ORIGIN")]
+    #[arg(long = "allow-origin", value_name = "ORIGIN", requires = "bridge")]
     pub(crate) allow_origin: Vec<String>,
 
     /// Listen on an address other than loopback.
     ///
-    /// Refused by default, and worth refusing: a reachable bridge gives anyone
-    /// who can route to it an agent that writes to the workspace, with no
-    /// authentication in the protocol to stop them.
-    #[arg(long)]
+    #[arg(long, requires = "bridge")]
     pub(crate) allow_non_loopback: bool,
+}
 
-    #[command(flatten)]
-    pub(crate) acp: AcpArgs,
+impl ServeArgs {
+    pub(crate) fn has_bridge_options(&self) -> bool {
+        self.bridge_args.bind.is_some()
+            || !self.bridge_args.allow_origin.is_empty()
+            || self.bridge_args.allow_non_loopback
+    }
 }
 
 /// How hard the model should think, where the provider supports it.
@@ -303,7 +318,7 @@ mod tests {
         for (value, expected) in EFFORTS {
             let cli = Cli::try_parse_from(["lan", "run", "prompt", "--effort", value])
                 .expect("effort should parse");
-            let Some(Command::Run(args)) = cli.command else {
+            let Some(Command::Spawn(args)) = cli.command else {
                 panic!("run command should parse");
             };
             assert_eq!(args.effort, Some(expected));
@@ -320,20 +335,22 @@ mod tests {
     #[test]
     fn acp_accepts_the_same_five_effort_spellings() {
         for (value, expected) in EFFORTS {
-            let cli = Cli::try_parse_from(["lan", "acp", "--effort", value])
+            let cli = Cli::try_parse_from(["lan", "serve", "--acp", "--effort", value])
                 .expect("effort should parse");
-            let Some(Command::Acp(args)) = cli.command else {
+            let Some(Command::Serve(args)) = cli.command else {
                 panic!("ACP command should parse");
             };
-            assert_eq!(args.effort, Some(expected));
+            assert!(args.acp);
+            assert_eq!(args.acp_args.effort, Some(expected));
         }
     }
 
     fn run_args(args: &[&str]) -> RunArgs {
-        let mut argv = vec!["lan", "run", "prompt"];
+        let mut argv = vec!["lan", "spawn", "prompt"];
         argv.extend_from_slice(args);
 
-        let Some(Command::Run(parsed)) = Cli::try_parse_from(argv).expect("parses").command else {
+        let Some(Command::Spawn(parsed)) = Cli::try_parse_from(argv).expect("parses").command
+        else {
             panic!("run command should parse");
         };
         parsed
@@ -410,13 +427,44 @@ mod tests {
         assert!(!run_args(&[]).no_shell, "ADR-0013: on by default");
         assert!(run_args(&["--no-shell"]).no_shell);
 
-        let Some(Command::Acp(acp)) = Cli::try_parse_from(["lan", "acp", "--no-shell"])
-            .expect("parses")
-            .command
+        let Some(Command::Serve(serve)) =
+            Cli::try_parse_from(["lan", "serve", "--acp", "--no-shell"])
+                .expect("parses")
+                .command
         else {
             panic!("ACP command should parse");
         };
-        assert!(acp.no_shell);
+        assert!(serve.acp_args.no_shell);
+    }
+
+    #[test]
+    fn serving_requires_one_explicit_transport() {
+        assert!(Cli::try_parse_from(["lan", "serve"]).is_err());
+        assert!(Cli::try_parse_from(["lan", "serve", "--acp", "--bridge"]).is_err());
+        assert!(Cli::try_parse_from(["lan", "serve", "--acp"]).is_ok());
+        assert!(Cli::try_parse_from(["lan", "serve", "--bridge"]).is_ok());
+    }
+
+    #[test]
+    fn bridge_options_require_the_bridge_mode() {
+        let Some(Command::Serve(acp_with_bridge_flag)) =
+            Cli::try_parse_from(["lan", "serve", "--acp", "--allow-origin", "http://x"])
+                .expect("clap parses the complete shape")
+                .command
+        else {
+            panic!("serve command should parse");
+        };
+        assert!(acp_with_bridge_flag.has_bridge_options());
+
+        let Some(Command::Serve(serve)) =
+            Cli::try_parse_from(["lan", "serve", "--bridge", "--bind", "127.0.0.1:0"])
+                .expect("bridge parses")
+                .command
+        else {
+            panic!("serve command should parse");
+        };
+        assert!(serve.bridge);
+        assert_eq!(serve.bridge_args.bind, Some("127.0.0.1:0".parse().unwrap()));
     }
 
     #[test]

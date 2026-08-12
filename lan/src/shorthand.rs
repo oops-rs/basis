@@ -1,7 +1,7 @@
 //! Rewriting the command line before clap sees it.
 //!
-//! ADR-0015's shorthand — `lan "fix the failing test"` is exactly
-//! `lan run "fix the failing test"` — is a statement about one token, and clap
+//! ADR-0017's shorthand — `lan "fix the failing test"` is exactly
+//! `lan spawn "fix the failing test"` — is a statement about one token, and clap
 //! has no way to express "this positional is a subcommand unless it isn't". So
 //! it happens out here on the raw argv, and [`cli`](crate::cli) then parses
 //! whatever comes out, none the wiser.
@@ -16,13 +16,13 @@ use std::ffi::{OsStr, OsString};
 
 /// The four subcommands plus clap's own, which is what makes a positional a
 /// prompt: anything that is not one of these words is one.
-const SUBCOMMANDS: [&str; 5] = ["run", "fingerprint", "acp", "bridge", "help"];
+const SUBCOMMANDS: [&str; 5] = ["spawn", "run", "fingerprint", "serve", "help"];
 
 /// Flags the top level answers itself. Every other flag belongs to `run`,
 /// which is what lets `lan --json "hi"` mean what it looks like.
 const TOP_LEVEL_FLAGS: [&str; 4] = ["-h", "--help", "-V", "--version"];
 
-/// Rewrites `lan "<prompt>"` as `lan run "<prompt>"`.
+/// Rewrites `lan "<prompt>"` as `lan spawn "<prompt>"`.
 ///
 /// Deciding on the first argument alone is what makes the rule total: a flag's
 /// *value* can look like anything (`lan --model gpt-5 "hi"`), and scanning
@@ -31,13 +31,14 @@ const TOP_LEVEL_FLAGS: [&str; 4] = ["-h", "--help", "-V", "--version"];
 pub(crate) fn normalize(argv: impl IntoIterator<Item = OsString>) -> Vec<OsString> {
     let mut argv: Vec<OsString> = argv.into_iter().collect();
 
-    // Bare `lan`: the ACP server, byte-identical to what an editor spawns.
+    // Bare `lan` is left alone so main can return usage without inventing a
+    // long-lived server mode.
     let Some(first) = argv.get(1) else {
         return argv;
     };
 
     if starts_a_run(first) {
-        argv.insert(1, OsString::from("run"));
+        argv.insert(1, OsString::from("spawn"));
     }
 
     argv
@@ -51,7 +52,7 @@ pub(crate) fn normalize(argv: impl IntoIterator<Item = OsString>) -> Vec<OsStrin
 fn starts_a_run(first: &OsStr) -> bool {
     match first.to_str() {
         // Not UTF-8, so it is neither a reserved word nor a flag lan defines.
-        // `run` takes it as a prompt and clap reports the encoding.
+        // `spawn` takes it as a prompt and clap reports the encoding.
         None => true,
         Some(word) => !SUBCOMMANDS.contains(&word) && !TOP_LEVEL_FLAGS.contains(&word),
     }
@@ -78,13 +79,13 @@ mod tests {
             .collect()
     }
 
-    /// The `run` the shorthand produced, so a test can check what it carries.
+    /// The `spawn` the shorthand produced, so a test can check what it carries.
     fn shorthand(argv: &[&str]) -> RunArgs {
         let parsed = Cli::try_parse_from(normalize(argv.iter().map(OsString::from)))
             .expect("the shorthand should parse");
 
-        let Some(Command::Run(args)) = parsed.command else {
-            panic!("a prompt should have become a run: {argv:?}");
+        let Some(Command::Spawn(args)) = parsed.command else {
+            panic!("a prompt should have become a spawn: {argv:?}");
         };
         args
     }
@@ -98,10 +99,10 @@ mod tests {
     }
 
     #[test]
-    fn the_shorthand_is_exactly_the_run_subcommand() {
+    fn the_shorthand_is_exactly_the_spawn_subcommand() {
         assert_eq!(
             normalized(&["lan", "fix the failing test"]),
-            ["lan", "run", "fix the failing test"]
+            ["lan", "spawn", "fix the failing test"]
         );
     }
 
@@ -128,14 +129,14 @@ mod tests {
 
     #[test]
     fn a_prompt_that_names_a_subcommand_needs_the_escape() {
-        // Without `--`, `lan run` is the subcommand with its prompt missing —
+        // Without `--`, `lan spawn` is the subcommand with its prompt missing —
         // clap says so rather than lan guessing which was meant.
-        let ambiguous = Cli::try_parse_from(normalize(["lan", "run"].iter().map(OsString::from)))
+        let ambiguous = Cli::try_parse_from(normalize(["lan", "spawn"].iter().map(OsString::from)))
             .expect_err("a bare subcommand name is not a prompt");
         assert_eq!(ambiguous.exit_code(), i32::from(EXIT_USAGE));
 
         assert_eq!(shorthand(&["lan", "--", "run"]).prompt, "run");
-        assert_eq!(shorthand(&["lan", "--", "bridge"]).prompt, "bridge");
+        assert_eq!(shorthand(&["lan", "--", "serve"]).prompt, "serve");
     }
 
     #[test]
@@ -147,13 +148,13 @@ mod tests {
     }
 
     #[test]
-    fn bare_lan_is_left_alone_for_the_editor_that_spawns_it() {
+    fn bare_lan_is_left_alone_for_usage_to_handle() {
         assert_eq!(normalized(&["lan"]), ["lan"]);
 
         let parsed = Cli::try_parse_from(["lan"]).expect("parses");
         assert!(
             parsed.command.is_none(),
-            "no subcommand is the ACP server; inserting one would break every editor"
+            "no subcommand is handled by main as usage, never as a server"
         );
     }
 

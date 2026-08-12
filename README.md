@@ -8,25 +8,26 @@ A full-functional, embeddable agent harness built on [Mentra](https://github.com
 Library first, binary second. No TUI — embedding is the front door:
 
 1. **In-process** — depend on the `lan-core` crate (Rust hosts).
-2. **ACP** — `lan` with no subcommand serves the [Agent Client Protocol](https://agentclientprotocol.com)
+2. **ACP** — `lan serve --acp` serves the [Agent Client Protocol](https://agentclientprotocol.com)
    (JSON-RPC 2.0 over stdio) for editors (Zed, JetBrains) and web UIs
    ([acp-ui](https://github.com/formulahendry/acp-ui)).
-3. **Subprocess** — `lan run --json` streams JSONL events for scripts and CI.
+3. **Subprocess** — `lan spawn --json` streams JSONL events for scripts and CI.
 
-There are two modes and two utilities, and the whole CLI is five lines
-([ADR-0015](docs/adr/0015-cli-grammar.md)):
+There are one-shot work, explicit serving, and one utility, and the whole CLI is
+small enough to keep in an agent's result hint ([ADR-0017](docs/adr/0017-structured-agent-concurrency.md)):
 
 ```
-lan                                # ACP server on stdio — what an editor spawns
-lan "<prompt>"                     # shorthand: exactly `lan run "<prompt>"`
-lan run "<prompt>" [--json]        # headless one-shot; `-` reads the prompt from stdin
-lan bridge                         # the same ACP server on a websocket, for a browser
+lan "<prompt>"                     # shorthand: exactly `lan spawn "<prompt>"`
+lan spawn "<prompt>" [--json]      # headless one-shot; `-` reads the prompt from stdin
+lan serve --acp                    # ACP server on stdio — what an editor spawns
+lan serve --bridge                 # the same ACP server on a websocket, for a browser
 lan fingerprint                    # the workspace's hash, for a loop you write yourself
 ```
 
 A positional argument that names no subcommand is a prompt, so the human path carries no
-ceremony and the editor path is untouched. `--` escapes a prompt that collides with a
-subcommand name (`lan -- run`).
+ceremony. Bare `lan` is usage output, never an accidental server; `--` escapes a prompt
+that collides with a subcommand name (`lan -- spawn`). The compatibility spelling
+`lan run` remains an alias for `lan spawn`.
 
 The core has no opinions: task-specific behavior enters through data — the prompt, the
 workspace (AGENTS.md, skills, prompt templates, `.mcp.json`), and config — never through code.
@@ -38,7 +39,7 @@ Set a provider key — `ANTHROPIC_API_KEY`, `OPENAI_API_KEY`, `GEMINI_API_KEY`, 
 
 ```sh
 lan "summarize what changed in the last three commits"
-lan run -C ../other-repo --json "find the slowest test and explain why"
+lan spawn -C ../other-repo --json "find the slowest test and explain why"
 ```
 
 `--effort` accepts exactly `low`, `medium`, `high`, `xhigh`, or `max`.
@@ -402,12 +403,12 @@ answering the familiar ones before it is ever asked
 
 ## ACP
 
-`lan` with no subcommand speaks the [Agent Client Protocol](https://agentclientprotocol.com)
+`lan serve --acp` speaks the [Agent Client Protocol](https://agentclientprotocol.com)
 on stdio, so any ACP client drives it with no lan-specific client code:
 
 ```sh
-lan                                # what an editor spawns
-lan acp --model gpt-5.6 --no-shell # same thing, configured
+lan serve --acp                          # what an editor spawns
+lan serve --acp --model gpt-5.6 --no-shell # same thing, configured
 ```
 
 The client supplies the workspace (`cwd` on `session/new`) and the prompt, so the flags
@@ -429,18 +430,18 @@ without breaking every editor. Instead of waiting silently on prose, the server 
 the input proves it was never a client:
 
 ```
-lan: expected an ACP client on stdio; did you mean 'lan run -'?
+lan: expected an ACP client on stdio; next: use `lan spawn -` for a prompt or `lan serve --acp` for ACP
 ```
 
 [`scripts/acp-smoke.py`](scripts/acp-smoke.py) drives it by hand if you want to watch the
 wire.
 
-For a browser client, `lan bridge` puts the same server behind a websocket — the transport
+For a browser client, `lan serve --bridge` puts the same server behind a websocket — the transport
 only; the UI is [acp-ui](https://github.com/formulahendry/acp-ui), adopted rather than
 built ([ADR-0002](docs/adr/0002-acp-is-the-protocol.md)):
 
 ```sh
-lan bridge --allow-origin http://localhost:5173
+lan serve --bridge --allow-origin http://localhost:5173
 ```
 
 It binds to loopback and serves **no page** until one is named. A websocket handshake is

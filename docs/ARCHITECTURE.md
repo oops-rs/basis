@@ -68,15 +68,16 @@ nightly dependency bump, an interactive refactor are all the same to the binary.
 seems to need core changes, close the gap generically or push it to an extension point.
 
 ```
-lan                                # ACP server on stdio (the front door)
-lan "<prompt>"                     # shorthand: exactly `lan run "<prompt>"`
-lan run "<prompt>" [--json]        # headless one-shot, JSONL event stream
-lan bridge                         # the same server on a websocket, for a browser
+lan "<prompt>"                     # shorthand: exactly `lan spawn "<prompt>"`
+lan spawn "<prompt>" [--json]      # headless one-shot, JSONL event stream
+lan serve --acp                    # ACP server on stdio (explicit)
+lan serve --bridge                 # the same server on a websocket, for a browser
 lan fingerprint                    # the workspace's hash, for a caller's own loop
 ```
 
-The grammar is ADR-0015's and is the whole CLI. Recurrence is not in it: an interval is the
-host's (cron, systemd, CI, a tokio task), and the two pieces that are easy to get wrong — the
+The grammar is ADR-0017's and is the whole CLI. Bare `lan` returns usage rather than
+starting a long-lived server. Recurrence is not in it: an interval is the host's (cron,
+systemd, CI, a tokio task), and the two pieces that are easy to get wrong — the
 fingerprint and per-run bounds — are a subcommand and three flags on `run` (ADR-0014). In
 process they are `Workspace::fingerprint()` and the bounds on a `RunSpec`, which is the same
 loop without the subprocess: [`lan-core/examples/watch.rs`](../lan-core/examples/watch.rs).

@@ -1,6 +1,6 @@
 //! The four numbers a script branches on.
 //!
-//! ADR-0015 makes these contract, and a contract is easier to keep when it
+//! ADR-0017 preserves this contract, and a contract is easier to keep when it
 //! fits on one screen: `--json` can grow a field and the prose can be
 //! reworded, but a `case $?` somebody wrote against lan a year ago has to keep
 //! meaning what it meant. So the codes and the one function that chooses
@@ -69,7 +69,7 @@ mod tests {
 
     #[test]
     fn a_tripped_bound_is_told_apart_from_a_failure_by_the_exit_code() {
-        // The whole point of the contract: `lan run --deadline 10m …; case $? in`
+        // The whole point of the contract: `lan spawn --deadline 10m …; case $? in`
         // has to be able to retry a bounded run and escalate a failed one.
         let failed = report(
             RunOutcome::Error {

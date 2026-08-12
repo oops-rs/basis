@@ -16,7 +16,7 @@ use lan_core::{ApprovalAnswer, ApprovalDecision, ApprovalRequest, Approver};
 /// With nothing to ask — stdin is not a terminal — the answer is always a
 /// refusal. That is the right fallback for an unattended run: it fails safe,
 /// visibly, instead of quietly granting whatever was asked for, and it is what
-/// `lan run --approve prompt` documents. Every refusal here says which case it
+/// `lan spawn --approve prompt` documents. Every refusal here says which case it
 /// was, because that text is what the model reads back.
 #[derive(Debug, Default)]
 pub struct TerminalApprover;

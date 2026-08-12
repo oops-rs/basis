@@ -28,6 +28,9 @@ explicit.
 - Make `lan <PROMPT>` the canonical shorthand for `lan spawn <PROMPT>`.
 - Make protocol serving explicit through `lan serve --acp` or
   `lan serve --bridge`.
+- Make human-readable CLI results and usage errors end with one concise
+  `next:` hint; structured lifecycle results will carry the same action as
+  metadata rather than requiring documentation lookup.
 - Give every attached child a structured owner, handle, deadline, and
   cancellation path.
 - Keep communication one-way by default and make terminal results independent
@@ -58,6 +61,8 @@ explicit.
 - [ ] `lan <PROMPT>` and `lan spawn <PROMPT>` normalize to the same command.
 - [ ] `lan serve --acp` starts ACP; `lan serve --bridge` starts the websocket
       bridge; bare `lan` does not start a server.
+- [ ] Human-readable usage/errors provide one valid `next:` action without
+      changing the existing JSONL run bookends.
 - [ ] A child handle has exactly one terminal state and can be waited on more
       than once without rerunning work.
 - [ ] Cancelling a parent cancels attached descendants and settles their
