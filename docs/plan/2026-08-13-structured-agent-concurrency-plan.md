@@ -49,6 +49,6 @@ Spec: [docs/spec/2026-08-13-structured-agent-concurrency.md](../spec/2026-08-13-
 
 - [x] Slice 1 — lock the design (`b2ec36d`).
 - [x] Slice 2 — make the CLI grammar explicit (`f48c6de`).
-- [x] Slice 3 — introduce the lifecycle state machine (current slice).
+- [x] Slice 3 — introduce the lifecycle state machine (`df43494`).
 - [ ] Slice 4 — wire in-process spawn/wait.
 - [ ] Slice 5 — add IPC and messaging.
