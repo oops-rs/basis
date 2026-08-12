@@ -18,7 +18,7 @@ use serde::{Deserialize, Serialize};
 use thiserror::Error;
 use tokio::{
     sync::{mpsc, oneshot, watch},
-    task::JoinHandle,
+    task::AbortHandle,
     time,
 };
 
@@ -235,7 +235,7 @@ impl Supervisor {
         let identity = Arc::new(());
         tokio::spawn(run_supervisor(
             receiver,
-            commands.clone(),
+            commands.downgrade(),
             Arc::clone(&identity),
         ));
         Self { commands, identity }
@@ -250,6 +250,41 @@ impl Supervisor {
         &self,
         parent: Option<&TaskHandle>,
         detached: bool,
+        work: F,
+    ) -> Result<TaskHandle, LifecycleError>
+    where
+        F: FnOnce(TaskContext) -> Fut + Send + 'static,
+        Fut: Future<Output = Result<Vec<u8>, String>> + Send + 'static,
+    {
+        self.spawn_with_behavior(parent, detached, CancelBehavior::Abort, work)
+            .await
+    }
+
+    /// Starts cooperatively cancellable work.
+    ///
+    /// Unlike [`spawn`](Self::spawn), cancellation signals the task and waits
+    /// for its future to finish instead of aborting it. The future must observe
+    /// [`TaskContext::cancellation`] and finish; this form is for work such as
+    /// an agent turn that has its own cancellation token and cleanup contract.
+    pub async fn spawn_cooperative<F, Fut>(
+        &self,
+        parent: Option<&TaskHandle>,
+        detached: bool,
+        work: F,
+    ) -> Result<TaskHandle, LifecycleError>
+    where
+        F: FnOnce(TaskContext) -> Fut + Send + 'static,
+        Fut: Future<Output = Result<Vec<u8>, String>> + Send + 'static,
+    {
+        self.spawn_with_behavior(parent, detached, CancelBehavior::Cooperative, work)
+            .await
+    }
+
+    async fn spawn_with_behavior<F, Fut>(
+        &self,
+        parent: Option<&TaskHandle>,
+        detached: bool,
+        cancel_behavior: CancelBehavior,
         work: F,
     ) -> Result<TaskHandle, LifecycleError>
     where
@@ -273,11 +308,12 @@ impl Supervisor {
         let factory: TaskFactory = Box::new(move |context| Box::pin(work(context)));
         let (reply, result) = oneshot::channel();
         self.commands
-            .send(Command::Spawn {
+            .send(Command::Spawn(SpawnRequest {
                 parent: parent_id,
+                cancel_behavior,
                 factory,
                 reply,
-            })
+            }))
             .await
             .map_err(|_| LifecycleError::Closed)?;
         result.await.map_err(|_| LifecycleError::Closed)?
@@ -291,11 +327,7 @@ impl Default for Supervisor {
 }
 
 enum Command {
-    Spawn {
-        parent: Option<TaskId>,
-        factory: TaskFactory,
-        reply: oneshot::Sender<Result<TaskHandle, LifecycleError>>,
-    },
+    Spawn(SpawnRequest),
     Complete {
         id: TaskId,
         outcome: Result<Vec<u8>, String>,
@@ -306,19 +338,34 @@ enum Command {
     },
 }
 
+struct SpawnRequest {
+    parent: Option<TaskId>,
+    cancel_behavior: CancelBehavior,
+    factory: TaskFactory,
+    reply: oneshot::Sender<Result<TaskHandle, LifecycleError>>,
+}
+
+#[derive(Clone, Copy)]
+enum CancelBehavior {
+    Abort,
+    Cooperative,
+}
+
 struct TaskRecord {
     parent: Option<TaskId>,
     children: HashSet<TaskId>,
     cancellation: CancellationSource,
+    cancel_behavior: CancelBehavior,
+    cancel_requested: bool,
     completion: watch::Sender<Option<TaskState>>,
     work: Option<TaskState>,
     terminal: Option<TaskState>,
-    worker: JoinHandle<()>,
+    worker: AbortHandle,
 }
 
 async fn run_supervisor(
     mut commands: mpsc::Receiver<Command>,
-    command_sender: mpsc::Sender<Command>,
+    command_sender: mpsc::WeakSender<Command>,
     identity: Arc<()>,
 ) {
     let mut next_id = 1_u64;
@@ -326,18 +373,12 @@ async fn run_supervisor(
 
     while let Some(command) = commands.recv().await {
         match command {
-            Command::Spawn {
-                parent,
-                factory,
-                reply,
-            } => spawn_task(
+            Command::Spawn(request) => spawn_task(
                 &mut next_id,
                 &mut records,
-                command_sender.clone(),
+                &command_sender,
                 identity.clone(),
-                parent,
-                factory,
-                reply,
+                request,
             ),
             Command::Complete { id, outcome } => {
                 complete_task(id, outcome, &mut records);
@@ -367,12 +408,21 @@ async fn run_supervisor(
 fn spawn_task(
     next_id: &mut u64,
     records: &mut HashMap<TaskId, TaskRecord>,
-    command_sender: mpsc::Sender<Command>,
+    command_sender: &mpsc::WeakSender<Command>,
     identity: Arc<()>,
-    parent: Option<TaskId>,
-    factory: TaskFactory,
-    reply: oneshot::Sender<Result<TaskHandle, LifecycleError>>,
+    request: SpawnRequest,
 ) {
+    let SpawnRequest {
+        parent,
+        cancel_behavior,
+        factory,
+        reply,
+    } = request;
+    let Some(command_sender) = command_sender.upgrade() else {
+        let _ = reply.send(Err(LifecycleError::Closed));
+        return;
+    };
+
     if let Some(parent_id) = parent {
         let Some(parent_record) = records.get(&parent_id) else {
             let _ = reply.send(Err(LifecycleError::ParentNotFound(parent_id)));
@@ -399,12 +449,18 @@ fn spawn_task(
         cancellation: cancellation.token.clone(),
     };
     let (completion_sender, completion_receiver) = watch::channel(None);
-    let worker_commands = command_sender.clone();
-    let worker = tokio::spawn(async move {
-        let outcome = factory(task_context).await;
-        let _ = worker_commands
-            .send(Command::Complete { id, outcome })
-            .await;
+    let worker_commands = command_sender.downgrade();
+    let work = tokio::spawn(factory(task_context));
+    let worker = work.abort_handle();
+    tokio::spawn(async move {
+        let outcome = match work.await {
+            Ok(outcome) => outcome,
+            Err(error) if error.is_cancelled() => return,
+            Err(_) => Err("task panicked".to_string()),
+        };
+        if let Some(commands) = worker_commands.upgrade() {
+            let _ = commands.send(Command::Complete { id, outcome }).await;
+        }
     });
 
     let handle = TaskHandle {
@@ -419,6 +475,8 @@ fn spawn_task(
             parent,
             children: HashSet::new(),
             cancellation,
+            cancel_behavior,
+            cancel_requested: false,
             completion: completion_sender,
             work: None,
             terminal: None,
@@ -448,9 +506,13 @@ fn complete_task(
             return;
         }
 
-        let state = match outcome {
-            Ok(bytes) => TaskState::Succeeded(bytes),
-            Err(error) => TaskState::Failed(error),
+        let state = if record.cancel_requested {
+            TaskState::Cancelled
+        } else {
+            match outcome {
+                Ok(bytes) => TaskState::Succeeded(bytes),
+                Err(error) => TaskState::Failed(error),
+            }
         };
         let cancel_children = matches!(state, TaskState::Failed(_));
         record.work = Some(state);
@@ -481,8 +543,11 @@ fn cancel_tree(id: TaskId, records: &mut HashMap<TaskId, TaskRecord>) {
         && record.terminal.is_none()
     {
         record.cancellation.cancel();
-        record.worker.abort();
-        record.work = Some(TaskState::Cancelled);
+        record.cancel_requested = true;
+        if matches!(record.cancel_behavior, CancelBehavior::Abort) {
+            record.worker.abort();
+            record.work = Some(TaskState::Cancelled);
+        }
     }
     finalize_if_ready(id, records);
 }
@@ -668,5 +733,51 @@ mod tests {
             .await
             .expect_err("foreign handles are rejected");
         assert_eq!(error, LifecycleError::WrongSupervisor(parent.id()));
+    }
+
+    #[tokio::test]
+    async fn cooperative_cancellation_waits_for_cleanup() {
+        let supervisor = Supervisor::new();
+        let (cleanup_started, cleanup_seen) = oneshot::channel();
+        let (release_cleanup, cleanup_gate) = oneshot::channel();
+        let task = supervisor
+            .spawn_cooperative(None, false, move |context| async move {
+                context.cancellation().cancelled().await;
+                cleanup_started.send(()).expect("observer is waiting");
+                cleanup_gate
+                    .await
+                    .map_err(|_| "cleanup gate closed".to_string())?;
+                Ok(Vec::new())
+            })
+            .await
+            .expect("task spawns");
+
+        task.cancel().await.expect("cancellation accepted");
+        cleanup_seen.await.expect("cleanup starts");
+        assert_eq!(task.state(), TaskState::Running);
+
+        release_cleanup.send(()).expect("cleanup is waiting");
+        assert_eq!(
+            task.wait(Duration::from_secs(1)).await.expect("settles"),
+            TaskState::Cancelled
+        );
+    }
+
+    #[tokio::test]
+    async fn a_panicking_task_reaches_a_terminal_failure() {
+        let supervisor = Supervisor::new();
+        let task = supervisor
+            .spawn(None, false, |_context| async {
+                panic!("boom");
+                #[allow(unreachable_code)]
+                Ok(Vec::new())
+            })
+            .await
+            .expect("task spawns");
+
+        assert_eq!(
+            task.wait(Duration::from_secs(1)).await.expect("settles"),
+            TaskState::Failed("task panicked".to_string())
+        );
     }
 }

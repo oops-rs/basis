@@ -85,6 +85,15 @@ A run that a bound ended says which one, both as `RunReport::stopped_by` in proc
 `run_finished`'s `stopped_by` on the stream, and the CLI exits `3` for all three of them —
 the exit-code contract of ADR-0015 is answerable without parsing prose.
 
+In-process concurrent work is owned by `lan_core::Supervisor`. `spawn` starts a
+generic future; `PreparedRun::spawn` starts an actual agent run under the same
+state machine. Both return a `TaskHandle` immediately. A handle has one durable
+terminal state, bounded repeatable `wait`, and downward `cancel`; an attached
+child delays its parent's terminal state until it settles. Agent runs use
+cooperative cancellation so their independent event stream reaches
+`run_finished` before the task publishes `cancelled`. This lifecycle surface is
+in process only today—cross-process handles and messaging are not shipped.
+
 ## 3. Extension model (without embedding a scripting language)
 
 pi's extensions are TypeScript modules loaded into a TS host — free for them, expensive for a
