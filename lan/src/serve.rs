@@ -33,13 +33,18 @@ use crate::{
 /// identical from here, so `cat prompt.txt | lan` cannot be detected as a
 /// prompt without breaking every editor. What can be done is answer, rather
 /// than wait silently, once the input proves it was never a client.
-pub(crate) const NOT_A_CLIENT: &str = "expected an ACP client on stdio; next: use `lan spawn -` for a prompt or `lan serve --acp` for ACP";
+pub(crate) const NOT_A_CLIENT: &str = "expected an ACP client on stdio";
+const NOT_A_CLIENT_NEXT: &str = "next: use `lan spawn -` for a prompt or `lan serve --acp` for ACP";
+const ACP_RETRY: &str = "next: retry with `lan serve --acp` after addressing the reported failure";
+const BRIDGE_RETRY: &str =
+    "next: retry with `lan serve --bridge` after addressing the reported failure";
 
 pub(crate) async fn serve_acp(args: AcpArgs) -> ExitCode {
     let config = match acp_config(args) {
         Ok(config) => config,
         Err(message) => {
             eprintln!("lan: {message}");
+            eprintln!("{ACP_RETRY}");
             return ExitCode::from(EXIT_FAILED);
         }
     };
@@ -51,10 +56,12 @@ pub(crate) async fn serve_acp(args: AcpArgs) -> ExitCode {
         // where the fix is.
         Err(StdioError::NotAClient) => {
             eprintln!("lan: {NOT_A_CLIENT}");
+            eprintln!("{NOT_A_CLIENT_NEXT}");
             ExitCode::from(EXIT_USAGE)
         }
         Err(error) => {
             eprintln!("lan: acp: {error}");
+            eprintln!("{ACP_RETRY}");
             ExitCode::from(EXIT_FAILED)
         }
     }
@@ -70,6 +77,7 @@ pub(crate) async fn serve_bridge(acp: AcpArgs, args: BridgeArgs) -> ExitCode {
         Ok(config) => config,
         Err(message) => {
             eprintln!("lan: {message}");
+            eprintln!("{BRIDGE_RETRY}");
             return ExitCode::from(EXIT_FAILED);
         }
     };
@@ -87,6 +95,7 @@ pub(crate) async fn serve_bridge(acp: AcpArgs, args: BridgeArgs) -> ExitCode {
         Ok(bridge) => bridge,
         Err(error) => {
             eprintln!("lan: bridge: {error}");
+            eprintln!("{BRIDGE_RETRY}");
             return ExitCode::from(EXIT_FAILED);
         }
     };
@@ -95,6 +104,7 @@ pub(crate) async fn serve_bridge(acp: AcpArgs, args: BridgeArgs) -> ExitCode {
         Ok(address) => eprintln!("lan: bridge listening on ws://{address}"),
         Err(error) => {
             eprintln!("lan: bridge: {error}");
+            eprintln!("{BRIDGE_RETRY}");
             return ExitCode::from(EXIT_FAILED);
         }
     }
@@ -113,6 +123,7 @@ pub(crate) async fn serve_bridge(acp: AcpArgs, args: BridgeArgs) -> ExitCode {
         Ok(()) => ExitCode::from(EXIT_OK),
         Err(error) => {
             eprintln!("lan: bridge: {error}");
+            eprintln!("{BRIDGE_RETRY}");
             ExitCode::from(EXIT_FAILED)
         }
     }
@@ -157,8 +168,8 @@ mod tests {
         // A silent wait was the old failure. The message replaces it, and the
         // only part that matters is that it says what to type instead.
         assert!(
-            NOT_A_CLIENT.contains("lan spawn -"),
-            "the signpost must name the fix: {NOT_A_CLIENT}"
+            NOT_A_CLIENT_NEXT.contains("lan spawn -"),
+            "the signpost must name the fix: {NOT_A_CLIENT_NEXT}"
         );
     }
 }

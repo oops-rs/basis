@@ -58,19 +58,19 @@ explicit.
 
 ## Acceptance criteria
 
-- [ ] `lan <PROMPT>` and `lan spawn <PROMPT>` normalize to the same command.
-- [ ] `lan serve --acp` starts ACP; `lan serve --bridge` starts the websocket
+- [x] `lan <PROMPT>` and `lan spawn <PROMPT>` normalize to the same command.
+- [x] `lan serve --acp` starts ACP; `lan serve --bridge` starts the websocket
       bridge; bare `lan` does not start a server.
-- [ ] Human-readable usage/errors provide one valid `next:` action without
+- [x] Human-readable usage/errors provide one valid `next:` action without
       changing the existing JSONL run bookends.
-- [ ] A child handle has exactly one terminal state and can be waited on more
+- [x] A child handle has exactly one terminal state and can be waited on more
       than once without rerunning work.
-- [ ] Cancelling a parent cancels attached descendants and settles their
+- [x] Cancelling a parent cancels attached descendants and settles their
       waiters.
-- [ ] Dropping or cancelling a wait does not lose a completed child result.
-- [ ] A parent/ancestor wait cycle is rejected or expires within a finite
+- [x] Dropping or cancelling a wait does not lose a completed child result.
+- [x] A parent/ancestor wait cycle is rejected or expires within a finite
       deadline; it never blocks forever.
-- [ ] A saturated progress/event path cannot prevent terminal completion.
+- [x] A saturated progress/event path cannot prevent terminal completion.
 - [ ] Detached work is visibly independent and has its own deadline/cancel
       policy.
 

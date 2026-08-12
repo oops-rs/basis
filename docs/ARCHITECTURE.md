@@ -78,7 +78,7 @@ lan fingerprint                    # the workspace's hash, for a caller's own lo
 The grammar is ADR-0017's and is the whole CLI. Bare `lan` returns usage rather than
 starting a long-lived server. Recurrence is not in it: an interval is the host's (cron,
 systemd, CI, a tokio task), and the two pieces that are easy to get wrong — the
-fingerprint and per-run bounds — are a subcommand and three flags on `run` (ADR-0014). In
+fingerprint and per-run bounds — are a subcommand and three flags on `spawn` (ADR-0014). In
 process they are `Workspace::fingerprint()` and the bounds on a `RunSpec`, which is the same
 loop without the subprocess: [`lan-core/examples/watch.rs`](../lan-core/examples/watch.rs).
 A run that a bound ended says which one, both as `RunReport::stopped_by` in process and as

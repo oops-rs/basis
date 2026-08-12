@@ -29,6 +29,10 @@ ceremony. Bare `lan` is usage output, never an accidental server; `--` escapes a
 that collides with a subcommand name (`lan -- spawn`). The compatibility spelling
 `lan run` remains an alias for `lan spawn`.
 
+Human-readable outcomes finish with one `next:` line naming valid commands.
+`--json` keeps stdout strictly JSONL; it never mixes prose hints into the event
+stream.
+
 The core has no opinions: task-specific behavior enters through data — the prompt, the
 workspace (AGENTS.md, skills, prompt templates, `.mcp.json`), and config — never through code.
 
@@ -430,7 +434,8 @@ without breaking every editor. Instead of waiting silently on prose, the server 
 the input proves it was never a client:
 
 ```
-lan: expected an ACP client on stdio; next: use `lan spawn -` for a prompt or `lan serve --acp` for ACP
+lan: expected an ACP client on stdio
+next: use `lan spawn -` for a prompt or `lan serve --acp` for ACP
 ```
 
 [`scripts/acp-smoke.py`](scripts/acp-smoke.py) drives it by hand if you want to watch the

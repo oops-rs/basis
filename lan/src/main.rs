@@ -95,6 +95,9 @@ async fn main() -> ExitCode {
             Ok(code) => code,
             Err(message) => {
                 eprintln!("lan: {message}");
+                eprintln!(
+                    "next: retry with `lan spawn <PROMPT>` after addressing the failure or use `lan --help` for options"
+                );
                 ExitCode::from(EXIT_FAILED)
             }
         },
@@ -102,13 +105,15 @@ async fn main() -> ExitCode {
             Ok(code) => code,
             Err(message) => {
                 eprintln!("lan: {message}");
+                eprintln!(
+                    "next: retry with `lan fingerprint -C <DIR>` after checking the workspace path"
+                );
                 ExitCode::from(EXIT_FAILED)
             }
         },
         Some(Command::Serve(args)) if args.acp && args.has_bridge_options() => {
-            eprintln!(
-                "lan: bridge options require `lan serve --bridge`; next: remove the bridge flags or select `--bridge`"
-            );
+            eprintln!("lan: bridge options cannot be used with `lan serve --acp`");
+            eprintln!("next: remove the bridge flags or use `lan serve --bridge`");
             ExitCode::from(EXIT_USAGE)
         }
         Some(Command::Serve(args)) if args.acp => serve_acp(args.acp_args).await,

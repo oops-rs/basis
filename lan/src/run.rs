@@ -16,7 +16,7 @@ use std::{
 };
 
 use lan_core::{
-    Event, JsonlWriter, RunConfig, RunOutcome, ShellAccess, provider,
+    Bound, Event, JsonlWriter, RunConfig, RunOutcome, ShellAccess, provider,
     run::{EventSink, FnSink},
 };
 use mentra::ModelSelector;
@@ -90,8 +90,26 @@ pub(crate) async fn execute_run(args: RunArgs) -> Result<ExitCode, String> {
         };
         eprintln!("lan: {what}: {message}");
     }
+    eprintln!("{}", next_hint(&report.outcome, report.stopped_by));
 
     Ok(ExitCode::from(exit_code(&report)))
+}
+
+/// One actionable line after a human-readable result. JSONL does not use this
+/// renderer, so its event contract remains a stream of JSON objects only.
+fn next_hint(outcome: &RunOutcome, stopped_by: Option<Bound>) -> &'static str {
+    if stopped_by.is_some() {
+        return "next: retry with `lan spawn <PROMPT>` using a narrower prompt or a larger bound";
+    }
+
+    match outcome {
+        RunOutcome::Ok => {
+            "next: use `lan fingerprint` to inspect workspace changes or `lan spawn <PROMPT>` for another task"
+        }
+        RunOutcome::Error { .. } => {
+            "next: retry with `lan spawn <PROMPT>` after addressing the reported failure"
+        }
+    }
 }
 
 /// The prompt as `run` was given it, reading stdin when it is `-`.
@@ -208,6 +226,40 @@ mod tests {
         assert_eq!(
             prompt_from("fix the failing test".to_string()).expect("a literal prompt"),
             "fix the failing test"
+        );
+    }
+
+    #[test]
+    fn a_success_hint_names_two_commands_that_exist() {
+        assert_eq!(
+            next_hint(&RunOutcome::Ok, None),
+            "next: use `lan fingerprint` to inspect workspace changes or `lan spawn <PROMPT>` for another task"
+        );
+    }
+
+    #[test]
+    fn a_bound_hint_suggests_changing_the_bound_or_the_work() {
+        assert_eq!(
+            next_hint(
+                &RunOutcome::Error {
+                    message: "deadline exceeded".to_string(),
+                },
+                Some(Bound::Deadline),
+            ),
+            "next: retry with `lan spawn <PROMPT>` using a narrower prompt or a larger bound"
+        );
+    }
+
+    #[test]
+    fn a_failure_hint_does_not_guess_the_remedy() {
+        assert_eq!(
+            next_hint(
+                &RunOutcome::Error {
+                    message: "provider failed".to_string(),
+                },
+                None,
+            ),
+            "next: retry with `lan spawn <PROMPT>` after addressing the reported failure"
         );
     }
 }
