@@ -30,7 +30,174 @@ const DEFAULT_TASK_DEADLINE: Duration = Duration::from_secs(30 * 60);
 const WATCH_POLL: Duration = Duration::from_secs(30);
 const CURRENT_TASK: &str = "LAN_TASK_ID";
 
-pub(crate) async fn spawn(args: RunArgs) -> Result<ExitCode, String> {
+/// An error returned by a local lifecycle command.
+///
+/// The daemon's wire contract has historically carried a human-readable
+/// `error` string. Keeping the error as a value at the client boundary lets us
+/// add machine-readable timeout/retry information without changing that
+/// string (or making `main` guess from stderr). In particular, a wait timeout
+/// is a bounded observation, not a failed task, and therefore exits with 3.
+#[derive(Debug)]
+pub(crate) struct ClientError {
+    message: String,
+    payload: Option<Value>,
+    code: u8,
+}
+
+impl ClientError {
+    fn new(message: impl Into<String>) -> Self {
+        Self {
+            message: message.into(),
+            payload: None,
+            code: EXIT_FAILED,
+        }
+    }
+
+    fn from_response(mut payload: Value) -> Self {
+        let message = payload["error"]
+            .as_str()
+            .unwrap_or("lan service rejected the request")
+            .to_string();
+
+        // Older daemons only sent prose. Recognize their stable timeout
+        // sentences here so a client can still preserve the durable handles
+        // and return the bounded exit code. A newer daemon may send `code` and
+        // `next` directly; those fields are accepted without interpretation.
+        let timeout = payload["code"] == "timeout" || parse_timeout(&message).is_some();
+        if timeout {
+            let parsed = parse_timeout(&message);
+            if let Some(parsed) = parsed
+                && let Some(object) = payload.as_object_mut()
+            {
+                for (key, value) in parsed {
+                    object.entry(key).or_insert(value);
+                }
+            }
+            payload["code"] = Value::String("timeout".to_string());
+            payload["timed_out"] = Value::Bool(true);
+        }
+
+        Self {
+            message,
+            payload: Some(payload),
+            code: if timeout { EXIT_BOUNDED } else { EXIT_FAILED },
+        }
+    }
+
+    fn timeout(message: impl Into<String>, payload: Value) -> Self {
+        Self {
+            message: message.into(),
+            payload: Some(payload),
+            code: EXIT_BOUNDED,
+        }
+    }
+
+    /// Render the error using the command's requested output mode.
+    pub(crate) fn render(self, structured: bool, command: &str) -> ExitCode {
+        if structured {
+            println!("{}", self.json_payload(command));
+        } else {
+            eprintln!("lan: {}", self.message);
+            if let Some(next) = self.next_action() {
+                eprintln!("next: use `{next}`");
+            } else {
+                eprintln!("next: retry with `{command}` or inspect `lan --help`");
+            }
+        }
+        ExitCode::from(self.code)
+    }
+
+    fn next_action(&self) -> Option<String> {
+        self.payload
+            .as_ref()
+            .and_then(|payload| payload["next"].as_str())
+            .map(str::to_string)
+    }
+
+    fn json_payload(&self, command: &str) -> Value {
+        let mut payload = self
+            .payload
+            .clone()
+            .unwrap_or_else(|| serde_json::json!({"error": self.message}));
+        let object = payload
+            .as_object_mut()
+            .expect("client error payload must be a JSON object");
+        object
+            .entry("error".to_string())
+            .or_insert_with(|| Value::String(self.message.clone()));
+        object
+            .entry("code".to_string())
+            .or_insert_with(|| Value::String("failed".to_string()));
+        object
+            .entry("next".to_string())
+            .or_insert_with(|| Value::String(command.to_string()));
+        payload
+    }
+}
+
+impl From<String> for ClientError {
+    fn from(message: String) -> Self {
+        Self::new(message)
+    }
+}
+
+impl From<&str> for ClientError {
+    fn from(message: &str) -> Self {
+        Self::new(message)
+    }
+}
+
+/// Parse timeout messages emitted by the current and previous local daemons.
+/// The parser intentionally only recognizes the fixed prefixes owned by this
+/// client; arbitrary service failures remain ordinary exit-1 errors.
+fn parse_timeout(message: &str) -> Option<serde_json::Map<String, Value>> {
+    let mut payload = serde_json::Map::new();
+    if let Some(rest) = message.strip_prefix("wait for ")
+        && let Some((task, _)) = rest.split_once(" timed out")
+        && !task.is_empty()
+    {
+        payload.insert("task".to_string(), Value::String(task.to_string()));
+        payload.insert("state".to_string(), Value::String("running".to_string()));
+        payload.insert(
+            "next".to_string(),
+            Value::String(format!("lan wait {task}")),
+        );
+        return Some(payload);
+    }
+
+    if let Some(rest) = message.strip_prefix("message ")
+        && let Some((message_id, rest)) = rest.split_once(" on ")
+        && let Some((task, _)) = rest.split_once(" timed out")
+        && !message_id.is_empty()
+        && !task.is_empty()
+    {
+        payload.insert("task".to_string(), Value::String(task.to_string()));
+        payload.insert("message".to_string(), Value::String(message_id.to_string()));
+        payload.insert("state".to_string(), Value::String("waiting".to_string()));
+        payload.insert(
+            "next".to_string(),
+            Value::String(format!("lan wait {task} --message {message_id}")),
+        );
+        return Some(payload);
+    }
+
+    if let Some(rest) = message.strip_prefix("watch for ")
+        && let Some((task, _)) = rest.split_once(" timed out")
+        && !task.is_empty()
+    {
+        payload.insert("task".to_string(), Value::String(task.to_string()));
+        payload.insert("state".to_string(), Value::String("running".to_string()));
+        payload.insert(
+            "next".to_string(),
+            Value::String(format!("lan watch {task}")),
+        );
+        return Some(payload);
+    }
+
+    None
+}
+
+pub(crate) async fn spawn(args: RunArgs) -> Result<ExitCode, ClientError> {
     let workspace = workspace_or_current(args.workspace.clone())?;
     let prompt = prompt_from(args.prompt.clone())?;
     if prompt.len() > super::protocol::MAX_PROMPT {
@@ -38,7 +205,8 @@ pub(crate) async fn spawn(args: RunArgs) -> Result<ExitCode, String> {
             "prompt is {} bytes; the limit is {}",
             prompt.len(),
             super::protocol::MAX_PROMPT
-        ));
+        )
+        .into());
     }
     let registry = Registry::discover().map_err(|error| format!("open task registry: {error}"))?;
     let descriptor = registry.ensure_daemon(&workspace).await?;
@@ -49,7 +217,8 @@ pub(crate) async fn spawn(args: RunArgs) -> Result<ExitCode, String> {
     {
         return Err(format!(
             "current task {caller} belongs to another workspace service; use `lan spawn --detached ...` to start work here"
-        ));
+        )
+        .into());
     }
     let parent = if args.detached { None } else { caller.clone() };
     let operation = Operation::Spawn {
@@ -70,7 +239,7 @@ pub(crate) fn has_current_task() -> bool {
     current_task().is_some()
 }
 
-pub(crate) async fn send(args: SendArgs) -> Result<ExitCode, String> {
+pub(crate) async fn send(args: SendArgs) -> Result<ExitCode, ClientError> {
     send_message(
         args.task,
         args.message,
@@ -81,7 +250,7 @@ pub(crate) async fn send(args: SendArgs) -> Result<ExitCode, String> {
     .await
 }
 
-pub(crate) async fn ask(args: AskArgs) -> Result<ExitCode, String> {
+pub(crate) async fn ask(args: AskArgs) -> Result<ExitCode, ClientError> {
     send_message(args.task, args.message, true, args.timeout, args.json).await
 }
 
@@ -91,7 +260,7 @@ async fn send_message(
     await_result: bool,
     timeout: Option<DurationArg>,
     json: bool,
-) -> Result<ExitCode, String> {
+) -> Result<ExitCode, ClientError> {
     let registry = Registry::discover().map_err(|error| format!("open task registry: {error}"))?;
     let descriptor = live_descriptor(&registry, &task).await?;
     let message = prompt_from(raw_message)?;
@@ -100,7 +269,8 @@ async fn send_message(
             "message is {} bytes; the limit is {}",
             message.len(),
             super::protocol::MAX_MESSAGE
-        ));
+        )
+        .into());
     }
     let operation = Operation::Send {
         task,
@@ -113,7 +283,7 @@ async fn send_message(
     render_result(&payload, json)
 }
 
-pub(crate) async fn wait(args: WaitArgs) -> Result<ExitCode, String> {
+pub(crate) async fn wait(args: WaitArgs) -> Result<ExitCode, ClientError> {
     let registry = Registry::discover().map_err(|error| format!("open task registry: {error}"))?;
     let descriptor = live_descriptor(&registry, &args.task).await?;
     let operation = Operation::Wait {
@@ -126,7 +296,7 @@ pub(crate) async fn wait(args: WaitArgs) -> Result<ExitCode, String> {
     render_result(&payload, args.json)
 }
 
-pub(crate) async fn cancel(args: CancelArgs) -> Result<ExitCode, String> {
+pub(crate) async fn cancel(args: CancelArgs) -> Result<ExitCode, ClientError> {
     let registry = Registry::discover().map_err(|error| format!("open task registry: {error}"))?;
     let descriptor = live_descriptor(&registry, &args.task).await?;
     let task = args.task;
@@ -143,7 +313,7 @@ pub(crate) async fn cancel(args: CancelArgs) -> Result<ExitCode, String> {
     render_result(&payload, args.json)
 }
 
-pub(crate) async fn inbox(args: InboxArgs) -> Result<ExitCode, String> {
+pub(crate) async fn inbox(args: InboxArgs) -> Result<ExitCode, ClientError> {
     let task = args.task.or_else(current_task).ok_or_else(|| {
         "`lan inbox` needs a task id outside a LAN task: use `lan inbox <ID>`".to_string()
     })?;
@@ -175,7 +345,7 @@ pub(crate) async fn inbox(args: InboxArgs) -> Result<ExitCode, String> {
     Ok(ExitCode::from(EXIT_OK))
 }
 
-pub(crate) async fn watch(args: WatchArgs) -> Result<ExitCode, String> {
+pub(crate) async fn watch(args: WatchArgs) -> Result<ExitCode, ClientError> {
     let registry = Registry::discover().map_err(|error| format!("open task registry: {error}"))?;
     let descriptor = live_descriptor(&registry, &args.task).await?;
     let timeout = args
@@ -188,10 +358,20 @@ pub(crate) async fn watch(args: WatchArgs) -> Result<ExitCode, String> {
     loop {
         let now = Instant::now();
         if now >= deadline {
-            return Err(format!(
+            let message = format!(
                 "watch for {} timed out; the task is still running",
                 args.task
-            ));
+            );
+            let payload = serde_json::json!({
+                "error": message,
+                "code": "timeout",
+                "timed_out": true,
+                "task": args.task,
+                "state": "running",
+                "next": format!("lan watch {}", args.task),
+            });
+            let error = payload["error"].as_str().unwrap_or_default().to_string();
+            return Err(ClientError::timeout(error, payload));
         }
         let poll = WATCH_POLL.min(deadline.saturating_duration_since(now));
         let payload = checked(
@@ -227,7 +407,7 @@ pub(crate) async fn watch(args: WatchArgs) -> Result<ExitCode, String> {
     }
 }
 
-async fn live_descriptor(registry: &Registry, task: &str) -> Result<Descriptor, String> {
+async fn live_descriptor(registry: &Registry, task: &str) -> Result<Descriptor, ClientError> {
     let descriptor = registry
         .descriptor_for_task(task)
         .map_err(|error| format!("read task handle: {error}"))?
@@ -239,30 +419,25 @@ async fn live_descriptor(registry: &Registry, task: &str) -> Result<Descriptor, 
         .ensure_daemon(Path::new(&descriptor.workspace))
         .await?;
     if restarted.instance != descriptor.instance {
-        return Err(format!(
-            "task handle `{task}` belongs to a different service instance"
-        ));
+        return Err(format!("task handle `{task}` belongs to a different service instance").into());
     }
     Ok(restarted)
 }
 
-fn checked(response: Response) -> Result<Value, String> {
+fn checked(response: Response) -> Result<Value, ClientError> {
     if response.version != super::protocol::VERSION {
-        return Err(format!(
+        return Err(ClientError::new(format!(
             "lan service replied with unsupported protocol version {}",
             response.version
-        ));
+        )));
     }
     match response.kind {
         ResponseKind::Ok => Ok(response.payload),
-        ResponseKind::Error => Err(response.payload["error"]
-            .as_str()
-            .unwrap_or("lan service rejected the request")
-            .to_string()),
+        ResponseKind::Error => Err(ClientError::from_response(response.payload)),
     }
 }
 
-fn render_result(payload: &Value, structured: bool) -> Result<ExitCode, String> {
+fn render_result(payload: &Value, structured: bool) -> Result<ExitCode, ClientError> {
     if structured {
         println!("{payload}");
         return Ok(ExitCode::from(result_code(payload)));
@@ -271,7 +446,14 @@ fn render_result(payload: &Value, structured: bool) -> Result<ExitCode, String> 
     match payload["state"].as_str().unwrap_or("unknown") {
         "running" | "accepted" | "cancel_requested" => {
             if let Some(task) = payload["task"].as_str() {
-                println!("task {task}: {}", payload["state"].as_str().unwrap());
+                let state = payload["state"].as_str().unwrap_or("unknown");
+                if state == "accepted"
+                    && let Some(message) = payload["message"].as_str()
+                {
+                    println!("task {task}: accepted message {message}");
+                } else {
+                    println!("task {task}: {state}");
+                }
             }
         }
         "succeeded" => {
@@ -295,11 +477,11 @@ fn render_result(payload: &Value, structured: bool) -> Result<ExitCode, String> 
     print_hint(payload);
     io::stdout()
         .flush()
-        .map_err(|error| format!("flush task output: {error}"))?;
+        .map_err(|error| ClientError::new(format!("flush task output: {error}")))?;
     Ok(ExitCode::from(result_code(payload)))
 }
 
-fn render_event(record: &Value, structured: bool) -> Result<(), String> {
+fn render_event(record: &Value, structured: bool) -> Result<(), ClientError> {
     if structured {
         println!("{record}");
         return Ok(());
@@ -310,7 +492,7 @@ fn render_event(record: &Value, structured: bool) -> Result<(), String> {
             print!("{}", event["text"].as_str().unwrap_or_default());
             io::stdout()
                 .flush()
-                .map_err(|error| format!("flush task progress: {error}"))?;
+                .map_err(|error| ClientError::new(format!("flush task progress: {error}")))?;
         }
         "tool_started" => eprintln!("  · {}", event["tool_name"].as_str().unwrap_or("tool")),
         "notice" | "error" => {
@@ -430,5 +612,48 @@ mod tests {
             result_code(&json!({"state": "failed", "stopped_by": "deadline"})),
             EXIT_BOUNDED
         );
+    }
+
+    #[test]
+    fn message_timeout_keeps_the_durable_retry_handle() {
+        let error = ClientError::from_response(json!({
+            "error": "message msg-7 on root/task timed out after 1s; retry with `lan wait root/task --message msg-7` or inspect `lan inbox root/task`"
+        }));
+
+        assert_eq!(error.code, EXIT_BOUNDED);
+        let payload = error.json_payload("lan ask <ID> <MESSAGE>");
+        assert_eq!(payload["code"], "timeout");
+        assert_eq!(payload["timed_out"], true);
+        assert_eq!(payload["task"], "root/task");
+        assert_eq!(payload["message"], "msg-7");
+        assert_eq!(payload["state"], "waiting");
+        assert_eq!(payload["next"], "lan wait root/task --message msg-7");
+    }
+
+    #[test]
+    fn task_timeout_is_bounded_without_fabricating_a_message_id() {
+        let error = ClientError::from_response(json!({
+            "error": "wait for root/task timed out after 30s; the task is still running"
+        }));
+
+        assert_eq!(error.code, EXIT_BOUNDED);
+        let payload = error.json_payload("lan wait <ID>");
+        assert_eq!(payload["task"], "root/task");
+        assert_eq!(payload["state"], "running");
+        assert!(payload.get("message").is_none());
+        assert_eq!(payload["next"], "lan wait root/task");
+    }
+
+    #[test]
+    fn ordinary_service_errors_keep_failed_exit_and_structured_details() {
+        let error = ClientError::from_response(json!({
+            "error": "task root/task does not exist"
+        }));
+
+        assert_eq!(error.code, EXIT_FAILED);
+        let payload = error.json_payload("lan wait <ID>");
+        assert_eq!(payload["error"], "task root/task does not exist");
+        assert_eq!(payload["code"], "failed");
+        assert_eq!(payload["next"], "lan wait <ID>");
     }
 }

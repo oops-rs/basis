@@ -8,7 +8,10 @@
 //! lan "<prompt>"            -> shorthand: exactly `lan spawn "<prompt>"`
 //! lan spawn "<prompt>"      -> enqueue one task and print its durable handle
 //! lan send <ID> "<message>" -> enqueue a later turn for a running task
+//! lan ask <ID> "<question>"  -> enqueue a turn and await its reply
 //! lan wait <ID>              -> observe a repeatable terminal result
+//! lan wait <ID> --message <MID>
+//!                              -> retry one correlated message reply
 //! lan cancel <ID>            -> request downward cancellation
 //! lan watch <ID>             -> follow progress without owning completion
 //! lan inbox [ID]             -> inspect accepted messages
@@ -27,7 +30,7 @@
 //! question it answers:
 //!
 //! - [`shorthand`] rewrites the command line before clap sees it, which is the
-//!   only place the five-line grammar is not simply declared.
+//!   only place the shorthand grammar is not simply declared.
 //! - [`cli`] declares the rest of it: every type clap parses into.
 //! - [`local`] owns the durable lifecycle adapter; [`serve`] owns ACP and its
 //!   websocket bridge; [`fingerprint`] owns workspace hashing.
@@ -75,6 +78,7 @@ use crate::{
     cli::{Cli, Command},
     exit::{EXIT_FAILED, EXIT_USAGE},
     fingerprint::execute_fingerprint,
+    local::ClientError,
     run::execute_run,
     serve::{serve_acp, serve_bridge},
     shorthand::normalize,
@@ -107,28 +111,41 @@ async fn main() -> ExitCode {
                 }
             }
         }
-        Some(Command::Spawn(args)) => match local::spawn(args).await {
-            Ok(code) => code,
-            Err(message) => {
-                eprintln!("lan: {message}");
-                eprintln!(
-                    "next: retry with `lan spawn <PROMPT>` or use `lan --help` for lifecycle options"
-                );
-                ExitCode::from(EXIT_FAILED)
+        Some(Command::Spawn(args)) => {
+            let structured = args.json;
+            match local::spawn(args).await {
+                Ok(code) => code,
+                Err(error) => error.render(structured, "lan spawn <PROMPT>"),
             }
-        },
+        }
         Some(Command::Send(args)) => {
-            lifecycle_result(local::send(args).await, "lan send <ID> <MESSAGE>")
+            let structured = args.json;
+            lifecycle_result(
+                local::send(args).await,
+                "lan send <ID> <MESSAGE>",
+                structured,
+            )
         }
         Some(Command::Ask(args)) => {
-            lifecycle_result(local::ask(args).await, "lan ask <ID> <MESSAGE>")
+            let structured = args.json;
+            lifecycle_result(local::ask(args).await, "lan ask <ID> <MESSAGE>", structured)
         }
-        Some(Command::Wait(args)) => lifecycle_result(local::wait(args).await, "lan wait <ID>"),
+        Some(Command::Wait(args)) => {
+            let structured = args.json;
+            lifecycle_result(local::wait(args).await, "lan wait <ID>", structured)
+        }
         Some(Command::Cancel(args)) => {
-            lifecycle_result(local::cancel(args).await, "lan cancel <ID>")
+            let structured = args.json;
+            lifecycle_result(local::cancel(args).await, "lan cancel <ID>", structured)
         }
-        Some(Command::Watch(args)) => lifecycle_result(local::watch(args).await, "lan watch <ID>"),
-        Some(Command::Inbox(args)) => lifecycle_result(local::inbox(args).await, "lan inbox <ID>"),
+        Some(Command::Watch(args)) => {
+            let structured = args.json;
+            lifecycle_result(local::watch(args).await, "lan watch <ID>", structured)
+        }
+        Some(Command::Inbox(args)) => {
+            let structured = args.json;
+            lifecycle_result(local::inbox(args).await, "lan inbox <ID>", structured)
+        }
         Some(Command::Fingerprint(args)) => match execute_fingerprint(args) {
             Ok(code) => code,
             Err(message) => {
@@ -158,14 +175,14 @@ async fn main() -> ExitCode {
     }
 }
 
-fn lifecycle_result(result: Result<ExitCode, String>, command: &str) -> ExitCode {
+fn lifecycle_result(
+    result: Result<ExitCode, ClientError>,
+    command: &str,
+    structured: bool,
+) -> ExitCode {
     match result {
         Ok(code) => code,
-        Err(message) => {
-            eprintln!("lan: {message}");
-            eprintln!("next: retry with `{command}` or inspect `lan --help`");
-            ExitCode::from(EXIT_FAILED)
-        }
+        Err(error) => error.render(structured, command),
     }
 }
 
