@@ -1,6 +1,10 @@
 //! Durable task state transitions and structured-concurrency controls.
 
-use std::{collections::VecDeque, time::Duration};
+use std::{
+    collections::{HashMap, HashSet, VecDeque},
+    sync::{Arc, Mutex},
+    time::Duration,
+};
 
 use lan_core::CancellationToken;
 use serde_json::{Value, json};
@@ -10,6 +14,115 @@ use super::{Shared, notify_changed};
 use crate::local::store::{self, DurableState, Journal};
 
 const DEFAULT_WAIT: Duration = Duration::from_secs(30 * 60);
+
+/// In-memory edges represent waits held by live request handlers. They are
+/// deliberately not journaled: a process restart drops every lease, and a
+/// persisted task can never inherit a wait edge whose owner no longer exists.
+#[derive(Debug, Default)]
+pub(super) struct WaitGraph {
+    edges: HashMap<String, HashMap<String, usize>>,
+}
+
+/// A counted edge in [`WaitGraph`]. Dropping it releases exactly one edge,
+/// including when a request returns an error, times out, or is cancelled.
+pub(super) struct WaitLease {
+    graph: Option<Arc<Mutex<WaitGraph>>>,
+    caller: Option<String>,
+    target: String,
+}
+
+impl WaitLease {
+    pub(super) fn detached() -> Self {
+        Self {
+            graph: None,
+            caller: None,
+            target: String::new(),
+        }
+    }
+}
+
+impl Drop for WaitLease {
+    fn drop(&mut self) {
+        let (Some(graph), Some(caller)) = (&self.graph, &self.caller) else {
+            return;
+        };
+        let Ok(mut graph) = graph.lock() else {
+            return;
+        };
+        let Some(targets) = graph.edges.get_mut(caller) else {
+            return;
+        };
+        let Some(count) = targets.get_mut(&self.target) else {
+            return;
+        };
+        if *count > 1 {
+            *count -= 1;
+        } else {
+            targets.remove(&self.target);
+            if targets.is_empty() {
+                graph.edges.remove(caller);
+            }
+        }
+    }
+}
+
+impl WaitGraph {
+    fn reaches(&self, start: &str, goal: &str) -> bool {
+        let mut pending = vec![start];
+        let mut visited = HashSet::new();
+        while let Some(current) = pending.pop() {
+            if current == goal {
+                return true;
+            }
+            if !visited.insert(current) {
+                continue;
+            }
+            if let Some(next) = self.edges.get(current) {
+                pending.extend(next.keys().map(String::as_str));
+            }
+        }
+        false
+    }
+
+    fn try_acquire(&mut self, caller: String, target: String) -> Result<(), String> {
+        if self.reaches(&target, &caller) {
+            return Err(format!(
+                "wait edge {caller} -> {target} would create a cycle"
+            ));
+        }
+        let count = self
+            .edges
+            .entry(caller)
+            .or_default()
+            .entry(target)
+            .or_default();
+        *count = count
+            .checked_add(1)
+            .ok_or_else(|| "wait edge count exhausted".to_string())?;
+        Ok(())
+    }
+}
+
+/// Validate the static ownership policy and acquire one dynamic wait edge.
+/// The journal lock is always taken before the graph lock; no lock is held by
+/// the returned lease across an await.
+pub(super) fn begin_wait(
+    shared: &Shared,
+    caller: Option<&str>,
+    target: &str,
+) -> Result<WaitLease, String> {
+    validate_wait_edge(shared, caller, target)?;
+    let Some(caller) = caller else {
+        return Ok(WaitLease::detached());
+    };
+    let mut graph = shared.waits.lock().expect("wait graph poisoned");
+    graph.try_acquire(caller.to_string(), target.to_string())?;
+    Ok(WaitLease {
+        graph: Some(shared.waits.clone()),
+        caller: Some(caller.to_string()),
+        target: target.to_string(),
+    })
+}
 
 pub(super) async fn settle_or_take_message(
     shared: &Shared,
@@ -75,8 +188,8 @@ pub(super) async fn enqueue_message(
 pub(super) async fn await_task(
     shared: &Shared,
     task: &str,
-    _caller: Option<String>,
     timeout: Duration,
+    _lease: WaitLease,
 ) -> Result<Value, String> {
     let deadline = Instant::now() + timeout;
     let mut updates = shared.changed.subscribe();
@@ -95,10 +208,12 @@ pub(super) async fn await_task(
 
 pub(super) async fn watch_task(
     shared: &Shared,
+    caller: Option<&str>,
     task: &str,
     since: u64,
     timeout: Duration,
 ) -> Result<Value, String> {
+    let _lease = begin_wait(shared, caller, task)?;
     let deadline = Instant::now() + timeout;
     let mut updates = shared.changed.subscribe();
     loop {
@@ -152,7 +267,12 @@ pub(super) fn inbox(shared: &Shared, task: &str) -> Result<Value, String> {
     }))
 }
 
-pub(super) async fn cancel_task(shared: &Shared, task: &str) -> Result<Value, String> {
+pub(super) async fn cancel_task(
+    shared: &Shared,
+    caller: Option<&str>,
+    task: &str,
+) -> Result<Value, String> {
+    validate_cancel_target(shared, caller, task)?;
     if let Some(payload) = terminal_payload(shared, task)? {
         return Ok(payload);
     }
@@ -167,6 +287,32 @@ pub(super) async fn cancel_task(shared: &Shared, task: &str) -> Result<Value, St
         "state": "cancel_requested",
         "next": format!("lan wait {task}"),
     }))
+}
+
+fn validate_cancel_target(
+    shared: &Shared,
+    caller: Option<&str>,
+    target: &str,
+) -> Result<(), String> {
+    let journal = shared.journal.lock().expect("task journal poisoned");
+    if !journal.contains_key(target) {
+        return Err(format!("task {target} does not exist"));
+    }
+    let Some(caller) = caller else {
+        return Ok(());
+    };
+    if !journal.contains_key(caller) {
+        return Err(format!("caller task {caller} does not exist"));
+    }
+    if caller == target || is_ancestor(&journal, caller, target) {
+        return Ok(());
+    }
+    if is_ancestor(&journal, target, caller) {
+        return Err(format!("task {caller} cannot cancel its ancestor {target}"));
+    }
+    Err(format!(
+        "task {caller} cannot cancel peer {target}; only itself or descendants are allowed"
+    ))
 }
 
 fn request_cancel_tree(
@@ -345,14 +491,17 @@ pub(super) fn accepted_payload(task: &str) -> Value {
     })
 }
 
-pub(super) fn task_parent(shared: &Shared, task: &str) -> Result<Option<String>, String> {
-    shared
-        .journal
-        .lock()
-        .expect("task journal poisoned")
-        .get(task)
-        .map(|record| record.parent.clone())
-        .ok_or_else(|| format!("task {task} does not exist"))
+/// Return a next action that is legal for the submitting task. Enqueue-only
+/// sends intentionally do not acquire a wait lease; when the target is an
+/// ancestor, peer, or self, suggest inspecting the caller's inbox instead of
+/// suggesting an impossible `lan wait` edge.
+pub(super) fn send_next_hint(shared: &Shared, caller: Option<&str>, target: &str) -> String {
+    if let Some(caller) = caller
+        && validate_wait_edge(shared, Some(caller), target).is_err()
+    {
+        return format!("lan inbox {caller}");
+    }
+    format!("lan wait {target}")
 }
 
 pub(super) fn deadline_of(shared: &Shared, task: &str) -> Option<u64> {
@@ -492,6 +641,7 @@ mod tests {
             controls: Arc::new(Mutex::new(HashMap::new())),
             persist_gate: Arc::new(AsyncMutex::new(())),
             changed,
+            waits: Arc::new(Mutex::new(WaitGraph::default())),
         };
         (dir, shared)
     }
@@ -551,5 +701,62 @@ mod tests {
             snapshot["result"]["next"],
             "lan watch task or lan inbox task"
         );
+    }
+
+    #[test]
+    fn opposite_independent_wait_edges_are_rejected() {
+        let mut graph = WaitGraph::default();
+        graph
+            .try_acquire("left".to_string(), "right".to_string())
+            .expect("first edge");
+        let error = graph
+            .try_acquire("right".to_string(), "left".to_string())
+            .expect_err("opposite edge would deadlock");
+        assert!(error.contains("cycle"), "{error}");
+    }
+
+    #[test]
+    fn duplicate_wait_leases_are_counted_until_each_drops() {
+        let graph = Arc::new(Mutex::new(WaitGraph::default()));
+        let first = {
+            let mut guard = graph.lock().expect("graph");
+            guard
+                .try_acquire("caller".to_string(), "target".to_string())
+                .expect("first edge");
+            WaitLease {
+                graph: Some(graph.clone()),
+                caller: Some("caller".to_string()),
+                target: "target".to_string(),
+            }
+        };
+        let second = {
+            let mut guard = graph.lock().expect("graph");
+            guard
+                .try_acquire("caller".to_string(), "target".to_string())
+                .expect("duplicate edge");
+            WaitLease {
+                graph: Some(graph.clone()),
+                caller: Some("caller".to_string()),
+                target: "target".to_string(),
+            }
+        };
+        drop(first);
+        assert_eq!(graph.lock().expect("graph").edges["caller"]["target"], 1);
+        drop(second);
+        assert!(graph.lock().expect("graph").edges.is_empty());
+    }
+
+    #[tokio::test]
+    async fn watch_rejects_an_ancestor_target_before_waiting() {
+        let (_dir, shared) = test_shared();
+        {
+            let mut journal = shared.journal.lock().expect("journal");
+            journal.insert("root".to_string(), record("root", None));
+            journal.insert("child".to_string(), record("child", Some("root")));
+        }
+        let error = watch_task(&shared, Some("child"), "root", 0, Duration::from_millis(1))
+            .await
+            .expect_err("watching an ancestor is an unsafe wait edge");
+        assert!(error.contains("ancestor"), "{error}");
     }
 }

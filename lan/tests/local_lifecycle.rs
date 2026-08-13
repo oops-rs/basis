@@ -21,6 +21,20 @@ impl Drop for ChildGuard {
 }
 
 #[test]
+fn bare_usage_ends_with_an_actionable_hint() {
+    let output = run_bounded(&mut Command::new(env!("CARGO_BIN_EXE_lan")));
+    assert_eq!(output.status.code(), Some(2), "{}", stderr(&output));
+    let stderr = stderr(&output);
+    assert!(
+        stderr
+            .lines()
+            .last()
+            .is_some_and(|line| line.starts_with("next:")),
+        "the final line should tell an agent what it can do next:\n{stderr}"
+    );
+}
+
+#[test]
 fn task_handles_survive_clients_and_terminal_waits_are_repeatable() {
     let root = tempfile::tempdir().expect("tempdir");
     let workspace = root.path().join("workspace");
@@ -74,7 +88,11 @@ fn task_handles_survive_clients_and_terminal_waits_are_repeatable() {
     let first: Value = serde_json::from_slice(&first.stdout).expect("first terminal JSON");
     assert_eq!(first["state"], "failed");
     assert_eq!(first["task"], task);
-    assert!(first["next"].as_str().is_some());
+    assert_eq!(
+        first["next"],
+        format!("lan watch {task} or lan inbox {task}"),
+        "a durable terminal result should name concrete follow-up commands"
+    );
 
     let second = wait(&config, &task);
     assert_eq!(second.status.code(), Some(1), "{}", stderr(&second));

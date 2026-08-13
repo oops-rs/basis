@@ -12,7 +12,7 @@ use serde::{Deserialize, Serialize, de::DeserializeOwned};
 use serde_json::Value;
 use tokio::io::{AsyncRead, AsyncReadExt, AsyncWrite, AsyncWriteExt};
 
-pub(crate) const VERSION: u8 = 1;
+pub(crate) const VERSION: u8 = 2;
 pub(crate) const MAX_FRAME: usize = 8 * 1024 * 1024;
 pub(crate) const MAX_PROMPT: usize = 256 * 1024;
 pub(crate) const MAX_MESSAGE: usize = 256 * 1024;
@@ -29,6 +29,10 @@ pub(crate) struct Request {
     pub operation: Operation,
 }
 
+// Spawn carries the complete run configuration because the daemon must be
+// independently launchable. Boxing it would complicate the private wire
+// contract without changing its bounded-frame cost.
+#[allow(clippy::large_enum_variant)]
 #[derive(Debug, Serialize, Deserialize)]
 #[serde(tag = "op", rename_all = "snake_case")]
 pub(crate) enum Operation {
@@ -36,10 +40,14 @@ pub(crate) enum Operation {
         workspace: String,
         prompt: String,
         parent: Option<String>,
+        /// The task that owns a wait for this new task. This is separate from
+        /// `parent` because detached tasks have no ownership parent but may
+        /// still be awaited by the ambient task that submitted them.
+        caller: Option<String>,
         detached: bool,
         await_result: bool,
         timeout_ms: Option<u64>,
-        options: RunOptions,
+        options: Box<RunOptions>,
     },
     Send {
         task: String,
@@ -55,9 +63,11 @@ pub(crate) enum Operation {
     },
     Cancel {
         task: String,
+        caller: Option<String>,
     },
     Watch {
         task: String,
+        caller: Option<String>,
         since: u64,
         timeout_ms: u64,
     },

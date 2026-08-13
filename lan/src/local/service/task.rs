@@ -17,18 +17,35 @@ use crate::local::{
 };
 
 use super::lifecycle::{
-    deadline_of, finish_cancelled, finish_failed, is_cancel_requested, persist,
-    settle_or_take_message,
+    WaitLease, begin_wait, deadline_of, finish_cancelled, finish_failed, is_cancel_requested,
+    persist, settle_or_take_message,
 };
+
+pub(super) struct SpawnRequest {
+    pub(super) workspace: String,
+    pub(super) prompt: String,
+    pub(super) parent: Option<String>,
+    pub(super) caller: Option<String>,
+    pub(super) detached: bool,
+    pub(super) await_result: bool,
+    pub(super) options: WireRunOptions,
+}
+
+const DEFAULT_TASK_DEADLINE_MS: u64 = 30 * 60 * 1000;
 
 pub(super) async fn spawn_task(
     shared: &Shared,
-    workspace: String,
-    prompt: String,
-    parent: Option<String>,
-    detached: bool,
-    options: WireRunOptions,
-) -> Result<String, String> {
+    request: SpawnRequest,
+) -> Result<(String, WaitLease), String> {
+    let SpawnRequest {
+        workspace,
+        prompt,
+        parent,
+        caller,
+        detached,
+        await_result,
+        options,
+    } = request;
     if prompt.trim().is_empty() {
         return Err("prompt is empty".to_string());
     }
@@ -47,11 +64,17 @@ pub(super) async fn spawn_task(
     if detached && parent.is_some() {
         return Err("a detached task cannot also name a parent".to_string());
     }
+    if !detached && parent.as_deref() != caller.as_deref() {
+        return Err("an attached task's parent must be its submitting caller".to_string());
+    }
 
     let task = format!("{}/{}", shared.descriptor.instance, Uuid::new_v4().simple());
-    let requested_deadline = options
-        .deadline_ms
-        .and_then(|after| store::now_ms().checked_add(after));
+    let deadline_after = options.deadline_ms.unwrap_or(DEFAULT_TASK_DEADLINE_MS);
+    let requested_deadline = Some(
+        store::now_ms()
+            .checked_add(deadline_after)
+            .ok_or_else(|| "task deadline exceeds the system clock range".to_string())?,
+    );
     let deadline_at = {
         let journal = shared.journal.lock().expect("task journal poisoned");
         match parent.as_deref() {
@@ -59,7 +82,12 @@ pub(super) async fn spawn_task(
                 let owner = journal
                     .get(parent_id)
                     .ok_or_else(|| format!("parent task {parent_id} does not exist"))?;
-                if owner.state.is_terminal() {
+                if owner.state.is_terminal()
+                    || owner.cancel_requested
+                    || owner
+                        .deadline_at_ms
+                        .is_some_and(|deadline| deadline <= store::now_ms())
+                {
                     return Err(format!("parent task {parent_id} is no longer running"));
                 }
                 earlier_deadline(requested_deadline, owner.deadline_at_ms)
@@ -70,7 +98,7 @@ pub(super) async fn spawn_task(
 
     let record = TaskRecord::new(
         task.clone(),
-        parent,
+        parent.clone(),
         detached,
         shared.workspace.to_string_lossy().into_owned(),
         String::new(),
@@ -84,30 +112,72 @@ pub(super) async fn spawn_task(
                 store::MAX_TASKS
             ));
         }
+        if let Some(parent_id) = parent.as_deref()
+            && journal.get(parent_id).is_none_or(|owner| {
+                owner.state.is_terminal()
+                    || owner.cancel_requested
+                    || owner
+                        .deadline_at_ms
+                        .is_some_and(|deadline| deadline <= store::now_ms())
+            })
+        {
+            return Err(format!("parent task {parent_id} is no longer running"));
+        }
         journal.insert(task.clone(), record);
     }
+    // Acquire the dynamic wait edge before exposing or starting the worker.
+    // If cycle detection rejects it, remove the just-created durable record so
+    // no task can continue after the caller receives an error.
+    let lease = if await_result {
+        match begin_wait(shared, caller.as_deref(), &task) {
+            Ok(lease) => lease,
+            Err(error) => {
+                shared
+                    .journal
+                    .lock()
+                    .expect("task journal poisoned")
+                    .remove(&task);
+                let _ = persist(shared).await;
+                return Err(error);
+            }
+        }
+    } else {
+        WaitLease::detached()
+    };
+
     if let Err(error) = persist(shared).await {
         shared
             .journal
             .lock()
             .expect("task journal poisoned")
             .remove(&task);
+        drop(lease);
         return Err(error);
     }
 
     let cancellation = CancellationToken::default();
-    shared
-        .controls
-        .lock()
-        .expect("task controls poisoned")
-        .insert(task.clone(), cancellation.clone());
+    // Cancellation and control registration use the same journal -> controls
+    // lock order as `request_cancel_tree`.  A cancel request can therefore not
+    // slip between the journal mutation and the worker's token registration.
+    let cancel_immediately = {
+        let journal = shared.journal.lock().expect("task journal poisoned");
+        let mut controls = shared.controls.lock().expect("task controls poisoned");
+        let requested = journal
+            .get(&task)
+            .is_none_or(|record| record.cancel_requested || record.state.is_terminal());
+        controls.insert(task.clone(), cancellation.clone());
+        requested
+    };
+    if cancel_immediately {
+        cancellation.cancel();
+    }
     let worker = shared.clone();
     let task_for_worker = task.clone();
     tokio::spawn(async move {
         run_task(worker, task_for_worker, prompt, options, cancellation).await;
     });
     notify_changed(shared);
-    Ok(task)
+    Ok((task, lease))
 }
 
 async fn run_task(
@@ -117,6 +187,12 @@ async fn run_task(
     options: WireRunOptions,
     cancellation: CancellationToken,
 ) {
+    // The token check above is the fast path; the journal check covers a
+    // cancel that won the registration race before the worker was spawned.
+    if cancellation.is_cancelled() || is_cancel_requested(&shared, &task) {
+        finish_cancelled(&shared, &task).await;
+        return;
+    }
     let config = match run_config(
         &shared.workspace,
         prompt,

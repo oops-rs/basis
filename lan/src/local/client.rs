@@ -39,15 +39,17 @@ pub(crate) async fn spawn(args: RunArgs) -> Result<ExitCode, String> {
     }
     let registry = Registry::discover().map_err(|error| format!("open task registry: {error}"))?;
     let descriptor = registry.ensure_daemon(&workspace).await?;
-    let parent = if args.detached { None } else { current_task() };
+    let caller = current_task();
+    let parent = if args.detached { None } else { caller.clone() };
     let operation = Operation::Spawn {
         workspace: workspace.to_string_lossy().into_owned(),
         prompt,
         parent,
+        caller,
         detached: args.detached,
         await_result: args.await_result,
         timeout_ms: args.timeout.map(duration_ms),
-        options: run_options(&args),
+        options: Box::new(run_options(&args)),
     };
     let payload = checked(request(&descriptor, operation).await?)?;
     render_result(&payload, args.json)
@@ -94,7 +96,17 @@ pub(crate) async fn wait(args: WaitArgs) -> Result<ExitCode, String> {
 pub(crate) async fn cancel(args: CancelArgs) -> Result<ExitCode, String> {
     let registry = Registry::discover().map_err(|error| format!("open task registry: {error}"))?;
     let descriptor = live_descriptor(&registry, &args.task).await?;
-    let payload = checked(request(&descriptor, Operation::Cancel { task: args.task }).await?)?;
+    let task = args.task;
+    let payload = checked(
+        request(
+            &descriptor,
+            Operation::Cancel {
+                task,
+                caller: current_task(),
+            },
+        )
+        .await?,
+    )?;
     render_result(&payload, args.json)
 }
 
@@ -148,6 +160,7 @@ pub(crate) async fn watch(args: WatchArgs) -> Result<ExitCode, String> {
                 &descriptor,
                 Operation::Watch {
                     task: args.task.clone(),
+                    caller: current_task(),
                     since,
                     timeout_ms: millis(poll),
                 },

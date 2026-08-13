@@ -27,10 +27,10 @@ use tokio::{
 
 use self::{
     lifecycle::{
-        accepted_payload, await_task, cancel_task, duration_from_ms, enqueue_message, inbox,
-        orphan_running, task_parent, validate_wait_edge, watch_task,
+        WaitGraph, accepted_payload, await_task, begin_wait, cancel_task, duration_from_ms,
+        enqueue_message, inbox, orphan_running, send_next_hint, watch_task,
     },
-    task::spawn_task,
+    task::{SpawnRequest, spawn_task},
 };
 use super::{
     protocol::{Operation, Request, VERSION, error, ok, read_frame, write_frame},
@@ -57,6 +57,7 @@ struct Shared {
     controls: Arc<Mutex<HashMap<String, CancellationToken>>>,
     persist_gate: Arc<AsyncMutex<()>>,
     changed: watch::Sender<u64>,
+    waits: Arc<Mutex<WaitGraph>>,
 }
 
 /// Runs the hidden per-workspace service. A filesystem lease selects exactly
@@ -98,6 +99,7 @@ pub(crate) async fn run_daemon(workspace: PathBuf, registry: PathBuf) -> Result<
         controls: Arc::new(Mutex::new(HashMap::new())),
         persist_gate: Arc::new(AsyncMutex::new(())),
         changed,
+        waits: Arc::new(Mutex::new(WaitGraph::default())),
     };
 
     write_descriptor(&registry.workspace_descriptor(&workspace), &descriptor)
@@ -159,20 +161,27 @@ async fn dispatch(operation: Operation, shared: &Shared) -> Result<Value, String
             workspace,
             prompt,
             parent,
+            caller,
             detached,
             await_result,
             timeout_ms,
             options,
         } => {
-            let task = spawn_task(shared, workspace, prompt, parent, detached, options).await?;
+            let (task, lease) = spawn_task(
+                shared,
+                SpawnRequest {
+                    workspace,
+                    prompt,
+                    parent,
+                    caller,
+                    detached,
+                    await_result,
+                    options: *options,
+                },
+            )
+            .await?;
             if await_result {
-                await_task(
-                    shared,
-                    &task,
-                    task_parent(shared, &task)?,
-                    duration_from_ms(timeout_ms),
-                )
-                .await
+                await_task(shared, &task, duration_from_ms(timeout_ms), lease).await
             } else {
                 Ok(accepted_payload(&task))
             }
@@ -184,18 +193,26 @@ async fn dispatch(operation: Operation, shared: &Shared) -> Result<Value, String
             await_result,
             timeout_ms,
         } => {
-            if await_result {
-                validate_wait_edge(shared, caller.as_deref(), &task)?;
-            }
+            let lease = if await_result {
+                Some(begin_wait(shared, caller.as_deref(), &task)?)
+            } else {
+                None
+            };
             let message_id = enqueue_message(shared, &task, message).await?;
             if await_result {
-                await_task(shared, &task, caller, duration_from_ms(timeout_ms)).await
+                await_task(
+                    shared,
+                    &task,
+                    duration_from_ms(timeout_ms),
+                    lease.expect("await lease"),
+                )
+                .await
             } else {
                 Ok(json!({
                     "task": task,
                     "message": message_id,
                     "state": "accepted",
-                    "next": format!("lan wait {task}"),
+                    "next": send_next_hint(shared, caller.as_deref(), &task),
                 }))
             }
         }
@@ -204,15 +221,25 @@ async fn dispatch(operation: Operation, shared: &Shared) -> Result<Value, String
             caller,
             timeout_ms,
         } => {
-            validate_wait_edge(shared, caller.as_deref(), &task)?;
-            await_task(shared, &task, caller, Duration::from_millis(timeout_ms)).await
+            let lease = begin_wait(shared, caller.as_deref(), &task)?;
+            await_task(shared, &task, Duration::from_millis(timeout_ms), lease).await
         }
-        Operation::Cancel { task } => cancel_task(shared, &task).await,
+        Operation::Cancel { task, caller } => cancel_task(shared, caller.as_deref(), &task).await,
         Operation::Watch {
             task,
+            caller,
             since,
             timeout_ms,
-        } => watch_task(shared, &task, since, Duration::from_millis(timeout_ms)).await,
+        } => {
+            watch_task(
+                shared,
+                caller.as_deref(),
+                &task,
+                since,
+                Duration::from_millis(timeout_ms),
+            )
+            .await
+        }
         Operation::Inbox { task } if task == "__probe__" => Ok(json!({"state": "ready"})),
         Operation::Inbox { task } => inbox(shared, &task),
     }
@@ -259,6 +286,7 @@ mod tests {
             controls: Arc::new(Mutex::new(HashMap::new())),
             persist_gate: Arc::new(AsyncMutex::new(())),
             changed,
+            waits: Arc::new(Mutex::new(WaitGraph::default())),
         };
         (dir, shared)
     }
@@ -285,6 +313,10 @@ mod tests {
         .await
         .expect("enqueue-only parent send is safe");
         assert_eq!(payload["state"], "accepted");
+        assert_eq!(
+            payload["next"], "lan inbox child",
+            "a child must not be told to wait on its ancestor"
+        );
 
         let error = dispatch(
             Operation::Send {
@@ -299,6 +331,127 @@ mod tests {
         .await
         .expect_err("awaiting an ancestor would close the wait cycle");
         assert!(error.contains("ancestor"), "{error}");
+    }
+
+    #[test]
+    fn independent_wait_cycle_is_rejected_until_the_first_lease_drops() {
+        let (_dir, shared) = test_shared();
+        {
+            let mut journal = shared.journal.lock().expect("journal");
+            journal.insert("left".to_string(), record("left", None));
+            journal.insert("right".to_string(), record("right", None));
+        }
+
+        let first = begin_wait(&shared, Some("left"), "right").expect("first wait edge");
+        let error = begin_wait(&shared, Some("right"), "left")
+            .err()
+            .expect("the reverse edge would deadlock");
+        assert!(error.contains("cycle"), "{error}");
+
+        drop(first);
+        let reverse =
+            begin_wait(&shared, Some("right"), "left").expect("a completed wait releases its edge");
+        drop(reverse);
+    }
+
+    #[tokio::test]
+    async fn detached_spawn_keeps_ownership_separate_from_its_waiting_caller() {
+        let (_dir, shared) = test_shared();
+        shared
+            .journal
+            .lock()
+            .expect("journal")
+            .insert("caller".to_string(), record("caller", None));
+        let options = crate::local::protocol::RunOptions {
+            provider: Some("not-a-provider".to_string()),
+            approve: "never".to_string(),
+            ..crate::local::protocol::RunOptions::default()
+        };
+
+        let (task, lease) = spawn_task(
+            &shared,
+            SpawnRequest {
+                workspace: shared.workspace.to_string_lossy().into_owned(),
+                prompt: "do not run".to_string(),
+                parent: None,
+                caller: Some("caller".to_string()),
+                detached: true,
+                await_result: true,
+                options,
+            },
+        )
+        .await
+        .expect("spawn detached task with an awaited caller edge");
+
+        {
+            let journal = shared.journal.lock().expect("journal");
+            assert_eq!(journal[&task].parent, None);
+            assert!(journal[&task].detached);
+        }
+        let reverse = begin_wait(&shared, Some(&task), "caller")
+            .err()
+            .expect("the detached caller edge participates in cycle prevention");
+        assert!(reverse.contains("cycle"), "{reverse}");
+        drop(lease);
+        let released = begin_wait(&shared, Some(&task), "caller")
+            .expect("dropping the detached caller wait releases its edge");
+        drop(released);
+    }
+
+    #[tokio::test]
+    async fn cancellation_authority_only_flows_down_the_attached_tree() {
+        let (_dir, shared) = test_shared();
+        {
+            let mut journal = shared.journal.lock().expect("journal");
+            journal.insert("root".to_string(), record("root", None));
+            journal.insert("child".to_string(), record("child", Some("root")));
+            journal.insert("other".to_string(), record("other", None));
+        }
+
+        let upward = dispatch(
+            Operation::Cancel {
+                task: "root".to_string(),
+                caller: Some("child".to_string()),
+            },
+            &shared,
+        )
+        .await
+        .expect_err("a child cannot cancel its owner");
+        assert!(upward.contains("ancestor"), "{upward}");
+
+        let sideways = dispatch(
+            Operation::Cancel {
+                task: "other".to_string(),
+                caller: Some("root".to_string()),
+            },
+            &shared,
+        )
+        .await
+        .expect_err("an attached task cannot cancel an independent root");
+        assert!(sideways.contains("peer"), "{sideways}");
+        {
+            let journal = shared.journal.lock().expect("journal");
+            assert!(
+                !journal["root"].cancel_requested,
+                "rejected upward cancellation must not mutate the target"
+            );
+            assert!(
+                !journal["other"].cancel_requested,
+                "rejected peer cancellation must not mutate the target"
+            );
+        }
+
+        let accepted = dispatch(
+            Operation::Cancel {
+                task: "child".to_string(),
+                caller: Some("root".to_string()),
+            },
+            &shared,
+        )
+        .await
+        .expect("an owner can cancel its child");
+        assert_eq!(accepted["state"], "cancel_requested");
+        assert!(shared.journal.lock().expect("journal")["child"].cancel_requested);
     }
 
     #[tokio::test]
