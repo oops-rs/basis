@@ -21,7 +21,7 @@ use lan_core::{
 use serde_json::{Value, json};
 use tokio::{
     net::{TcpListener, TcpStream},
-    sync::{Mutex as AsyncMutex, Notify},
+    sync::{Mutex as AsyncMutex, watch},
     time::{self, Instant},
 };
 use uuid::Uuid;
@@ -40,6 +40,12 @@ use super::{
 const HANDSHAKE_TIMEOUT: Duration = Duration::from_secs(5);
 const DEFAULT_WAIT: Duration = Duration::from_secs(30 * 60);
 
+fn notify_changed(shared: &Shared) {
+    shared
+        .changed
+        .send_modify(|version| *version = version.saturating_add(1));
+}
+
 #[derive(Clone)]
 struct Shared {
     registry: Registry,
@@ -48,7 +54,7 @@ struct Shared {
     journal: Arc<Mutex<Journal>>,
     controls: Arc<Mutex<HashMap<String, CancellationToken>>>,
     persist_gate: Arc<AsyncMutex<()>>,
-    changed: Arc<Notify>,
+    changed: watch::Sender<u64>,
 }
 
 /// Runs the hidden per-workspace service. A filesystem lease selects exactly
@@ -81,6 +87,7 @@ pub(crate) async fn run_daemon(workspace: PathBuf, registry: PathBuf) -> Result<
     };
     let journal =
         store::load(&registry, &instance).map_err(|error| format!("load task journal: {error}"))?;
+    let (changed, _) = watch::channel(0_u64);
     let shared = Shared {
         registry: registry.clone(),
         descriptor: descriptor.clone(),
@@ -88,7 +95,7 @@ pub(crate) async fn run_daemon(workspace: PathBuf, registry: PathBuf) -> Result<
         journal: Arc::new(Mutex::new(journal)),
         controls: Arc::new(Mutex::new(HashMap::new())),
         persist_gate: Arc::new(AsyncMutex::new(())),
-        changed: Arc::new(Notify::new()),
+        changed,
     };
 
     write_descriptor(&registry.workspace_descriptor(&workspace), &descriptor)
@@ -294,7 +301,7 @@ async fn spawn_task(
     tokio::spawn(async move {
         run_task(worker, task_for_worker, prompt, options, cancellation).await;
     });
-    shared.changed.notify_waiters();
+    notify_changed(shared);
     Ok(task)
 }
 
@@ -486,7 +493,7 @@ async fn settle_or_take_message(
         }
     };
     persist(shared).await?;
-    shared.changed.notify_waiters();
+    notify_changed(shared);
     if terminal {
         terminal_cleanup(shared, task).await;
     }
@@ -508,7 +515,7 @@ async fn enqueue_message(shared: &Shared, task: &str, message: String) -> Result
         record.add_message(message)?
     };
     persist(shared).await?;
-    shared.changed.notify_waiters();
+    notify_changed(shared);
     Ok(id)
 }
 
@@ -519,12 +526,12 @@ async fn await_task(
     timeout: Duration,
 ) -> Result<Value, String> {
     let deadline = Instant::now() + timeout;
+    let mut updates = shared.changed.subscribe();
     loop {
-        let notified = shared.changed.notified();
         if let Some(payload) = terminal_payload(shared, task)? {
             return Ok(payload);
         }
-        if time::timeout_at(deadline, notified).await.is_err() {
+        if time::timeout_at(deadline, updates.changed()).await.is_err() {
             return Err(format!(
                 "wait for {task} timed out after {}; the task is still running",
                 human_duration(timeout)
@@ -540,8 +547,8 @@ async fn watch_task(
     timeout: Duration,
 ) -> Result<Value, String> {
     let deadline = Instant::now() + timeout;
+    let mut updates = shared.changed.subscribe();
     loop {
-        let notified = shared.changed.notified();
         let snapshot = watch_snapshot(shared, task, since)?;
         let has_events = snapshot["events"]
             .as_array()
@@ -550,7 +557,7 @@ async fn watch_task(
         if has_events || terminal {
             return Ok(snapshot);
         }
-        if time::timeout_at(deadline, notified).await.is_err() {
+        if time::timeout_at(deadline, updates.changed()).await.is_err() {
             return Ok(snapshot);
         }
     }
@@ -601,7 +608,7 @@ async fn cancel_task(shared: &Shared, task: &str) -> Result<Value, String> {
     for token in cancelled {
         token.cancel();
     }
-    shared.changed.notify_waiters();
+    notify_changed(shared);
     Ok(json!({
         "task": task,
         "state": "cancel_requested",
@@ -707,7 +714,7 @@ async fn terminal_cleanup(shared: &Shared, task: &str) {
             token.cancel();
         }
     }
-    shared.changed.notify_waiters();
+    notify_changed(shared);
 }
 
 async fn orphan_running(shared: &Shared) {
@@ -731,7 +738,7 @@ async fn orphan_running(shared: &Shared) {
         token.cancel();
     }
     let _ = persist(shared).await;
-    shared.changed.notify_waiters();
+    notify_changed(shared);
 }
 
 async fn persist(shared: &Shared) -> Result<(), String> {
@@ -973,7 +980,7 @@ impl EventSink for TaskSink {
             && !record.state.is_terminal()
         {
             record.record_event(value);
-            self.shared.changed.notify_waiters();
+            notify_changed(&self.shared);
         }
         Ok(())
     }
@@ -1000,6 +1007,7 @@ mod tests {
         let dir = tempfile::tempdir().expect("tempdir");
         let registry = Registry::from_path(dir.path().join("registry")).expect("registry");
         let workspace = canonical_workspace(dir.path()).expect("workspace");
+        let (changed, _) = watch::channel(0_u64);
         let descriptor = Descriptor {
             version: VERSION,
             instance: workspace_key(&workspace),
@@ -1015,7 +1023,7 @@ mod tests {
             journal: Arc::new(Mutex::new(Journal::new())),
             controls: Arc::new(Mutex::new(HashMap::new())),
             persist_gate: Arc::new(AsyncMutex::new(())),
-            changed: Arc::new(Notify::new()),
+            changed,
         };
         (dir, shared)
     }
