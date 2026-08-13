@@ -438,21 +438,27 @@ fn sync_parent(_parent: &Path) -> io::Result<()> {
     Ok(())
 }
 
+#[cfg(unix)]
 fn restrict_directory(path: &Path) -> io::Result<()> {
-    #[cfg(unix)]
-    {
-        use std::os::unix::fs::PermissionsExt;
-        fs::set_permissions(path, fs::Permissions::from_mode(0o700))?;
-    }
+    use std::os::unix::fs::PermissionsExt;
+    fs::set_permissions(path, fs::Permissions::from_mode(0o700))?;
     Ok(())
 }
 
+#[cfg(not(unix))]
+fn restrict_directory(_path: &Path) -> io::Result<()> {
+    Ok(())
+}
+
+#[cfg(unix)]
 fn restrict_file(path: &Path) -> io::Result<()> {
-    #[cfg(unix)]
-    {
-        use std::os::unix::fs::PermissionsExt;
-        fs::set_permissions(path, fs::Permissions::from_mode(0o600))?;
-    }
+    use std::os::unix::fs::PermissionsExt;
+    fs::set_permissions(path, fs::Permissions::from_mode(0o600))?;
+    Ok(())
+}
+
+#[cfg(not(unix))]
+fn restrict_file(_path: &Path) -> io::Result<()> {
     Ok(())
 }
 
