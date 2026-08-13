@@ -185,11 +185,16 @@ pub(super) async fn settle_or_take_message(
     };
     let completed_task = next.is_none().then_some(task);
     let tokens = transition_controls(shared, completed_task, &effects);
-    persist(shared).await?;
+    // The in-memory transition has already detached its controls.  Always
+    // release those controls and wake waiters, even when the durable snapshot
+    // cannot be written; otherwise a failed write leaves live workers and
+    // waiters observing a state transition that never completes.
+    let persist_result = persist(shared).await;
     for token in tokens {
         token.cancel();
     }
     notify_changed(shared);
+    persist_result?;
     Ok(next)
 }
 
@@ -281,6 +286,17 @@ pub(super) async fn watch_task(
     since: u64,
     timeout: Duration,
 ) -> Result<Value, String> {
+    // A snapshot that is already useful does not need a live wait lease. In
+    // particular, a child may inspect a terminal ancestor without creating an
+    // impossible upward wait edge.
+    let initial = watch_snapshot(shared, task, since)?;
+    let initial_has_events = initial["events"]
+        .as_array()
+        .is_some_and(|events| !events.is_empty());
+    if initial_has_events || initial["terminal"].as_bool().unwrap_or(false) {
+        return Ok(initial);
+    }
+
     let _lease = begin_wait(shared, caller, task)?;
     let deadline = Instant::now() + timeout;
     let mut updates = shared.changed.subscribe();
@@ -368,11 +384,15 @@ pub(super) async fn cancel_task(
         return Ok(payload);
     }
     let cancelled = request_cancel_tree(shared, task, true)?;
-    persist(shared).await?;
+    // Cancellation is an in-memory control-plane transition first.  Do not
+    // strand the collected cancellation tokens or waiters if its journal
+    // write fails; report the persistence error only after cleanup.
+    let persist_result = persist(shared).await;
     for token in cancelled {
         token.cancel();
     }
     notify_changed(shared);
+    persist_result?;
     Ok(json!({
         "task": task,
         "state": "cancel_requested",
@@ -548,6 +568,16 @@ fn transition_controls(
     for task in &effects.finalized {
         controls.remove(task);
     }
+    drop(controls);
+
+    let mut graph = shared.waits.lock().expect("wait graph poisoned");
+    for task in &effects.finalized {
+        graph.edges.remove(task);
+        for targets in graph.edges.values_mut() {
+            targets.remove(task);
+        }
+    }
+    graph.edges.retain(|_, targets| !targets.is_empty());
     tokens
 }
 
@@ -617,6 +647,7 @@ pub(super) async fn orphan_running(shared: &Shared) {
         let mut journal = shared.journal.lock().expect("task journal poisoned");
         for record in journal.values_mut() {
             if !record.state.is_terminal() {
+                record.finish_unanswered_messages();
                 record.state = DurableState::Orphaned;
                 record.pending_terminal = None;
                 record.updated_ms = store::now_ms();
@@ -652,7 +683,7 @@ pub(super) async fn persist(shared: &Shared) -> Result<(), String> {
         .map_err(|error| format!("persist task journal: {error}"))
 }
 
-fn terminal_payload(shared: &Shared, task: &str) -> Result<Option<Value>, String> {
+pub(super) fn terminal_payload(shared: &Shared, task: &str) -> Result<Option<Value>, String> {
     let journal = shared.journal.lock().expect("task journal poisoned");
     let record = journal
         .get(task)
@@ -1002,6 +1033,32 @@ mod tests {
         assert!(error.contains("ancestor"), "{error}");
     }
 
+    #[tokio::test]
+    async fn watch_returns_terminal_ancestor_without_a_wait_edge() {
+        let (_dir, shared) = test_shared();
+        let mut root = record("root", None);
+        root.state = DurableState::Succeeded {
+            result: "already done".to_string(),
+        };
+        {
+            let mut journal = shared.journal.lock().expect("journal");
+            journal.insert("root".to_string(), root);
+            journal.insert("child".to_string(), record("child", Some("root")));
+        }
+
+        let snapshot = watch_task(&shared, Some("child"), "root", 0, Duration::from_millis(1))
+            .await
+            .expect("terminal snapshot does not require a live wait edge");
+        assert_eq!(snapshot["terminal"], true);
+        assert_eq!(snapshot["result"]["result"], "already done");
+    }
+
+    #[test]
+    fn duration_from_ms_clamps_untrusted_timeout() {
+        assert_eq!(duration_from_ms(Some(u64::MAX)), MAX_WAIT);
+        assert_eq!(duration_from_ms(None), DEFAULT_WAIT);
+    }
+
     #[test]
     fn successful_parent_finalizes_only_after_attached_child() {
         let mut journal = Journal::new();
@@ -1037,6 +1094,37 @@ mod tests {
             journal["root"].state,
             DurableState::Succeeded { ref result } if result == "parent"
         ));
+    }
+
+    #[test]
+    fn pending_parent_preserves_live_wait_edges_until_finalization() {
+        let (_dir, shared) = test_shared();
+        {
+            let mut journal = shared.journal.lock().expect("journal");
+            journal.insert("root".to_string(), record("root", None));
+            journal.insert("child".to_string(), record("child", Some("root")));
+            journal.insert("other".to_string(), record("other", None));
+        }
+        let _lease = begin_wait(&shared, Some("other"), "root").expect("initial wait edge");
+        let effects = {
+            let mut journal = shared.journal.lock().expect("journal");
+            apply_completion(
+                &mut journal,
+                "root",
+                PendingTerminal::Succeeded {
+                    result: "parent".to_string(),
+                },
+            )
+            .expect("parent worker completion")
+        };
+        assert!(effects.finalized.is_empty());
+
+        transition_controls(&shared, Some("root"), &effects);
+
+        let error = begin_wait(&shared, Some("root"), "other")
+            .err()
+            .expect("the reciprocal edge must still be rejected");
+        assert!(error.contains("cycle"), "{error}");
     }
 
     #[test]
@@ -1123,5 +1211,162 @@ mod tests {
         assert_eq!(payload["message"], first);
         assert_eq!(payload["result"], "first reply");
         assert_eq!(payload["state"], "succeeded");
+    }
+
+    #[tokio::test]
+    async fn queued_messages_keep_distinct_replies_before_task_completion() {
+        let (_dir, shared) = test_shared();
+        let mut task = record("task", None);
+        let first = task
+            .add_message("first".to_string())
+            .expect("first message");
+        let second = task
+            .add_message("second".to_string())
+            .expect("second message");
+        task.start_next_message().expect("first in flight");
+        shared
+            .journal
+            .lock()
+            .expect("journal")
+            .insert("task".to_string(), task);
+
+        let next =
+            settle_or_take_message(&shared, "task", Some(&first), "reply one".to_string(), None)
+                .await
+                .expect("first turn")
+                .expect("second turn is queued");
+        assert_eq!(next.0, second);
+        let next = settle_or_take_message(
+            &shared,
+            "task",
+            Some(&second),
+            "reply two".to_string(),
+            None,
+        )
+        .await
+        .expect("second turn");
+        assert!(next.is_none());
+
+        assert_eq!(
+            message_payload_for_dispatch(&shared, "task", &first)
+                .expect("first lookup")
+                .expect("first reply")["result"],
+            "reply one"
+        );
+        assert_eq!(
+            message_payload_for_dispatch(&shared, "task", &second)
+                .expect("second lookup")
+                .expect("second reply")["result"],
+            "reply two"
+        );
+    }
+
+    #[tokio::test]
+    async fn terminal_failure_resolves_unanswered_messages() {
+        let (_dir, shared) = test_shared();
+        let mut task = record("task", None);
+        let first = task
+            .add_message("first".to_string())
+            .expect("first message");
+        let second = task
+            .add_message("second".to_string())
+            .expect("second message");
+        task.start_next_message().expect("first in flight");
+        shared
+            .journal
+            .lock()
+            .expect("journal")
+            .insert("task".to_string(), task);
+
+        finish_failed(&shared, "task", "provider failed".to_string(), None).await;
+        for id in [first, second] {
+            let payload = message_payload_for_dispatch(&shared, "task", &id)
+                .expect("message lookup")
+                .expect("terminal result resolves message");
+            assert_eq!(payload["state"], "failed");
+            assert_eq!(payload["message"], id);
+        }
+    }
+
+    #[tokio::test]
+    async fn daemon_shutdown_resolves_unanswered_messages_as_orphaned() {
+        let (_dir, shared) = test_shared();
+        let mut task = record("task", None);
+        let in_flight = task
+            .add_message("in flight".to_string())
+            .expect("in-flight message");
+        let pending = task
+            .add_message("pending".to_string())
+            .expect("pending message");
+        task.start_next_message().expect("start first message");
+        shared
+            .journal
+            .lock()
+            .expect("journal")
+            .insert("task".to_string(), task);
+
+        orphan_running(&shared).await;
+
+        for id in [in_flight, pending] {
+            let payload = message_payload_for_dispatch(&shared, "task", &id)
+                .expect("message lookup")
+                .expect("orphan terminal resolves message wait");
+            assert_eq!(payload["state"], "orphaned");
+            assert_eq!(payload["message"], id);
+        }
+    }
+
+    #[tokio::test]
+    async fn settle_cleans_up_controls_and_waiters_when_persist_fails() {
+        let (dir, shared) = test_shared();
+        let mut root = record("root", None);
+        root.cancel_requested = true;
+        let child = record("child", Some("root"));
+        {
+            let mut journal = shared.journal.lock().expect("journal");
+            journal.insert(root.id.clone(), root);
+            journal.insert(child.id.clone(), child);
+        }
+        let child_token = CancellationToken::default();
+        shared
+            .controls
+            .lock()
+            .expect("controls")
+            .insert("child".to_string(), child_token.clone());
+        let updates = shared.changed.subscribe();
+        std::fs::remove_dir_all(dir.path().join("registry")).expect("remove registry");
+
+        let error = settle_or_take_message(&shared, "root", None, "ignored".to_string(), None)
+            .await
+            .expect_err("missing registry makes persistence fail");
+        assert!(error.contains("persist task journal"), "{error}");
+        assert!(child_token.is_cancelled());
+        assert!(updates.has_changed().expect("change notification"));
+    }
+
+    #[tokio::test]
+    async fn cancel_cleans_up_controls_and_waiters_when_persist_fails() {
+        let (dir, shared) = test_shared();
+        let task = record("task", None);
+        shared
+            .journal
+            .lock()
+            .expect("journal")
+            .insert(task.id.clone(), task);
+        let token = CancellationToken::default();
+        shared
+            .controls
+            .lock()
+            .expect("controls")
+            .insert("task".to_string(), token.clone());
+        let updates = shared.changed.subscribe();
+        std::fs::remove_dir_all(dir.path().join("registry")).expect("remove registry");
+
+        let error = cancel_task(&shared, None, "task")
+            .await
+            .expect_err("missing registry makes persistence fail");
+        assert!(error.contains("persist task journal"), "{error}");
+        assert!(token.is_cancelled());
+        assert!(updates.has_changed().expect("change notification"));
     }
 }

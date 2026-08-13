@@ -269,6 +269,9 @@ async fn dispatch(operation: Operation, shared: &Shared) -> Result<Value, String
                 )
                 .await
             } else {
+                if let Some(payload) = lifecycle::terminal_payload(shared, &task)? {
+                    return Ok(payload);
+                }
                 let lease = begin_wait(shared, caller.as_deref(), &task)?;
                 await_task(shared, &task, duration_from_ms(Some(timeout_ms)), lease).await
             }
@@ -285,7 +288,7 @@ async fn dispatch(operation: Operation, shared: &Shared) -> Result<Value, String
                 caller.as_deref(),
                 &task,
                 since,
-                Duration::from_millis(timeout_ms),
+                duration_from_ms(Some(timeout_ms)),
             )
             .await
         }
@@ -380,6 +383,34 @@ mod tests {
         .await
         .expect_err("awaiting an ancestor would close the wait cycle");
         assert!(error.contains("ancestor"), "{error}");
+    }
+
+    #[tokio::test]
+    async fn wait_returns_terminal_result_before_validating_an_upward_edge() {
+        let (_dir, shared) = test_shared();
+        let mut root = record("root", None);
+        root.state = crate::local::store::DurableState::Succeeded {
+            result: "already done".to_string(),
+        };
+        {
+            let mut journal = shared.journal.lock().expect("journal");
+            journal.insert("root".to_string(), root);
+            journal.insert("child".to_string(), record("child", Some("root")));
+        }
+
+        let payload = dispatch(
+            Operation::Wait {
+                task: "root".to_string(),
+                caller: Some("child".to_string()),
+                message: None,
+                timeout_ms: 1,
+            },
+            &shared,
+        )
+        .await
+        .expect("terminal result does not require a live wait edge");
+        assert_eq!(payload["state"], "succeeded");
+        assert_eq!(payload["result"], "already done");
     }
 
     #[test]

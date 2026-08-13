@@ -297,6 +297,7 @@ pub(crate) fn load(registry: &Registry, instance: &str) -> io::Result<Journal> {
     let mut changed = false;
     for task in journal.values_mut() {
         if matches!(task.state, DurableState::Running) {
+            task.finish_unanswered_messages();
             task.state = DurableState::Orphaned;
             task.pending_terminal = None;
             task.updated_ms = now_ms();
@@ -389,6 +390,43 @@ mod tests {
     }
 
     #[test]
+    fn restart_resolves_unanswered_messages_with_orphan_terminal_state() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let registry = Registry::from_path(dir.path()).expect("registry");
+        let mut journal = Journal::new();
+        let mut task = TaskRecord::new(
+            "i/t".to_string(),
+            None,
+            true,
+            "/repo".to_string(),
+            "agent".to_string(),
+            None,
+        );
+        let in_flight = task
+            .add_message("in flight".to_string())
+            .expect("in-flight message");
+        let pending = task
+            .add_message("pending".to_string())
+            .expect("pending message");
+        task.start_next_message().expect("start first message");
+        journal.insert(task.id.clone(), task);
+        save(&registry, "i", &journal).expect("save");
+
+        let reopened = load(&registry, "i").expect("load");
+        let task = &reopened["i/t"];
+        assert!(matches!(task.state, DurableState::Orphaned));
+        for id in [in_flight, pending] {
+            let message = task
+                .messages
+                .iter()
+                .find(|message| message.id == id)
+                .expect("message survives restart");
+            assert_eq!(message.state, MessageState::Delivered);
+            assert!(message.reply.is_none());
+        }
+    }
+
+    #[test]
     fn bounded_text_never_splits_utf8() {
         let (value, truncated) = bounded_text("a界b".to_string(), 2);
         assert_eq!(value, "a");
@@ -409,5 +447,86 @@ mod tests {
 
         assert_eq!(task.events.len(), 1);
         assert_eq!(task.events[0].event["type"], "notice");
+    }
+
+    #[test]
+    fn journals_written_before_correlated_replies_still_deserialize() {
+        // This is the minimum shape emitted before MessageRecord.reply and
+        // TaskRecord.pending_terminal were introduced.  Compatibility is a
+        // persistence invariant: adding fields must not make existing task
+        // history unreadable.
+        let old_journal = serde_json::json!({
+            "i/t": {
+                "id": "i/t",
+                "parent": null,
+                "detached": true,
+                "workspace": "/repo",
+                "agent_id": "agent",
+                "state": {"state": "succeeded", "result": "done"},
+                "cancel_requested": false,
+                "deadline_at_ms": null,
+                "messages": [{
+                    "id": "message-1",
+                    "body": "hello",
+                    "state": "delivered",
+                    "created_ms": 1
+                }],
+                "events": [],
+                "next_event": 1,
+                "created_ms": 1,
+                "updated_ms": 2
+            }
+        });
+
+        let journal: Journal = serde_json::from_value(old_journal).expect("old journal loads");
+        let task = &journal["i/t"];
+        assert!(task.pending_terminal.is_none());
+        assert_eq!(task.messages.len(), 1);
+        assert!(task.messages[0].reply.is_none());
+        assert_eq!(task.messages[0].state, MessageState::Delivered);
+    }
+
+    #[test]
+    fn terminal_cleanup_delivers_pending_and_inflight_messages() {
+        let mut task = TaskRecord::new(
+            "i/t".to_string(),
+            None,
+            true,
+            "/repo".to_string(),
+            "agent".to_string(),
+            None,
+        );
+        let pending = task
+            .add_message("pending".to_string())
+            .expect("pending message");
+        let in_flight = task
+            .add_message("in flight".to_string())
+            .expect("in-flight message");
+        let started = task.start_next_message().expect("start message");
+        assert_eq!(started.0, pending);
+        assert!(matches!(
+            task.messages
+                .iter()
+                .find(|message| message.id == pending)
+                .unwrap()
+                .state,
+            MessageState::InFlight
+        ));
+        assert!(matches!(
+            task.messages
+                .iter()
+                .find(|message| message.id == in_flight)
+                .unwrap()
+                .state,
+            MessageState::Pending
+        ));
+
+        task.finish_unanswered_messages();
+
+        assert!(
+            task.messages
+                .iter()
+                .all(|message| message.state == MessageState::Delivered)
+        );
     }
 }

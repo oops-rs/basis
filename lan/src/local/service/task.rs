@@ -158,11 +158,24 @@ pub(super) async fn spawn_task(
     // lock order as `request_cancel_tree`.  A cancel request can therefore not
     // slip between the journal mutation and the worker's token registration.
     let cancel_immediately = {
-        let journal = shared.journal.lock().expect("task journal poisoned");
+        let mut journal = shared.journal.lock().expect("task journal poisoned");
         let mut controls = shared.controls.lock().expect("task controls poisoned");
+        let parent_rejected = parent.as_deref().is_some_and(|parent_id| {
+            journal.get(parent_id).is_none_or(|owner| {
+                !owner.accepts_work()
+                    || owner
+                        .deadline_at_ms
+                        .is_some_and(|deadline| deadline <= store::now_ms())
+            })
+        });
         let requested = journal
             .get(&task)
-            .is_none_or(|record| record.cancel_requested || record.state.is_terminal());
+            .is_none_or(|record| record.cancel_requested || record.state.is_terminal())
+            || parent_rejected;
+        if parent_rejected && let Some(record) = journal.get_mut(&task) {
+            record.cancel_requested = true;
+            record.updated_ms = store::now_ms();
+        }
         controls.insert(task.clone(), cancellation.clone());
         requested
     };
