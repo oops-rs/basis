@@ -16,6 +16,6 @@ are not acceptable.
 
 ## Enforcement
 
-Report unacceptable behavior to the maintainers through the private security
-reporting channel described in `SECURITY.md`. Reports will be reviewed and
-handled confidentially where possible.
+Report unacceptable behavior to the maintainers through a private channel
+described in `SECURITY.md`. Do not put sensitive details in a public issue.
+Reports will be reviewed and handled confidentially where possible.
