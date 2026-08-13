@@ -41,10 +41,13 @@ Lifecycle JSON includes the same `next` hint as metadata. A local task has a
 finite 30-minute default deadline; `--deadline` narrows it, and `--detached`
 starts an independent root rather than inheriting a parent.
 
-`send` is enqueue-only by default. `send --await` is safe only for a descendant
-or an independent root; an ancestor/peer wait edge is rejected before it can
-form a cycle. A task consumes accepted messages at the next model-turn
-boundary. `wait` is finite (30 minutes by default), cancel-safe, and repeatable.
+`send` is enqueue-only by default. Blocking lifecycle commands register a live
+wait edge: self, ancestor, and same-tree peer edges are rejected, and an edge
+between independent ownership trees is accepted only if it does not close a
+cycle. A task consumes accepted messages at the next model-turn boundary.
+`send --await` observes the target task's terminal state rather than a reply
+correlated to that message. `wait` is finite (30 minutes by default),
+cancel-safe, and repeatable.
 
 For backward compatibility, `--json` without lifecycle flags keeps the original
 attended JSONL stream. Lifecycle commands return one bounded JSON object

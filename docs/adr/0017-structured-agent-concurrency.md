@@ -47,17 +47,26 @@ generic lifecycle types.
 ### Communication
 
 1. `send` is enqueue-only and returns an acknowledgement or an error.
-2. `send --await` is initially restricted to a child or an independent actor
-   whose supervisor can answer without requiring the caller's current model
-   turn. Parent-facing requests enter an inbox and are handled at a later
-   round boundary.
-3. Terminal completion uses a control path separate from progress/events.
+2. A blocking lifecycle operation (`spawn --await`, `send --await`, `wait`, or
+   `watch`) acquires a live caller-to-target wait edge. An attached caller may
+   wait on a descendant, but not itself, an ancestor, or a peer in the same
+   ownership tree. A task in another ownership tree is eligible only when the
+   reverse path is absent.
+3. The supervisor checks the complete live wait-for graph before it starts the
+   worker or enqueues the awaited message. An edge that would close a cycle is
+   rejected. Edges are counted leases and are released on success, error,
+   timeout, or waiter cancellation; they are intentionally not persisted,
+   because a service restart also ends the request handlers that owned them.
+4. Terminal completion uses a control path separate from progress/events.
    Event backpressure must never prevent a job from reaching a terminal state.
-4. Every wait has a finite deadline and is cancellation-safe. A cancelled
+5. Every wait has a finite deadline and is cancellation-safe. A cancelled
    waiter does not lose a result; an abandoned owner settles descendants as
    cancelled or orphaned according to their ownership mode.
-5. Arbitrary peer request/reply is deferred until a wait-for graph can reject
-   an edge that would close a cycle.
+6. Enqueue-only `send` acquires no wait edge, so a child can safely leave an
+   ancestor a message for its next round. `send --await` waits for the target
+   task's terminal state, not for a reply correlated to that message.
+   Post-terminal messages and arbitrary per-message request/reply remain out of
+   scope.
 
 ### CLI
 
@@ -91,6 +100,10 @@ same hint as metadata, while the attended run JSONL bookends remain unchanged.
   function that simply awaits a child is not sufficient.
 - Cancellation is cooperative for model and async work, so shell/process work
   additionally requires kill-and-reap handling in its owning supervisor.
-- The local service deliberately does not promise arbitrary peer request/reply
-  or post-terminal multi-turn agents. Those are safety and lifecycle boundaries,
-  not missing convenience; they require a later protocol decision.
+- The live graph prevents logical wait cycles among requests known to one
+  workspace service. It does not claim that arbitrary model-generated
+  protocols, external processes, or cross-service dependencies are deadlock
+  free.
+- The local service deliberately does not promise correlated per-message
+  request/reply or post-terminal multi-turn agents. Those are lifecycle
+  boundaries, not missing convenience; they require a later protocol decision.
