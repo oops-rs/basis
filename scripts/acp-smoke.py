@@ -21,7 +21,17 @@ BINARY = os.environ.get("LAN_BIN", "./target/debug/lan")
 
 def main() -> int:
     agent = subprocess.Popen(
-        [BINARY, "acp", "--base-url", BASE_URL, "--model", MODEL, "--approve", "always"],
+        [
+            BINARY,
+            "serve",
+            "--acp",
+            "--base-url",
+            BASE_URL,
+            "--model",
+            MODEL,
+            "--approve",
+            "always",
+        ],
         stdin=subprocess.PIPE,
         stdout=subprocess.PIPE,
         stderr=subprocess.PIPE,

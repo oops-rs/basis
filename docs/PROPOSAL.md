@@ -15,7 +15,7 @@ yourself. Meanwhile the runtimes underneath (Mentra included) are libraries by d
 but the distance from "runtime" to "usable agent" is a pile of unwritten glue: context
 conventions, session lifecycle, permission surfacing, a wire protocol, confinement.
 Every application that embeds an agent rebuilds that glue — zentox did, and its
-[feedback](../../mentra/docs/mentra-api-feedback.md) is a catalog of exactly this
+[feedback in the public Mentra repository](https://github.com/oops-rs/mentra) is a catalog of exactly this
 distance.
 
 The existing answers each fail in a specific way:
@@ -63,7 +63,7 @@ the cautionary tales). [ADR-0002]
 **Believe:** the agent loop, providers, tools, and persistence are mentra's problem,
 already solved and tested. **Buys:** lan's effort goes to the only thing lan can be —
 conventions, protocol, packaging; nous set the precedent
-([nous ADR-0003, "mentra is the loop"](../../nous/docs/adr/0003-mentra-is-the-loop.md)).
+(`mentra is the loop`, the corresponding upstream runtime decision).
 **Refuse:** to re-implement runtime machinery in lan to feel in control. [ADR-0001]
 
 ### Bet 4 — The core has no opinions

@@ -71,8 +71,8 @@ explicit.
 - [x] A parent/ancestor wait cycle is rejected or expires within a finite
       deadline; it never blocks forever.
 - [x] A saturated progress/event path cannot prevent terminal completion.
-- [ ] Detached work is visibly independent and has its own deadline/cancel
-      policy.
+- [x] Detached work is visibly independent and has its own finite deadline and
+      cancel policy.
 
 ## Assumptions
 
@@ -89,13 +89,14 @@ explicit.
 - None for the first implementation slice. Arbitrary peer request/reply will
   require a separate decision after the wait-graph tests exist.
 
-## Out of scope / follow-ups
+## Shipped limits / follow-ups
 
-- Durable cross-process IPC and capability discovery after the in-process
-  lifecycle foundation lands.
-- `lan send`, `lan wait`, `lan cancel`, `lan watch`, and `lan inbox` CLI wiring
-  over the lifecycle service.
-- Dynamic wait-graph cycle detection for unrestricted peer requests.
+- The first service uses loopback TCP with a private bearer descriptor and a
+  bounded JSON journal. It is local-process coordination, not a remote RPC
+  service; the capability is required even on loopback.
+- `send` targets a running one-session task and is consumed at a model-turn
+  boundary. Durable multi-turn agents after terminal completion, arbitrary
+  peer request/reply, and unrestricted dynamic wait graphs remain deferred.
 
 ## References
 

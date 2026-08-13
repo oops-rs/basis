@@ -11,14 +11,21 @@ Library first, binary second. No TUI — embedding is the front door:
 2. **ACP** — `lan serve --acp` serves the [Agent Client Protocol](https://agentclientprotocol.com)
    (JSON-RPC 2.0 over stdio) for editors (Zed, JetBrains) and web UIs
    ([acp-ui](https://github.com/formulahendry/acp-ui)).
-3. **Subprocess** — `lan spawn --json` streams JSONL events for scripts and CI.
+3. **Subprocess** — `lan spawn` returns a durable task handle for scripts and
+   agents; the compatibility `--json` spelling still streams JSONL.
 
-There are one-shot work, explicit serving, and one utility, and the whole CLI is
-small enough to keep in an agent's result hint ([ADR-0017](docs/adr/0017-structured-agent-concurrency.md)):
+There is one small command surface for work, communication, observation, and
+explicit serving ([ADR-0017](docs/adr/0017-structured-agent-concurrency.md)):
 
 ```
 lan "<prompt>"                     # shorthand: exactly `lan spawn "<prompt>"`
-lan spawn "<prompt>" [--json]      # headless one-shot; `-` reads the prompt from stdin
+lan spawn "<prompt>"               # enqueue work and print a durable task handle
+lan spawn "<prompt>" --await       # enqueue, then wait for the terminal result
+lan send <ID> "<message>"          # enqueue a later turn for a running task
+lan wait <ID>                      # repeatably observe its terminal result
+lan cancel <ID>                    # request cancellation (attached descendants too)
+lan watch <ID>                     # observe bounded/replayable progress
+lan inbox [ID]                     # list accepted messages; ambient ID if nested
 lan serve --acp                    # ACP server on stdio — what an editor spawns
 lan serve --bridge                 # the same ACP server on a websocket, for a browser
 lan fingerprint                    # the workspace's hash, for a loop you write yourself
@@ -30,8 +37,19 @@ that collides with a subcommand name (`lan -- spawn`). The compatibility spellin
 `lan run` remains an alias for `lan spawn`.
 
 Human-readable outcomes finish with one `next:` line naming valid commands.
-`--json` keeps stdout strictly JSONL; it never mixes prose hints into the event
-stream.
+Lifecycle JSON includes the same `next` hint as metadata. A local task has a
+finite 30-minute default deadline; `--deadline` narrows it, and `--detached`
+starts an independent root rather than inheriting a parent.
+
+`send` is enqueue-only by default. `send --await` is safe only for a descendant
+or an independent root; an ancestor/peer wait edge is rejected before it can
+form a cycle. A task consumes accepted messages at the next model-turn
+boundary. `wait` is finite (30 minutes by default), cancel-safe, and repeatable.
+
+For backward compatibility, `--json` without lifecycle flags keeps the original
+attended JSONL stream. Lifecycle commands return one bounded JSON object
+(`watch --json` returns JSONL events), and the renderer does not change task
+ownership.
 
 The core has no opinions: task-specific behavior enters through data — the prompt, the
 workspace (AGENTS.md, skills, prompt templates, `.mcp.json`), and config — never through code.
@@ -43,7 +61,7 @@ Set a provider key — `ANTHROPIC_API_KEY`, `OPENAI_API_KEY`, `GEMINI_API_KEY`, 
 
 ```sh
 lan "summarize what changed in the last three commits"
-lan spawn -C ../other-repo --json "find the slowest test and explain why"
+lan spawn -C ../other-repo "find the slowest test and explain why"
 ```
 
 `--effort` accepts exactly `low`, `medium`, `high`, `xhigh`, or `max`.
@@ -550,7 +568,8 @@ the example calls it inline because that loop has nothing else to do while it wa
 **P0–P4 complete.** Everything the original plan called a phase is built: the ACP server on
 stdio (the default mode) with modes, session listing — which only began returning anything
 in Phase D — and history replay; multi-turn
-conversation and resume; one-shot `lan run` in prose or JSONL; MCP servers from `.mcp.json`
+conversation and resume; durable local `spawn`/`send`/`wait`/`cancel`/`watch`/`inbox`
+tasks; one-shot `lan run` in prose or JSONL; MCP servers from `.mcp.json`
 and from the client; prompt templates surfaced as commands; subprocess hooks that allow,
 deny, or rewrite a tool call; a websocket bridge for
 [acp-ui](https://github.com/formulahendry/acp-ui); and branching. All with AGENTS.md
@@ -575,8 +594,9 @@ rule is that its items ship only against one. This README describes only what is
 
 Still open, and named honestly: compaction tuning, the packages convention, and provider
 OAuth remain, and **nobody has driven this from Zed or JetBrains yet** — it is verified
-against the protocol and its official client library, not against the ecosystem. lan itself
-is unpublished. CI runs `cargo fmt --all --check`, clippy at `-D warnings`, and the full
+against the protocol and its official client library, not against the ecosystem. The source
+repository is public; the crates are published independently and their release order follows
+Mentra. CI runs `cargo fmt --all --check`, clippy at `-D warnings`, and the full
 suite on Linux, macOS, and Windows, plus an MSRV job. See
 [docs/ARCHITECTURE.md](docs/ARCHITECTURE.md) §6.
 
@@ -587,4 +607,4 @@ Docs follow the nous layout: [docs/PROPOSAL.md](docs/PROPOSAL.md) (why) ·
 
 ## License
 
-MIT
+MIT. See [LICENSE](LICENSE).

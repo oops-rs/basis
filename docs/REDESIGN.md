@@ -1,6 +1,6 @@
 # lan — Redesign plan
 
-> rev 8 · 2026-08-13 · The transition from the P0–P4 harness to the SDK-first
+> rev 9 · 2026-08-13 · The transition from the P0–P4 harness to the SDK-first
 > shape decided in [ADR-0010](adr/0010-the-crate-is-the-workflow-surface.md)
 > through [ADR-0017](adr/0017-structured-agent-concurrency.md). This document is the
 > honest ledger of that transition: what exists, what is in between, what is not
@@ -21,17 +21,18 @@
 > route to a command and to a subagent. It reopened the tally the day after it
 > reached zero — three new upstream candidates, all named in §2 — which is what
 > a new surface does when the discipline is working.
-> **Rev 8 accepts ADR-0017.** Its first slices make serving explicit, add
-> actionable `next:` hints, and land the generic in-process lifecycle
-> supervisor. IPC and agent messaging remain not started.
+> **Rev 9 ships the local ADR-0017 service.** Serving is explicit, lifecycle
+> results carry actionable `next:` hints, and the hidden per-workspace daemon
+> provides durable handles, bounded messaging, detached roots, and repeatable
+> observation. Arbitrary peer request/reply remains deferred.
 
 ## 1. The target in one paragraph
 
 lan is `Workspace` (discover: AGENTS.md, skills, templates, tool manifests) →
 runs (execute / converse / resume, bounded, cancellable, with typed output) →
 one event stream → two seams (authorize, tools), plus two opt-in adapters
-(ACP for interactive clients, MCP as one tool binding) and a five-line CLI
-grammar. Orchestration is host-language Rust against the crate — no DSL, no
+(ACP for interactive clients, MCP as one tool binding) and a compact CLI
+grammar with lifecycle verbs. Orchestration is host-language Rust against the crate — no DSL, no
 scheduler, no shipped container, no per-language SDKs. Identity check for any
 future addition: does it make embedding cheaper for a Rust host, is it a
 convention other agents already speak, or is it a seam? If none — it is the
@@ -100,7 +101,7 @@ ledger).
 | `session/list` over ACP | 0007/0010 | **Built** (`e81e5d8`) — it had never worked: lan filtered on the workspace's runtime identifier while writing every agent under mentra's `"default"`. `WorkspaceBuilder::open` now tags what it persists. Forward-only, deliberately [17] |
 | Credentials never printed | — | **Built** (`f3529be`) — `ProviderChoice` and `McpServer`'s stdio env hand-write `Debug`: names kept so a misconfiguration stays fixable, values redacted. Provider resolution reads the environment through a passed-in lookup, so the suite passes identically with `LAN_API_KEY`/`LAN_BASE_URL` set and unset [18] |
 | One delegation surface (`spawn`) | 0016 | **Built** (`74ef59f`, with the ACP map, the auto-mode example and these lines in the commit that carries them) — the model's only door to delegation *and* commands. `spawn("!cmd")` is parsed once, at the boundary, into `{mode, body, cwd}`, and that typed triple is what `authorization_preview` presents — so the approver, the rule store, the hooks and the audit trail all dispatch on it and none of them re-reads the string. Both modes are consequential, so neither is waved through under the reads-are-never-asked rule; command mode executes only after the answer. `shell`, `background_run` and `task` left the model's roster via `ToolProfile::hide` while staying registered on the runtime, so ADR-0013's posture is untouched — the route changed, not the availability, and `--no-shell` still refuses at the policy on the path `spawn` calls, verified end to end. The depth guard is lan's own, since mentra's floor is name-specific and does not fire for a registered tool: an agent-id ledger with RAII cleanup, refusing *in the preview* so a remembered allow-rule cannot lift a structural floor (`MAX_DEPTH` 2). The policy ladder is existing machinery tiered — a pattern rule answers first and never reaches the approver, the `Approver` sees only the residue, and a remembered refusal now carries its own reason (mentra `b895ea0`) — and `lan-core/examples/reviewed_shell.rs` walks all three rungs live. Two things about the pattern tier are traps rather than features. mentra globs with `glob-match`, where a single `*` does not cross `/`, and the serialized input carries `cwd`, which is a path: a rule written with one star silently matches nothing, and the operator sees a reviewer they thought they had bypassed rather than an error. And a remembered *answer* is stored bare (`pattern: None`), so `AllowForSession` / `DenyForSession` on `spawn` covers both modes and every body — where an operator could once allow `task` and deny `shell` by name alone, drawing that line now means writing a pattern against the parsed `mode`, which is more expressive and less obvious. **Deviation from the ADR's sketch, deliberately**: no `WorkspaceBuilder::with_tool` and no `ExecutableTool` re-export. mentra's `RuntimeBuilder::with_tool` takes its tool by value and nothing upstream implements the trait for `Box` or `Arc`, so a public registration point would need a hand-forwarded shim — where forgetting `authorization_preview` would present a host's tool to the approver as its static descriptor, the exact failure this ADR exists to remove. `SpawnTool` is public instead; adding the method later is additive. Declared subprocess tools stay held: adjacent binding of the same contract, not this use case |
-| Structured agent concurrency | 0017 | **Started** — explicit `spawn`/`serve` grammar and actionable `next:` hints are built; the generic lifecycle supervisor owns attached tasks and accepts detached roots, with downward cancellation and repeatable waits; `PreparedRun::spawn` puts real agent runs under it and cooperatively closes their event streams on cancellation. Independent detached deadlines, durable cross-process state, IPC, and messaging remain not started |
+| Structured agent concurrency | 0017 | **Built** — `spawn` returns a durable per-workspace task handle; the hidden local service persists bounded state, accepts `send`, and provides repeatable `wait`, `cancel`, `watch`, and `inbox`; attached deadlines/cancellation flow downward, detached roots are independent, wait edges reject ancestor/peer cycles, and terminal state is separate from advisory progress |
 
 Footnotes on the Phase B, C and D rows, because a ledger that records only
 the wins is not a ledger:

@@ -55,7 +55,7 @@ hot-reloadable extensions. Two pi decisions independently validate ours:
 | Prompt templates (/commands) | Markdown templates with args, exposed over ACP as commands ✅ | built |
 | Extensions (custom tools, event interception) | MCP servers + interception with two bindings — in-process `Interceptor`, subprocess hooks — allow/deny/modify (§3) ✅ | built |
 | Packages (shareable bundles) | Directory convention over skills/templates/hooks/MCP — defer | later |
-| RPC / headless mode | `run --json` event stream + **ACP** (standard, not bespoke) ✅ | built |
+| RPC / headless mode | `run --json` event stream + **ACP** (standard, not bespoke) ✅; local lifecycle daemon for durable task control ✅ | built |
 | SDK | `lan-core`: a `Workspace` opened once, runs minted from it with typed output, bounds, cancellation ✅ — other languages use ACP | built |
 | TUI / themes / keybindings | Out of scope by design — ACP clients own presentation | — |
 | Provider OAuth login flows | API-key auth first; OAuth per provider later | later |
@@ -69,14 +69,19 @@ seems to need core changes, close the gap generically or push it to an extension
 
 ```
 lan "<prompt>"                     # shorthand: exactly `lan spawn "<prompt>"`
-lan spawn "<prompt>" [--json]      # headless one-shot, JSONL event stream
+lan spawn "<prompt>"               # enqueue work and return a durable handle
+lan send <ID> "<message>"          # enqueue a follow-up turn
+lan wait <ID>                      # repeatable terminal observation
+lan cancel <ID>                    # downward cancellation request
+lan watch <ID>                     # replayable progress observation
+lan inbox [ID]                     # accepted-message listing
 lan serve --acp                    # ACP server on stdio (explicit)
 lan serve --bridge                 # the same server on a websocket, for a browser
 lan fingerprint                    # the workspace's hash, for a caller's own loop
 ```
 
-The grammar is ADR-0017's and is the whole CLI. Bare `lan` returns usage rather than
-starting a long-lived server. Recurrence is not in it: an interval is the host's (cron,
+The grammar is ADR-0017's and includes the local lifecycle verbs above. Bare `lan` returns
+usage rather than starting a long-lived server. Recurrence is not in it: an interval is the host's (cron,
 systemd, CI, a tokio task), and the two pieces that are easy to get wrong — the
 fingerprint and per-run bounds — are a subcommand and three flags on `spawn` (ADR-0014). In
 process they are `Workspace::fingerprint()` and the bounds on a `RunSpec`, which is the same
@@ -85,14 +90,16 @@ A run that a bound ended says which one, both as `RunReport::stopped_by` in proc
 `run_finished`'s `stopped_by` on the stream, and the CLI exits `3` for all three of them —
 the exit-code contract of ADR-0015 is answerable without parsing prose.
 
-In-process concurrent work is owned by `lan_core::Supervisor`. `spawn` starts a
-generic future; `PreparedRun::spawn` starts an actual agent run under the same
-state machine. Both return a `TaskHandle` immediately. A handle has one durable
-terminal state, bounded repeatable `wait`, and downward `cancel`; an attached
-child delays its parent's terminal state until it settles. Agent runs use
-cooperative cancellation so their independent event stream reaches
-`run_finished` before the task publishes `cancelled`. This lifecycle surface is
-in process only today—cross-process handles and messaging are not shipped.
+In-process concurrent work is owned by `lan_core::Supervisor`. The binary adds
+the same ownership rules across CLI processes: a per-workspace hidden daemon
+owns a loopback TCP endpoint, a private capability descriptor, and an atomic
+JSON journal. `spawn` returns immediately with an opaque instance/task handle;
+`wait`/`watch`/`cancel` reconnect through that descriptor, and terminal results
+remain repeatable after the submitting process exits. Attached children inherit
+the narrower parent deadline and downward cancellation; `--detached` creates a
+new root. Progress is bounded and advisory, while terminal state is persisted
+on a separate control path, so a slow watcher cannot strand completion. The
+transport lives in the binary; `lan-core` remains protocol- and transport-free.
 
 ## 3. Extension model (without embedding a scripting language)
 
@@ -235,8 +242,8 @@ flowchart LR
   sandboxing: per-command wrapping (`codex-rs/sandboxing/src/manager.rs`), `workspace-write`
   policy with `.git`/agent-config kept read-only *inside* the workspace, network default-deny
   in three layers (seccomp, netns unshare, SBPL omission).
-- **pi** (`/Users/wendell/developer/WeNext/ai/pi`): study `packages/coding-agent/docs/`
-  session-format.md and compaction.md as prior art in P0.
+- **pi**: its public coding-agent session and compaction documentation informed
+  the prior-art notes in P0; no local checkout is required.
 - **zentox**: `mentra/docs/mentra-api-feedback.md` describes a prior Mentra-based agent and
   catalogs its API friction — requirements input for lan's core, whatever its domain was.
 
