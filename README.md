@@ -55,9 +55,9 @@ client disconnects or the wait times out, the task and its message continue;
 the task. `wait` without `--message` remains the repeatable terminal observation
 and is finite (30 minutes by default).
 
-The inbox is intentionally bounded: at most 16 messages are retained, and
-human/JSON inbox replies are summaries capped at 4 KiB per body and reply (with
-truncation metadata). A successful parent keeps attached children in its scope
+The inbox is intentionally bounded: a task accepts at most 16 messages over
+its lifetime, and human/JSON inbox replies are summaries capped at 4 KiB per
+body and reply (with truncation metadata). A successful parent keeps attached children in its scope
 until they settle; a failed or cancelled parent requests downward cancellation
 and publishes its terminal state only after those children settle. Once a
 worker has finished its own turn, it accepts no new messages or children.
