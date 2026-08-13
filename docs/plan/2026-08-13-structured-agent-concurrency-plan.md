@@ -21,10 +21,31 @@ Spec: [docs/spec/2026-08-13-structured-agent-concurrency.md](../spec/2026-08-13-
    integration and `lan` command handlers. Acceptance: an attached child can
    be spawned, awaited, cancelled, and observed without holding the parent
    turn or losing completion.
-5. **Slice 5: add IPC and messaging** — files: a transport adapter and the
-   top-level `send`, `wait`, `cancel`, `watch`, and `inbox` commands.
-   Acceptance: a capability-scoped local connection survives CLI clients and
-   preserves the same lifecycle invariants across processes.
+5. **Slice 5: add the durable local lifecycle service** — files: the binary's
+   local transport, registry, journal, worker adapter, and the top-level
+   lifecycle commands. This remained one dependency wave but landed in
+   separately reviewable steps:
+
+   - **5a: daemon and durable IPC** — a capability-scoped loopback service,
+     bounded journal, and `send`/`wait`/`cancel`/`watch`/`inbox` survive the CLI
+     process that created a task.
+   - **5b: live wait graph** — every unresolved blocking operation owns a
+     counted caller-to-target lease; static ownership rules and dynamic graph
+     traversal reject cycles, and dropped clients release their leases.
+   - **5c: attached parent scope** — a parent keeps its terminal result pending
+     until attached children settle; success leaves them running, while
+     failure or cancellation propagates downward. Detached roots remain
+     independent.
+   - **5d: correlated messaging** — `ask` and `send --await` wait for the exact
+     accepted message's durable reply, while `wait --message` retries it after
+     timeout or disconnect and `inbox` exposes bounded reply summaries.
+   - **5e: acceptance and recovery tests** — focused unit and integration tests
+     cover state transitions, durable recovery, IPC, cycle rejection, caller
+     authority, parent settlement, and distinct per-message replies.
+
+   Acceptance: the local connection preserves the lifecycle invariants across
+   processes, every wait is bounded and cycle-checked, and terminal task state,
+   correlated message replies, and advisory progress remain distinct.
 
 ### Overlap matrix
 
@@ -47,9 +68,14 @@ Spec: [docs/spec/2026-08-13-structured-agent-concurrency.md](../spec/2026-08-13-
 
 ## Progress
 
-- [x] Slice 1 — lock the design (`b2ec36d`).
-- [x] Slice 2 — make the CLI grammar explicit (`f48c6de`).
-- [x] Slice 3 — introduce the lifecycle state machine (`df43494`).
-- [x] Slice 4 — wire in-process spawn/wait.
-- [x] Slice 5 — add IPC and messaging (local daemon, capability descriptor,
-  durable journal, `send`/`wait`/`cancel`/`watch`/`inbox`, detached roots).
+| Slice | Status | Shipped evidence |
+|---|---|---|
+| 1 — design | Shipped | Accepted spec, ADR-0017, and plan (`b2ec36d`) |
+| 2 — explicit CLI grammar | Shipped | Canonical `spawn`, compatible `run`, explicit serve transports, and next hints (`f48c6de`) |
+| 3 — lifecycle state machine | Shipped | Generic `lan-core` supervisor and focused transition tests (`df43494`) |
+| 4 — in-process structured ownership | Shipped | Prepared runs execute under handles with repeatable waits and downward cancellation (`3db1317`) |
+| 5a — local daemon and durable IPC | Shipped | Capability descriptor, bounded journal, lifecycle commands, and process-level integration tests (`a4539dc`); wakeup, registry ownership, and connection-bound hardening (`a1c8ed8`, `7f82e17`, `b1ebf0a`) |
+| 5b — live wait graph and caller authority | Shipped | Counted wait leases, static ownership validation, dynamic cycle rejection, and downward-only task cancellation (`61c8d26`) |
+| 5c — attached parent scope | Shipped | Pending terminal results, success/failure propagation rules, and detached-root isolation (`9d2179b`) |
+| 5d — `ask` and correlated replies | Shipped | Durable per-message replies, `ask`, exact `send --await`, `wait --message`, and bounded inbox summaries (`89ee68a`) |
+| 5e — acceptance and recovery tests | Shipped with each implementation slice | `lan-core/src/lifecycle.rs`, `lan-core/tests/lifecycle_run.rs`, `lan/tests/local_lifecycle.rs`, and colocated local-service/store/registry tests cover the accepted invariants without relying on a live remote CI run |

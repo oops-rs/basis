@@ -33,13 +33,20 @@ explicit.
   metadata rather than requiring documentation lookup.
 - Give every attached child a structured owner, handle, deadline, and
   cancellation path.
-- Keep communication one-way by default and make terminal results independent
-  from progress/event delivery.
+- Keep communication one-way by default, with one durable correlated reply for
+  each accepted message, and make terminal results independent from
+  progress/event delivery.
+- Keep inboxes, replies, waits, and event history bounded so a durable task
+  cannot grow without limit.
+- Keep an attached parent scope open until its children settle, while making
+  detached roots explicitly independent.
 - Preserve a small CLI and a generic core with no task-specific vocabulary.
 
 ## Non-goals
 
-- Arbitrary peer-to-peer synchronous request/reply in the first implementation.
+- Unrestricted peer-to-peer synchronous protocols or messages after a task has
+  reached its terminal state. The first service supports one correlated reply
+  for each message accepted while a task is running.
 - A new wire protocol in `lan-core`; transports remain in adapters or the
   binary.
 - A TUI, process sandbox, or replacement for Mentra's agent loop.
@@ -51,10 +58,16 @@ explicit.
 - `lan-core` carries generic lifecycle types only: no ACP, websocket, or TTY
   dependencies.
 - Parent cancellation and deadlines propagate to attached descendants.
+- A parent's own completion is pending while attached descendants are still
+  non-terminal; successful parents leave those children running, while failed
+  or cancelled parents request downward cancellation.
 - No await may hold an agent/session/resource lock or prevent the supervisor
   from processing control messages.
 - A detached root has an explicit independent lifetime and a durable terminal
   state.
+- Every blocking lifecycle request has a finite deadline (30 minutes by
+  default, capped at seven days), and its live wait edge is released when the
+  request finishes, times out, or is cancelled.
 
 ## Acceptance criteria
 
@@ -65,11 +78,27 @@ explicit.
       changing the existing JSONL run bookends.
 - [x] A child handle has exactly one terminal state and can be waited on more
       than once without rerunning work.
+- [x] `send` returns a durable message ID; `ask` and `send --await` wait for
+      that message's correlated reply, and `wait --message` retries the same
+      reply without rerunning the task.
+- [x] Distinct accepted messages retain distinct bounded replies, even while
+      the target task remains alive for later turns.
 - [x] Cancelling a parent cancels attached descendants and settles their
       waiters.
+- [x] A parent that finishes its own work remains pending until attached
+      descendants settle; success leaves children running, while failure or
+      cancellation propagates downward.
 - [x] Dropping or cancelling a wait does not lose a completed child result.
-- [x] A parent/ancestor wait cycle is rejected or expires within a finite
-      deadline; it never blocks forever.
+- [x] `spawn --await`, `send --await`, `ask`, `wait`, and `watch` acquire a
+      counted live caller-to-target wait lease; static ownership checks and a
+      dynamic graph traversal reject an edge that would close a cycle.
+- [x] For an unresolved wait, a parent/ancestor, self, or same-tree peer edge
+      is rejected before work is started or a message is enqueued; completed
+      terminal/reply snapshots are reads, and enqueue-only `send` remains safe
+      for parent-facing updates.
+- [x] `wait` observes terminal state, `wait --message` observes one message's
+      reply, `watch` observes bounded progress/events, and `cancel` requests
+      downward cancellation without acquiring a wait edge.
 - [x] A saturated progress/event path cannot prevent terminal completion.
 - [x] Detached work is visibly independent and has its own finite deadline and
       cancel policy.
@@ -78,16 +107,21 @@ explicit.
 
 - The accepted default is structured ownership: attached children are
   descendants, while `--detached` creates a new root.
-- `send` is enqueue-only. `send --await` initially targets a child or an
-  independent actor whose supervisor can answer without the caller's current
-  model turn.
+- `send` is enqueue-only by default and targets a running one-session task.
+  Every accepted message has one durable ID and one bounded reply. `ask` is
+  the explicit enqueue-and-await spelling; `send --await` has the same
+  correlated message semantics.
 - Parent-facing requests are delivered through an inbox and handled at a
   later model boundary rather than by synchronously blocking the parent turn.
+- A blocking request owns a counted in-memory wait lease. The lease is not
+  journaled, so a daemon restart cannot preserve a wait whose client no longer
+  exists.
 
 ## Open questions
 
-- None for the first implementation slice. Arbitrary peer request/reply will
-  require a separate decision after the wait-graph tests exist.
+- None for the shipped first slice. Post-terminal multi-turn agents and an
+  unrestricted peer-to-peer request/reply protocol require a separate
+  decision.
 
 ## Shipped limits / follow-ups
 
@@ -95,8 +129,40 @@ explicit.
   bounded JSON journal. It is local-process coordination, not a remote RPC
   service; the capability is required even on loopback.
 - `send` targets a running one-session task and is consumed at a model-turn
-  boundary. Durable multi-turn agents after terminal completion, arbitrary
-  peer request/reply, and unrestricted dynamic wait graphs remain deferred.
+  boundary. A task accepts at most 16 messages over its lifetime; message
+  bodies are capped at 256 KiB, task results at 1 MiB, and inbox body/reply
+  previews at 4 KiB with truncation metadata.
+- `ask` and `send --await` wait for the exact message reply. A client timeout
+  or disconnect leaves the task and message running; `wait --message` can
+  retrieve the durable reply later. If the task terminates before a reply,
+  the message wait returns the tagged terminal outcome.
+- The live wait graph is local to one daemon. It combines static ownership
+  rules (no self, ancestor, or same-tree peer waits) with dynamic cycle
+  detection for independent roots. Edges are counted leases, released on
+  success, error, timeout, or client cancellation, and are not persisted.
+- `wait` waits for terminal state, `watch` returns bounded/replayable progress
+  and terminal snapshots (including on a watch timeout), and `cancel` is a
+  downward control request. An attached task caller may cancel itself or
+  descendants, not ancestors or peers; an external capability holder may
+  request cancellation of any task in that service. A parent stores a pending
+  terminal result while attached children run; success keeps them alive,
+  failure/cancellation asks them to stop, and the parent becomes terminal only
+  after the attached children settle. Detached roots do not hold or inherit
+  the parent scope.
+- Durable multi-turn agents after terminal completion and unrestricted
+  cross-service/peer protocols remain deferred.
+
+## Lifecycle operation scope
+
+| Operation | Durable effect | Wait-graph behavior |
+|---|---|---|
+| `send` | Enqueue one message and return its ID | No wait edge; safe for a parent-facing update |
+| `ask` / `send --await` | Enqueue one message and return its correlated reply | One caller-to-target lease while the reply is unresolved |
+| `wait <ID>` | Read the task's repeatable terminal result | One lease while the task is non-terminal |
+| `wait <ID> --message <MID>` | Read/retry one message's reply | One lease only when that reply is unresolved |
+| `watch <ID>` | Read bounded events and a terminal snapshot | One lease for the live watch request |
+| `cancel <ID>` | Mark the target tree for downward cancellation | No wait edge; task callers are self/descendant scoped, external capability holders are unrestricted |
+| `inbox [ID]` | Read bounded message/reply summaries | No wait edge |
 
 ## References
 
