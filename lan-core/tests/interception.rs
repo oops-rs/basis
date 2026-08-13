@@ -23,7 +23,9 @@ use mentra::{
 };
 use serde_json::json;
 
-use lan_core::{HookOutcome, HookRequest, HookRunner, HookSpec, Interceptor, InterceptorError};
+#[cfg(unix)]
+use lan_core::HookSpec;
+use lan_core::{HookOutcome, HookRequest, HookRunner, Interceptor, InterceptorError};
 
 /// An interceptor built from a closure, so a test states only its answer.
 struct Scripted {
