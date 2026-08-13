@@ -9,6 +9,7 @@ version = "0.1.0"
 edition = "2024"
 rust-version = "1.88"
 license = "MIT"
+readme = "README.md"
 repository = "https://github.com/oops-rs/lan"
 homepage = "https://github.com/oops-rs/lan"
 
