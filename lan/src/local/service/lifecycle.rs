@@ -661,6 +661,16 @@ pub(super) async fn orphan_running(shared: &Shared) {
             .cloned()
             .collect::<Vec<_>>()
     };
+    // No request handler can remain a valid waiter once the daemon has
+    // declared every live task orphaned. Clear the graph before waking those
+    // handlers so a short-lived test/runtime restart cannot leave stale edges
+    // blocking a later request in the same process.
+    shared
+        .waits
+        .lock()
+        .expect("wait graph poisoned")
+        .edges
+        .clear();
     for token in tokens {
         token.cancel();
     }
@@ -768,11 +778,20 @@ pub(super) fn send_next_hint(
     message: &str,
 ) -> String {
     if let Some(caller) = caller
-        && validate_wait_edge(shared, Some(caller), target).is_err()
+        && (validate_wait_edge(shared, Some(caller), target).is_err()
+            || wait_edge_would_cycle(shared, caller, target))
     {
         return format!("lan inbox {target}");
     }
     format!("lan wait {target} --message {message}")
+}
+
+fn wait_edge_would_cycle(shared: &Shared, caller: &str, target: &str) -> bool {
+    shared
+        .waits
+        .lock()
+        .expect("wait graph poisoned")
+        .reaches(target, caller)
 }
 
 pub(super) fn deadline_of(shared: &Shared, task: &str) -> Option<u64> {
@@ -1017,6 +1036,28 @@ mod tests {
         assert_eq!(graph.lock().expect("graph").edges["caller"]["target"], 1);
         drop(second);
         assert!(graph.lock().expect("graph").edges.is_empty());
+    }
+
+    #[test]
+    fn send_hint_does_not_recommend_a_dynamic_wait_cycle() {
+        let (_dir, shared) = test_shared();
+        {
+            let mut journal = shared.journal.lock().expect("journal");
+            journal.insert("left".to_string(), record("left", None));
+            journal.insert("right".to_string(), record("right", None));
+        }
+        let lease = begin_wait(&shared, Some("right"), "left").expect("initial wait edge");
+
+        assert_eq!(
+            send_next_hint(&shared, Some("left"), "right", "message-1"),
+            "lan inbox right"
+        );
+
+        drop(lease);
+        assert_eq!(
+            send_next_hint(&shared, Some("left"), "right", "message-1"),
+            "lan wait right --message message-1"
+        );
     }
 
     #[tokio::test]
@@ -1314,6 +1355,23 @@ mod tests {
             assert_eq!(payload["state"], "orphaned");
             assert_eq!(payload["message"], id);
         }
+    }
+
+    #[tokio::test]
+    async fn daemon_shutdown_releases_every_live_wait_edge() {
+        let (_dir, shared) = test_shared();
+        {
+            let mut journal = shared.journal.lock().expect("journal");
+            journal.insert("left".to_string(), record("left", None));
+            journal.insert("right".to_string(), record("right", None));
+        }
+        let lease = begin_wait(&shared, Some("left"), "right").expect("initial wait edge");
+        assert!(!shared.waits.lock().expect("graph").edges.is_empty());
+
+        orphan_running(&shared).await;
+
+        assert!(shared.waits.lock().expect("graph").edges.is_empty());
+        drop(lease);
     }
 
     #[tokio::test]
