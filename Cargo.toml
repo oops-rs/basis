@@ -46,7 +46,12 @@ serde_json = "1"
 serde_yaml_ng = "0.10"
 tempfile = "3"
 thiserror = "2"
-tokio = { version = "1", features = ["macros", "net", "rt-multi-thread", "signal", "sync", "time"] }
+tokio = { version = "1", features = ["io-util", "macros", "net", "rt-multi-thread", "signal", "sync", "time"] }
+
+# Stable, capability-scoped identifiers for local task services. ACP already
+# brings uuid into the lockfile, but lan names it directly because transitive
+# dependencies are not an API contract.
+uuid = { version = "1", features = ["v4", "serde"] }
 
 # Server side only: the bridge accepts websocket connections, it never dials
 # one. Already in the tree via mentra-provider, so this names what lan itself
