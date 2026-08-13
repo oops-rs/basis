@@ -595,8 +595,8 @@ rule is that its items ship only against one. This README describes only what is
 Still open, and named honestly: compaction tuning, the packages convention, and provider
 OAuth remain, and **nobody has driven this from Zed or JetBrains yet** — it is verified
 against the protocol and its official client library, not against the ecosystem. The source
-repository is public; the crates are published independently and their release order follows
-Mentra. CI runs `cargo fmt --all --check`, clippy at `-D warnings`, and the full
+repository is public; the runtime dependency is published, while LAN crates will follow a
+coordinated release order. CI runs `cargo fmt --all --check`, clippy at `-D warnings`, and the full
 suite on Linux, macOS, and Windows, plus an MSRV job. See
 [docs/ARCHITECTURE.md](docs/ARCHITECTURE.md) §6.
 
