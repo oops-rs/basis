@@ -170,9 +170,9 @@ fn usage() -> ExitCode {
     eprintln!(
         "lan: a prompt or command is required; try `lan serve --acp` or `lan spawn <PROMPT>`"
     );
+    eprintln!("{}", Cli::command().render_usage());
     eprintln!(
         "next: use `lan spawn <PROMPT>` for work, `lan fingerprint` for the workspace hash, or `lan serve --acp` for ACP"
     );
-    eprintln!("{}", Cli::command().render_usage());
     ExitCode::from(EXIT_USAGE)
 }
