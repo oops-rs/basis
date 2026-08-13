@@ -18,16 +18,15 @@ homepage = "https://github.com/oops-rs/lan"
 lan-core = { version = "0.1", path = "lan-core" }
 lan-acp = { version = "0.1", path = "lan-acp" }
 
-# TEMPORARY: use the sibling checkout for unreleased Mentra changes.
-# Restore the registry-only dependency before publishing; standalone checkouts
-# need the same sibling layout while this override is present.
+# Mentra 0.18 is published and is the runtime contract LAN targets. Keeping
+# this registry-only makes a standalone checkout and a package resolve alike.
 #
 # `default-features = false` drops exactly one thing: mentra's Responses
 # websocket transport, which nothing in lan can select — every run streams over
 # HTTP+SSE. `lan-core` re-offers it as a feature for an embedder who wants it
 # (see its manifest); the binary and `lan-acp` do not, because neither has a
 # surface that would ask for it.
-mentra = { version = "0.18", path = "../mentra/mentra", default-features = false }
+mentra = { version = "0.18", default-features = false }
 
 async-trait = "0.1"
 # Moves a blocking reader onto its own thread, which is how stdin becomes an
