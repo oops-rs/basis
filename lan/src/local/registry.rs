@@ -15,15 +15,14 @@ use std::{
     time::Duration,
 };
 
-use fs2::FileExt;
+use fs2::{FileExt, lock_contended_error};
 use serde::{Deserialize, Serialize};
 use tempfile::NamedTempFile;
 use tokio::{net::TcpStream, time};
 use uuid::Uuid;
 
-use super::protocol::{Request, Response, read_frame, write_frame};
+use super::protocol::{Request, Response, VERSION, read_frame, write_frame};
 
-const REGISTRY_VERSION: u8 = 1;
 const STARTUP_ATTEMPTS: usize = 100;
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -109,6 +108,9 @@ impl Registry {
         let workspace_path = self.workspace_descriptor(Path::new(&descriptor.workspace));
         if let Some(current) = read_descriptor(&workspace_path)?
             && current.instance == descriptor.instance
+            && current.endpoint == descriptor.endpoint
+            && current.token == descriptor.token
+            && current.pid == descriptor.pid
         {
             let _ = fs::remove_file(workspace_path);
         }
@@ -125,7 +127,7 @@ impl Registry {
             .open(&path)?;
         file.try_lock_exclusive().map_err(|error| {
             io::Error::new(
-                if error.kind() == io::ErrorKind::WouldBlock {
+                if is_lock_contended(&error) {
                     io::ErrorKind::AlreadyExists
                 } else {
                     error.kind()
@@ -265,7 +267,7 @@ pub(crate) async fn request(
         .await
         .map_err(|error| format!("connect to lan service: {error}"))?;
     let request = Request {
-        version: REGISTRY_VERSION,
+        version: VERSION,
         id: 1,
         token: descriptor.token.clone(),
         operation,
@@ -276,7 +278,7 @@ pub(crate) async fn request(
     let response: Response = read_frame(&mut stream)
         .await
         .map_err(|error| format!("read response: {error}"))?;
-    if response.version != REGISTRY_VERSION || response.id != 1 {
+    if response.version != VERSION || response.id != 1 {
         return Err(format!(
             "lan service returned mismatched response v{} id {}",
             response.version, response.id
@@ -290,7 +292,7 @@ pub(crate) async fn probe(descriptor: &Descriptor) -> bool {
         return false;
     };
     let request = Request {
-        version: REGISTRY_VERSION,
+        version: VERSION,
         id: 0,
         token: descriptor.token.clone(),
         operation: super::protocol::Operation::Inbox {
@@ -307,7 +309,7 @@ pub(crate) async fn probe(descriptor: &Descriptor) -> bool {
     .await
     .is_ok_and(|result| {
         result.is_ok_and(|response| {
-            response.version == REGISTRY_VERSION
+            response.version == VERSION
                 && response.id == 0
                 && matches!(response.kind, super::protocol::ResponseKind::Ok)
                 && response.payload["state"] == "ready"
@@ -431,15 +433,30 @@ fn detach(_command: &mut Command) {}
 
 #[cfg(windows)]
 fn pid_alive(_pid: u32) -> bool {
-    // A failed TCP probe is enough to retry startup on Windows. Avoid a
-    // platform-specific process API here; the capability handshake remains
-    // authoritative for endpoint ownership.
-    false
+    // The standard library does not expose a portable, read-only Windows
+    // process probe. Treat an unknown PID as potentially alive: a failed
+    // handshake must never make us unlink another service's descriptor. The
+    // caller retries the probe and then returns a clear "alive but unavailable"
+    // error instead of deleting the descriptor.
+    true
 }
 
 #[cfg(not(any(unix, windows)))]
 fn pid_alive(_pid: u32) -> bool {
     false
+}
+
+fn is_lock_contended(error: &io::Error) -> bool {
+    let expected = lock_contended_error();
+    match (error.raw_os_error(), expected.raw_os_error()) {
+        // The OS code is the discriminant on Windows (ERROR_LOCK_VIOLATION)
+        // and Unix (EWOULDBLOCK/EAGAIN). Prefer it whenever both are present
+        // so an unrelated `Uncategorized` error cannot look like contention.
+        (Some(actual), Some(expected)) => actual == expected,
+        // Keep the kind-only fallback for targets where fs2 cannot expose an
+        // OS code. `lock_contended_error` is the crate's contract in that case.
+        _ => error.kind() == expected.kind(),
+    }
 }
 
 #[cfg(test)]
@@ -458,7 +475,7 @@ mod tests {
         let dir = tempfile::tempdir().unwrap();
         let registry = Registry::from_path(dir.path()).unwrap();
         let descriptor = Descriptor {
-            version: 1,
+            version: VERSION,
             instance: "0123456789abcdef".to_string(),
             workspace: "/repo".to_string(),
             endpoint: "127.0.0.1:1".to_string(),
@@ -503,7 +520,7 @@ mod tests {
         let left = tempfile::tempdir().unwrap();
         let right = tempfile::tempdir().unwrap();
         let descriptor = Descriptor {
-            version: REGISTRY_VERSION,
+            version: VERSION,
             instance: "0123456789abcdef".to_string(),
             workspace: left.path().to_string_lossy().into_owned(),
             endpoint: "127.0.0.1:1".to_string(),
@@ -514,5 +531,65 @@ mod tests {
         let error = ensure_descriptor_workspace(&descriptor, right.path())
             .expect_err("a digest alone must not select another workspace");
         assert!(error.contains("collision"), "{error}");
+    }
+
+    #[test]
+    fn lock_contention_error_is_recognized_across_platforms() {
+        assert!(is_lock_contended(&lock_contended_error()));
+    }
+
+    #[test]
+    fn acquire_maps_real_lock_contention_to_already_exists() {
+        let dir = tempfile::tempdir().unwrap();
+        let registry = Registry::from_path(dir.path()).unwrap();
+        let workspace = tempfile::tempdir().unwrap();
+        let _first = registry.acquire(workspace.path()).unwrap();
+
+        let error = match registry.acquire(workspace.path()) {
+            Ok(_) => panic!("a second owner must not acquire the workspace lease"),
+            Err(error) => error,
+        };
+        assert_eq!(error.kind(), io::ErrorKind::AlreadyExists);
+    }
+
+    #[test]
+    fn descriptor_removal_requires_the_current_capability_and_owner() {
+        let dir = tempfile::tempdir().unwrap();
+        let registry = Registry::from_path(dir.path()).unwrap();
+        let workspace = tempfile::tempdir().unwrap();
+        let descriptor = Descriptor {
+            version: VERSION,
+            instance: "0123456789abcdef".to_string(),
+            workspace: workspace.path().to_string_lossy().into_owned(),
+            endpoint: "127.0.0.1:1234".to_string(),
+            token: "current-token".to_string(),
+            pid: 42,
+        };
+        let path = registry.workspace_descriptor(workspace.path());
+        write_descriptor(&path, &descriptor).unwrap();
+
+        let mut replacement = descriptor.clone();
+        replacement.endpoint = "127.0.0.1:5678".to_string();
+        registry.remove_descriptor(&replacement).unwrap();
+        assert!(
+            path.exists(),
+            "an endpoint replacement must survive cleanup"
+        );
+
+        replacement.endpoint = descriptor.endpoint.clone();
+        replacement.pid = 43;
+        registry.remove_descriptor(&replacement).unwrap();
+        assert!(path.exists(), "a PID replacement must survive cleanup");
+
+        replacement.pid = descriptor.pid;
+        replacement.token = "replacement-token".to_string();
+        registry.remove_descriptor(&replacement).unwrap();
+        assert!(
+            path.exists(),
+            "a replacement descriptor must survive cleanup"
+        );
+
+        registry.remove_descriptor(&descriptor).unwrap();
+        assert!(!path.exists());
     }
 }
