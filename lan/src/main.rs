@@ -2,32 +2,35 @@
 //!
 //! Per ADR-0003 the library is the product and this is a wrapper; per ADR-0011
 //! there are two of them, and the CLI is what sits over both. The grammar is
-//! ADR-0015's, and it is five lines:
+//! ADR-0015 and ADR-0017's:
 //!
 //! ```text
 //! lan "<prompt>"            -> shorthand: exactly `lan spawn "<prompt>"`
-//! lan spawn "<prompt>"      -> headless one-shot; `-` reads the prompt from stdin
+//! lan spawn "<prompt>"      -> enqueue one task and print its durable handle
+//! lan send <ID> "<message>" -> enqueue a later turn for a running task
+//! lan wait <ID>              -> observe a repeatable terminal result
+//! lan cancel <ID>            -> request downward cancellation
+//! lan watch <ID>             -> follow progress without owning completion
+//! lan inbox [ID]             -> inspect accepted messages
 //! lan serve --acp           -> ACP server on stdio, for an editor to spawn
 //! lan serve --bridge        -> the same ACP server on a websocket, for a browser
 //! lan fingerprint           -> the workspace's hash, for a caller's own loop
 //! ```
 //!
-//! A positional argument that is not one of the four subcommands is a prompt,
+//! A positional argument that is not a subcommand is a prompt,
 //! so the human path carries no ceremony and the editor path is untouched. `--`
 //! escapes a prompt that collides with a subcommand name: `lan -- run`.
 //!
 //! # Where the parts are
 //!
-//! What is left in this file is the dispatch, and the two contracts above and
-//! below it. Everything else is split by the question it answers, because the
-//! four commands share almost nothing but the argv they came from:
+//! What is left in this file is dispatch. Everything else is split by the
+//! question it answers:
 //!
 //! - [`shorthand`] rewrites the command line before clap sees it, which is the
 //!   only place the five-line grammar is not simply declared.
 //! - [`cli`] declares the rest of it: every type clap parses into.
-//! - [`run`], [`serve`] and [`fingerprint`] are the commands themselves — one
-//!   per line of the table, with `acp` and `bridge` sharing [`serve`] since
-//!   they are one server on two transports.
+//! - [`local`] owns the durable lifecycle adapter; [`serve`] owns ACP and its
+//!   websocket bridge; [`fingerprint`] owns workspace hashing.
 //! - [`exit`] is the table below, and the one function that reads it.
 //!
 //! The error handling here is the seam between two conventions: a command that
@@ -59,6 +62,7 @@ mod cli;
 mod duration_arg;
 mod exit;
 mod fingerprint;
+mod local;
 mod run;
 mod serve;
 mod shorthand;
@@ -91,16 +95,37 @@ async fn main() -> ExitCode {
     };
 
     match cli.command {
-        Some(Command::Spawn(args)) => match execute_run(args).await {
+        Some(Command::Spawn(args))
+            if args.json && !args.detached && !args.await_result && !local::has_current_task() =>
+        {
+            match execute_run(args).await {
+                Ok(code) => code,
+                Err(message) => {
+                    eprintln!("lan: {message}");
+                    eprintln!("next: retry with `lan spawn <PROMPT>` or use `lan --help`");
+                    ExitCode::from(EXIT_FAILED)
+                }
+            }
+        }
+        Some(Command::Spawn(args)) => match local::spawn(args).await {
             Ok(code) => code,
             Err(message) => {
                 eprintln!("lan: {message}");
                 eprintln!(
-                    "next: retry with `lan spawn <PROMPT>` after addressing the failure or use `lan --help` for options"
+                    "next: retry with `lan spawn <PROMPT>` or use `lan --help` for lifecycle options"
                 );
                 ExitCode::from(EXIT_FAILED)
             }
         },
+        Some(Command::Send(args)) => {
+            lifecycle_result(local::send(args).await, "lan send <ID> <MESSAGE>")
+        }
+        Some(Command::Wait(args)) => lifecycle_result(local::wait(args).await, "lan wait <ID>"),
+        Some(Command::Cancel(args)) => {
+            lifecycle_result(local::cancel(args).await, "lan cancel <ID>")
+        }
+        Some(Command::Watch(args)) => lifecycle_result(local::watch(args).await, "lan watch <ID>"),
+        Some(Command::Inbox(args)) => lifecycle_result(local::inbox(args).await, "lan inbox <ID>"),
         Some(Command::Fingerprint(args)) => match execute_fingerprint(args) {
             Ok(code) => code,
             Err(message) => {
@@ -118,7 +143,26 @@ async fn main() -> ExitCode {
         }
         Some(Command::Serve(args)) if args.acp => serve_acp(args.acp_args).await,
         Some(Command::Serve(args)) => serve_bridge(args.acp_args, args.bridge_args).await,
+        Some(Command::Daemon(args)) => match local::run_daemon(args.workspace, args.registry).await
+        {
+            Ok(()) => ExitCode::SUCCESS,
+            Err(message) => {
+                eprintln!("lan service: {message}");
+                ExitCode::from(EXIT_FAILED)
+            }
+        },
         None => usage(),
+    }
+}
+
+fn lifecycle_result(result: Result<ExitCode, String>, command: &str) -> ExitCode {
+    match result {
+        Ok(code) => code,
+        Err(message) => {
+            eprintln!("lan: {message}");
+            eprintln!("next: retry with `{command}` or inspect `lan --help`");
+            ExitCode::from(EXIT_FAILED)
+        }
     }
 }
 

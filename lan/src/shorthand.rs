@@ -14,9 +14,21 @@
 
 use std::ffi::{OsStr, OsString};
 
-/// The four subcommands plus clap's own, which is what makes a positional a
-/// prompt: anything that is not one of these words is one.
-const SUBCOMMANDS: [&str; 5] = ["spawn", "run", "fingerprint", "serve", "help"];
+/// The lifecycle commands, adapters, and clap's own help command. Anything
+/// else is a prompt.
+const SUBCOMMANDS: [&str; 11] = [
+    "spawn",
+    "run",
+    "send",
+    "wait",
+    "cancel",
+    "watch",
+    "inbox",
+    "fingerprint",
+    "serve",
+    "__daemon",
+    "help",
+];
 
 /// Flags the top level answers itself. Every other flag belongs to `run`,
 /// which is what lets `lan --json "hi"` mean what it looks like.
@@ -137,6 +149,17 @@ mod tests {
 
         assert_eq!(shorthand(&["lan", "--", "run"]).prompt, "run");
         assert_eq!(shorthand(&["lan", "--", "serve"]).prompt, "serve");
+    }
+
+    #[test]
+    fn lifecycle_verbs_are_never_rewritten_as_prompts() {
+        for verb in ["send", "wait", "cancel", "watch", "inbox"] {
+            assert_eq!(
+                normalized(&["lan", verb, "task"])[1],
+                verb,
+                "{verb} must reach clap as a subcommand"
+            );
+        }
     }
 
     #[test]

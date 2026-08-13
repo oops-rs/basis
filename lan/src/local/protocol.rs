@@ -3,7 +3,8 @@
 //! This is deliberately a binary-side adapter. `lan-core` remains transport
 //! free; a host embedding the SDK can choose a different control plane. The
 //! protocol is a length-delimited JSON envelope over a loopback TCP stream.
-//! The bearer token is checked before an operation is decoded or executed.
+//! The bounded envelope is decoded first; the bearer token is checked before
+//! an operation is dispatched or can mutate state.
 
 use std::io;
 
@@ -49,6 +50,7 @@ pub(crate) enum Operation {
     },
     Wait {
         task: String,
+        caller: Option<String>,
         timeout_ms: u64,
     },
     Cancel {
@@ -57,6 +59,7 @@ pub(crate) enum Operation {
     Watch {
         task: String,
         since: u64,
+        timeout_ms: u64,
     },
     Inbox {
         task: String,
@@ -64,8 +67,8 @@ pub(crate) enum Operation {
 }
 
 /// Per-run values that are safe to serialize into a local request. Credentials
-/// are intentionally absent: the daemon inherits the caller's environment,
-/// just as a direct `lan spawn` does, and the descriptor never contains a key.
+/// are intentionally absent: the daemon owns its startup environment, just as
+/// another long-lived host does, and the descriptor never contains a key.
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]
 pub(crate) struct RunOptions {
     pub provider: Option<String>,
@@ -130,7 +133,10 @@ where
     let mut bytes = vec![0_u8; length];
     reader.read_exact(&mut bytes).await?;
     serde_json::from_slice(&bytes).map_err(|error| {
-        io::Error::new(io::ErrorKind::InvalidData, format!("invalid JSON frame: {error}"))
+        io::Error::new(
+            io::ErrorKind::InvalidData,
+            format!("invalid JSON frame: {error}"),
+        )
     })
 }
 
@@ -142,12 +148,18 @@ where
     T: Serialize,
 {
     let bytes = serde_json::to_vec(value).map_err(|error| {
-        io::Error::new(io::ErrorKind::InvalidData, format!("could not encode JSON: {error}"))
+        io::Error::new(
+            io::ErrorKind::InvalidData,
+            format!("could not encode JSON: {error}"),
+        )
     })?;
     if bytes.is_empty() || bytes.len() > MAX_FRAME {
         return Err(io::Error::new(
             io::ErrorKind::InvalidData,
-            format!("encoded frame length {} is outside 1..={MAX_FRAME}", bytes.len()),
+            format!(
+                "encoded frame length {} is outside 1..={MAX_FRAME}",
+                bytes.len()
+            ),
         ));
     }
 
@@ -166,6 +178,8 @@ mod tests {
         let (mut left, mut right) = duplex(1024);
         let first = serde_json::json!({"n": 1});
         let second = serde_json::json!({"n": 2});
+        let expected_first = first.clone();
+        let expected_second = second.clone();
 
         let writer = tokio::spawn(async move {
             write_frame(&mut left, &first).await.expect("first frame");
@@ -176,8 +190,8 @@ mod tests {
         let b: Value = read_frame(&mut right).await.expect("second read");
         writer.await.expect("writer joins");
 
-        assert_eq!(a, first);
-        assert_eq!(b, second);
+        assert_eq!(a, expected_first);
+        assert_eq!(b, expected_second);
     }
 
     #[tokio::test]

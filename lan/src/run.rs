@@ -117,7 +117,7 @@ fn next_hint(outcome: &RunOutcome, stopped_by: Option<Bound>) -> &'static str {
 /// Explicit rather than detected: bare `lan` already owns stdin for the ACP
 /// server, and no amount of sniffing can tell an editor's pipe from a shell's
 /// (ADR-0015). So the caller says which one this is, with one character.
-fn prompt_from(argument: String) -> Result<String, String> {
+pub(crate) fn prompt_from(argument: String) -> Result<String, String> {
     match argument.as_str() {
         "-" => read_prompt(io::stdin().lock()),
         _ => Ok(argument),

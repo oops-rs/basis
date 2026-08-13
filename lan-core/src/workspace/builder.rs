@@ -12,6 +12,7 @@
 //! caller can still change per run lives in [`RunSpec`](super::RunSpec).
 
 use std::{
+    collections::BTreeMap,
     path::{Path, PathBuf},
     sync::Arc,
 };
@@ -39,6 +40,7 @@ use crate::{
 };
 
 use super::Workspace;
+use super::environment::EnvironmentExecutor;
 
 /// How a workspace is opened.
 ///
@@ -65,6 +67,7 @@ pub struct WorkspaceBuilder {
     interceptors: Vec<Arc<dyn Interceptor>>,
     shell: ShellAccess,
     history: Option<History>,
+    command_environment: BTreeMap<String, String>,
 }
 
 /// What a caller said about where this workspace's conversations go.
@@ -106,6 +109,10 @@ impl std::fmt::Debug for WorkspaceBuilder {
             )
             .field("shell", &self.shell)
             .field("history", &self.history)
+            .field(
+                "command_environment",
+                &self.command_environment.keys().collect::<Vec<_>>(),
+            )
             .finish_non_exhaustive()
     }
 }
@@ -130,6 +137,7 @@ impl WorkspaceBuilder {
             // configuration, not read out of the environment behind the caller.
             shell: ShellAccess::default(),
             history: None,
+            command_environment: BTreeMap::new(),
         }
     }
 
@@ -174,6 +182,22 @@ impl WorkspaceBuilder {
 
     pub fn with_model(self, model: ModelSelector) -> Self {
         Self { model, ..self }
+    }
+
+    /// Adds one fixed environment value to every command this workspace runs.
+    ///
+    /// Mentra clears the ambient environment, so a host must state execution
+    /// context explicitly. Values are scoped to this opened workspace rather
+    /// than the process, which keeps concurrently driven agents from seeing
+    /// one another's task identity. A later call with the same name replaces
+    /// the earlier value. Debug output names variables but redacts values.
+    pub fn with_command_environment(
+        mut self,
+        name: impl Into<String>,
+        value: impl Into<String>,
+    ) -> Self {
+        self.command_environment.insert(name.into(), value.into());
+        self
     }
 
     pub fn with_context(self, context: ContextConfig) -> Self {
@@ -411,6 +435,12 @@ impl WorkspaceBuilder {
             // parent's runtime registry and `spawn` must reach the model at
             // every depth — the uniformity the ADR calls recursive.
             .with_tool(SpawnTool::new());
+
+        let builder = if self.command_environment.is_empty() {
+            builder
+        } else {
+            builder.with_executor(EnvironmentExecutor::new(self.command_environment.clone()))
+        };
 
         // Left alone unless the caller said something, because mentra's default
         // is a real database a host may already have history in — moving it, or

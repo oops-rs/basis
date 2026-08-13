@@ -262,6 +262,22 @@ fn a_supplied_credential_is_not_printed() {
     assert!(printed.contains("redacted"));
 }
 
+#[test]
+fn command_environment_is_scoped_and_redacted() {
+    let builder = WorkspaceBuilder::new("/repo")
+        .with_command_environment("LAN_TASK_ID", "parent")
+        .with_command_environment("LAN_TASK_ID", "child");
+
+    assert_eq!(
+        builder.command_environment.get("LAN_TASK_ID"),
+        Some(&"child".to_string()),
+        "the last fixed value is the only value a command should receive"
+    );
+    let printed = format!("{builder:?}");
+    assert!(printed.contains("LAN_TASK_ID"), "{printed}");
+    assert!(!printed.contains("child"), "{printed}");
+}
+
 struct Named(&'static str);
 
 #[async_trait::async_trait]

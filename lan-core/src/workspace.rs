@@ -41,6 +41,7 @@
 //! resolution path, and this is it.
 
 mod builder;
+mod environment;
 mod spec;
 
 use std::path::{Path, PathBuf};

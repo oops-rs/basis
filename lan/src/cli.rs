@@ -21,10 +21,11 @@
 
 use std::{net::SocketAddr, path::PathBuf};
 
-use clap::{Parser, Subcommand};
 use lan_core::{AllowAll, Approver, DenyAll};
 
-use crate::{approver::TerminalApprover, duration_arg::DurationArg};
+use crate::approver::TerminalApprover;
+use crate::duration_arg::DurationArg;
+use clap::{Parser, Subcommand};
 
 #[derive(Debug, Parser)]
 #[command(
@@ -37,6 +38,9 @@ Shorthand:
   lan \"fix the failing test\"    the same as: lan spawn \"fix the failing test\"
   lan -- run                    a prompt that collides with a subcommand name
   lan spawn -                   read the prompt from stdin
+  lan spawn \"task\" --await     wait for the task's terminal result
+  lan wait <ID>                 wait again using the durable task handle
+  lan send <ID> \"message\"      enqueue a follow-up turn
   lan serve --acp               serve ACP on stdio
   lan serve --bridge            serve ACP over a websocket
 
@@ -53,13 +57,93 @@ pub(crate) struct Cli {
 
 #[derive(Debug, Subcommand)]
 pub(crate) enum Command {
-    /// Spawn one prompt against a workspace and exit.
+    /// Submit one prompt and return its durable task handle.
     #[command(name = "spawn", alias = "run")]
     Spawn(RunArgs),
     /// Print a hash of everything in the workspace a run could see.
     Fingerprint(FingerprintArgs),
+    /// Enqueue a message for a running task.
+    Send(SendArgs),
+    /// Wait for a task's durable terminal result.
+    Wait(WaitArgs),
+    /// Request cancellation of a task and its attached descendants.
+    Cancel(CancelArgs),
+    /// Follow a task's progress until it reaches a terminal state.
+    Watch(WatchArgs),
+    /// List the messages accepted by a task.
+    Inbox(InboxArgs),
     /// Serve one explicit protocol transport.
     Serve(ServeArgs),
+    /// Own asynchronous tasks for one workspace.
+    #[command(name = "__daemon", hide = true)]
+    Daemon(DaemonArgs),
+}
+
+#[derive(Debug, clap::Args)]
+pub(crate) struct SendArgs {
+    /// Opaque task handle printed by `lan spawn`.
+    pub(crate) task: String,
+    /// Message to enqueue. `-` reads the whole message from stdin.
+    pub(crate) message: String,
+    /// Wait for the task's terminal result after enqueueing the message.
+    #[arg(long = "await")]
+    pub(crate) await_result: bool,
+    /// Bound the client wait. The task keeps running if the wait expires.
+    #[arg(long, value_name = "DURATION", requires = "await_result")]
+    pub(crate) timeout: Option<DurationArg>,
+    /// Emit one JSON object instead of human-readable output.
+    #[arg(long)]
+    pub(crate) json: bool,
+}
+
+#[derive(Debug, clap::Args)]
+pub(crate) struct WaitArgs {
+    /// Opaque task handle printed by `lan spawn`.
+    pub(crate) task: String,
+    /// Bound this wait. Defaults to 30m; retrying never reruns the task.
+    #[arg(long, value_name = "DURATION")]
+    pub(crate) timeout: Option<DurationArg>,
+    /// Emit one JSON object instead of human-readable output.
+    #[arg(long)]
+    pub(crate) json: bool,
+}
+
+#[derive(Debug, clap::Args)]
+pub(crate) struct CancelArgs {
+    /// Opaque task handle printed by `lan spawn`.
+    pub(crate) task: String,
+    /// Emit one JSON object instead of human-readable output.
+    #[arg(long)]
+    pub(crate) json: bool,
+}
+
+#[derive(Debug, clap::Args)]
+pub(crate) struct WatchArgs {
+    /// Opaque task handle printed by `lan spawn`.
+    pub(crate) task: String,
+    /// Stop following after this long. The task itself keeps running.
+    #[arg(long, value_name = "DURATION")]
+    pub(crate) timeout: Option<DurationArg>,
+    /// Emit progress as JSONL instead of human-readable output.
+    #[arg(long)]
+    pub(crate) json: bool,
+}
+
+#[derive(Debug, clap::Args)]
+pub(crate) struct InboxArgs {
+    /// Task whose accepted messages to list. Defaults to the current LAN task.
+    pub(crate) task: Option<String>,
+    /// Emit one JSON object instead of human-readable output.
+    #[arg(long)]
+    pub(crate) json: bool,
+}
+
+#[derive(Debug, clap::Args)]
+pub(crate) struct DaemonArgs {
+    #[arg(long)]
+    pub(crate) workspace: PathBuf,
+    #[arg(long)]
+    pub(crate) registry: PathBuf,
 }
 
 /// Selects which server transport to expose.
@@ -180,11 +264,23 @@ pub(crate) struct RunArgs {
     /// name needs `--` in front of it: `lan -- run`.
     pub(crate) prompt: String,
 
+    /// Create a new root even when this command runs inside another LAN task.
+    #[arg(long)]
+    pub(crate) detached: bool,
+
+    /// Wait for the task's terminal result instead of returning its handle.
+    #[arg(long = "await")]
+    pub(crate) await_result: bool,
+
+    /// Bound the client wait. The task keeps running if the wait expires.
+    #[arg(long, value_name = "DURATION", requires = "await_result")]
+    pub(crate) timeout: Option<DurationArg>,
+
     /// Workspace root. Defaults to the current directory.
     #[arg(short = 'C', long, value_name = "DIR")]
     pub(crate) workspace: Option<PathBuf>,
 
-    /// Emit the JSONL event stream on stdout instead of prose.
+    /// Emit one structured task result instead of human-readable output.
     #[arg(long)]
     pub(crate) json: bool,
 
@@ -222,17 +318,16 @@ pub(crate) struct RunArgs {
     #[arg(long, value_name = "LEVEL")]
     pub(crate) effort: Option<EffortArg>,
 
-    /// When to ask before the agent changes anything: always allow, ask each
-    /// time, or refuse. Asking needs a terminal on stdin; without one, a
-    /// request is denied rather than silently granted.
+    /// Approval policy for consequential calls. `prompt` requires ACP and is
+    /// rejected by the asynchronous local service.
     #[arg(long, value_name = "MODE", default_value = "always")]
     pub(crate) approve: ApproveMode,
 
     /// Give up on the run after this long: 90s, 30m, 2h.
     ///
-    /// Unset by default. An attended run has a person watching, and a person
-    /// tells "thinking hard" from "stuck" in a way no timer can — so this is
-    /// for the run nobody is watching, which has to say so itself.
+    /// Local tasks default to 30m because their submitting process exits.
+    /// Setting this narrows that service bound; attached children can only
+    /// narrow their parent's inherited deadline.
     #[arg(long, value_name = "DURATION")]
     pub(crate) deadline: Option<DurationArg>,
 
@@ -258,11 +353,9 @@ pub(crate) struct FingerprintArgs {
 
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq, clap::ValueEnum)]
 pub(crate) enum ApproveMode {
-    /// Never ask. What an unattended run needs, since nobody is there to
-    /// answer and a question nothing answers is a hang.
+    /// Allow consequential calls without asking.
     Always,
-    /// Ask before each consequential call. The default over ACP, where there
-    /// is a client to ask.
+    /// Ask the protocol client. Valid for ACP; rejected for local async work.
     #[default]
     Prompt,
     /// Refuse anything that changes state outside the process.
@@ -270,19 +363,10 @@ pub(crate) enum ApproveMode {
 }
 
 impl ApproveMode {
-    /// The approver this mode installs.
-    ///
-    /// The three words on the command line are three implementations of one
-    /// trait, which is all approval is since ADR-0010. Boxed because they are
-    /// different types and the choice is made at runtime — a host writing Rust
-    /// names the one it wants and skips this.
+    /// Installs the binary approver for the legacy attended JSONL path.
     pub(crate) fn approver(self) -> Box<dyn Approver> {
         match self {
             Self::Always => Box::new(AllowAll),
-            // Asks on stderr and reads stdin, so it works under either
-            // renderer — and denies outright when stdin is not a terminal,
-            // which is what makes `--approve prompt` safe to leave in a script
-            // that turns out to have nobody watching it.
             Self::Prompt => Box::new(TerminalApprover::new()),
             Self::Never => Box::new(DenyAll),
         }
@@ -365,6 +449,73 @@ mod tests {
         assert_eq!(plain.deadline, None);
         assert_eq!(plain.tool_budget, None);
         assert_eq!(plain.token_budget, None);
+        assert!(!plain.detached);
+        assert!(!plain.await_result);
+        assert_eq!(plain.timeout, None);
+    }
+
+    #[test]
+    fn lifecycle_flags_are_explicit_and_waits_are_bounded() {
+        let spawned = run_args(&["--detached", "--await", "--timeout", "45s"]);
+        assert!(spawned.detached);
+        assert!(spawned.await_result);
+        assert_eq!(
+            spawned.timeout.map(DurationArg::duration),
+            Some(std::time::Duration::from_secs(45))
+        );
+
+        let error = Cli::try_parse_from(["lan", "spawn", "prompt", "--timeout", "45s"])
+            .expect_err("a wait timeout without --await has no meaning");
+        assert_eq!(error.exit_code(), i32::from(EXIT_USAGE));
+    }
+
+    #[test]
+    fn communication_verbs_share_one_task_handle() {
+        let Some(Command::Send(send)) = Cli::try_parse_from([
+            "lan",
+            "send",
+            "workspace/task",
+            "refine the answer",
+            "--await",
+            "--timeout",
+            "2m",
+        ])
+        .expect("send parses")
+        .command
+        else {
+            panic!("send command should parse");
+        };
+        assert_eq!(send.task, "workspace/task");
+        assert_eq!(send.message, "refine the answer");
+        assert!(send.await_result);
+
+        let Some(Command::Wait(wait)) =
+            Cli::try_parse_from(["lan", "wait", "workspace/task", "--timeout", "2m"])
+                .expect("wait parses")
+                .command
+        else {
+            panic!("wait command should parse");
+        };
+        assert_eq!(wait.task, "workspace/task");
+
+        assert!(matches!(
+            Cli::try_parse_from(["lan", "cancel", "workspace/task"])
+                .expect("cancel parses")
+                .command,
+            Some(Command::Cancel(_))
+        ));
+        assert!(matches!(
+            Cli::try_parse_from(["lan", "watch", "workspace/task"])
+                .expect("watch parses")
+                .command,
+            Some(Command::Watch(_))
+        ));
+        assert!(matches!(
+            Cli::try_parse_from(["lan", "inbox", "workspace/task"])
+                .expect("inbox parses")
+                .command,
+            Some(Command::Inbox(_))
+        ));
     }
 
     #[test]
