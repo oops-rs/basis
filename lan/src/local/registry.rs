@@ -142,6 +142,33 @@ impl Registry {
         Ok(Reservation { file: Some(file) })
     }
 
+    /// Reserves an unowned workspace lock without rewriting its contents.
+    ///
+    /// The lock itself, rather than the PID recorded in a descriptor or lock
+    /// file, is the authoritative proof that a daemon still owns the
+    /// workspace. This probe is intentionally non-destructive so a client
+    /// recovering stale discovery metadata cannot impersonate a daemon owner.
+    fn reserve_if_unowned(&self, workspace: &Path) -> io::Result<Option<Reservation>> {
+        let path = self.lock_path(workspace);
+        let file = OpenOptions::new()
+            .read(true)
+            .write(true)
+            .create(true)
+            .truncate(false)
+            .open(&path)?;
+        match file.try_lock_exclusive() {
+            Ok(()) => {
+                restrict_file(&path)?;
+                Ok(Some(Reservation { file: Some(file) }))
+            }
+            Err(error) if is_lock_contended(&error) => Ok(None),
+            Err(error) => Err(io::Error::new(
+                error.kind(),
+                format!("{}: {error}", path.display()),
+            )),
+        }
+    }
+
     pub(crate) async fn ensure_daemon(&self, workspace: &Path) -> Result<Descriptor, String> {
         let workspace = canonical_workspace(workspace).map_err(|error| error.to_string())?;
 
@@ -154,28 +181,55 @@ impl Registry {
                 return Ok(descriptor);
             }
 
-            // A descriptor whose owner is still alive may simply be between
-            // bind and accept. Give it the full startup window before calling
-            // it stale; never unlink a live endpoint on the first failed probe.
-            if pid_alive(descriptor.pid) {
-                for _ in 0..20 {
-                    time::sleep(Duration::from_millis(50)).await;
-                    if let Some(current) = self
-                        .read_workspace(&workspace)
-                        .map_err(|error| error.to_string())?
-                        && probe(&current).await
-                    {
-                        return Ok(current);
+            // A failed handshake is not proof that discovery metadata is
+            // stale. The filesystem lock is the authoritative daemon-owner
+            // lease on every supported platform, including Windows where the
+            // standard library exposes no reliable process-liveness probe.
+            match self
+                .reserve_if_unowned(&workspace)
+                .map_err(|error| format!("inspect lan service owner: {error}"))?
+            {
+                None => {
+                    for _ in 0..20 {
+                        time::sleep(Duration::from_millis(50)).await;
+                        if let Some(current) = self
+                            .read_workspace(&workspace)
+                            .map_err(|error| error.to_string())?
+                        {
+                            ensure_descriptor_workspace(&current, &workspace)?;
+                            if probe(&current).await {
+                                return Ok(current);
+                            }
+                        }
                     }
-                }
-                return Err(format!(
-                    "the lan service for {} is alive but did not accept a connection",
-                    workspace.display()
-                ));
-            }
 
-            self.remove_descriptor(&descriptor)
-                .map_err(|error| format!("remove stale lan service: {error}"))?;
+                    // The owner may have exited during the retry window.
+                    // Recheck the lease before reporting it unavailable;
+                    // capability-match removal below prevents an old
+                    // observation from unlinking a replacement descriptor.
+                    let Some(reservation) = self
+                        .reserve_if_unowned(&workspace)
+                        .map_err(|error| format!("inspect lan service owner: {error}"))?
+                    else {
+                        return Err(format!(
+                            "the lan service for {} owns its workspace but did not accept a connection",
+                            workspace.display()
+                        ));
+                    };
+                    self.remove_descriptor(&descriptor)
+                        .map_err(|error| format!("remove stale lan service: {error}"))?;
+                    drop(reservation);
+                }
+                Some(reservation) => {
+                    // Holding the lock proves that no daemon currently owns
+                    // this workspace. Remove only the exact descriptor we
+                    // probed while the reservation prevents a new daemon from
+                    // publishing.
+                    self.remove_descriptor(&descriptor)
+                        .map_err(|error| format!("remove stale lan service: {error}"))?;
+                    drop(reservation);
+                }
+            }
         }
 
         let executable =
@@ -403,18 +457,6 @@ fn restrict_file(path: &Path) -> io::Result<()> {
 }
 
 #[cfg(unix)]
-fn pid_alive(pid: u32) -> bool {
-    // `kill -0` is a read-only liveness probe. Avoid an unsafe libc dependency
-    // in the binary; a missing process yields a non-zero status.
-    Command::new("kill")
-        .args(["-0", &pid.to_string()])
-        .stdout(std::process::Stdio::null())
-        .stderr(std::process::Stdio::null())
-        .status()
-        .is_ok_and(|status| status.success())
-}
-
-#[cfg(unix)]
 fn detach(command: &mut Command) {
     use std::os::unix::process::CommandExt;
     command.process_group(0);
@@ -430,21 +472,6 @@ fn detach(command: &mut Command) {
 
 #[cfg(not(any(unix, windows)))]
 fn detach(_command: &mut Command) {}
-
-#[cfg(windows)]
-fn pid_alive(_pid: u32) -> bool {
-    // The standard library does not expose a portable, read-only Windows
-    // process probe. Treat an unknown PID as potentially alive: a failed
-    // handshake must never make us unlink another service's descriptor. The
-    // caller retries the probe and then returns a clear "alive but unavailable"
-    // error instead of deleting the descriptor.
-    true
-}
-
-#[cfg(not(any(unix, windows)))]
-fn pid_alive(_pid: u32) -> bool {
-    false
-}
 
 fn is_lock_contended(error: &io::Error) -> bool {
     let expected = lock_contended_error();
@@ -550,6 +577,71 @@ mod tests {
             Err(error) => error,
         };
         assert_eq!(error.kind(), io::ErrorKind::AlreadyExists);
+    }
+
+    #[test]
+    fn stale_descriptor_can_be_removed_while_the_owner_lock_is_free() {
+        let dir = tempfile::tempdir().unwrap();
+        let registry = Registry::from_path(dir.path()).unwrap();
+        let workspace = tempfile::tempdir().unwrap();
+        let descriptor = Descriptor {
+            version: VERSION,
+            instance: "0123456789abcdef".to_string(),
+            workspace: workspace.path().to_string_lossy().into_owned(),
+            endpoint: "127.0.0.1:1".to_string(),
+            token: "stale-token".to_string(),
+            pid: u32::MAX,
+        };
+        let descriptor_path = registry.workspace_descriptor(workspace.path());
+        let lock_path = registry.lock_path(workspace.path());
+        write_descriptor(&descriptor_path, &descriptor).unwrap();
+        fs::write(&lock_path, b"previous owner\n").unwrap();
+
+        let reservation = registry
+            .reserve_if_unowned(workspace.path())
+            .unwrap()
+            .expect("a free lock proves that the descriptor has no owner");
+        assert_eq!(
+            fs::read(&lock_path).unwrap(),
+            b"previous owner\n",
+            "the recovery reservation must not rewrite daemon-owner metadata"
+        );
+        registry.remove_descriptor(&descriptor).unwrap();
+        drop(reservation);
+
+        assert!(!descriptor_path.exists());
+        assert!(registry.acquire(workspace.path()).is_ok());
+    }
+
+    #[test]
+    fn contended_owner_lock_preserves_an_unresponsive_descriptor() {
+        let dir = tempfile::tempdir().unwrap();
+        let registry = Registry::from_path(dir.path()).unwrap();
+        let workspace = tempfile::tempdir().unwrap();
+        let descriptor = Descriptor {
+            version: VERSION,
+            instance: "0123456789abcdef".to_string(),
+            workspace: workspace.path().to_string_lossy().into_owned(),
+            endpoint: "127.0.0.1:1".to_string(),
+            token: "owned-token".to_string(),
+            pid: std::process::id(),
+        };
+        let descriptor_path = registry.workspace_descriptor(workspace.path());
+        write_descriptor(&descriptor_path, &descriptor).unwrap();
+        let _owner = registry.acquire(workspace.path()).unwrap();
+
+        assert!(
+            registry
+                .reserve_if_unowned(workspace.path())
+                .unwrap()
+                .is_none(),
+            "contention is authoritative evidence of a daemon owner"
+        );
+        assert_eq!(
+            read_descriptor(&descriptor_path).unwrap().unwrap().token,
+            descriptor.token,
+            "a failed endpoint probe must not unlink an owned descriptor"
+        );
     }
 
     #[test]
