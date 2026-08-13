@@ -89,11 +89,8 @@ to compile.
 docker build -t lan:local .
 ```
 
-One caveat while it lasts: the workspace currently points `mentra` at a
-sibling checkout (`../mentra`), which sits outside this build context, so
-`COPY . .` does not carry it. Build from the directory holding both checkouts,
-or restore the registry versions first — `Cargo.toml` says which state the
-tree is in.
+The image resolves Mentra 0.18 from crates.io, so `COPY . .` is a complete
+build context. No sibling checkout is required.
 
 ## 3. The read-only-root pattern
 
