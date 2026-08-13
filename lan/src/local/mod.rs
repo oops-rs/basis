@@ -6,5 +6,5 @@ mod registry;
 mod service;
 mod store;
 
-pub(crate) use client::{cancel, has_current_task, inbox, send, spawn, wait, watch};
+pub(crate) use client::{ask, cancel, has_current_task, inbox, send, spawn, wait, watch};
 pub(crate) use service::run_daemon;

@@ -204,14 +204,24 @@ async fn run_task(
         }
     };
     let (builder, spec) = config.split();
-    let prepared = match builder
+    let parent = shared
+        .journal
+        .lock()
+        .expect("task journal poisoned")
+        .get(&task)
+        .and_then(|record| record.parent.clone());
+    let mut builder = builder
         .with_store_dir(
             shared
                 .registry
                 .history_directory(&shared.descriptor.instance),
         )
         .with_command_environment("LAN_TASK_ID", &task)
-        .with_command_environment("LAN_REGISTRY_DIR", shared.registry.root().to_string_lossy())
+        .with_command_environment("LAN_REGISTRY_DIR", shared.registry.root().to_string_lossy());
+    if let Some(parent) = parent {
+        builder = builder.with_command_environment("LAN_PARENT_TASK_ID", parent);
+    }
+    let prepared = match builder
         .open()
         .await
         .and_then(|workspace| workspace.prepare(spec))

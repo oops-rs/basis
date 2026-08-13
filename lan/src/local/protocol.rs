@@ -12,7 +12,7 @@ use serde::{Deserialize, Serialize, de::DeserializeOwned};
 use serde_json::Value;
 use tokio::io::{AsyncRead, AsyncReadExt, AsyncWrite, AsyncWriteExt};
 
-pub(crate) const VERSION: u8 = 2;
+pub(crate) const VERSION: u8 = 3;
 pub(crate) const MAX_FRAME: usize = 8 * 1024 * 1024;
 pub(crate) const MAX_PROMPT: usize = 256 * 1024;
 pub(crate) const MAX_MESSAGE: usize = 256 * 1024;
@@ -59,6 +59,8 @@ pub(crate) enum Operation {
     Wait {
         task: String,
         caller: Option<String>,
+        #[serde(default)]
+        message: Option<String>,
         timeout_ms: u64,
     },
     Cancel {

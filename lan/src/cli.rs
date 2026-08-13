@@ -40,7 +40,9 @@ Shorthand:
   lan spawn -                   read the prompt from stdin
   lan spawn \"task\" --await     wait for the task's terminal result
   lan wait <ID>                 wait again using the durable task handle
+  lan wait <ID> --message <MID> retry a specific message reply
   lan send <ID> \"message\"      enqueue a follow-up turn
+  lan ask <ID> \"question\"      enqueue and await that message's reply
   lan serve --acp               serve ACP on stdio
   lan serve --bridge            serve ACP over a websocket
 
@@ -64,6 +66,8 @@ pub(crate) enum Command {
     Fingerprint(FingerprintArgs),
     /// Enqueue a message for a running task.
     Send(SendArgs),
+    /// Enqueue a message and wait for its correlated reply.
+    Ask(AskArgs),
     /// Wait for a task's durable terminal result.
     Wait(WaitArgs),
     /// Request cancellation of a task and its attached descendants.
@@ -85,7 +89,7 @@ pub(crate) struct SendArgs {
     pub(crate) task: String,
     /// Message to enqueue. `-` reads the whole message from stdin.
     pub(crate) message: String,
-    /// Wait for the task's terminal result after enqueueing the message.
+    /// Wait for this message's correlated reply after enqueueing it.
     #[arg(long = "await")]
     pub(crate) await_result: bool,
     /// Bound the client wait. The task keeps running if the wait expires.
@@ -97,9 +101,26 @@ pub(crate) struct SendArgs {
 }
 
 #[derive(Debug, clap::Args)]
+pub(crate) struct AskArgs {
+    /// Opaque task handle printed by `lan spawn`.
+    pub(crate) task: String,
+    /// Question to enqueue. `-` reads the whole message from stdin.
+    pub(crate) message: String,
+    /// Bound the reply wait. The task keeps running if the wait expires.
+    #[arg(long, value_name = "DURATION")]
+    pub(crate) timeout: Option<DurationArg>,
+    /// Emit one JSON object instead of human-readable output.
+    #[arg(long)]
+    pub(crate) json: bool,
+}
+
+#[derive(Debug, clap::Args)]
 pub(crate) struct WaitArgs {
     /// Opaque task handle printed by `lan spawn`.
     pub(crate) task: String,
+    /// Retry a specific queued message reply instead of the task terminal.
+    #[arg(long, value_name = "MESSAGE_ID")]
+    pub(crate) message: Option<String>,
     /// Bound this wait. Defaults to 30m; retrying never reruns the task.
     #[arg(long, value_name = "DURATION")]
     pub(crate) timeout: Option<DurationArg>,
@@ -489,14 +510,38 @@ mod tests {
         assert_eq!(send.message, "refine the answer");
         assert!(send.await_result);
 
-        let Some(Command::Wait(wait)) =
-            Cli::try_parse_from(["lan", "wait", "workspace/task", "--timeout", "2m"])
-                .expect("wait parses")
-                .command
+        let Some(Command::Ask(ask)) = Cli::try_parse_from([
+            "lan",
+            "ask",
+            "workspace/task",
+            "what changed?",
+            "--timeout",
+            "2m",
+        ])
+        .expect("ask parses")
+        .command
+        else {
+            panic!("ask command should parse");
+        };
+        assert_eq!(ask.task, "workspace/task");
+        assert_eq!(ask.message, "what changed?");
+
+        let Some(Command::Wait(wait)) = Cli::try_parse_from([
+            "lan",
+            "wait",
+            "workspace/task",
+            "--message",
+            "message-id",
+            "--timeout",
+            "2m",
+        ])
+        .expect("wait parses")
+        .command
         else {
             panic!("wait command should parse");
         };
         assert_eq!(wait.task, "workspace/task");
+        assert_eq!(wait.message.as_deref(), Some("message-id"));
 
         assert!(matches!(
             Cli::try_parse_from(["lan", "cancel", "workspace/task"])

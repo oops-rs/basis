@@ -11,7 +11,10 @@ use serde_json::Value;
 use tokio::time::Instant;
 
 use crate::{
-    cli::{ApproveMode, CancelArgs, EffortArg, InboxArgs, RunArgs, SendArgs, WaitArgs, WatchArgs},
+    cli::{
+        ApproveMode, AskArgs, CancelArgs, EffortArg, InboxArgs, RunArgs, SendArgs, WaitArgs,
+        WatchArgs,
+    },
     duration_arg::DurationArg,
     exit::{EXIT_BOUNDED, EXIT_FAILED, EXIT_OK},
     run::prompt_from,
@@ -40,6 +43,14 @@ pub(crate) async fn spawn(args: RunArgs) -> Result<ExitCode, String> {
     let registry = Registry::discover().map_err(|error| format!("open task registry: {error}"))?;
     let descriptor = registry.ensure_daemon(&workspace).await?;
     let caller = current_task();
+    if let Some(caller) = caller.as_deref()
+        && !args.detached
+        && !caller.starts_with(&format!("{}/", descriptor.instance))
+    {
+        return Err(format!(
+            "current task {caller} belongs to another workspace service; use `lan spawn --detached ...` to start work here"
+        ));
+    }
     let parent = if args.detached { None } else { caller.clone() };
     let operation = Operation::Spawn {
         workspace: workspace.to_string_lossy().into_owned(),
@@ -60,9 +71,30 @@ pub(crate) fn has_current_task() -> bool {
 }
 
 pub(crate) async fn send(args: SendArgs) -> Result<ExitCode, String> {
+    send_message(
+        args.task,
+        args.message,
+        args.await_result,
+        args.timeout,
+        args.json,
+    )
+    .await
+}
+
+pub(crate) async fn ask(args: AskArgs) -> Result<ExitCode, String> {
+    send_message(args.task, args.message, true, args.timeout, args.json).await
+}
+
+async fn send_message(
+    task: String,
+    raw_message: String,
+    await_result: bool,
+    timeout: Option<DurationArg>,
+    json: bool,
+) -> Result<ExitCode, String> {
     let registry = Registry::discover().map_err(|error| format!("open task registry: {error}"))?;
-    let descriptor = live_descriptor(&registry, &args.task).await?;
-    let message = prompt_from(args.message)?;
+    let descriptor = live_descriptor(&registry, &task).await?;
+    let message = prompt_from(raw_message)?;
     if message.len() > super::protocol::MAX_MESSAGE {
         return Err(format!(
             "message is {} bytes; the limit is {}",
@@ -71,14 +103,14 @@ pub(crate) async fn send(args: SendArgs) -> Result<ExitCode, String> {
         ));
     }
     let operation = Operation::Send {
-        task: args.task,
+        task,
         message,
         caller: current_task(),
-        await_result: args.await_result,
-        timeout_ms: args.timeout.map(duration_ms),
+        await_result,
+        timeout_ms: timeout.map(duration_ms),
     };
     let payload = checked(request(&descriptor, operation).await?)?;
-    render_result(&payload, args.json)
+    render_result(&payload, json)
 }
 
 pub(crate) async fn wait(args: WaitArgs) -> Result<ExitCode, String> {
@@ -87,6 +119,7 @@ pub(crate) async fn wait(args: WaitArgs) -> Result<ExitCode, String> {
     let operation = Operation::Wait {
         task: args.task,
         caller: current_task(),
+        message: args.message,
         timeout_ms: duration_ms(args.timeout.unwrap_or_else(default_wait_arg)),
     };
     let payload = checked(request(&descriptor, operation).await?)?;
@@ -128,8 +161,14 @@ pub(crate) async fn inbox(args: InboxArgs) -> Result<ExitCode, String> {
     } else {
         for message in messages {
             let state = message["state"].as_str().unwrap_or("unknown");
+            let id = message["id"].as_str().unwrap_or("?");
             let body = message["body"].as_str().unwrap_or_default();
-            println!("[{state}] {body}");
+            println!("[{state}] {id}: {body}");
+            if let Some(reply) = message["reply"]["result"].as_str()
+                && !reply.is_empty()
+            {
+                println!("  reply: {reply}");
+            }
         }
     }
     print_hint(&payload);

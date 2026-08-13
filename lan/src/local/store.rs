@@ -72,11 +72,22 @@ pub(crate) enum MessageState {
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub(crate) struct MessageReply {
+    pub result: String,
+    #[serde(default, skip_serializing_if = "is_false")]
+    pub result_truncated: bool,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub stopped_by: Option<String>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub(crate) struct MessageRecord {
     pub id: String,
     pub body: String,
     pub state: MessageState,
     pub created_ms: u64,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub reply: Option<MessageReply>,
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
@@ -164,6 +175,7 @@ impl TaskRecord {
             body,
             state: MessageState::Pending,
             created_ms: now_ms(),
+            reply: None,
         });
         self.updated_ms = now_ms();
         Ok(id)
@@ -179,17 +191,18 @@ impl TaskRecord {
         Some((message.id.clone(), message.body.clone()))
     }
 
-    pub(crate) fn finish_message(&mut self, id: &str) {
+    pub(crate) fn finish_message(&mut self, id: &str, reply: Option<MessageReply>) {
         if let Some(message) = self.messages.iter_mut().find(|message| message.id == id) {
             message.state = MessageState::Delivered;
+            message.reply = reply;
             self.updated_ms = now_ms();
         }
     }
 
-    pub(crate) fn finish_in_flight_messages(&mut self) {
+    pub(crate) fn finish_unanswered_messages(&mut self) {
         let mut changed = false;
         for message in &mut self.messages {
-            if message.state == MessageState::InFlight {
+            if message.state != MessageState::Delivered {
                 message.state = MessageState::Delivered;
                 changed = true;
             }

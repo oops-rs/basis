@@ -16,10 +16,11 @@ use std::ffi::{OsStr, OsString};
 
 /// The lifecycle commands, adapters, and clap's own help command. Anything
 /// else is a prompt.
-const SUBCOMMANDS: [&str; 11] = [
+const SUBCOMMANDS: [&str; 12] = [
     "spawn",
     "run",
     "send",
+    "ask",
     "wait",
     "cancel",
     "watch",

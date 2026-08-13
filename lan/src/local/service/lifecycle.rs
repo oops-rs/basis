@@ -11,9 +11,10 @@ use serde_json::{Value, json};
 use tokio::time::{self, Instant};
 
 use super::{Shared, notify_changed};
-use crate::local::store::{self, DurableState, Journal, PendingTerminal};
+use crate::local::store::{self, DurableState, Journal, MessageReply, PendingTerminal};
 
 const DEFAULT_WAIT: Duration = Duration::from_secs(30 * 60);
+const MAX_WAIT: Duration = Duration::from_secs(7 * 24 * 60 * 60);
 
 enum SettleAction {
     Next((String, String)),
@@ -151,11 +152,20 @@ pub(super) async fn settle_or_take_message(
             if record.state.is_terminal() || record.pending_terminal.is_some() {
                 return Err(format!("task {task} no longer has active work"));
             }
+            let completed_reply = completed_message.map(|_| {
+                let (reply, result_truncated) =
+                    store::bounded_text(result.clone(), store::MAX_RESULT_BYTES);
+                MessageReply {
+                    result: reply,
+                    result_truncated,
+                    stopped_by: stopped_by.clone(),
+                }
+            });
             if let Some(message) = completed_message {
-                record.finish_message(message);
+                record.finish_message(message, completed_reply);
             }
             if record.cancel_requested {
-                record.finish_in_flight_messages();
+                record.finish_unanswered_messages();
                 SettleAction::Complete(PendingTerminal::Cancelled)
             } else if let Some(message) = record.start_next_message() {
                 SettleAction::Next(message)
@@ -201,7 +211,22 @@ pub(super) async fn enqueue_message(
         }
         record.add_message(message)?
     };
-    persist(shared).await?;
+    if let Err(error) = persist(shared).await {
+        let mut journal = shared.journal.lock().expect("task journal poisoned");
+        if let Some(record) = journal.get_mut(task)
+            && let Some(index) = record
+                .messages
+                .iter()
+                .position(|entry| entry.id == id && entry.state == store::MessageState::Pending)
+        {
+            record.messages.remove(index);
+            record.updated_ms = store::now_ms();
+            return Err(error);
+        }
+        return Err(format!(
+            "persist task journal: {error}; message {id} was accepted in memory, inspect `lan inbox {task}`"
+        ));
+    }
     notify_changed(shared);
     Ok(id)
 }
@@ -221,6 +246,28 @@ pub(super) async fn await_task(
         if time::timeout_at(deadline, updates.changed()).await.is_err() {
             return Err(format!(
                 "wait for {task} timed out after {}; the task is still running",
+                human_duration(timeout)
+            ));
+        }
+    }
+}
+
+pub(super) async fn await_message(
+    shared: &Shared,
+    task: &str,
+    message: &str,
+    timeout: Duration,
+    _lease: WaitLease,
+) -> Result<Value, String> {
+    let deadline = Instant::now() + timeout;
+    let mut updates = shared.changed.subscribe();
+    loop {
+        if let Some(payload) = message_payload_for_dispatch(shared, task, message)? {
+            return Ok(payload);
+        }
+        if time::timeout_at(deadline, updates.changed()).await.is_err() {
+            return Err(format!(
+                "message {message} on {task} timed out after {}; retry with `lan wait {task} --message {message}` or inspect `lan inbox {task}`",
                 human_duration(timeout)
             ));
         }
@@ -281,9 +328,32 @@ pub(super) fn inbox(shared: &Shared, task: &str) -> Result<Value, String> {
     let record = journal
         .get(task)
         .ok_or_else(|| format!("task {task} does not exist"))?;
+    let messages: Vec<Value> = record
+        .messages
+        .iter()
+        .map(|message| {
+            let (body, body_truncated) = store::bounded_text(message.body.clone(), 4 * 1024);
+            let reply = message.reply.as_ref().map(|reply| {
+                let (result, result_truncated) =
+                    store::bounded_text(reply.result.clone(), 4 * 1024);
+                json!({
+                    "result": result,
+                    "result_truncated": reply.result_truncated || result_truncated,
+                    "stopped_by": reply.stopped_by,
+                })
+            });
+            json!({
+                "id": message.id,
+                "state": message.state,
+                "body": body,
+                "body_truncated": body_truncated,
+                "reply": reply,
+            })
+        })
+        .collect();
     Ok(json!({
         "task": task,
-        "messages": record.messages,
+        "messages": messages,
         "next": format!("lan watch {task}"),
     }))
 }
@@ -495,7 +565,7 @@ pub(super) async fn finish_failed(
         if record.state.is_terminal() || record.pending_terminal.is_some() {
             return;
         }
-        record.finish_in_flight_messages();
+        record.finish_unanswered_messages();
         let completion = if record.cancel_requested {
             record.result_truncated = false;
             record.stopped_by = None;
@@ -527,7 +597,7 @@ pub(super) async fn finish_cancelled(shared: &Shared, task: &str) {
             return;
         }
         record.cancel_requested = true;
-        record.finish_in_flight_messages();
+        record.finish_unanswered_messages();
         record.result_truncated = false;
         record.stopped_by = None;
         apply_completion(&mut journal, task, PendingTerminal::Cancelled).ok()
@@ -593,6 +663,49 @@ fn terminal_payload(shared: &Shared, task: &str) -> Result<Option<Value>, String
     Ok(Some(decorate_terminal(task, payload)))
 }
 
+pub(super) fn message_payload_for_dispatch(
+    shared: &Shared,
+    task: &str,
+    message_id: &str,
+) -> Result<Option<Value>, String> {
+    let journal = shared.journal.lock().expect("task journal poisoned");
+    let record = journal
+        .get(task)
+        .ok_or_else(|| format!("task {task} does not exist"))?;
+    let message = record
+        .messages
+        .iter()
+        .find(|message| message.id == message_id)
+        .ok_or_else(|| format!("message {message_id} does not exist on task {task}"))?;
+    if let Some(reply) = &message.reply {
+        let mut payload = json!({
+            "task": task,
+            "message": message_id,
+            "state": "succeeded",
+            "result": reply.result,
+            "result_truncated": reply.result_truncated,
+            "stopped_by": reply.stopped_by,
+            "next": format!("lan inbox {task}"),
+        });
+        if !reply.result_truncated {
+            payload["result_truncated"] = Value::Null;
+        }
+        return Ok(Some(payload));
+    }
+    if message.state == store::MessageState::Delivered
+        && let Some(mut terminal) = record.terminal_result()
+    {
+        let object = terminal
+            .as_object_mut()
+            .expect("terminal payload is an object");
+        object.insert("task".to_string(), json!(task));
+        object.insert("message".to_string(), json!(message_id));
+        object.insert("next".to_string(), json!(format!("lan inbox {task}")));
+        return Ok(Some(terminal));
+    }
+    Ok(None)
+}
+
 fn decorate_terminal(task: &str, mut payload: Value) -> Value {
     let object = payload
         .as_object_mut()
@@ -615,15 +728,20 @@ pub(super) fn accepted_payload(task: &str) -> Value {
 
 /// Return a next action that is legal for the submitting task. Enqueue-only
 /// sends intentionally do not acquire a wait lease; when the target is an
-/// ancestor, peer, or self, suggest inspecting the caller's inbox instead of
+/// ancestor, peer, or self, suggest inspecting the target's inbox instead of
 /// suggesting an impossible `lan wait` edge.
-pub(super) fn send_next_hint(shared: &Shared, caller: Option<&str>, target: &str) -> String {
+pub(super) fn send_next_hint(
+    shared: &Shared,
+    caller: Option<&str>,
+    target: &str,
+    message: &str,
+) -> String {
     if let Some(caller) = caller
         && validate_wait_edge(shared, Some(caller), target).is_err()
     {
-        return format!("lan inbox {caller}");
+        return format!("lan inbox {target}");
     }
-    format!("lan wait {target}")
+    format!("lan wait {target} --message {message}")
 }
 
 pub(super) fn deadline_of(shared: &Shared, task: &str) -> Option<u64> {
@@ -703,7 +821,9 @@ fn root_of<'a>(journal: &'a Journal, task: &'a str) -> &'a str {
 }
 
 pub(super) fn duration_from_ms(value: Option<u64>) -> Duration {
-    value.map(Duration::from_millis).unwrap_or(DEFAULT_WAIT)
+    value
+        .map(|milliseconds| Duration::from_millis(milliseconds).min(MAX_WAIT))
+        .unwrap_or(DEFAULT_WAIT)
 }
 
 fn human_duration(duration: Duration) -> String {
@@ -971,5 +1091,37 @@ mod tests {
             .expect("cancel terminal root is harmless");
         assert!(cancelled.is_empty());
         assert!(!journal["detached"].cancel_requested);
+    }
+
+    #[tokio::test]
+    async fn each_message_keeps_its_own_reply() {
+        let (_dir, shared) = test_shared();
+        let mut task = record("task", None);
+        let first = task
+            .add_message("first".to_string())
+            .expect("first message");
+        task.start_next_message().expect("first in flight");
+        shared
+            .journal
+            .lock()
+            .expect("journal")
+            .insert("task".to_string(), task);
+
+        settle_or_take_message(
+            &shared,
+            "task",
+            Some(&first),
+            "first reply".to_string(),
+            None,
+        )
+        .await
+        .expect("settle first reply");
+
+        let payload = message_payload_for_dispatch(&shared, "task", &first)
+            .expect("message lookup")
+            .expect("reply is durable");
+        assert_eq!(payload["message"], first);
+        assert_eq!(payload["result"], "first reply");
+        assert_eq!(payload["state"], "succeeded");
     }
 }

@@ -28,8 +28,8 @@ use tokio::{
 
 use self::{
     lifecycle::{
-        WaitGraph, accepted_payload, await_task, begin_wait, cancel_task, duration_from_ms,
-        enqueue_message, inbox, orphan_running, send_next_hint, watch_task,
+        WaitGraph, accepted_payload, await_message, await_task, begin_wait, cancel_task,
+        duration_from_ms, enqueue_message, inbox, orphan_running, send_next_hint, watch_task,
     },
     task::{SpawnRequest, spawn_task},
 };
@@ -230,9 +230,10 @@ async fn dispatch(operation: Operation, shared: &Shared) -> Result<Value, String
             };
             let message_id = enqueue_message(shared, &task, message).await?;
             if await_result {
-                await_task(
+                await_message(
                     shared,
                     &task,
+                    &message_id,
                     duration_from_ms(timeout_ms),
                     lease.expect("await lease"),
                 )
@@ -242,17 +243,35 @@ async fn dispatch(operation: Operation, shared: &Shared) -> Result<Value, String
                     "task": task,
                     "message": message_id,
                     "state": "accepted",
-                    "next": send_next_hint(shared, caller.as_deref(), &task),
+                    "next": send_next_hint(shared, caller.as_deref(), &task, &message_id),
                 }))
             }
         }
         Operation::Wait {
             task,
             caller,
+            message,
             timeout_ms,
         } => {
-            let lease = begin_wait(shared, caller.as_deref(), &task)?;
-            await_task(shared, &task, Duration::from_millis(timeout_ms), lease).await
+            if let Some(message) = message {
+                if let Some(payload) =
+                    lifecycle::message_payload_for_dispatch(shared, &task, &message)?
+                {
+                    return Ok(payload);
+                }
+                let lease = begin_wait(shared, caller.as_deref(), &task)?;
+                await_message(
+                    shared,
+                    &task,
+                    &message,
+                    duration_from_ms(Some(timeout_ms)),
+                    lease,
+                )
+                .await
+            } else {
+                let lease = begin_wait(shared, caller.as_deref(), &task)?;
+                await_task(shared, &task, duration_from_ms(Some(timeout_ms)), lease).await
+            }
         }
         Operation::Cancel { task, caller } => cancel_task(shared, caller.as_deref(), &task).await,
         Operation::Watch {
@@ -344,7 +363,7 @@ mod tests {
         .expect("enqueue-only parent send is safe");
         assert_eq!(payload["state"], "accepted");
         assert_eq!(
-            payload["next"], "lan inbox child",
+            payload["next"], "lan inbox root",
             "a child must not be told to wait on its ancestor"
         );
 

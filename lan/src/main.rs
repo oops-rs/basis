@@ -120,6 +120,9 @@ async fn main() -> ExitCode {
         Some(Command::Send(args)) => {
             lifecycle_result(local::send(args).await, "lan send <ID> <MESSAGE>")
         }
+        Some(Command::Ask(args)) => {
+            lifecycle_result(local::ask(args).await, "lan ask <ID> <MESSAGE>")
+        }
         Some(Command::Wait(args)) => lifecycle_result(local::wait(args).await, "lan wait <ID>"),
         Some(Command::Cancel(args)) => {
             lifecycle_result(local::cancel(args).await, "lan cancel <ID>")
