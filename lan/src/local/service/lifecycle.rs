@@ -11,9 +11,20 @@ use serde_json::{Value, json};
 use tokio::time::{self, Instant};
 
 use super::{Shared, notify_changed};
-use crate::local::store::{self, DurableState, Journal};
+use crate::local::store::{self, DurableState, Journal, PendingTerminal};
 
 const DEFAULT_WAIT: Duration = Duration::from_secs(30 * 60);
+
+enum SettleAction {
+    Next((String, String)),
+    Complete(PendingTerminal),
+}
+
+#[derive(Default)]
+struct TransitionEffects {
+    cancel: Vec<String>,
+    finalized: Vec<String>,
+}
 
 /// In-memory edges represent waits held by live request handlers. They are
 /// deliberately not journaled: a process restart drops every lease, and a
@@ -131,34 +142,44 @@ pub(super) async fn settle_or_take_message(
     result: String,
     stopped_by: Option<String>,
 ) -> Result<Option<(String, String)>, String> {
-    let (next, terminal) = {
+    let (next, effects) = {
         let mut journal = shared.journal.lock().expect("task journal poisoned");
-        let record = journal
-            .get_mut(task)
-            .ok_or_else(|| format!("task {task} does not exist"))?;
-        if let Some(message) = completed_message {
-            record.finish_message(message);
-        }
-        if record.cancel_requested {
-            record.state = DurableState::Cancelled;
-            record.updated_ms = store::now_ms();
-            (None, true)
-        } else if let Some(message) = record.start_next_message() {
-            (Some(message), false)
-        } else {
-            let (result, truncated) = store::bounded_text(result, store::MAX_RESULT_BYTES);
-            record.state = DurableState::Succeeded { result };
-            record.result_truncated = truncated;
-            record.stopped_by = stopped_by;
-            record.updated_ms = store::now_ms();
-            (None, true)
+        let action = {
+            let record = journal
+                .get_mut(task)
+                .ok_or_else(|| format!("task {task} does not exist"))?;
+            if record.state.is_terminal() || record.pending_terminal.is_some() {
+                return Err(format!("task {task} no longer has active work"));
+            }
+            if let Some(message) = completed_message {
+                record.finish_message(message);
+            }
+            if record.cancel_requested {
+                record.finish_in_flight_messages();
+                SettleAction::Complete(PendingTerminal::Cancelled)
+            } else if let Some(message) = record.start_next_message() {
+                SettleAction::Next(message)
+            } else {
+                let (result, truncated) = store::bounded_text(result, store::MAX_RESULT_BYTES);
+                record.result_truncated = truncated;
+                record.stopped_by = stopped_by;
+                SettleAction::Complete(PendingTerminal::Succeeded { result })
+            }
+        };
+        match action {
+            SettleAction::Next(message) => (Some(message), TransitionEffects::default()),
+            SettleAction::Complete(completion) => {
+                (None, apply_completion(&mut journal, task, completion)?)
+            }
         }
     };
+    let completed_task = next.is_none().then_some(task);
+    let tokens = transition_controls(shared, completed_task, &effects);
     persist(shared).await?;
-    notify_changed(shared);
-    if terminal {
-        terminal_cleanup(shared, task).await;
+    for token in tokens {
+        token.cancel();
     }
+    notify_changed(shared);
     Ok(next)
 }
 
@@ -175,8 +196,8 @@ pub(super) async fn enqueue_message(
         let record = journal
             .get_mut(task)
             .ok_or_else(|| format!("task {task} does not exist"))?;
-        if record.state.is_terminal() {
-            return Err(format!("task {task} is already terminal"));
+        if !record.accepts_work() {
+            return Err(format!("task {task} no longer accepts messages"));
         }
         record.add_message(message)?
     };
@@ -320,13 +341,36 @@ fn request_cancel_tree(
     task: &str,
     include_root: bool,
 ) -> Result<Vec<CancellationToken>, String> {
-    let mut journal = shared.journal.lock().expect("task journal poisoned");
+    let effects = {
+        let mut journal = shared.journal.lock().expect("task journal poisoned");
+        let cancel = request_cancel_tree_locked(&mut journal, task, include_root)?;
+        let mut effects = TransitionEffects {
+            cancel,
+            finalized: Vec::new(),
+        };
+        for candidate in effects.cancel.clone().into_iter().rev() {
+            finalize_ready_chain(&mut journal, &candidate, &mut effects.finalized);
+        }
+        effects
+    };
+    Ok(transition_controls(shared, None, &effects))
+}
+
+fn request_cancel_tree_locked(
+    journal: &mut Journal,
+    task: &str,
+    include_root: bool,
+) -> Result<Vec<String>, String> {
     if !journal.contains_key(task) {
         return Err(format!("task {task} does not exist"));
     }
     let mut queue = VecDeque::from([task.to_string()]);
+    let mut visited = HashSet::new();
     let mut affected = Vec::new();
     while let Some(parent) = queue.pop_front() {
+        if !visited.insert(parent.clone()) {
+            continue;
+        }
         let children: Vec<String> = journal
             .values()
             .filter(|record| !record.detached && record.parent.as_deref() == Some(&parent))
@@ -340,15 +384,101 @@ fn request_cancel_tree(
             && !record.state.is_terminal()
         {
             record.cancel_requested = true;
+            if record.pending_terminal.is_some() {
+                record.pending_terminal = Some(PendingTerminal::Cancelled);
+                record.result_truncated = false;
+                record.stopped_by = None;
+            }
             record.updated_ms = store::now_ms();
             affected.push(parent);
         }
     }
-    let controls = shared.controls.lock().expect("task controls poisoned");
-    Ok(affected
+    Ok(affected)
+}
+
+fn apply_completion(
+    journal: &mut Journal,
+    task: &str,
+    completion: PendingTerminal,
+) -> Result<TransitionEffects, String> {
+    let cancel_children = !matches!(completion, PendingTerminal::Succeeded { .. });
+    {
+        let record = journal
+            .get_mut(task)
+            .ok_or_else(|| format!("task {task} does not exist"))?;
+        if record.state.is_terminal() || record.pending_terminal.is_some() {
+            return Err(format!("task {task} no longer has active work"));
+        }
+        record.pending_terminal = Some(completion);
+        record.updated_ms = store::now_ms();
+    }
+
+    let cancel = if cancel_children {
+        request_cancel_tree_locked(journal, task, false)?
+    } else {
+        Vec::new()
+    };
+    let mut effects = TransitionEffects {
+        cancel,
+        finalized: Vec::new(),
+    };
+    for candidate in effects.cancel.clone().into_iter().rev() {
+        finalize_ready_chain(journal, &candidate, &mut effects.finalized);
+    }
+    finalize_ready_chain(journal, task, &mut effects.finalized);
+    Ok(effects)
+}
+
+fn finalize_ready_chain(journal: &mut Journal, task: &str, finalized: &mut Vec<String>) {
+    let mut current = Some(task.to_string());
+    while let Some(id) = current {
+        let has_running_child = journal.values().any(|record| {
+            !record.detached && record.parent.as_deref() == Some(&id) && !record.state.is_terminal()
+        });
+        let ready = journal.get(&id).is_some_and(|record| {
+            !record.state.is_terminal() && record.pending_terminal.is_some() && !has_running_child
+        });
+        if !ready {
+            break;
+        }
+
+        let record = journal
+            .get_mut(&id)
+            .expect("the readiness check found this task");
+        let completion = record
+            .pending_terminal
+            .take()
+            .expect("the readiness check found a completion");
+        record.state = completion.into();
+        record.updated_ms = store::now_ms();
+        let parent = if record.detached {
+            None
+        } else {
+            record.parent.clone()
+        };
+        finalized.push(id);
+        current = parent;
+    }
+}
+
+fn transition_controls(
+    shared: &Shared,
+    completed_task: Option<&str>,
+    effects: &TransitionEffects,
+) -> Vec<CancellationToken> {
+    let mut controls = shared.controls.lock().expect("task controls poisoned");
+    let tokens = effects
+        .cancel
         .iter()
         .filter_map(|id| controls.get(id).cloned())
-        .collect())
+        .collect();
+    if let Some(task) = completed_task {
+        controls.remove(task);
+    }
+    for task in &effects.finalized {
+        controls.remove(task);
+    }
+    tokens
 }
 
 pub(super) async fn finish_failed(
@@ -357,68 +487,59 @@ pub(super) async fn finish_failed(
     message: String,
     stopped_by: Option<String>,
 ) {
-    let terminal = {
+    let effects = {
         let mut journal = shared.journal.lock().expect("task journal poisoned");
         let Some(record) = journal.get_mut(task) else {
             return;
         };
-        if record.state.is_terminal() {
-            false
-        } else if record.cancel_requested {
-            record.finish_in_flight_messages();
-            record.state = DurableState::Cancelled;
-            record.updated_ms = store::now_ms();
-            true
+        if record.state.is_terminal() || record.pending_terminal.is_some() {
+            return;
+        }
+        record.finish_in_flight_messages();
+        let completion = if record.cancel_requested {
+            record.result_truncated = false;
+            record.stopped_by = None;
+            PendingTerminal::Cancelled
         } else {
-            record.finish_in_flight_messages();
             let (error, _) = store::bounded_text(message, store::MAX_RESULT_BYTES);
-            record.state = DurableState::Failed { error };
             record.stopped_by = stopped_by;
-            record.updated_ms = store::now_ms();
-            true
-        }
-    };
-    if terminal {
-        let _ = persist(shared).await;
-        terminal_cleanup(shared, task).await;
-    }
-}
-
-pub(super) async fn finish_cancelled(shared: &Shared, task: &str) {
-    let terminal = {
-        let mut journal = shared.journal.lock().expect("task journal poisoned");
-        let Some(record) = journal.get_mut(task) else {
-            return;
+            PendingTerminal::Failed { error }
         };
-        if record.state.is_terminal() {
-            false
-        } else {
-            record.cancel_requested = true;
-            record.finish_in_flight_messages();
-            record.state = DurableState::Cancelled;
-            record.updated_ms = store::now_ms();
-            true
-        }
+        apply_completion(&mut journal, task, completion).ok()
     };
-    if terminal {
-        let _ = persist(shared).await;
-        terminal_cleanup(shared, task).await;
-    }
-}
-
-async fn terminal_cleanup(shared: &Shared, task: &str) {
-    shared
-        .controls
-        .lock()
-        .expect("task controls poisoned")
-        .remove(task);
-    if let Ok(tokens) = request_cancel_tree(shared, task, false) {
+    if let Some(effects) = effects {
+        let tokens = transition_controls(shared, Some(task), &effects);
         let _ = persist(shared).await;
         for token in tokens {
             token.cancel();
         }
+        notify_changed(shared);
     }
-    notify_changed(shared);
+}
+
+pub(super) async fn finish_cancelled(shared: &Shared, task: &str) {
+    let effects = {
+        let mut journal = shared.journal.lock().expect("task journal poisoned");
+        let Some(record) = journal.get_mut(task) else {
+            return;
+        };
+        if record.state.is_terminal() || record.pending_terminal.is_some() {
+            return;
+        }
+        record.cancel_requested = true;
+        record.finish_in_flight_messages();
+        record.result_truncated = false;
+        record.stopped_by = None;
+        apply_completion(&mut journal, task, PendingTerminal::Cancelled).ok()
+    };
+    if let Some(effects) = effects {
+        let tokens = transition_controls(shared, Some(task), &effects);
+        let _ = persist(shared).await;
+        for token in tokens {
+            token.cancel();
+        }
+        notify_changed(shared);
+    }
 }
 
 pub(super) async fn orphan_running(shared: &Shared) {
@@ -427,6 +548,7 @@ pub(super) async fn orphan_running(shared: &Shared) {
         for record in journal.values_mut() {
             if !record.state.is_terminal() {
                 record.state = DurableState::Orphaned;
+                record.pending_terminal = None;
                 record.updated_ms = store::now_ms();
             }
         }
@@ -758,5 +880,96 @@ mod tests {
             .await
             .expect_err("watching an ancestor is an unsafe wait edge");
         assert!(error.contains("ancestor"), "{error}");
+    }
+
+    #[test]
+    fn successful_parent_finalizes_only_after_attached_child() {
+        let mut journal = Journal::new();
+        journal.insert("root".to_string(), record("root", None));
+        journal.insert("child".to_string(), record("child", Some("root")));
+
+        let parent = apply_completion(
+            &mut journal,
+            "root",
+            PendingTerminal::Succeeded {
+                result: "parent".to_string(),
+            },
+        )
+        .expect("parent completion");
+        assert!(parent.finalized.is_empty());
+        assert!(matches!(journal["root"].state, DurableState::Running));
+        assert!(!journal["root"].accepts_work());
+
+        let child = apply_completion(
+            &mut journal,
+            "child",
+            PendingTerminal::Succeeded {
+                result: "child".to_string(),
+            },
+        )
+        .expect("child completion");
+        assert_eq!(child.finalized, ["child", "root"]);
+        assert!(matches!(
+            journal["child"].state,
+            DurableState::Succeeded { ref result } if result == "child"
+        ));
+        assert!(matches!(
+            journal["root"].state,
+            DurableState::Succeeded { ref result } if result == "parent"
+        ));
+    }
+
+    #[test]
+    fn failed_parent_cancels_children_and_waits_for_them() {
+        let mut journal = Journal::new();
+        journal.insert("root".to_string(), record("root", None));
+        journal.insert("child".to_string(), record("child", Some("root")));
+
+        let parent = apply_completion(
+            &mut journal,
+            "root",
+            PendingTerminal::Failed {
+                error: "boom".to_string(),
+            },
+        )
+        .expect("parent completion");
+        assert_eq!(parent.cancel, ["child"]);
+        assert!(parent.finalized.is_empty());
+        assert!(journal["child"].cancel_requested);
+        assert!(matches!(journal["root"].state, DurableState::Running));
+
+        let child = apply_completion(&mut journal, "child", PendingTerminal::Cancelled)
+            .expect("child cancellation");
+        assert_eq!(child.finalized, ["child", "root"]);
+        assert!(matches!(journal["child"].state, DurableState::Cancelled));
+        assert!(matches!(
+            journal["root"].state,
+            DurableState::Failed { ref error } if error == "boom"
+        ));
+    }
+
+    #[test]
+    fn detached_work_does_not_hold_or_inherit_parent_scope() {
+        let mut journal = Journal::new();
+        journal.insert("root".to_string(), record("root", None));
+        let mut detached = record("detached", Some("root"));
+        detached.detached = true;
+        journal.insert("detached".to_string(), detached);
+
+        let parent = apply_completion(
+            &mut journal,
+            "root",
+            PendingTerminal::Succeeded {
+                result: "done".to_string(),
+            },
+        )
+        .expect("parent completion");
+        assert_eq!(parent.finalized, ["root"]);
+        assert!(matches!(journal["detached"].state, DurableState::Running));
+
+        let cancelled = request_cancel_tree_locked(&mut journal, "root", true)
+            .expect("cancel terminal root is harmless");
+        assert!(cancelled.is_empty());
+        assert!(!journal["detached"].cancel_requested);
     }
 }

@@ -42,6 +42,27 @@ impl DurableState {
     }
 }
 
+/// A task's own work has finished, but its attached children may still be
+/// running. This deliberately excludes `Running` and `Orphaned`: only a
+/// completed worker can be pending, while orphaning settles the whole daemon.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(tag = "state", rename_all = "snake_case")]
+pub(crate) enum PendingTerminal {
+    Succeeded { result: String },
+    Failed { error: String },
+    Cancelled,
+}
+
+impl From<PendingTerminal> for DurableState {
+    fn from(value: PendingTerminal) -> Self {
+        match value {
+            PendingTerminal::Succeeded { result } => Self::Succeeded { result },
+            PendingTerminal::Failed { error } => Self::Failed { error },
+            PendingTerminal::Cancelled => Self::Cancelled,
+        }
+    }
+}
+
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub(crate) enum MessageState {
@@ -72,6 +93,8 @@ pub(crate) struct TaskRecord {
     pub workspace: String,
     pub agent_id: String,
     pub state: DurableState,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub pending_terminal: Option<PendingTerminal>,
     #[serde(default, skip_serializing_if = "is_false")]
     pub result_truncated: bool,
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -102,6 +125,7 @@ impl TaskRecord {
             workspace,
             agent_id,
             state: DurableState::Running,
+            pending_terminal: None,
             result_truncated: false,
             stopped_by: None,
             cancel_requested: false,
@@ -112,6 +136,16 @@ impl TaskRecord {
             created_ms: now,
             updated_ms: now,
         }
+    }
+
+    /// Whether this task can still accept work into its local agent session.
+    /// A task whose worker finished remains externally `Running` while its
+    /// children settle, but no worker remains to consume new children or
+    /// messages.
+    pub(crate) fn accepts_work(&self) -> bool {
+        matches!(self.state, DurableState::Running)
+            && self.pending_terminal.is_none()
+            && !self.cancel_requested
     }
 
     pub(crate) fn add_message(&mut self, body: String) -> Result<String, String> {
@@ -251,6 +285,7 @@ pub(crate) fn load(registry: &Registry, instance: &str) -> io::Result<Journal> {
     for task in journal.values_mut() {
         if matches!(task.state, DurableState::Running) {
             task.state = DurableState::Orphaned;
+            task.pending_terminal = None;
             task.updated_ms = now_ms();
             changed = true;
         }

@@ -82,8 +82,7 @@ pub(super) async fn spawn_task(
                 let owner = journal
                     .get(parent_id)
                     .ok_or_else(|| format!("parent task {parent_id} does not exist"))?;
-                if owner.state.is_terminal()
-                    || owner.cancel_requested
+                if !owner.accepts_work()
                     || owner
                         .deadline_at_ms
                         .is_some_and(|deadline| deadline <= store::now_ms())
@@ -114,8 +113,7 @@ pub(super) async fn spawn_task(
         }
         if let Some(parent_id) = parent.as_deref()
             && journal.get(parent_id).is_none_or(|owner| {
-                owner.state.is_terminal()
-                    || owner.cancel_requested
+                !owner.accepts_work()
                     || owner
                         .deadline_at_ms
                         .is_some_and(|deadline| deadline <= store::now_ms())
