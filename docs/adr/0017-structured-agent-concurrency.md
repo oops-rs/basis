@@ -79,9 +79,8 @@ retained as a compatibility alias for `spawn` during migration.
 
 Every human-readable result that needs follow-up ends with one concise
 `next:` line naming valid commands. This is an affordance for agents consuming
-CLI output, not a second documentation system. Structured lifecycle results
-will carry the same hint as metadata; the existing run JSONL bookends remain
-unchanged until that lifecycle surface exists.
+CLI output, not a second documentation system. Lifecycle results carry the
+same hint as metadata, while the attended run JSONL bookends remain unchanged.
 
 ## Consequences
 
@@ -92,5 +91,6 @@ unchanged until that lifecycle surface exists.
   function that simply awaits a child is not sufficient.
 - Cancellation is cooperative for model and async work, so shell/process work
   additionally requires kill-and-reap handling in its owning supervisor.
-- The first implementation deliberately does not promise arbitrary peer
-  request/reply. That is a safety boundary, not missing convenience.
+- The local service deliberately does not promise arbitrary peer request/reply
+  or post-terminal multi-turn agents. Those are safety and lifecycle boundaries,
+  not missing convenience; they require a later protocol decision.

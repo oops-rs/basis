@@ -48,7 +48,7 @@ Exit codes:
   0  the run finished
   1  the run failed, or lan could not start it
   2  the invocation was wrong
-  3  a bound tripped (--deadline, --tool-budget); committed work was kept",
+  3  a bound tripped (--deadline, --tool-budget, --token-budget); committed work was kept",
 )]
 pub(crate) struct Cli {
     #[command(subcommand)]
