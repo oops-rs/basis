@@ -32,7 +32,7 @@ jobs:
           toolchain: "1.88.0"
 
       - name: Check the workspace against the MSRV
-        run: cargo check --workspace --all-targets --all-features
+        run: cargo check --workspace --all-targets --all-features --locked
 
   ci:
     name: Format, lint, and test (${{ matrix.os }})
@@ -60,9 +60,9 @@ jobs:
         run: cargo fmt --all --check
 
       - name: Run Clippy
-        run: cargo clippy --workspace --all-targets --all-features -- -D warnings
+        run: cargo clippy --workspace --all-targets --all-features --locked -- -D warnings
 
       # Hook and bridge tests spawn processes and bind loopback sockets. They
       # need no network and no credentials — nothing here reaches a provider.
       - name: Run tests
-        run: cargo test --workspace --all-features
+        run: cargo test --workspace --all-features --locked
