@@ -46,12 +46,19 @@ generic lifecycle types.
 
 ### Communication
 
-1. `send` is enqueue-only and returns an acknowledgement or an error.
-2. A blocking lifecycle operation (`spawn --await`, `send --await`, `wait`, or
-   `watch`) acquires a live caller-to-target wait edge. An attached caller may
-   wait on a descendant, but not itself, an ancestor, or a peer in the same
-   ownership tree. A task in another ownership tree is eligible only when the
-   reverse path is absent.
+1. `send` is enqueue-only by default. Each accepted message gets a durable,
+   opaque message ID and a bounded inbox record. `send --await` waits for the
+   reply produced by that message's turn; `ask` is the explicit spelling that
+   combines enqueue and the correlated reply wait. It never waits for an
+   unrelated task termination. `wait <ID> --message <MID>` retries the same
+   reply after a client timeout or disconnect and never reruns the task. If a
+   task terminates before producing a reply, the message wait returns that
+   terminal outcome tagged with the message ID.
+2. A blocking lifecycle operation (`spawn --await`, `send --await`, `ask`,
+   `wait`, or `watch`) acquires a live caller-to-target wait edge. An attached
+   caller may wait on a descendant, but not itself, an ancestor, or a peer in
+   the same ownership tree. A task in another ownership tree is eligible only
+   when the reverse path is absent.
 3. The supervisor checks the complete live wait-for graph before it starts the
    worker or enqueues the awaited message. An edge that would close a cycle is
    rejected. Edges are counted leases and are released on success, error,
@@ -63,20 +70,33 @@ generic lifecycle types.
    waiter does not lose a result; an abandoned owner settles descendants as
    cancelled or orphaned according to their ownership mode.
 6. Enqueue-only `send` acquires no wait edge, so a child can safely leave an
-   ancestor a message for its next round. `send --await` waits for the target
-   task's terminal state, not for a reply correlated to that message.
-   Post-terminal messages and arbitrary per-message request/reply remain out of
-   scope.
+   ancestor a message for its next round. Inbox bodies and replies are bounded
+   summaries (with truncation metadata), and the journal has a fixed message
+   capacity. Post-terminal messages and unrestricted peer-to-peer protocols
+   remain out of scope.
+
+### Parent scope
+
+An attached task's own model work may finish before its descendants. The
+supervisor records that completion as pending, keeps the parent externally
+`running`, and publishes its terminal state only after every attached child
+settles. Successful parent work does not cancel children; failed, cancelled, or
+orphaned work requests downward cancellation. Once a worker has finished, its
+scope is closed to new messages and children. `--detached` removes the ownership
+edge and gives the new root an independent deadline and cancellation lifetime.
 
 ### CLI
 
 ```text
 lan <PROMPT>                  # shorthand for lan spawn <PROMPT>
 lan spawn <PROMPT>            # one-shot work
-lan send ...                  # enqueue a message
+lan send ...                  # enqueue a message (or --await its reply)
+lan ask <ID> <QUESTION>       # enqueue and await the correlated reply
 lan wait <ID>                 # wait for terminal state
+lan wait <ID> --message <MID> # retry one message's reply
 lan cancel <ID>               # request cancellation
 lan watch <ID>                # observe progress/events
+lan inbox [ID]                # bounded message/reply summaries
 lan serve --acp               # ACP over stdio
 lan serve --bridge            # ACP over websocket
 lan fingerprint               # workspace hash
@@ -104,6 +124,7 @@ same hint as metadata, while the attended run JSONL bookends remain unchanged.
   workspace service. It does not claim that arbitrary model-generated
   protocols, external processes, or cross-service dependencies are deadlock
   free.
-- The local service deliberately does not promise correlated per-message
-  request/reply or post-terminal multi-turn agents. Those are lifecycle
-  boundaries, not missing convenience; they require a later protocol decision.
+- The local service deliberately does not promise post-terminal multi-turn
+  agents or unrestricted peer-to-peer request/reply. Its first communication
+  contract is intentionally narrower: one accepted message has one durable,
+  bounded correlated reply, retrievable by message ID.

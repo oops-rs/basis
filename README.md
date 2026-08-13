@@ -21,11 +21,14 @@ explicit serving ([ADR-0017](docs/adr/0017-structured-agent-concurrency.md)):
 lan "<prompt>"                     # shorthand: exactly `lan spawn "<prompt>"`
 lan spawn "<prompt>"               # enqueue work and print a durable task handle
 lan spawn "<prompt>" --await       # enqueue, then wait for the terminal result
-lan send <ID> "<message>"          # enqueue a later turn for a running task
-lan wait <ID>                      # repeatably observe its terminal result
+lan send <ID> "<message>"          # enqueue a later turn and print its message ID
+lan send <ID> "<message>" --await  # enqueue, then await that message's reply
+lan ask <ID> "<question>"          # send with the correlated reply wait implied
+lan wait <ID>                      # repeatably observe the task's terminal result
+lan wait <ID> --message <MID>       # await/retry one message's correlated reply
 lan cancel <ID>                    # request cancellation (attached descendants too)
 lan watch <ID>                     # observe bounded/replayable progress
-lan inbox [ID]                     # list accepted messages; ambient ID if nested
+lan inbox [ID]                     # list bounded message/reply summaries
 lan serve --acp                    # ACP server on stdio — what an editor spawns
 lan serve --bridge                 # the same ACP server on a websocket, for a browser
 lan fingerprint                    # the workspace's hash, for a loop you write yourself
@@ -41,13 +44,25 @@ Lifecycle JSON includes the same `next` hint as metadata. A local task has a
 finite 30-minute default deadline; `--deadline` narrows it, and `--detached`
 starts an independent root rather than inheriting a parent.
 
-`send` is enqueue-only by default. Blocking lifecycle commands register a live
-wait edge: self, ancestor, and same-tree peer edges are rejected, and an edge
-between independent ownership trees is accepted only if it does not close a
-cycle. A task consumes accepted messages at the next model-turn boundary.
-`send --await` observes the target task's terminal state rather than a reply
-correlated to that message. `wait` is finite (30 minutes by default),
-cancel-safe, and repeatable.
+`send` is enqueue-only by default and returns an opaque message ID. Blocking
+lifecycle commands register a live wait edge: self, ancestor, and same-tree
+peer edges are rejected, and an edge between independent ownership trees is
+accepted only if it does not close a cycle. A task consumes accepted messages
+at the next model-turn boundary. `send --await` waits for the reply produced by
+that message's turn; `ask` is the explicit spelling that always waits. If the
+client disconnects or the wait times out, the task and its message continue;
+`wait <ID> --message <MID>` retries the same durable reply without rerunning
+the task. `wait` without `--message` remains the repeatable terminal observation
+and is finite (30 minutes by default).
+
+The inbox is intentionally bounded: at most 16 messages are retained, and
+human/JSON inbox replies are summaries capped at 4 KiB per body and reply (with
+truncation metadata). A successful parent keeps attached children in its scope
+until they settle; a failed or cancelled parent requests downward cancellation
+and publishes its terminal state only after those children settle. Once a
+worker has finished its own turn, it accepts no new messages or children.
+`--detached` creates an independent root with its own finite deadline and
+cancellation policy.
 
 For backward compatibility, `--json` without lifecycle flags keeps the original
 attended JSONL stream. Lifecycle commands return one bounded JSON object
@@ -571,7 +586,7 @@ the example calls it inline because that loop has nothing else to do while it wa
 **P0–P4 complete.** Everything the original plan called a phase is built: the ACP server on
 stdio via the explicit `lan serve --acp` adapter with modes, session listing — which only began returning anything
 in Phase D — and history replay; multi-turn
-conversation and resume; durable local `spawn`/`send`/`wait`/`cancel`/`watch`/`inbox`
+conversation and resume; durable local `spawn`/`send`/`ask`/`wait`/`cancel`/`watch`/`inbox`
 tasks; one-shot `lan spawn` in prose or JSONL (`lan run` remains a compatibility alias); MCP servers from `.mcp.json`
 and from the client; prompt templates surfaced as commands; subprocess hooks that allow,
 deny, or rewrite a tool call; a websocket bridge for

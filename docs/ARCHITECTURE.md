@@ -70,11 +70,14 @@ seems to need core changes, close the gap generically or push it to an extension
 ```
 lan "<prompt>"                     # shorthand: exactly `lan spawn "<prompt>"`
 lan spawn "<prompt>"               # enqueue work and return a durable handle
-lan send <ID> "<message>"          # enqueue a follow-up turn
+lan send <ID> "<message>"          # enqueue a follow-up turn and return its message ID
+lan send <ID> "<message>" --await  # enqueue, then await that message's reply
+lan ask <ID> "<question>"          # send and await the correlated reply
 lan wait <ID>                      # repeatable terminal observation
+lan wait <ID> --message <MID>       # await/retry one message's reply
 lan cancel <ID>                    # downward cancellation request
 lan watch <ID>                     # replayable progress observation
-lan inbox [ID]                     # accepted-message listing
+lan inbox [ID]                     # bounded message/reply summaries
 lan serve --acp                    # ACP server on stdio (explicit)
 lan serve --bridge                 # the same server on a websocket, for a browser
 lan fingerprint                    # the workspace's hash, for a caller's own loop
@@ -94,12 +97,20 @@ In-process concurrent work is owned by `lan_core::Supervisor`. The binary adds
 the same ownership rules across CLI processes: a per-workspace hidden daemon
 owns a loopback TCP endpoint, a private capability descriptor, and an atomic
 JSON journal. `spawn` returns immediately with an opaque instance/task handle;
-`wait`/`watch`/`cancel` reconnect through that descriptor, and terminal results
-remain repeatable after the submitting process exits. Attached children inherit
-the narrower parent deadline and downward cancellation; `--detached` creates a
-new root. Progress is bounded and advisory, while terminal state is persisted
-on a separate control path, so a slow watcher cannot strand completion. The
-transport lives in the binary; `lan-core` remains protocol- and transport-free.
+`wait`/`watch`/`cancel`/`inbox` reconnect through that descriptor, and terminal
+results remain repeatable after the submitting process exits. `send` records an
+opaque message ID; `send --await` and `ask` wait for the reply from that message
+turn, while `wait --message` retries the same durable reply without rerunning
+the task. Inbox bodies and replies are bounded summaries with truncation
+metadata. Attached children inherit the narrower parent deadline and downward
+cancellation. A parent's own work can finish before its attached children: the
+service keeps the parent in scope and publishes its terminal state only after
+all attached children settle; success leaves children running, while failure or
+cancellation requests them downward. A finished worker accepts no new work.
+`--detached` creates a new root. Progress is bounded and advisory, while
+terminal state is persisted on a separate control path, so a slow watcher
+cannot strand completion. The transport lives in the binary; `lan-core` remains
+protocol- and transport-free.
 
 ## 3. Extension model (without embedding a scripting language)
 
