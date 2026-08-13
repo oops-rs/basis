@@ -20,8 +20,9 @@ use std::{
 use lan_core::CancellationToken;
 use serde_json::{Value, json};
 use tokio::{
+    io::AsyncReadExt,
     net::{TcpListener, TcpStream},
-    sync::{Mutex as AsyncMutex, watch},
+    sync::{Mutex as AsyncMutex, Semaphore, watch},
     time,
 };
 
@@ -41,6 +42,7 @@ use super::{
 };
 
 const HANDSHAKE_TIMEOUT: Duration = Duration::from_secs(5);
+const MAX_CONNECTIONS: usize = 128;
 
 fn notify_changed(shared: &Shared) {
     shared
@@ -114,12 +116,20 @@ pub(crate) async fn run_daemon(workspace: PathBuf, registry: PathBuf) -> Result<
 }
 
 async fn accept_loop(listener: TcpListener, shared: Shared) -> Result<(), String> {
+    let connections = Arc::new(Semaphore::new(MAX_CONNECTIONS));
     loop {
         tokio::select! {
             accepted = listener.accept() => {
                 let (stream, _) = accepted.map_err(|error| format!("accept lan client: {error}"))?;
+                let Ok(permit) = connections.clone().try_acquire_owned() else {
+                    // A bounded control plane must fail closed under load. The
+                    // client can retry; no handler is allowed to consume an
+                    // unbounded task or socket slot for thirty minutes.
+                    continue;
+                };
                 let shared = shared.clone();
                 tokio::spawn(async move {
+                    let _permit = permit;
                     let _ = handle_connection(stream, shared).await;
                 });
             }
@@ -137,6 +147,7 @@ async fn handle_connection(mut stream: TcpStream, shared: Shared) -> Result<(), 
         .map_err(|_| "lan client did not finish its request in time".to_string())?
         .map_err(|error| format!("read lan request: {error}"))?;
     let id = request.id;
+    let (mut reader, mut writer) = stream.into_split();
     let response = if request.version != VERSION {
         error(
             id,
@@ -145,12 +156,31 @@ async fn handle_connection(mut stream: TcpStream, shared: Shared) -> Result<(), 
     } else if request.token != shared.descriptor.token {
         error(id, "invalid lan service capability")
     } else {
-        match dispatch(request.operation, &shared).await {
+        // Keep the request future inline rather than detaching it. If the CLI
+        // disappears while waiting, EOF drops the future and its WaitLease;
+        // a cancelled client cannot retain a wait-graph edge for 30 minutes.
+        let dispatch = dispatch(request.operation, &shared);
+        tokio::pin!(dispatch);
+        let mut eof_probe = [0_u8; 1];
+        let result = tokio::select! {
+            biased;
+            result = &mut dispatch => Some(result),
+            read = reader.read(&mut eof_probe) => {
+                match read {
+                    Ok(0) | Err(_) => None,
+                    Ok(_) => None,
+                }
+            }
+        };
+        let Some(result) = result else {
+            return Ok(());
+        };
+        match result {
             Ok(payload) => ok(id, payload),
             Err(message) => error(id, message),
         }
     };
-    write_frame(&mut stream, &response)
+    write_frame(&mut writer, &response)
         .await
         .map_err(|error| format!("write lan response: {error}"))
 }
