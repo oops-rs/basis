@@ -236,6 +236,10 @@ mod tests {
         assert_eq!(loaded[0].name, "SHOUT");
     }
 
+    // The flat `x:y.md` spelling is required to collide with `x/y.md`, but
+    // `:` cannot appear in a Windows filename. Keep this filesystem-level
+    // collision test on platforms that can represent both names.
+    #[cfg(not(windows))]
     #[test]
     fn two_files_claiming_one_name_in_a_single_root_is_an_error() {
         let tmp = tempfile::tempdir().expect("tempdir");
