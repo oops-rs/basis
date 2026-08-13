@@ -1,9 +1,9 @@
 //! Serving ACP on stdio, with a signpost where the trap used to be.
 //!
-//! Bare `lan` speaks JSON-RPC on stdin, and from this process's seat an editor
-//! connecting looks exactly like a shell pipe: no arguments, stdin not a
-//! terminal. Nothing distinguishes them, so lan does not guess (ADR-0015) —
-//! prompt-from-stdin stays explicit, at `lan spawn -`.
+//! `lan serve --acp` speaks JSON-RPC on stdin. A bare `lan` invocation is
+//! usage output, so from this process's seat an editor connection can only be
+//! confused with a shell pipe when the explicit server command is chosen.
+//! Prompt-from-stdin stays explicit at `lan spawn -` (ADR-0017).
 //!
 //! What is left is the one case that is certainly a mistake: a first line that
 //! is not a message at all. Answering it costs a peek and turns an unexplained
@@ -42,8 +42,9 @@ pub enum StdioError {
 
 /// Serves ACP on stdin/stdout until the client disconnects.
 ///
-/// This is what `lan` with no subcommand runs: the default mode, because
-/// embedding is the primary case (ADR-0002, ADR-0003).
+/// This is the transport behind the explicit `lan serve --acp` command. Bare
+/// `lan` prints usage; selecting a long-lived protocol server is deliberate
+/// (ADR-0017).
 ///
 /// Nothing is written before the first line is read, and the first line is
 /// handed to the server unchanged, so a client that speaks the protocol cannot

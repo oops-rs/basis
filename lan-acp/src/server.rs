@@ -71,7 +71,7 @@ use lifecycle::Replay;
 /// in-process — see `tests/acp/`, which drives it over `Channel::duplex()`.
 ///
 /// [`serve_stdio`](crate::serve_stdio) is this over stdin and stdout, which is
-/// what `lan` with no subcommand runs.
+/// what the binary's explicit `lan serve --acp` command runs.
 pub async fn serve<T>(config: ServeConfig, transport: T) -> Result<(), Error>
 where
     T: agent_client_protocol::ConnectTo<Agent> + 'static,

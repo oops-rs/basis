@@ -183,7 +183,7 @@ pub struct McpSource {
 
 /// Anything that can go wrong turning configuration into servers.
 ///
-/// These messages travel — into `lan run --json`, into an ACP client's error
+/// These messages travel — into `lan spawn --json`, into an ACP client's error
 /// pane, into whatever a host logs. A `.mcp.json` is gitignored in most
 /// projects (lan's own included) because its `env` and `headers` hold
 /// credentials, so a message may name the file, the server, the field, and an

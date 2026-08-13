@@ -33,8 +33,8 @@ mcp = []
 # Off by default, which is a statement about reachability rather than a
 # preference: the transport is chosen per request through mentra's
 # `ProviderRequestOptions`, lan never sets that field, and the `AgentConfig`
-# that would carry it is private to workspace construction. No lan run can
-# select it, so the default build linked a websocket client for a code path it
+# that would carry it is private to workspace construction. No CLI invocation
+# can select it, so the default build linked a websocket client for a code path it
 # cannot enter. Kept nameable rather than cut outright, for an embedder driving
 # lan-core against an endpoint where that transport is the point; enabling it
 # forwards to mentra, which forwards to mentra-provider, which compiles the

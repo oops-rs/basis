@@ -3,6 +3,8 @@
 > Status: Accepted · 2026-08-11
 > Refines [`0003-library-first-no-tui.md`](0003-library-first-no-tui.md);
 > preserves [`0002-acp-is-the-protocol.md`](0002-acp-is-the-protocol.md).
+> The binary invocation detail was refined by
+> [`0017-structured-agent-concurrency.md`](0017-structured-agent-concurrency.md).
 
 ## Context
 
@@ -27,8 +29,8 @@ The workspace splits into three:
   lifecycle, the event stream, the seams (approval, tools, hooks). No
   protocol, no transport, no TTY.
 - **`lan-acp`** — the ACP adapter over `lan-core`'s event stream and seams.
-  Opt-in by dependency; the *default mode of the binary*, unchanged, because
-  what an editor spawns is still plain `lan`.
+  Opt-in by dependency; the binary exposes it through the explicit
+  `lan serve --acp` command, which is what an editor spawns.
 - **`lan`** (binary) — CLI over both, per the grammar of
   [`0015`](0015-cli-grammar.md). The terminal approver lives here.
 
@@ -45,8 +47,9 @@ upstreaming, and is never an identity argument for lan.
 
 - An embedder's dependency graph states what they actually use; `lan-core`
   alone pulls no protocol stack.
-- ADR-0002 is untouched: ACP remains the standard and the binary's default.
-  What changes is who pays for it — only the surfaces that serve it.
+- ADR-0002 remains authoritative for the wire protocol. ADR-0017 refines the
+  invocation: ACP is no longer an accidental bare-binary default, and only the
+  explicit serving surfaces pay for it.
 - The two-audience story becomes structural: interactive clients get
   `lan-acp`, workflow builders get `lan-core`, and there is no third surface.
 - The split is a pre-1.0 API break, accepted deliberately while the crate is

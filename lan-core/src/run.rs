@@ -142,7 +142,7 @@ pub struct RunConfig {
     /// Gives up on the run after this long.
     ///
     /// Unset by default, and unset for an unattended caller too. An attended
-    /// `lan run` has a person watching, who can tell "thinking hard" from
+    /// `lan spawn` has a person watching, who can tell "thinking hard" from
     /// "stuck" in a way no timer can; a caller nobody is watching has to write
     /// the bound down in advance, and with no scheduler shipped there is no
     /// period for lan to guess one from (ADR-0014).

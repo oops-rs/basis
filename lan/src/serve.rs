@@ -27,12 +27,12 @@ use crate::{
     exit::{EXIT_FAILED, EXIT_OK, EXIT_USAGE},
 };
 
-/// What bare `lan` says when the first thing on stdin is not a message.
+/// What `lan serve --acp` says when the first thing on stdin is not a message.
 ///
-/// The trap ADR-0015 names: an editor spawning lan and a shell pipe look
-/// identical from here, so `cat prompt.txt | lan` cannot be detected as a
-/// prompt without breaking every editor. What can be done is answer, rather
-/// than wait silently, once the input proves it was never a client.
+/// The explicit server still guards the same transport boundary: an editor and
+/// a shell pipe can both send non-TTY stdin, so `cat prompt.txt | lan serve
+/// --acp` cannot be treated as a prompt. What can be done is answer, rather
+/// than wait silently, once the input proves it was never a client (ADR-0017).
 pub(crate) const NOT_A_CLIENT: &str = "expected an ACP client on stdio";
 const NOT_A_CLIENT_NEXT: &str = "next: use `lan spawn -` for a prompt or `lan serve --acp` for ACP";
 const ACP_RETRY: &str = "next: retry with `lan serve --acp` after addressing the reported failure";

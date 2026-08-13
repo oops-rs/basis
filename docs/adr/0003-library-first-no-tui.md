@@ -13,8 +13,9 @@ by clients.
 
 The `lan` crate is the product; the `lan` binary is a thin shell over it. Three
 embedding surfaces, in order of preference: (1) in-process via the crate (Rust
-hosts), (2) ACP for anything speaking the protocol, (3) `lan run --json` as a
-subprocess for scripts and CI. No TUI, themes, or keybindings — ever, in this
+hosts), (2) ACP for anything speaking the protocol, (3) `lan spawn --json` as a
+subprocess for scripts and CI (`lan run` remains a compatibility alias). No TUI,
+themes, or keybindings — ever, in this
 repo. Terminal interactivity, if wanted, is an ACP client someone else ships.
 
 ## Consequences

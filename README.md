@@ -116,7 +116,7 @@ attended run has a person who tells "thinking hard" from "stuck" in a way no tim
 ([ADR-0014](docs/adr/0014-watch-retired-runs-are-boundable.md)):
 
 ```sh
-lan run --deadline 10m --tool-budget 40 --token-budget 200000 "bump the deps and fix the fallout"
+lan spawn --deadline 10m --tool-budget 40 --token-budget 200000 "bump the deps and fix the fallout"
 ```
 
 Every bound ends the run *gracefully* rather than discarding it: the event stream closes the
@@ -133,7 +133,7 @@ server. Paste the URL as published; the trailing `/v1` is handled:
 ```sh
 export LAN_BASE_URL=http://127.0.0.1:3455/v1
 export LAN_API_KEY=…
-lan run --model gpt-5.6 "explain the module layout"
+lan spawn --model gpt-5.6 "explain the module layout"
 ```
 
 Custom endpoints use complete local transcript replay and do not automatically
@@ -484,7 +484,7 @@ last=""
 while :; do
   now=$(lan fingerprint)
   if [ "$now" != "$last" ]; then
-    lan run --json --deadline 10m --tool-budget 40 \
+    lan spawn --json --deadline 10m --tool-budget 40 \
         "check for newly introduced TODOs and summarize them" > run.jsonl
     case $? in
       0) last=$now ;;                          # only a clean run moves the baseline
@@ -566,21 +566,21 @@ the example calls it inline because that loop has nothing else to do while it wa
 ## Status
 
 **P0–P4 complete.** Everything the original plan called a phase is built: the ACP server on
-stdio (the default mode) with modes, session listing — which only began returning anything
+stdio via the explicit `lan serve --acp` adapter with modes, session listing — which only began returning anything
 in Phase D — and history replay; multi-turn
 conversation and resume; durable local `spawn`/`send`/`wait`/`cancel`/`watch`/`inbox`
-tasks; one-shot `lan run` in prose or JSONL; MCP servers from `.mcp.json`
+tasks; one-shot `lan spawn` in prose or JSONL (`lan run` remains a compatibility alias); MCP servers from `.mcp.json`
 and from the client; prompt templates surfaced as commands; subprocess hooks that allow,
 deny, or rewrite a tool call; a websocket bridge for
 [acp-ui](https://github.com/formulahendry/acp-ui); and branching. All with AGENTS.md
 discovery, skills, and approval.
 
 **The redesign is underway.** [ADR-0010](docs/adr/0010-the-crate-is-the-workflow-surface.md)
-through [ADR-0015](docs/adr/0015-cli-grammar.md) point lan at an SDK-first shape: the crate
+through [ADR-0017](docs/adr/0017-structured-agent-concurrency.md) point lan at an SDK-first shape: the crate
 is the workflow surface, the host owns the boundary, and the binary keeps only the grammar
 above. [docs/REDESIGN.md](docs/REDESIGN.md) is the honest ledger of that transition.
 **Phase A has landed** — `watch` retired with its bounds moved onto `RunConfig` and
-`lan run`, the fingerprint kept as a utility, shell on by default, the shipped container
+`lan spawn`, the fingerprint kept as a utility, shell on by default, the shipped container
 replaced by documented patterns, and the CLI grammar with its exit codes. **Phase B has
 landed** too — the split into `lan-core`, `lan-acp`, and the binary, MCP behind a feature,
 and approval as the `Approver` trait alone. **So has Phase C, the SDK proper** — the

@@ -30,7 +30,7 @@ use crate::{
 /// one is answered — so it runs to the end of the turn even when the sink stops
 /// accepting events. A forwarder that returned on the first failed write would
 /// hang the next consequential call rather than merely stop narrating it, which
-/// is what `lan run --json | head` would do to every run.
+/// is what `lan spawn --json | head` would do to every run.
 pub(super) async fn forward_events<S: EventSink, A: Approver>(
     mut receiver: SessionEventReceiver,
     mut sink: S,

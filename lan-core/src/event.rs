@@ -2,8 +2,9 @@
 //!
 //! Mentra's [`SessionEvent`] broadcast is the source of truth for what happens
 //! during a run. This module normalizes it into a wire contract lan owns, so
-//! that `lan run --json`, the ACP mapping (P2), and anything downstream all
-//! read the same shape — and so a change inside mentra does not silently
+//! that `lan spawn --json` (with `lan run` retained as an alias), the ACP
+//! mapping (P2), and anything downstream all read the same shape — and so a
+//! change inside mentra does not silently
 //! become a change in lan's output.
 //!
 //! # Wire format

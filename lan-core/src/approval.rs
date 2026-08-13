@@ -118,7 +118,7 @@ impl From<ApprovalDecision> for ApprovalAnswer {
 /// something outside this process.
 ///
 /// The worked example is the binary's `TerminalApprover`. Asked when stdin is
-/// not a terminal — an unattended `lan run --approve prompt`, a cron job — it
+/// not a terminal — an unattended `lan spawn --approve prompt`, a cron job — it
 /// denies without printing a question nobody would read, so the run fails
 /// visibly instead of quietly granting whatever came up. `lan-acp`'s client
 /// approver applies the same rule to a failed round trip, a cancelled request,

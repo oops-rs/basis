@@ -12,8 +12,9 @@
 //! 1. **In-process**: depend on this crate (Rust hosts).
 //! 2. **ACP**: `lan-acp` serves the Agent Client Protocol (JSON-RPC 2.0 over
 //!    stdio) over this crate's event stream, for editors and web UIs. It is
-//!    what the `lan` binary runs with no subcommand.
-//! 3. **Subprocess**: `lan run --json` streams JSONL events for scripts and CI.
+//!    reached from the binary with the explicit `lan serve --acp` command.
+//! 3. **Subprocess**: `lan spawn --json` streams JSONL events for scripts and CI;
+//!    `lan run` remains a compatibility alias.
 //!
 //! The core has no opinions: task-specific behavior enters through data — the
 //! prompt, the workspace (AGENTS.md, skills, templates, `.mcp.json`), and

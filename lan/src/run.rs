@@ -1,4 +1,4 @@
-//! The headless one-shot: `lan run "<prompt>"`.
+//! The headless one-shot: `lan spawn "<prompt>"` (`lan run` is an alias).
 //!
 //! Everything between a parsed [`RunArgs`] and an exit code — the config the
 //! flags build, the prompt `-` reads from stdin, and the prose the event stream
@@ -112,11 +112,12 @@ fn next_hint(outcome: &RunOutcome, stopped_by: Option<Bound>) -> &'static str {
     }
 }
 
-/// The prompt as `run` was given it, reading stdin when it is `-`.
+/// The prompt as `spawn` (or its `run` alias) was given it, reading stdin when
+/// it is `-`.
 ///
-/// Explicit rather than detected: bare `lan` already owns stdin for the ACP
-/// server, and no amount of sniffing can tell an editor's pipe from a shell's
-/// (ADR-0015). So the caller says which one this is, with one character.
+/// Explicit rather than detected: `lan serve --acp` owns stdin for the ACP
+/// server, while `lan spawn -` owns stdin for a prompt. The caller says which
+/// one this is, with the command and one character (ADR-0017).
 pub(crate) fn prompt_from(argument: String) -> Result<String, String> {
     match argument.as_str() {
         "-" => read_prompt(io::stdin().lock()),

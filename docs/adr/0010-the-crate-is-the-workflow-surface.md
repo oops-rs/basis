@@ -54,7 +54,7 @@ The SDK surface this commits to:
 - **Approval is the trait alone.** `ApprovalPolicy` is deleted. `Approver` is
   the seam; `AllowAll` (the default) and `DenyAll` ship in the core; the
   terminal prompter moves to the binary, where TTYs live —
-  `lan run --approve prompt` behaves exactly as before by installing it. The
+  `lan spawn --approve prompt` behaves exactly as before by installing it. The
   trait contract inherits the fail-closed rule: an approver that cannot
   answer (no TTY, timeout, broken channel) denies.
 

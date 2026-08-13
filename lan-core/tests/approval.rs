@@ -370,7 +370,7 @@ async fn a_run_with_no_approver_of_its_own_allows_what_it_cannot_ask_about() {
 
 #[tokio::test]
 async fn a_broken_sink_stops_the_narration_and_not_the_turn() {
-    // `lan run --json | head`: stdout closes mid-run. Every consequential call
+    // `lan spawn --json | head`: stdout closes mid-run. Every consequential call
     // now waits on the task that writes those events, so a forwarder that gave
     // up on the first failed write would leave the turn blocked on a permission
     // nobody was left to answer.

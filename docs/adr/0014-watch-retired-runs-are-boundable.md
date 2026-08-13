@@ -29,11 +29,11 @@ The other two pieces are not scheduler concepts at all and never were:
 **The `watch` subcommand is deleted. Its pieces move to where they were
 always pointed:**
 
-- **Bounds move to `RunConfig`** and to `lan run` as `--deadline`,
+- **Bounds move to `RunConfig`** and to `lan spawn` as `--deadline`,
   `--tool-budget`, `--token-budget`. All default to unset: ADR-0009's
   deadline-defaults-to-interval coupling dies with the interval. An attended
-  `lan run` still gets no implicit timer (ADR-0009's last consequence
-  survives); an unattended caller states its bounds, and the recipe shows
+  `lan spawn` still gets no implicit timer (ADR-0009's last consequence
+  survives; `lan run` remains an alias); an unattended caller states its bounds, and the recipe shows
   how. A tripped bound stays a graceful end — committed work is kept.
 - **The fingerprint survives as a utility**: `Workspace::fingerprint()` in
   `lan-core` and a `lan fingerprint` subcommand printing the hash for shell

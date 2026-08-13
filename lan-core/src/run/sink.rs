@@ -1,6 +1,6 @@
 //! Where a run's events go.
 //!
-//! `lan run --json` writes JSONL to stdout; an in-process host wants a
+//! `lan spawn --json` writes JSONL to stdout; an in-process host wants a
 //! callback or a buffer; P2's ACP server will want a protocol notification.
 //! All of them are the same stream, so they are all the same trait.
 //!

@@ -1,4 +1,4 @@
-//! lan-acp — the ACP server: lan's front door.
+//! lan-acp — the ACP adapter: lan's explicit protocol surface.
 //!
 //! [ACP](https://agentclientprotocol.com) is JSON-RPC 2.0 over stdio, LSP-style
 //! — the standard editors and web UIs already speak. Serving it is what makes
@@ -9,8 +9,9 @@
 //! the event stream and the seams are all the core's, and what is here is the
 //! translation at one edge. Opt-in by dependency, so a host embedding the
 //! harness in-process never compiles a JSON-RPC server it does not run
-//! (ADR-0011). Running `lan` with no subcommand serves this on stdin/stdout,
-//! because the embedded case is the primary case.
+//! (ADR-0011). The binary exposes this adapter through the explicit
+//! `lan serve --acp` command on stdin/stdout; a bare `lan` invocation is
+//! reserved for usage and prompt shorthand (ADR-0017).
 //!
 //! # Shape
 //!

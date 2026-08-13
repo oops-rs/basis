@@ -55,7 +55,7 @@ hot-reloadable extensions. Two pi decisions independently validate ours:
 | Prompt templates (/commands) | Markdown templates with args, exposed over ACP as commands ✅ | built |
 | Extensions (custom tools, event interception) | MCP servers + interception with two bindings — in-process `Interceptor`, subprocess hooks — allow/deny/modify (§3) ✅ | built |
 | Packages (shareable bundles) | Directory convention over skills/templates/hooks/MCP — defer | later |
-| RPC / headless mode | `run --json` event stream + **ACP** (standard, not bespoke) ✅; local lifecycle daemon for durable task control ✅ | built |
+| RPC / headless mode | `spawn --json` event stream (`run` is a compatibility alias) + **ACP** (standard, not bespoke) ✅; local lifecycle daemon for durable task control ✅ | built |
 | SDK | `lan-core`: a `Workspace` opened once, runs minted from it with typed output, bounds, cancellation ✅ — other languages use ACP | built |
 | TUI / themes / keybindings | Out of scope by design — ACP clients own presentation | — |
 | Provider OAuth login flows | API-key auth first; OAuth per provider later | later |
@@ -182,13 +182,16 @@ flowchart LR
   split by dependency weight rather than by release schedule (they share one version):
   **`lan-core`** is the in-process SDK and carries no protocol, no transport, and no TTY
   code; **`lan-acp`** is the ACP adapter over its event stream and seams, opt-in by
-  dependency; **`lan`** is the binary over both, and still what an editor spawns. MCP is a
+  dependency; **`lan`** is the binary over both, and the explicit `lan serve --acp` command
+  is what an editor spawns. MCP is a
   default-on `mcp` feature of `lan-core`, so an embedder can compile a core that has never
   heard of it (ADR-0012). The websocket bridge stays in the binary, marked extractable: it
   is ACP-ecosystem tooling with no lan-specific knowledge, and never an identity argument
   for lan.
-- **ACP is the default mode** — running `lan` with no subcommand serves the protocol, because
-  the embedded case is the primary case.
+- **ACP is explicit** — `lan serve --acp` serves the protocol on stdio and
+  `lan serve --bridge` serves it over a websocket. Bare `lan` prints usage; making a
+  long-lived server an explicit command keeps a prompt invocation from accidentally
+  becoming a server (ADR-0017).
 - **A workspace is opened once and mints runs** (ADR-0010). Everything that belongs to a
   repository rather than to a prompt — context documents, the credential and resolved
   model, skills, templates, hooks, MCP connections, the approval gate — is settled by

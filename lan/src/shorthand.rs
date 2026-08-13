@@ -60,7 +60,7 @@ pub(crate) fn normalize(argv: impl IntoIterator<Item = OsString>) -> Vec<OsStrin
 /// asking the top level for help.
 ///
 /// `--` lands here as a run too, which is what makes it the escape: `lan -- run`
-/// becomes `lan run -- run`, and the word arrives as a prompt.
+/// becomes `lan spawn -- run`, and the word arrives as a prompt.
 fn starts_a_run(first: &OsStr) -> bool {
     match first.to_str() {
         // Not UTF-8, so it is neither a reserved word nor a flag lan defines.
