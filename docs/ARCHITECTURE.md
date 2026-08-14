@@ -309,3 +309,95 @@ periodic check — so no single use case bends the API toward itself.
 - **Name collision.** `lan` collides with the networking acronym; searchability will be poor.
   Accepted trade-off — the expansion (Lightweight Agent Nucleus) leans into it rather than
   fighting it.
+
+## 8. Operator notes
+
+Behavior a caller can observe but the sections above do not describe. The embedding
+counterpart is [`embedding.md`](embedding.md).
+
+### Effort, providers, and custom endpoints
+
+`--effort` accepts exactly `low`, `medium`, `high`, `xhigh`, or `max`.
+LAN keeps those values provider-neutral: Responses-family APIs receive
+`reasoning.effort`, while Anthropic receives `output_config.effort` and enables
+adaptive thinking only on models that support it. Provider/model combinations
+without a requested tier fail explicitly instead of silently lowering it;
+omitting the flag leaves the provider default unchanged.
+
+Any OpenAI-compatible endpoint works too — a gateway, a proxy, or a local
+server. Paste the URL as published; the trailing `/v1` is handled:
+
+```sh
+export LAN_BASE_URL=http://127.0.0.1:3455/v1
+export LAN_API_KEY=…
+lan spawn --model gpt-5.6 "explain the module layout"
+```
+
+Custom endpoints use complete local transcript replay and do not automatically
+send `previous_response_id`. That optional extension is not part of LAN's
+compatibility assumption; native provider presets retain Mentra's Hybrid state
+chaining.
+
+### The two meanings of stdin, and `session/list`
+
+An editor spawning lan and a shell pipe look identical from inside the process — both are a
+non-TTY stdin with no arguments — so `cat prompt.txt | lan` cannot be detected as a prompt
+without breaking every editor. Instead of waiting silently on prose, the server answers once
+the input proves it was never a client:
+
+```
+lan: expected an ACP client on stdio
+next: use `lan spawn -` for a prompt or `lan serve --acp` for ACP
+```
+
+`session/list` works as of the interception wave, and had not before: lan filtered listings
+by the workspace a conversation belongs to while filing every conversation under mentra's
+`"default"` tag, so no list ever matched. Conversations from before the fix keep the old
+tag and do not appear in a list — but none of them is stranded, because resuming looks a
+conversation up by id and never by tag, and mentra re-files one under its workspace the
+first time it is resumed and used.
+
+### Hooks: the `shell` → `spawn` migration
+
+An entry scoped `"tools": ["shell"]` no longer fires. Nothing errors — the name the model
+calls is now `spawn`, and a `tools` list matches on the exact name, so the hook simply stops
+running. Match `spawn` instead; a hook that wants commands and not delegations reads the
+call's own input, where `input` is the string the model wrote and a single leading `!`
+(never `!!`) is what makes it a command (ADR-0016).
+
+### The recurring-run loop, written out
+
+lan ships no scheduler: an interval belongs to whatever already runs things on your machine
+— cron, systemd, CI, a tokio task in your own binary. What lan ships instead are the two
+pieces that are easy to get wrong, and the loop is composition
+([ADR-0014](adr/0014-watch-retired-runs-are-boundable.md)):
+
+```sh
+last=""
+while :; do
+  now=$(lan fingerprint)
+  if [ "$now" != "$last" ]; then
+    lan spawn --json --deadline 10m --tool-budget 40 \
+        "check for newly introduced TODOs and summarize them" > run.jsonl
+    case $? in
+      0) last=$now ;;                          # only a clean run moves the baseline
+      3) echo "bound tripped; retry next tick" >&2 ;;
+      *) echo "run failed" >&2 ;;
+    esac
+  fi
+  sleep 1800
+done
+```
+
+`lan fingerprint` prints a digest over `git ls-files` — path, length, mtime, plus `HEAD` —
+so `.gitignore` is honored and `.git`'s own churn is ignored:
+
+```
+$ lan fingerprint
+cea476f305ecf3f5
+```
+
+Every uncertain case reports *changed* rather than unchanged: a false "changed" costs tokens,
+while a false "unchanged" would silently stop the loop doing anything at all. Recording the
+baseline only after a run you consider successful is the caller's policy, because the caller
+is where the definition of "successful" lives — above, that is the `0` arm.
