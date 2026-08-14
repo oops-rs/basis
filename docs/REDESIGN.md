@@ -28,6 +28,13 @@
 > `ask`/`send --await` provide one correlated reply per accepted message, and
 > `wait --message` retries that reply without rerunning the task. Parent scopes
 > remain open until attached children settle; detached roots stay independent.
+> **Rev 11 decides Phase E.** [ADR-0018](adr/0018-the-runtime-owns-the-process.md)
+> splits the process-scoped substrate out of `Workspace` as `Runtime`;
+> [ADR-0019](adr/0019-the-filesystem-is-the-coordination-surface.md) retires
+> the daemon rev 10 shipped — its ownership and messaging semantics survive on
+> files: attach-under-lock execution, checkpoints at turn boundaries, and an
+> atomically written terminal record as the completion signal, with liveness
+> handed to the OS. §3 Phase E sequences the two; neither has landed.
 
 ## 1. The target in one paragraph
 
@@ -835,6 +842,49 @@ stay on one page. And the suite went red once on the way to that 641, in
 `lan-core/tests/hooks.rs`, on a five-second subprocess deadline that the same
 target clears in a third of a second when run alone — the third such sighting,
 recorded in footnote 20 rather than rerun until green and forgotten.
+
+### Phase E — The runtime and the files — **decided, not started**
+
+Decided by [ADR-0018](adr/0018-the-runtime-owns-the-process.md) and
+[ADR-0019](adr/0019-the-filesystem-is-the-coordination-surface.md) on
+2026-08-15; one spec carries both:
+[`spec/2026-08-15-runtime-and-filesystem-coordination.md`](spec/2026-08-15-runtime-and-filesystem-coordination.md).
+E1 lands before E2, because the files design assumes the runtime owns the
+data-directory policy that lets any process resume any agent.
+
+1. **E1 — the `Runtime` split (ADR-0018).** The process-scoped half of
+   `Workspace` — mentra's runtime, provider/credential/model policy, store
+   policy, host interceptors — moves into `Runtime` + `RuntimeBuilder`;
+   `Workspace` keeps repository discovery and borrows through an `Arc`.
+   `Workspace::open` survives unchanged as sugar minting a private default
+   runtime, so the one-repository host never sees the new noun.
+   `workspace.runtime()` becomes `mentra_runtime()` — the breaking rename
+   taken while nothing is published. `lan-acp` drops runtime-per-session for
+   one `Runtime` per process and one `Workspace` per distinct `cwd`, which is
+   the concrete use case the phase ships against.
+2. **E2 — files as the coordination surface (ADR-0019).** The per-workspace
+   daemon is retired. Task metadata moves to a global workspace-keyed data
+   directory beside mentra's store; attach — an `fs2` lock, resume from the
+   last committed turn, checkpoint at turn boundaries — replaces the service
+   actor; the atomically written terminal record becomes the completion
+   signal, so an agent is resumable iff it has none, and a parent may not
+   write its record while an attached child lacks one.
+   `send`/`cancel`/`watch`/`wait` become file operations with ADR-0017's
+   bounds and semantics unchanged. `registry.rs`, `protocol.rs`, the service
+   actor, and the wait graph are deleted; unattended execution is documented
+   as the OS's job.
+
+What the phase deliberately gives up is part of the decision, not a gap
+found later: no progress without an attached process, boundary-granular
+cancellation, no effect rollback on a re-driven turn, and a stale-lock
+liveness probe as the one racy edge kept. ADR-0019 names each in bold; the
+README says them plainly when E2 lands.
+
+Acceptance: the spec's criteria, among them — `kill -9` mid-turn leaves an
+agent with no terminal record that a later attach completes; two concurrent
+`send --await` on one agent serialize on the lock; no lan process survives
+any completed CLI invocation; `cargo test --workspace` green on all three
+platforms with the data-directory probe still zero.
 
 ## 4. Explicitly not planned
 
