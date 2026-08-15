@@ -43,6 +43,16 @@ pub(super) async fn list_sessions(
     config: &ServeConfig,
     request: ListSessionsRequest,
 ) -> Result<ListSessionsResponse, Error> {
+    // The handler is registered whatever the source is — the builder's type
+    // changes with every handler added, so there is no chain to skip one in —
+    // so this is where a source that cannot enumerate says so. `-32601` is the
+    // answer `initialize` promised by not advertising the capability, and an
+    // empty list from a workspace that has conversations is the wrong answer
+    // this whole capability exists to avoid.
+    if !config.source.lists_sessions() {
+        return Err(Error::method_not_found());
+    }
+
     // lan scopes conversations to the workspace they were opened in, so
     // "every session everywhere" is a question it cannot answer: mentra's
     // shared store has no index across workspaces. Saying so is better than
@@ -147,8 +157,8 @@ pub(super) async fn open_persisted(
     let session = match sessions.get(&session_id) {
         // Already open on this connection. Reconnecting a client that lost its
         // view is exactly when a replay is wanted, so this is not a shortcut
-        // past the work — only past building a second runtime for the same
-        // conversation.
+        // past the work — only past minting a second session on a conversation
+        // this process is already holding.
         Some(session) => session,
         None => {
             let mcp = crate::from_acp(&mcp_servers).map_err(|error| setup_failed(error.into()))?;
@@ -228,9 +238,12 @@ pub(super) fn set_mode(
 /// Drops a session, stopping whatever it was doing first.
 ///
 /// Both halves matter: cancelling is what ACP requires, and forgetting the
-/// session is what frees the mentra runtime behind it. A turn still unwinding
-/// holds its own handle, so the runtime outlives this call by exactly as long
-/// as that turn takes to notice it was cancelled.
+/// session is what frees the conversation — its transcript, and the mentra
+/// agent holding it — behind it. A turn still unwinding holds its own handle,
+/// so that outlives this call by exactly as long as the turn takes to notice
+/// it was cancelled. What closing does *not* free is the runtime or the
+/// workspace: since ADR-0018 both are the process's, shared by every session on
+/// that directory, and are not one session's to release.
 pub(super) fn close_session(
     sessions: &SessionRegistry,
     request: &CloseSessionRequest,

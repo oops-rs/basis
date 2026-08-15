@@ -292,7 +292,8 @@ fn answer(verdict: Verdict) -> ApprovalAnswer {
 /// **This is the gap the example is most useful for reporting.** A pattern rule
 /// is exactly what ADR-0016 §5 promises — an allowlist written as data,
 /// answering ahead of the approver — and lan has no vocabulary of its own for
-/// it. There is no `RunSpec::allowing(…)` and no `WorkspaceBuilder` knob, and
+/// it. There is no `RunSpec::allowing(…)` and no builder knob — workspace or
+/// runtime — and
 /// none of `RememberedRule`, `RuleKey` or `PermissionRuleScope` is re-exported
 /// by `lan-core`. What makes the rung reachable at all is that
 /// [`PreparedRun::session`] hands back mentra's `Session`: a host writes the

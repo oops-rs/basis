@@ -127,13 +127,15 @@ Rust binary. Equivalent coverage, Rust-native:
 
 Interception is not a subsystem parallel to anything. `hooks::contract` holds the request
 and outcome types both bindings speak, one `Chain` decides what an answer *means* — first
-refusal wins, modifications compose, nothing is smuggled past a later guard — and a single
-`HookRunner` is the one hook lan registers with mentra, so the ordering and the
-short-circuit are lan's rather than the runtime's. Participants speak in-process
-interceptors first (registration order), then global hooks, then workspace hooks, on the
-rule that **the further a participant is from the workspace's own data, the earlier it
-speaks**: a host's compiled guard can then refuse before a program that arrived with a
-five-minute-old clone is spawned at all. Anything that cannot answer denies.
+refusal wins, modifications compose, nothing is smuggled past a later guard — and the one
+hook lan registers with mentra dispatches each call to the calling workspace's own
+`HookRunner`, keyed by the agent's base directory, since a shared runtime is built before
+any workspace opens (ADR-0018). The ordering and the short-circuit are therefore lan's
+rather than the runtime's. Participants speak in-process interceptors first (registration
+order), then global hooks, then workspace hooks, on the rule that **the further a
+participant is from the workspace's own data, the earlier it speaks**: a host's compiled
+guard can then refuse before a program that arrived with a five-minute-old clone is spawned
+at all. Anything that cannot answer denies.
 
 `Approver` is a *sibling* seam, not a parent and not a child. It answers *may this happen*
 and its answer feeds the permission machinery a person drives; an interceptor answers *may
@@ -160,6 +162,7 @@ flowchart LR
   end
   subgraph lib["lan-core — the SDK"]
     ws["Workspace — opened once: context · model · MCP · seams"]
+    lrt["Runtime — one per process: provider · credential · history · host interceptors"]
     ctx["context: AGENTS.md · skills · templates"]
     ext["interception (2 bindings) · MCP client (mcp feature)"]
     runs["runs — minted cheaply: typed output · bounds · cancel · fan-in"]
@@ -183,7 +186,8 @@ flowchart LR
   ctx --> ws
   ext --> ws
   ws --> runs
-  ws --> rt
+  ws --> lrt
+  lrt --> rt
   runs --> sess
   sess --> rt
 ```
@@ -204,13 +208,25 @@ flowchart LR
   long-lived server an explicit command keeps a prompt invocation from accidentally
   becoming a server (ADR-0017).
 - **A workspace is opened once and mints runs** (ADR-0010). Everything that belongs to a
-  repository rather than to a prompt — context documents, the credential and resolved
-  model, skills, templates, hooks, MCP connections, the approval gate — is settled by
-  `Workspace::open`, and `prepare` mints a run from it *synchronously*, because nothing is
-  left to await. A twenty-way fan-out therefore reads `AGENTS.md` once. What a run carries
-  of its own is the honestly per-run half: the prompt, the session name, the effort, and
-  the bounds. The free functions (`run`, `prepare`, `resume`) are wrappers that open a
-  workspace, mint one run, and drop it — one resolution path, not two.
+  repository rather than to a prompt — context documents, the resolved model, skills,
+  templates, hooks, MCP connections — is settled by `Workspace::open`, and `prepare` mints
+  a run from it *synchronously*, because nothing is left to await. A twenty-way fan-out
+  therefore reads `AGENTS.md` once. What a run carries of its own is the honestly per-run
+  half: the prompt, the session name, the effort, and the bounds. The free functions
+  (`run`, `prepare`, `resume`) are wrappers that open a workspace, mint one run, and drop
+  it — one resolution path, not two.
+- **A runtime is the process, and workspaces borrow it** (ADR-0018). The half of an open
+  that was never about the repository — mentra's runtime, the provider and its credential,
+  the model *policy*, where history is kept, the host's interceptors, the command
+  environment, the approval gate that puts a consequential call to a run's `Approver` — is
+  `Runtime`, built synchronously and shared through an `Arc` by every workspace opened on
+  it, so N repositories cost one provider resolution rather than N. `Workspace::open(path)`
+  is unchanged sugar over a private one bound to that path, so the one-repository host never
+  meets the noun. What stays per workspace is what a repository says: hooks, `ShellAccess`,
+  the `.git` carve-out — enforced on a shared runtime by the single dispatch hook lan
+  registers, since mentra fixes hooks at build time and workspaces arrive later — and its
+  MCP connections, which are minted from its own config and die with it while the tool
+  registry underneath is the runtime's.
 - **A run answers with a value when asked.** `PreparedRun::output::<T>()` runs a turn that
   must answer through a generated terminal tool whose input *is* the answer, which is what
   makes a workflow composable in host Rust rather than in prose-parsing. The stream is
@@ -222,14 +238,18 @@ flowchart LR
   a working turn stop and answer. Neither is right for the other's job, so the choice sits
   on the spec rather than in a default.
 - **Sessions**: an ACP session *is* a mentra agent — lan uses the persisted agent id as the
-  protocol's session id, so `session/load` is `Runtime::resume_session` and lan stores no
-  mapping of its own (ADR-0007). A session outlives a turn, which is what makes conversation
-  and resume possible at all; compaction wires to context-pressure events. Which
+  protocol's session id, so `session/load` is mentra's `Runtime::resume_session` and lan
+  stores no mapping of its own (ADR-0007). A session outlives a turn, which is what makes
+  conversation and resume possible at all; compaction wires to context-pressure events. Which
   conversations belong to *this* workspace is a tag mentra keeps on each row, and
   `WorkspaceBuilder::open` is where lan sets it — until it did, `session/list` filtered on a
-  tag lan never wrote and so returned nothing, whatever had been persisted. Where those rows
-  live is the caller's to say: `with_store_dir` names a directory, `with_ephemeral_history`
-  says nowhere and takes an in-memory store instead.
+  tag lan never wrote and so returned nothing, whatever had been persisted. Since ADR-0018
+  that holds for a workspace on its own private runtime, which is every `Workspace::open`
+  and every path the binary takes; mentra fixes the tag per runtime at build time, so rows
+  minted on a *shared* runtime carry `"lan:runtime"` and stay out of the per-workspace lists
+  until a per-session override lands upstream. Where the rows live is the caller's to say,
+  on the runtime that owns them: `RuntimeBuilder::with_store_dir` names a directory, and
+  `with_ephemeral_history` says nowhere and takes an in-memory store instead.
 - **The mentra/lan split** (same author owns both): anything a *different* harness could also
   want — session branching, compaction lifecycle, hook points, MCP client — belongs in mentra.
   lan keeps conventions and protocol: AGENTS.md/skills/template discovery, ACP mapping, the
@@ -237,13 +257,13 @@ flowchart LR
 - **Confinement**: the boundary is the OS's and lan ships no instance of it (ADR-0013,
   amending ADR-0004). Shell and background execution are on by default; a run holds the
   authority of the account that starts it, and lan never claims otherwise. In-process there
-  is hygiene only — workspace path roots, and a policy that keeps `.git/hooks` and agent
-  config read-only to the *file tools* (codex's anti-escape carve-out), which a shell
-  redirect walks past. [`containerization.md`](containerization.md) documents the
-  read-only-root pattern lan used to ship; a native per-command sandbox (Seatbelt on macOS,
-  bubblewrap+seccomp on Linux, codex's `workspace-write` design) stays parked in
-  [`proposals/0002`](proposals/0002-native-sandbox.md) as an *optional* later layer, not a
-  return to denying commands by default.
+  is hygiene only — each agent bounded to its own workspace directory, and a rule that keeps
+  `.git/hooks` and `.git/config` read-only to the *file tools* (codex's anti-escape
+  carve-out), which a shell redirect walks past. [`containerization.md`](containerization.md)
+  documents the read-only-root pattern lan used to ship; a native per-command sandbox
+  (Seatbelt on macOS, bubblewrap+seccomp on Linux, codex's `workspace-write` design) stays
+  parked in [`proposals/0002`](proposals/0002-native-sandbox.md) as an *optional* later
+  layer, not a return to denying commands by default.
 
 ## 5. Research notes (2026-08-08)
 

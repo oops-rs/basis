@@ -22,9 +22,9 @@ discovery, no servers registered ([ADR-0012](adr/0012-one-contract-many-bindings
 ## A workspace opens once and mints runs
 
 Opening a workspace settles everything that belongs to the repository rather than to the
-prompt — context documents, the credential, the resolved model, skills, templates, hooks,
-MCP connections. Minting a run from it is then synchronous, because nothing is left to
-await ([ADR-0010](adr/0010-the-crate-is-the-workflow-surface.md)):
+prompt — context documents, the resolved model, skills, templates, hooks, MCP connections.
+Minting a run from it is then synchronous, because nothing is left to await
+([ADR-0010](adr/0010-the-crate-is-the-workflow-surface.md)):
 
 ```rust
 let workspace = lan_core::Workspace::open("/repo").await?;
@@ -68,6 +68,56 @@ let config = lan_core::RunConfig::new("/repo", "bump the deps and fix the fallou
     .with_tool_budget(40)
     .with_token_budget(200_000);
 ```
+
+## One runtime, many workspaces
+
+Half of what opening used to settle was never the repository's: the provider and its
+credential, where history is kept, the host's own interceptors. That half is a `Runtime`
+([ADR-0018](adr/0018-the-runtime-owns-the-process.md)), and a host serving more than one
+repository builds one and lends it out:
+
+```rust
+use std::sync::Arc;
+use lan_core::{Runtime, Workspace};
+
+let runtime = Arc::new(Runtime::builder().build()?);
+
+let one = Workspace::builder("/repo/one").with_runtime(Arc::clone(&runtime)).open().await?;
+let two = Workspace::builder("/repo/two").with_runtime(runtime).open().await?;
+```
+
+`build()` is synchronous and reaches no network — it resolves the provider and finds the
+credential, and MCP servers are a workspace's business — so N repositories cost one provider
+resolution and one history store rather than N. `Workspace::open("/repo")` is unchanged by
+the split: it is the same call with a private runtime built behind it, bound to that path,
+and a single-repository host never meets the type.
+
+What sharing shares is the runtime's; the rest stays the workspace's. The model is a
+*policy* on `RuntimeBuilder::with_model` that a workspace overrides with its own
+`with_model`, and the resolved id is the workspace's fact either way. Skills land on the one
+tool registry, so a skill one workspace registered is loadable by another's runs, while
+`Workspace::skills` still reports only its own. MCP connections are workspace-owned — minted
+from that repository's config, shut down when it drops — and every roster hides the `mcp__*`
+tools of servers its workspace does not own, so a name two repositories both configure is
+claimed once and suffixed for the second. Hooks, `ShellAccess`, and the `.git` carve-out
+remain per workspace as well, enforced on a shared runtime by the one dispatch hook lan
+registers.
+
+One thing does not work yet on a shared runtime: mentra fixes the persistence tag per
+*runtime* at build time, so conversations minted there are filed under `"lan:runtime"`
+instead of under their workspace, and `store::list` — ACP's `session/list` — does not find
+them for it. Nothing is stranded, because resume takes an agent id and never a tag, and a
+row re-files itself the next time it persists under a runtime that knows its workspace. The
+private path is unaffected: every `Workspace::open` tags exactly as it always did.
+
+The knobs ADR-0018 moved are `RuntimeBuilder`'s now — `with_provider`, `with_base_url`,
+`with_api_key`, `with_store_dir`, `with_ephemeral_history`, `with_interceptor`,
+`with_command_environment`. A single-workspace host that wants one of them hands the recipe
+to `WorkspaceBuilder::with_runtime_builder`, which configures the private runtime
+`Workspace::open` would have built rather than switching to a shared one. Mentra's own
+surface is still unhidden, under a name that now says whose it is:
+`Runtime::mentra_runtime()`, and `Workspace::mentra_runtime()` for a host that has only the
+workspace in hand.
 
 ## Answers you can branch on
 
@@ -221,7 +271,12 @@ impl lan_core::Interceptor for Redact {
     }
 }
 
-let workspace = lan_core::Workspace::builder("/repo").with_interceptor(Redact).open().await?;
+// Host scope is runtime scope (ADR-0018): the guard registers on the runtime —
+// the shared one every workspace borrows, or the private one this open builds.
+let workspace = lan_core::Workspace::builder("/repo")
+    .with_runtime_builder(lan_core::Runtime::builder().with_interceptor(Redact))
+    .open()
+    .await?;
 ```
 
 Both bindings speak the same vocabulary and are folded by the same chain, so allow, deny,
@@ -249,15 +304,19 @@ Conversations are persisted by mentra, and unset, it picks a database keyed by t
 and the last one called wins:
 
 ```rust
-lan_core::Workspace::builder("/repo").with_store_dir("/var/lib/myapp/history")  // there
-lan_core::Workspace::builder("/repo").with_ephemeral_history()                  // nowhere
+lan_core::Runtime::builder().with_store_dir("/var/lib/myapp/history")  // there
+lan_core::Runtime::builder().with_ephemeral_history()                  // nowhere
 ```
 
-`with_store_dir` keeps this workspace's conversations in a directory you name, and
+The knobs are the runtime's (ADR-0018): history is a process fact, so a host sharing one
+`Runtime` across workspaces sets it once, and a single-workspace host hands the recipe to
+`WorkspaceBuilder::with_runtime_builder`.
+
+`with_store_dir` keeps this runtime's conversations in a directory you name, and
 `lan_core::store::list_in` reads them back from it. `with_ephemeral_history` uses an
-in-memory store: resume works inside the workspace's lifetime and nothing survives the
-process — no file, no export, no way to make one durable afterwards, so a host that might
-want that later wants `with_store_dir` now.
+in-memory store: resume works for as long as the `Runtime` holding it lives, and nothing
+survives the process — no file, no export, no way to make one durable afterwards, so a host
+that might want that later wants `with_store_dir` now.
 
 ## The fingerprint, in process
 

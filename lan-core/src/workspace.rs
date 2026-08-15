@@ -9,13 +9,18 @@
 //! So:
 //!
 //! - **[`WorkspaceBuilder::open`]** settles what belongs to the workspace —
-//!   context documents, credential and provider, the resolved model, skills,
-//!   templates, hooks, MCP connections, the command posture, the approval gate.
+//!   context documents, the resolved model, skills, templates, hooks, MCP
+//!   connections, the command posture, the approval gate.
 //!   It is `async` and it does real I/O, once.
 //! - **[`Workspace::prepare`]** mints one run from a [`RunSpec`]. It is *not*
 //!   `async`, which is the honest signal that nothing is discovered, resolved,
 //!   or connected here: a session is spawned on the runtime that already
 //!   exists, and that is all.
+//!
+//! What belongs to the *process* rather than to either — the provider and
+//! credential, the history store, the host's interceptors — is a third thing,
+//! [`Runtime`] (ADR-0018). A workspace borrows one through an
+//! `Arc`, and a host opening many workspaces builds it once.
 //!
 //! ```no_run
 //! # async fn example() -> Result<(), lan_core::RunError> {
@@ -41,12 +46,12 @@
 //! resolution path, and this is it.
 
 mod builder;
-mod environment;
 mod spec;
 
 use std::path::{Path, PathBuf};
+use std::sync::Arc;
 
-use mentra::{ModelInfo, Runtime, Session, agent::AgentConfig, provider::ReasoningOptions};
+use mentra::{ModelInfo, Session, agent::AgentConfig, provider::ReasoningOptions};
 
 pub use builder::WorkspaceBuilder;
 pub use spec::RunSpec;
@@ -54,23 +59,27 @@ pub use spec::RunSpec;
 pub(crate) use builder::{load_templates, resolved_workspace};
 pub(crate) use spec::DEFAULT_SESSION_NAME;
 
+#[cfg(feature = "mcp")]
+use crate::mcp::connections::McpConnections;
 use crate::{
     context::WorkspaceContext,
     event::ContextFile,
     fingerprint::{self, Snapshot},
     run::{Effort, LoadedSkill, PreparedRun, RunContext, RunError},
+    runtime::{Runtime, dispatch::HookRegistration},
     templates::Template,
 };
 
-/// One workspace, resolved: the runtime, the model, and everything discovered
-/// on disk, ready to mint runs from.
+/// One workspace, resolved: the runtime it borrows, the model, and everything
+/// discovered on disk, ready to mint runs from.
 ///
 /// Held by reference by every run it mints, so a host keeps one per repository
 /// for as long as it wants to send prompts at it. Dropping it does not end the
 /// runs already minted — a [`PreparedRun`] owns its session — but the MCP
-/// connections and the runtime go with it.
+/// connections go with it, and so does the runtime when this held the last
+/// `Arc`.
 ///
-/// `Send` and `Sync`: mentra's [`Runtime`] is shared through `Arc`s and creates
+/// `Send` and `Sync`: the runtime is shared through `Arc`s and creates
 /// sessions from `&self`, so concurrent minting from one workspace needs no
 /// lock of lan's own.
 pub struct Workspace {
@@ -81,9 +90,14 @@ pub struct Workspace {
     /// the run header reports, so `workspace` and `context_files` name one
     /// place.
     root: PathBuf,
-    runtime: Runtime,
+    runtime: Arc<Runtime>,
     model: ModelInfo,
     provider: String,
+    /// [`store::runtime_identifier`](crate::store::runtime_identifier) for
+    /// `path`, computed once: what this workspace's conversations are (or, on
+    /// a shared runtime, should be — see [`WorkspaceBuilder::open`]) tagged
+    /// with.
+    identifier: String,
     context: WorkspaceContext,
     /// Built once from the context, cloned per run: none of its inputs vary.
     agent: AgentConfig,
@@ -93,10 +107,18 @@ pub struct Workspace {
     templates: Vec<Template>,
     mcp_files: Vec<ContextFile>,
     mcp_servers: Vec<String>,
+    /// Keeps this workspace's hooks and guards registered on the runtime's
+    /// dispatcher; deregisters on drop.
+    #[allow(dead_code, reason = "held for its Drop")]
+    hook_registration: HookRegistration,
+    #[cfg(feature = "mcp")]
+    #[allow(dead_code, reason = "held for its Drop")]
+    mcp_connections: McpConnections,
 }
 
-/// Hand-written because mentra's [`Runtime`] is not `Debug`, and because the
-/// context documents hold whole files — a derived impl would dump them.
+/// Hand-written because neither the runtime nor the registration is `Debug`
+/// material, and because the context documents hold whole files — a derived
+/// impl would dump them.
 impl std::fmt::Debug for Workspace {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         f.debug_struct("Workspace")
@@ -112,11 +134,13 @@ impl std::fmt::Debug for Workspace {
 }
 
 impl Workspace {
-    /// Opens `path` with lan's defaults: the provider auto-detected from the
-    /// environment, the newest model it offers, and every convention discovered
-    /// where convention says to look.
+    /// Opens `path` with lan's defaults: a private runtime with the provider
+    /// auto-detected from the environment, the newest model it offers, and
+    /// every convention discovered where convention says to look.
     ///
-    /// [`builder`](Self::builder) is the same call with the knobs exposed.
+    /// [`builder`](Self::builder) is the same call with the knobs exposed —
+    /// including [`with_runtime`](WorkspaceBuilder::with_runtime), for the
+    /// host that opens many workspaces on one [`Runtime`].
     pub async fn open(path: impl Into<PathBuf>) -> Result<Self, RunError> {
         Self::builder(path).open().await
     }
@@ -141,10 +165,11 @@ impl Workspace {
     /// wants to hear about it before a session exists.)
     pub fn prepare(&self, spec: impl Into<RunSpec>) -> Result<PreparedRun, RunError> {
         let spec = spec.into();
-        let mut session = self.runtime.create_session_with_config(
+        let mut session = self.runtime.mint(
             spec.session_name.clone(),
             self.model.clone(),
-            self.agent.clone(),
+            self.minted_agent(),
+            &self.identifier,
         )?;
         apply_effort(&mut session, spec.effort)?;
 
@@ -168,7 +193,7 @@ impl Workspace {
         spec: impl Into<RunSpec>,
     ) -> Result<PreparedRun, RunError> {
         let spec = spec.into();
-        let mut session = self.runtime.resume_session(agent_id)?;
+        let mut session = self.runtime.resume_minted(agent_id)?;
         apply_effort(&mut session, spec.effort)?;
 
         Ok(self.minted(session, spec))
@@ -217,7 +242,12 @@ impl Workspace {
         &self.context
     }
 
-    /// The skills registered on the runtime, after layering.
+    /// The skills this workspace registered on the runtime, after layering.
+    ///
+    /// Only what *this* workspace registered. The registry itself is the
+    /// runtime's and additive, so on a shared runtime a run may also be able
+    /// to `load_skill` what a sibling workspace registered — an accepted
+    /// consequence of sharing (see [`WorkspaceBuilder::open`]).
     pub fn skills(&self) -> &[LoadedSkill] {
         &self.skills
     }
@@ -228,20 +258,56 @@ impl Workspace {
         &self.templates
     }
 
-    /// The MCP servers connected at open, by name. Names only: nothing here
-    /// echoes a command or a credential.
+    /// The MCP servers connected at open, by the names that took effect —
+    /// which is the configured name unless another workspace on the shared
+    /// runtime already held it, in which case it carries a deterministic
+    /// suffix. Names only: nothing here echoes a command or a credential.
     pub fn mcp_servers(&self) -> &[String] {
         &self.mcp_servers
     }
 
-    /// The runtime the runs are minted on, for a host that wants mentra's own
-    /// surface — the task board, teams, the store — alongside lan's.
+    /// The mentra runtime the runs are minted on, for a host that wants
+    /// mentra's own surface — the task board, teams, the store — alongside
+    /// lan's.
     ///
     /// The same bargain as [`PreparedRun::session`]: lan does not hide mentra,
-    /// and reaching past lan's surface is a supported thing to do rather than a
-    /// workaround.
-    pub fn runtime(&self) -> &Runtime {
-        &self.runtime
+    /// and reaching past lan's surface is a supported thing to do rather than
+    /// a workaround. Renamed from `runtime()` when ADR-0018 gave lan a
+    /// `Runtime` of its own, so the name says whose surface comes back.
+    pub fn mentra_runtime(&self) -> &mentra::Runtime {
+        self.runtime.mentra_runtime()
+    }
+
+    /// The agent config this mint offers the model: the one built at open,
+    /// with every `mcp__*` tool this workspace does not own hidden.
+    ///
+    /// Per mint rather than per open, because the shared registry moves as
+    /// sibling workspaces come and go, and a roster is honest only about the
+    /// registry it was minted against. Hidden, not unregistered — the registry
+    /// is single and has no unregister — which also keeps a dropped sibling's
+    /// stale bridged tools inert.
+    #[cfg(feature = "mcp")]
+    fn minted_agent(&self) -> AgentConfig {
+        let mut agent = self.agent.clone();
+
+        for descriptor in self.runtime.mentra_runtime().tools() {
+            let name = &descriptor.provider.name;
+            if let Some((server, _)) = mentra::mcp::parse_mcp_tool_name(name)
+                && !self.mcp_servers.iter().any(|own| own == server)
+            {
+                agent.tool_profile.hidden_tools.insert(name.clone());
+            }
+        }
+
+        agent
+    }
+
+    /// Built without MCP there is nothing to hide: lan registered no bridged
+    /// tools, and a host that registered its own past lan's surface asked for
+    /// them.
+    #[cfg(not(feature = "mcp"))]
+    fn minted_agent(&self) -> AgentConfig {
+        self.agent.clone()
     }
 
     /// Wraps a freshly created or resumed session in the run context this

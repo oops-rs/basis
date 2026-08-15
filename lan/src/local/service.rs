@@ -317,7 +317,10 @@ mod tests {
         )
     }
 
-    fn test_shared() -> (TempDir, Shared) {
+    /// Shared with `task`'s tests, which need the same registry-backed service
+    /// state; the `TempDir` is returned because dropping it deletes the
+    /// registry underneath the `Shared`.
+    pub(super) fn test_shared() -> (TempDir, Shared) {
         let dir = tempfile::tempdir().expect("tempdir");
         let registry = Registry::from_path(dir.path().join("registry")).expect("registry");
         let workspace = canonical_workspace(dir.path()).expect("workspace");

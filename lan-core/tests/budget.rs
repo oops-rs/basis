@@ -32,7 +32,7 @@ use std::{
 };
 
 use lan_core::{
-    BudgetPool, CollectingSink, ContextConfig, RunError, RunOutcome, RunSpec, TurnOptions,
+    BudgetPool, CollectingSink, ContextConfig, RunError, RunOutcome, RunSpec, Runtime, TurnOptions,
     Workspace, WorkspaceBuilder, hooks::HooksConfig, skills::SkillsConfig,
     templates::TemplatesConfig,
 };
@@ -45,12 +45,18 @@ const OUTPUT_TOKENS: u64 = 20;
 const ROUND_COST: u64 = INPUT_TOKENS + OUTPUT_TOKENS;
 
 /// A builder that looks nowhere except where the test put something, and that
-/// contacts nothing while opening. `tests/workspace.rs` explains the choices.
-fn offline(workspace: &Path) -> WorkspaceBuilder {
+/// contacts nothing while opening. `tests/workspace.rs` explains the choices;
+/// the endpoint's base URL rides on the private runtime's recipe, because
+/// ADR-0018 made it a runtime fact.
+fn offline(workspace: &Path, endpoint: &ScriptedEndpoint) -> WorkspaceBuilder {
     Workspace::builder(workspace)
-        .with_api_key("test-key")
+        .with_runtime_builder(
+            Runtime::builder()
+                .with_base_url(&endpoint.base_url)
+                .with_api_key("test-key")
+                .with_ephemeral_history(),
+        )
         .with_model(ModelSelector::Id("test-model".to_string()))
-        .with_ephemeral_history()
         .with_context(ContextConfig {
             file_name: "AGENTS.md".to_string(),
             global_dir: None,
@@ -74,11 +80,7 @@ async fn workspace_on(endpoint: &ScriptedEndpoint) -> Workspace {
     let dir = tempfile::tempdir().expect("tempdir");
     std::fs::write(dir.path().join("AGENTS.md"), "house rules").expect("write");
 
-    offline(dir.path())
-        .with_base_url(&endpoint.base_url)
-        .open()
-        .await
-        .expect("opens")
+    offline(dir.path(), endpoint).open().await.expect("opens")
 }
 
 #[tokio::test]

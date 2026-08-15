@@ -45,11 +45,17 @@ lan spawn --model gpt-5.6 --await "explain the module layout"
 ## The SDK
 
 **A workspace opens once and mints runs.** Opening settles everything that belongs to the repository
-rather than to the prompt — context documents, the credential, the resolved model, skills,
-templates, hooks, MCP connections, the approval gate — so `prepare` is *synchronous*, and a
-twenty-way fan-out reads `AGENTS.md` once
+rather than to the prompt — context documents, the resolved model, skills, templates, hooks, MCP
+connections — so `prepare` is *synchronous*, and a twenty-way fan-out reads `AGENTS.md` once
 ([ADR-0010](docs/adr/0010-the-crate-is-the-workflow-surface.md)). `Workspace` is `Send + Sync`, so
 those runs can be spawned tasks.
+
+What belongs to the *process* rather than to the repository — the provider and its credential,
+where history is kept, the host's own interceptors, the gate that puts a consequential call to a
+run's `Approver` — is a `Runtime` ([ADR-0018](docs/adr/0018-the-runtime-owns-the-process.md)).
+`Workspace::open("/repo")` builds a private one bound to that repository and is unchanged by
+the split; a host opening N of them builds `Runtime::builder().build()?` once and hands each
+workspace an `Arc` of it, so N repositories cost one provider resolution and one history store.
 
 Keep the run and send again for a conversation — `run.send("and which of those is riskiest?", sink,
 AllowAll)` — because the session survives the turn, and `run.agent_id()` is the handle
@@ -139,9 +145,10 @@ reason is what the model reads as the call's result.
 
 **Interception** answers *may this happen, in this form*, and is one contract with two bindings
 ([ADR-0012](docs/adr/0012-one-contract-many-bindings.md)): a repository declares a subprocess in
-`.lan/hooks.json`, and an embedding host writes `Workspace::builder("/repo").with_interceptor(…)` so
-its own compiled code gets the say — what you want when the guard needs a vault handle, a token you
-just minted, or a regex that lives in a config struct. `intercept(&HookRequest)` answers
+`.lan/hooks.json`, and an embedding host writes `Runtime::builder().with_interceptor(…)` — host
+scope is runtime scope ([ADR-0018](docs/adr/0018-the-runtime-owns-the-process.md)) — so its own
+compiled code gets the say, which is what you want when the guard needs a vault handle, a token
+you just minted, or a regex that lives in a config struct. `intercept(&HookRequest)` answers
 `HookOutcome::Allow`, `Deny`, or `Modify`, and `lan_core::async_trait` is re-exported so writing the
 impl costs your manifest nothing.
 
@@ -153,8 +160,9 @@ refuse before a repository's program is spawned at all, and a participant that e
 
 **Sinks** are the third seam: anything `FnMut(Event) -> io::Result<()>` is one, beside
 `CollectingSink`, `NullSink`, `JsonlWriter`, and the tagged sinks above. **Where history goes** is
-yours too — `with_store_dir` names a directory, `with_ephemeral_history` uses an in-memory store that
-survives nothing. Unset, mentra keys a database by the *process's* current directory.
+yours too — `RuntimeBuilder::with_store_dir` names a directory, `with_ephemeral_history` uses an
+in-memory store that survives nothing. Unset, mentra keys a database by the *process's* current
+directory.
 
 ## What the workspace contributes
 

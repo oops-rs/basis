@@ -31,13 +31,23 @@
 //! persists. [`WorkspaceBuilder::open`](crate::WorkspaceBuilder::open) is where
 //! the tag is set, and where that ruling is written down.
 //!
+//! One caveat since ADR-0018: mentra fixes the tag per *runtime* at build
+//! time, so only a workspace on its own private runtime — every
+//! `Workspace::open(path)`, the CLI, the free functions — tags rows with its
+//! path. A workspace on a **shared** [`Runtime`](crate::Runtime) mints rows
+//! tagged `"lan:runtime"` until mentra grows a per-session override; those
+//! rows stay out of every per-workspace list (the `"default"` ruling above,
+//! applied again) and re-file themselves the first time they persist under a
+//! runtime that knows their workspace. [`Runtime`](crate::Runtime)'s `mint` is
+//! the one line that changes when the override lands.
+//!
 //! # Where the file goes
 //!
 //! mentra's default directory is keyed by the *process's* current directory,
 //! not by the workspace lan opened, so every program started from one place
 //! shares one database whatever workspace it went on to open — including every
 //! test binary in one `cargo test`.
-//! [`WorkspaceBuilder::with_store_dir`](crate::WorkspaceBuilder::with_store_dir)
+//! [`RuntimeBuilder::with_store_dir`](crate::RuntimeBuilder::with_store_dir)
 //! is how a caller says otherwise, and [`list_in`] is how the same caller reads
 //! back what it wrote. The filename inside that directory is chosen in exactly
 //! one place, `store_in`, because two places would eventually disagree and a
@@ -46,7 +56,7 @@
 //!
 //! # When there is no file
 //!
-//! [`WorkspaceBuilder::with_ephemeral_history`](crate::WorkspaceBuilder::with_ephemeral_history)
+//! [`RuntimeBuilder::with_ephemeral_history`](crate::RuntimeBuilder::with_ephemeral_history)
 //! answers *where* with *nowhere*, and opens mentra's in-memory store instead.
 //! Nothing in this module can see one of those conversations: there is no file
 //! for [`list_in`] to read and no row for [`list`] to filter, whichever
@@ -105,7 +115,7 @@ pub struct PersistedSession {
 /// Every conversation persisted for `workspace`, oldest first.
 ///
 /// Reads the default directory. A workspace opened with
-/// [`with_store_dir`](crate::WorkspaceBuilder::with_store_dir) is read by
+/// [`with_store_dir`](crate::RuntimeBuilder::with_store_dir) is read by
 /// [`list_in`] instead — the two have to name the same place, and nothing here
 /// can guess which one a caller chose.
 ///
@@ -122,7 +132,7 @@ pub fn list(workspace: &Path) -> Result<Vec<PersistedSession>, RunError> {
 /// The same, for conversations kept somewhere of the caller's choosing.
 ///
 /// `dir` is what was passed to
-/// [`with_store_dir`](crate::WorkspaceBuilder::with_store_dir). A directory
+/// [`with_store_dir`](crate::RuntimeBuilder::with_store_dir). A directory
 /// nothing was ever written to lists nothing rather than failing: an empty
 /// history and a store that does not exist yet are the same answer.
 pub fn list_in(dir: &Path, workspace: &Path) -> Result<Vec<PersistedSession>, RunError> {
@@ -151,9 +161,9 @@ pub fn list_in(dir: &Path, workspace: &Path) -> Result<Vec<PersistedSession>, Ru
 /// nothing to do with listing.
 ///
 /// The store is built from `dir` rather than left at mentra's default, so that
-/// this and [`WorkspaceBuilder::open`](crate::WorkspaceBuilder::open) read and
-/// write one file. The identifier is the other thing that has to agree, and it
-/// comes from [`runtime_identifier`] on both sides.
+/// this and [`RuntimeBuilder::with_store_dir`](crate::RuntimeBuilder::with_store_dir)
+/// read and write one file. The identifier is the other thing that has to
+/// agree, and it comes from [`runtime_identifier`] on both sides.
 fn enumerating_runtime(identifier: &str, dir: &Path) -> Result<Runtime, RunError> {
     Ok(Runtime::empty_builder()
         .with_runtime_identifier(identifier.to_string())
@@ -164,14 +174,14 @@ fn enumerating_runtime(identifier: &str, dir: &Path) -> Result<Runtime, RunError
 
 /// The store lan keeps a workspace's conversations in, under `dir`.
 ///
-/// The one place the filename is chosen: `WorkspaceBuilder` writes through
+/// The one place the filename is chosen: `RuntimeBuilder` writes through
 /// this and [`list_in`] reads through it, so the two cannot drift.
 ///
 /// Neither this store type nor [`volatile`]'s reaches lan's surface. A caller
 /// picks a *posture* — history in a directory, or history nowhere — and lan
 /// picks the backend that is it, rather than re-exporting `RuntimeStore` and
 /// the nine traits it composes (see
-/// [`WorkspaceBuilder::with_store_dir`](crate::WorkspaceBuilder::with_store_dir)).
+/// [`RuntimeBuilder::with_store_dir`](crate::RuntimeBuilder::with_store_dir)).
 pub(crate) fn store_in(dir: &Path) -> SqliteRuntimeStore {
     SqliteRuntimeStore::new(dir.join(STORE_FILENAME))
 }
@@ -186,7 +196,7 @@ pub(crate) fn store_in(dir: &Path) -> SqliteRuntimeStore {
 /// database with none of the durability.
 ///
 /// The backing for
-/// [`WorkspaceBuilder::with_ephemeral_history`](crate::WorkspaceBuilder::with_ephemeral_history),
+/// [`RuntimeBuilder::with_ephemeral_history`](crate::RuntimeBuilder::with_ephemeral_history),
 /// and named here rather than in the builder so that the two mentra store types
 /// lan can open are chosen in one file.
 pub(crate) fn volatile() -> VolatileRuntimeStore {

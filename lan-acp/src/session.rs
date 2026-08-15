@@ -20,8 +20,8 @@
 //! lan uses mentra's **agent id**, not its session id. mentra persists agents;
 //! a `Session` is one process's view of one. Keying on the agent id is what
 //! makes `session/load` free — it is exactly the handle
-//! [`resume`](lan_core::run::resume) takes, so a client can reconnect to a
-//! conversation this process never saw.
+//! [`Workspace::resume`](lan_core::Workspace::resume) takes, so a client can
+//! reconnect to a conversation this process never saw.
 
 use std::{
     collections::HashMap,

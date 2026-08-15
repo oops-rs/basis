@@ -6,23 +6,31 @@
 //! `tests/acp/`; what is left here is the pieces that can be checked without
 //! one, which is why they sit together rather than beside each handler.
 
-use std::path::{Path, PathBuf};
+use std::{
+    path::{Path, PathBuf},
+    sync::Arc,
+};
 
 use agent_client_protocol::schema::{
     ProtocolVersion,
     v1::{
-        ContentBlock, ErrorCode, InitializeRequest, ResourceLink, SessionCapabilities, TextContent,
+        ContentBlock, ErrorCode, InitializeRequest, ListSessionsRequest, ResourceLink,
+        SessionCapabilities, TextContent,
     },
 };
 
-use super::config::{ConfiguredSource, ServeConfig, SessionSource};
+use super::config::{ServeConfig, SessionSource};
 use super::initialize;
-use super::lifecycle::{session_info, setup_failed};
+use super::lifecycle::{list_sessions, session_info, setup_failed};
 use super::turn::prompt_text;
+use super::workspaces::{ConfiguredSource, WorkspaceKey};
 use crate::mode::ApprovalMode;
 use lan_core::{
-    McpServer, PersistedSession, PreparedRun, RunConfig, RunError, provider::ProviderError,
+    ContextConfig, McpServer, PersistedSession, PreparedRun, RunConfig, RunError, Runtime,
+    hooks::HooksConfig, mcp::McpConfig, provider::ProviderError, skills::SkillsConfig,
+    templates::TemplatesConfig,
 };
+use mentra::ModelSelector;
 
 /// A source that cannot enumerate, which is what most hosts supplying
 /// their own sessions are.
@@ -84,6 +92,23 @@ fn a_source_that_cannot_enumerate_does_not_claim_a_list() {
             .list
             .is_none()
     );
+}
+
+#[tokio::test]
+async fn a_source_that_cannot_enumerate_refuses_the_call_it_never_claimed() {
+    // The other half of the same promise, and the half that was missing: the
+    // handler is registered whatever the source is, so a client that asks
+    // without reading the capability has to hear the same -32601 an
+    // unadvertised method gives it — not an empty list for a workspace whose
+    // conversations this source simply cannot see.
+    let error = list_sessions(
+        &ServeConfig::with_source(Ephemeral),
+        ListSessionsRequest::new().cwd(PathBuf::from("/repo")),
+    )
+    .await
+    .expect_err("a source with no registry must not answer for one");
+
+    assert_eq!(error.code, ErrorCode::MethodNotFound);
 }
 
 #[test]
@@ -160,11 +185,9 @@ fn the_config_template_takes_the_clients_working_directory() {
     // Denied rather than granted, so the assertion below has something to
     // catch: granted is the default, and a template that was dropped
     // entirely would still look right.
-    let source = ConfiguredSource {
-        template: Some(
-            RunConfig::new("/placeholder", "").with_shell(lan_core::ShellAccess::Denied),
-        ),
-    };
+    let source = ConfiguredSource::new(Some(
+        RunConfig::new("/placeholder", "").with_shell(lan_core::ShellAccess::Denied),
+    ));
 
     let built = source.config_for(PathBuf::from("/repo"), Vec::new());
 
@@ -178,7 +201,7 @@ fn the_config_template_takes_the_clients_working_directory() {
 
 #[test]
 fn the_clients_mcp_servers_reach_the_config() {
-    let source = ConfiguredSource { template: None };
+    let source = ConfiguredSource::new(None);
 
     let built = source.config_for(
         PathBuf::from("/repo"),
@@ -241,4 +264,136 @@ fn other_setup_failures_stay_internal_errors() {
     let error = setup_failed(RunError::NoSuchSession);
 
     assert_eq!(error.code, ErrorCode::InternalError);
+}
+
+/// A runtime that resolves offline: a loopback endpoint nothing here dials and
+/// a placeholder credential, so building it does no more than pick a provider.
+/// Its history is ephemeral, so a test suite writes no database.
+fn offline_runtime() -> Arc<Runtime> {
+    Arc::new(
+        Runtime::builder()
+            .with_base_url("http://127.0.0.1:1/v1")
+            .with_api_key("test-key")
+            .with_ephemeral_history()
+            .build()
+            .expect("a runtime builds without touching the network"),
+    )
+}
+
+/// A template that looks nowhere except where a test put something.
+///
+/// Every discovery root is pinned, global ones to `None`: an unpinned one would
+/// read the developer's own configuration — and, for MCP, spawn the servers
+/// their `mcp.json` names. The model is an id rather than "newest available",
+/// which is what keeps resolution off the network.
+fn offline_template() -> RunConfig {
+    RunConfig::new("/placeholder", "")
+        .with_model(ModelSelector::Id("test-model".to_string()))
+        .with_context(ContextConfig {
+            file_name: "AGENTS.md".to_string(),
+            global_dir: None,
+            walk_parents: false,
+        })
+        .with_skills(SkillsConfig {
+            workspace_subdir: PathBuf::from(".lan/skills"),
+            global_dir: None,
+        })
+        .with_templates(TemplatesConfig {
+            workspace_subdir: PathBuf::from(".lan/templates"),
+            global_dir: None,
+        })
+        .with_hooks(HooksConfig {
+            workspace_file: PathBuf::from(".lan/hooks.json"),
+            global_dir: None,
+        })
+        .with_mcp(McpConfig {
+            workspace_file: PathBuf::from(".mcp.json"),
+            global_dir: None,
+            supplied: Vec::new(),
+        })
+}
+
+/// ADR-0018's acceptance for lan-acp: a server holding two sessions on one
+/// `cwd` holds one runtime and one workspace, not two of each.
+///
+/// Identity rather than a count of store files, which cannot tell the two
+/// shapes apart — N private runtimes still share mentra's one default
+/// directory. What a runtime per session actually cost was a second provider
+/// resolution, a second store handle, and a second copy of every MCP server
+/// and hook the repository configures; pointer identity is what says none of
+/// that happened twice.
+#[tokio::test]
+async fn two_sessions_on_one_workspace_share_one_runtime() {
+    let repository = tempfile::tempdir().expect("tempdir");
+    let runtime = offline_runtime();
+    let source = ConfiguredSource::on_runtime(Arc::clone(&runtime), Some(offline_template()));
+
+    let first = source
+        .create(repository.path().to_path_buf(), Vec::new())
+        .await
+        .expect("the first session opens");
+    let second = source
+        .create(repository.path().to_path_buf(), Vec::new())
+        .await
+        .expect("the second session opens");
+
+    assert_ne!(
+        first.agent_id(),
+        second.agent_id(),
+        "two sessions, not one conversation handed out twice"
+    );
+
+    let opened = source.opened();
+    assert_eq!(
+        opened.len(),
+        1,
+        "one directory is one workspace, however many sessions were minted on it"
+    );
+    assert!(
+        std::ptr::eq(opened[0].mentra_runtime(), runtime.mentra_runtime()),
+        "and both were minted on the one runtime this process built"
+    );
+}
+
+/// The other half of the same key: two sessions share a workspace only when
+/// they asked for the same servers.
+///
+/// Sharing on the directory alone would hand the second session the first
+/// one's roster and drop what it asked for, which reads exactly like a server
+/// with nothing to offer. Asserted on the key rather than on two opened
+/// workspaces, because opening one spawns the programs it names.
+#[test]
+fn a_session_that_asked_for_different_servers_is_a_different_workspace() {
+    let source = ConfiguredSource::new(Some(offline_template()));
+    let server = |command: &str| {
+        vec![McpServer::Stdio(mentra::McpServerConfig {
+            name: "fs".to_string(),
+            command: command.to_string(),
+            args: Vec::new(),
+            env: Default::default(),
+            cwd: None,
+        })]
+    };
+    let key = |mcp| WorkspaceKey::of(&source.config_for(PathBuf::from("/repo"), mcp));
+
+    assert_eq!(
+        key(Vec::new()),
+        key(Vec::new()),
+        "the same directory asked about the same way is one workspace"
+    );
+    assert_ne!(
+        key(Vec::new()),
+        key(server("/bin/mcp-fs")),
+        "a supplied server is not none"
+    );
+    assert_ne!(
+        key(server("/bin/mcp-fs")),
+        key(server("/bin/other-fs")),
+        "one name, two commands: a client that named a different program must get it"
+    );
+    assert_ne!(
+        key(Vec::new()),
+        WorkspaceKey::of(&source.config_for(PathBuf::from("/other-repo"), Vec::new())),
+        "and a directory is a key"
+    );
 }

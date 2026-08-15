@@ -8,7 +8,8 @@
 //! with two ways to speak it.
 //!
 //! - **In-process** — a host implements [`Interceptor`] and registers it with
-//!   [`WorkspaceBuilder::with_interceptor`](crate::WorkspaceBuilder::with_interceptor).
+//!   [`RuntimeBuilder::with_interceptor`](crate::RuntimeBuilder::with_interceptor) —
+//!   host scope is runtime scope (ADR-0018).
 //!   Its code, its process, its dependencies; the case a subprocess answers
 //!   badly, because redacting a credential needs the vault handle the embedding
 //!   program is already holding.

@@ -3,10 +3,12 @@
 //!
 //! The handlers themselves are split by what they touch:
 //! [`lifecycle`] holds the `session/*` methods that open, list, switch and
-//! close a conversation, [`turn`] holds the one that runs the agent, and
-//! [`config`] holds what the connection was configured with. What stays here
-//! is the wiring, the capabilities answer that describes all of it, and the
-//! two sends a handler may make from either side of the rule below.
+//! close a conversation, [`turn`] holds the one that runs the agent,
+//! [`config`] holds what the connection was configured with, and
+//! [`workspaces`] holds what lan's own sessions are built on — one runtime for
+//! the process, one workspace per directory (ADR-0018). What stays here is the
+//! wiring, the capabilities answer that describes all of it, and the two sends
+//! a handler may make from either side of the rule below.
 //!
 //! # The one rule
 //!
@@ -42,13 +44,16 @@
 //!   `session/list`, and the next call would list it again from the store. A
 //!   deletion that does not delete is the one answer worse than `-32601`.
 //!
-//! `session/list` *is* registered, but only when the
-//! [`SessionSource`] can actually enumerate — see
-//! [`lists_sessions`](SessionSource::lists_sessions).
+//! `session/list` is the third, conditionally: it is registered whatever the
+//! source is — a builder whose type changes with each handler has no chain to
+//! skip one in — and answers `-32601` itself when the [`SessionSource`] cannot
+//! enumerate, which is the answer `initialize` promised by not advertising the
+//! capability. See [`lists_sessions`](SessionSource::lists_sessions).
 
 mod config;
 mod lifecycle;
 mod turn;
+mod workspaces;
 
 pub use config::{ServeConfig, SessionSource};
 
@@ -278,7 +283,7 @@ fn initialize(request: &InitializeRequest, config: &ServeConfig) -> InitializeRe
                         // replay, for a client that draws its own history.
                         .resume(SessionResumeCapabilities::new())
                         // Closing is real work here: it stops the turn and
-                        // drops the runtime the session was holding.
+                        // drops the conversation this process was holding open.
                         .close(SessionCloseCapabilities::new())
                         // Only when the source can actually enumerate. A host
                         // serving sessions that die with the process has no

@@ -1,11 +1,16 @@
-//! Fixed command environment for one opened workspace.
+//! Fixed command environment for one built runtime.
 //!
 //! Mentra deliberately clears the ambient process environment before running
 //! a model command. A host can still need to attach non-secret execution
-//! context that is different for two workspaces in the same process. This
-//! executor adds exactly the pairs the workspace builder was given, then
-//! delegates every timeout, output cap, process-group, and cleanup rule to
-//! Mentra's local executor.
+//! context — a task identity, a registry directory — without exporting it
+//! process-wide. This executor adds exactly the pairs the runtime builder was
+//! given, then delegates every timeout, output cap, process-group, and cleanup
+//! rule to Mentra's local executor.
+//!
+//! Runtime-scoped since ADR-0018 moved the executor with the rest of the
+//! process knobs: on a shared runtime every workspace's commands see the same
+//! pairs, and a host that wants two workspaces to differ gives each its own
+//! runtime via [`WorkspaceBuilder::with_runtime_builder`](crate::WorkspaceBuilder::with_runtime_builder).
 
 use std::{collections::BTreeMap, sync::Arc};
 

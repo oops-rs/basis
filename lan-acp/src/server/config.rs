@@ -1,11 +1,12 @@
 //! Where a connection's sessions come from, and what its client cannot say.
 //!
-//! One module for both halves because they are one decision: a [`ServeConfig`]
-//! is a [`SessionSource`] plus the mode its sessions open in, and
-//! [`ConfiguredSource`] — the source lan builds when the caller supplies a
-//! [`RunConfig`] rather than a runtime of its own — is what
-//! [`ServeConfig::new`] reaches for. A constructor and the only thing it
-//! constructs do not belong on opposite sides of a file boundary.
+//! A [`ServeConfig`] is a [`SessionSource`] plus the mode its sessions open
+//! in, and the source [`ServeConfig::new`] reaches for is
+//! [`ConfiguredSource`](super::workspaces::ConfiguredSource) — which is next
+//! door rather than here, because since ADR-0018 it is no longer a mapping
+//! from a template to a config. It holds the process's runtime and a workspace
+//! per directory, which is a lifetime rather than a configuration, and
+//! configuration is all this file is.
 //!
 //! Nothing here answers a request. The handlers read this and never write it,
 //! which is why it is `Clone` and holds no lock: every closure in
@@ -13,6 +14,7 @@
 
 use std::{path::PathBuf, sync::Arc};
 
+use super::workspaces::ConfiguredSource;
 use crate::mode::ApprovalMode;
 use lan_core::{McpServer, PersistedSession, PreparedRun, RunConfig, RunError};
 
@@ -28,8 +30,8 @@ use lan_core::{McpServer, PersistedSession, PreparedRun, RunConfig, RunError};
 /// A source that builds its own runtime owns its tool authorizer too, and a
 /// session mode only reaches calls that authorizer surfaces: install
 /// [`ApprovalGate`](lan_core::approval::ApprovalGate) — which is what lan's own
-/// source gets from [`prepare_without_prompt`](lan_core::run::prepare_without_prompt)
-/// — or the client's mode picker will have nothing to decide.
+/// source gets from the [`Runtime`](lan_core::Runtime) it builds — or the
+/// client's mode picker will have nothing to decide.
 #[async_trait::async_trait]
 pub trait SessionSource: Send + Sync + 'static {
     /// Opens a conversation in `cwd`, for `session/new`, with the MCP servers
@@ -70,77 +72,17 @@ pub trait SessionSource: Send + Sync + 'static {
     }
 }
 
-/// The default source: build a runtime per session from a [`RunConfig`].
-pub(super) struct ConfiguredSource {
-    pub(super) template: Option<RunConfig>,
-}
-
-impl ConfiguredSource {
-    /// Builds the config for one session, in the client's working directory.
-    ///
-    /// Nothing here says anything about approval. A runtime's authorizer is
-    /// fixed for its life, so lan-core installs one that surfaces every
-    /// consequential call and answers none of them; which of those the client
-    /// actually sees is the session's mode, which can still change (see
-    /// [`mode`](crate::mode)).
-    pub(super) fn config_for(&self, cwd: PathBuf, mcp: Vec<McpServer>) -> RunConfig {
-        let config = match &self.template {
-            Some(template) => {
-                let mut config = template.clone();
-                config.workspace = cwd;
-                config
-            }
-            None => RunConfig::new(cwd, ""),
-        };
-
-        // The client's servers outrank the workspace's own: it is answering
-        // for this session in particular. Discovery still runs, so a
-        // `.mcp.json` the client said nothing about is still honored.
-        let mcp = config.mcp.clone().with_supplied(mcp);
-        config.with_mcp(mcp)
-    }
-}
-
-#[async_trait::async_trait]
-impl SessionSource for ConfiguredSource {
-    async fn create(&self, cwd: PathBuf, mcp: Vec<McpServer>) -> Result<PreparedRun, RunError> {
-        lan_core::run::prepare_without_prompt(self.config_for(cwd, mcp)).await
-    }
-
-    async fn resume(
-        &self,
-        agent_id: &str,
-        cwd: PathBuf,
-        mcp: Vec<McpServer>,
-    ) -> Result<PreparedRun, RunError> {
-        lan_core::run::resume(agent_id, self.config_for(cwd, mcp)).await
-    }
-
-    fn lists_sessions(&self) -> bool {
-        true
-    }
-
-    /// Reads mentra's store directly. Building a session to enumerate sessions
-    /// would resolve a model over the network to answer a question about a
-    /// SQLite table.
-    ///
-    /// This depends on
-    /// [`WorkspaceBuilder::open`](lan_core::WorkspaceBuilder::open) tagging each
-    /// conversation with
-    /// [`store::runtime_identifier`](lan_core::store::runtime_identifier) for
-    /// its workspace. Until it did, conversations were written under mentra's
-    /// `"default"` tag and no workspace's list found any of them.
-    async fn list_sessions(&self, cwd: PathBuf) -> Result<Vec<PersistedSession>, RunError> {
-        lan_core::store::list(&cwd)
-    }
-}
-
 /// How a served connection is configured.
 ///
 /// The client supplies the workspace per session (`cwd` on `session/new`), so
 /// what belongs here is only what the client cannot say: which model and
 /// endpoint to use, whether commands are granted, and which permission mode
 /// each session opens in.
+///
+/// One of these describes a *server*, not a connection: it is cloned into every
+/// handler and, on the bridge, into every connection served, so the runtime and
+/// workspaces its source holds are the process's (ADR-0018). Building a second
+/// one builds a second runtime.
 #[derive(Clone)]
 pub struct ServeConfig {
     pub(super) source: Arc<dyn SessionSource>,
@@ -166,6 +108,12 @@ impl ServeConfig {
     /// Serves sessions built from `template`, whose workspace each session
     /// replaces with the `cwd` its client sent.
     ///
+    /// The template's process half — provider, endpoint, model — becomes the
+    /// recipe for the one [`Runtime`](lan_core::Runtime) every session runs on
+    /// (ADR-0018), built on the first `session/new` rather than here, so that a
+    /// missing credential still reaches the client as `auth_required` rather
+    /// than stopping the server from starting.
+    ///
     /// Sessions open at [`ApprovalMode::Prompt`] rather than at lan's library
     /// default of allowing everything: over ACP there is a client to ask, which
     /// is the whole reason the protocol carries a permission request. An
@@ -175,9 +123,7 @@ impl ServeConfig {
     /// approval to carry (ADR-0010).
     pub fn new(template: impl Into<Option<RunConfig>>) -> Self {
         Self {
-            source: Arc::new(ConfiguredSource {
-                template: template.into(),
-            }),
+            source: Arc::new(ConfiguredSource::new(template.into())),
             initial_mode: ApprovalMode::default(),
         }
     }

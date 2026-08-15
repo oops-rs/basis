@@ -1,10 +1,10 @@
 //! Task creation and Mentra execution.
 
-use std::{io, path::Path, time::Duration};
+use std::{io, path::Path, sync::Arc, time::Duration};
 
 use lan_core::{
     AllowAll, Approver, Bound, CancellationToken, DenyAll, Effort, Event, EventSink, ModelSelector,
-    RunConfig, RunOutcome, ShellAccess, TurnOptions, provider,
+    RunConfig, RunOutcome, Runtime, RuntimeBuilder, ShellAccess, TurnOptions, provider,
 };
 use tokio::time;
 use uuid::Uuid;
@@ -204,6 +204,22 @@ async fn run_task(
         finish_cancelled(&shared, &task).await;
         return;
     }
+    let parent = shared
+        .journal
+        .lock()
+        .expect("task journal poisoned")
+        .get(&task)
+        .and_then(|record| record.parent.clone());
+    // Ahead of the run config: the first unusable option is what the task
+    // fails with, and `--provider` was read before `--effort` while both
+    // halves of the options lived in one config.
+    let runtime = match task_runtime(&shared, &task, parent.as_deref(), &options) {
+        Ok(runtime) => runtime,
+        Err(error) => {
+            finish_failed(&shared, &task, error, None).await;
+            return;
+        }
+    };
     let config = match run_config(
         &shared.workspace,
         prompt,
@@ -217,35 +233,24 @@ async fn run_task(
         }
     };
     let (builder, spec) = config.split();
-    let parent = shared
-        .journal
-        .lock()
-        .expect("task journal poisoned")
-        .get(&task)
-        .and_then(|record| record.parent.clone());
-    let mut builder = builder
-        .with_store_dir(
-            shared
-                .registry
-                .history_directory(&shared.descriptor.instance),
-        )
-        .with_command_environment("LAN_TASK_ID", &task)
-        .with_command_environment("LAN_REGISTRY_DIR", shared.registry.root().to_string_lossy());
-    if let Some(parent) = parent {
-        builder = builder.with_command_environment("LAN_PARENT_TASK_ID", parent);
-    }
-    let prepared = match builder
-        .open()
-        .await
-        .and_then(|workspace| workspace.prepare(spec))
-    {
-        Ok(run) => run,
+    let workspace = match builder.with_runtime_builder(runtime).open().await {
+        Ok(workspace) => Arc::new(workspace),
         Err(error) => {
             finish_failed(&shared, &task, error.to_string(), None).await;
             return;
         }
     };
-    let mut run = prepared;
+    // The run carries the workspace through the whole turn loop below, not
+    // just the mint: the workspace's hook registration and MCP connections
+    // end when it drops, and a task's `.lan/hooks.json` must keep its say over
+    // every turn (see `PreparedRun::with_workspace`).
+    let mut run = match workspace.prepare(spec) {
+        Ok(run) => run.with_workspace(workspace),
+        Err(error) => {
+            finish_failed(&shared, &task, error.to_string(), None).await;
+            return;
+        }
+    };
     {
         let mut journal = shared.journal.lock().expect("task journal poisoned");
         let Some(record) = journal.get_mut(&task) else {
@@ -364,6 +369,13 @@ async fn run_task(
     }
 }
 
+/// The per-run and per-workspace half of the wire options.
+///
+/// The provider and the base URL are the other half — process facts since
+/// ADR-0018 — and are stated on [`task_runtime`]'s recipe instead. Saying them
+/// here as well would build a value that
+/// [`with_runtime_builder`](lan_core::WorkspaceBuilder::with_runtime_builder)
+/// then replaces.
 fn run_config(
     workspace: &Path,
     prompt: String,
@@ -372,12 +384,6 @@ fn run_config(
 ) -> Result<RunConfig, String> {
     let mut config =
         RunConfig::new(workspace, prompt).with_shell(ShellAccess::from_flag(!options.no_shell));
-    if let Some(name) = &options.provider {
-        config = config.with_provider(provider::parse(name).map_err(|error| error.to_string())?);
-    }
-    if let Some(base_url) = &options.base_url {
-        config = config.with_base_url(base_url);
-    }
     if let Some(model) = &options.model {
         config = config.with_model(ModelSelector::Id(model.clone()));
     }
@@ -394,6 +400,42 @@ fn run_config(
         config = config.with_token_budget(token_budget);
     }
     Ok(config)
+}
+
+/// The recipe for this task's own runtime: the process half of the wire
+/// options, plus the identity a spawned command needs to talk back to the
+/// service.
+///
+/// One runtime per task rather than one per service, which is the shape the
+/// pre-split code already had — a workspace open built one, and there is a
+/// workspace per task. It has to stay that way: the environment below names
+/// *this* task, and a runtime's command environment is fixed for every
+/// workspace on it (ADR-0018), so two concurrent tasks sharing one runtime
+/// would tell their subprocesses the same task id.
+fn task_runtime(
+    shared: &Shared,
+    task: &str,
+    parent: Option<&str>,
+    options: &WireRunOptions,
+) -> Result<RuntimeBuilder, String> {
+    let mut runtime = Runtime::builder()
+        .with_store_dir(
+            shared
+                .registry
+                .history_directory(&shared.descriptor.instance),
+        )
+        .with_command_environment("LAN_TASK_ID", task)
+        .with_command_environment("LAN_REGISTRY_DIR", shared.registry.root().to_string_lossy());
+    if let Some(name) = &options.provider {
+        runtime = runtime.with_provider(provider::parse(name).map_err(|error| error.to_string())?);
+    }
+    if let Some(base_url) = &options.base_url {
+        runtime = runtime.with_base_url(base_url);
+    }
+    if let Some(parent) = parent {
+        runtime = runtime.with_command_environment("LAN_PARENT_TASK_ID", parent);
+    }
+    Ok(runtime)
 }
 
 fn parse_effort(value: &str) -> Result<Effort, String> {
@@ -479,5 +521,97 @@ mod tests {
         assert_eq!(earlier_deadline(None, Some(10)), Some(10));
         assert_eq!(earlier_deadline(Some(20), None), Some(20));
         assert_eq!(earlier_deadline(None, None), None);
+    }
+
+    /// Asserted through `Debug` because the recipe's fields are private and its
+    /// values are redacted; the names and the history directory are what a
+    /// regression would drop, and a task whose history went to the machine-wide
+    /// default would otherwise look like it worked.
+    #[test]
+    fn a_task_runs_on_the_registry_history_and_knows_which_task_it_is() {
+        let (_dir, shared) = crate::local::service::tests::test_shared();
+        let history = shared
+            .registry
+            .history_directory(&shared.descriptor.instance);
+
+        let attached = task_runtime(
+            &shared,
+            "instance/child",
+            Some("instance/root"),
+            &WireRunOptions::default(),
+        )
+        .expect("no provider name to parse");
+        let printed = format!("{attached:?}");
+
+        assert!(
+            printed.contains(&format!("Directory({history:?})")),
+            "{printed}"
+        );
+        assert!(printed.contains("LAN_TASK_ID"), "{printed}");
+        assert!(printed.contains("LAN_REGISTRY_DIR"), "{printed}");
+        assert!(printed.contains("LAN_PARENT_TASK_ID"), "{printed}");
+
+        let detached = task_runtime(&shared, "instance/root", None, &WireRunOptions::default())
+            .expect("no provider name to parse");
+        assert!(
+            !format!("{detached:?}").contains("LAN_PARENT_TASK_ID"),
+            "a root task has no parent to name"
+        );
+    }
+
+    /// The provider moved onto the runtime recipe with ADR-0018, so this is
+    /// where an unusable `--provider` has to be refused now.
+    #[test]
+    fn an_unknown_provider_fails_the_task_rather_than_going_unread() {
+        let (_dir, shared) = crate::local::service::tests::test_shared();
+        let options = WireRunOptions {
+            provider: Some("nonsense".to_string()),
+            ..WireRunOptions::default()
+        };
+
+        assert!(task_runtime(&shared, "instance/root", None, &options).is_err());
+    }
+
+    /// Two functions read the wire options where one did, so the order they
+    /// are called in is now what decides which bad value a caller hears about.
+    /// `--provider` was read before `--effort` while both halves lived in one
+    /// `RunConfig`, and this is the message `lan wait` prints.
+    #[tokio::test]
+    async fn the_first_unusable_option_is_the_one_the_task_fails_with() {
+        use crate::local::service::lifecycle::await_task;
+
+        let (_dir, shared) = crate::local::service::tests::test_shared();
+        let (task, lease) = spawn_task(
+            &shared,
+            SpawnRequest {
+                workspace: shared.workspace.to_string_lossy().into_owned(),
+                prompt: "anything at all".to_string(),
+                parent: None,
+                caller: None,
+                detached: false,
+                await_result: true,
+                options: WireRunOptions {
+                    // Validated by `spawn_task` itself, so it has to be usable
+                    // for the worker to reach the options this test is about.
+                    approve: "never".to_string(),
+                    provider: Some("nonsense".to_string()),
+                    effort: Some("bogus".to_string()),
+                    ..WireRunOptions::default()
+                },
+            },
+        )
+        .await
+        .expect("the options are the worker's to read, not the request's");
+
+        let payload = await_task(&shared, &task, Duration::from_secs(10), lease)
+            .await
+            .expect("the worker settles without opening a workspace");
+
+        assert_eq!(payload["state"], "failed");
+        let error = payload["error"]
+            .as_str()
+            .expect("a failure names its cause");
+        assert!(error.contains("unknown provider"), "{error}");
+        assert!(!error.contains("effort"), "{error}");
     }
 }

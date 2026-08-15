@@ -23,7 +23,7 @@ mod sink;
 mod turn;
 mod usage;
 
-use std::{path::PathBuf, time::Duration};
+use std::{path::PathBuf, sync::Arc, time::Duration};
 
 use mentra::{BuiltinProvider, ModelSelector, Session};
 use thiserror::Error;
@@ -105,12 +105,13 @@ impl From<Effort> for mentra::provider::ReasoningEffort {
 /// Everything a run needs. Task-specific behavior lives in `prompt` and in the
 /// workspace, never in this struct.
 ///
-/// This conflates two lifetimes, and [`split`](Self::split) is where the seam
-/// is: most of it describes a *workspace* — where to discover context, which
-/// provider answers, which MCP servers to connect — and only a handful of
-/// fields describe one run. A caller sending many prompts at one repository
-/// wants [`Workspace`] and a [`RunSpec`] each; a caller
-/// sending one wants this, and pays for the discovery once either way.
+/// This conflates lifetimes, and [`split`](Self::split) is where the seam is:
+/// most of it describes a *workspace* — where to discover context, which MCP
+/// servers to connect — a couple of fields describe the *process*
+/// (`provider`, `base_url`, seeded into the private runtime's recipe per
+/// ADR-0018), and only a handful describe one run. A caller sending many
+/// prompts at one repository wants [`Workspace`] and a [`RunSpec`] each; a
+/// caller sending one wants this, and pays for the discovery once either way.
 #[derive(Debug, Clone)]
 pub struct RunConfig {
     pub workspace: PathBuf,
@@ -316,7 +317,20 @@ impl RunConfig {
     /// migration path. A caller that outgrows one-prompt-per-config keeps the
     /// builder, opens it once, and mints a [`RunSpec`] per run.
     pub fn split(&self) -> (WorkspaceBuilder, RunSpec) {
+        // The process half of this config seeds the private runtime's recipe;
+        // opening the builder builds it bound to the workspace path, which is
+        // exactly what the pre-ADR-0018 knobs did.
+        let mut runtime = crate::runtime::Runtime::builder();
+        if let Some(provider) = self.provider {
+            runtime = runtime.with_provider(provider);
+        }
+        if let Some(base_url) = &self.base_url {
+            runtime = runtime.with_base_url(base_url.clone());
+        }
+
+        #[allow(unused_mut, reason = "mutated only when the mcp feature is on")]
         let mut builder = Workspace::builder(&self.workspace)
+            .with_runtime_builder(runtime)
             .with_model(self.model.clone())
             .with_context(self.context.clone())
             .with_skills(self.skills.clone())
@@ -327,12 +341,6 @@ impl RunConfig {
         #[cfg(feature = "mcp")]
         {
             builder = builder.with_mcp(self.mcp.clone());
-        }
-        if let Some(provider) = self.provider {
-            builder = builder.with_provider(provider);
-        }
-        if let Some(base_url) = &self.base_url {
-            builder = builder.with_base_url(base_url.clone());
         }
 
         (builder, self.spec())
@@ -552,9 +560,9 @@ pub async fn prepare(config: RunConfig) -> Result<PreparedRun, RunError> {
 /// [`prepare`] would reject exactly the case that matters. Prompts arrive later
 /// through [`PreparedRun::send`], which does its own checking.
 pub async fn prepare_without_prompt(config: RunConfig) -> Result<PreparedRun, RunError> {
-    let (workspace, spec) = config.split();
+    let (builder, spec) = config.split();
 
-    workspace.open().await?.prepare(spec)
+    mint_carrying_workspace(builder, |workspace| workspace.prepare(spec)).await
 }
 
 /// Picks up a conversation a previous process left behind.
@@ -567,9 +575,30 @@ pub async fn prepare_without_prompt(config: RunConfig) -> Result<PreparedRun, Ru
 /// `config.prompt` may be empty here — a caller that resumes to inspect the
 /// history, or to send a prompt chosen later, has nothing to say yet.
 pub async fn resume(agent_id: &str, config: RunConfig) -> Result<PreparedRun, RunError> {
-    let (workspace, spec) = config.split();
+    let (builder, spec) = config.split();
 
-    workspace.open().await?.resume(agent_id, spec)
+    mint_carrying_workspace(builder, |workspace| workspace.resume(agent_id, spec)).await
+}
+
+/// Opens the builder and mints one run that carries the workspace.
+///
+/// The one resolution path for every free function above, and the load-bearing
+/// half is the carry: these functions hand back a [`PreparedRun`] and nothing
+/// else, so the run must be what keeps the workspace alive until the run ends
+/// — the module's own promise. A workspace dropped when this returns would
+/// take its hook registration and MCP connections with it *before the first
+/// turn is driven*: the dispatcher fails open for a directory no live
+/// workspace claims, so every `.lan/hooks.json` hook would be silently
+/// bypassed, and the minted roster would offer `mcp__*` tools whose servers
+/// were already torn down. See [`PreparedRun::with_workspace`].
+async fn mint_carrying_workspace(
+    builder: WorkspaceBuilder,
+    mint: impl FnOnce(&Workspace) -> Result<PreparedRun, RunError>,
+) -> Result<PreparedRun, RunError> {
+    let workspace = Arc::new(builder.open().await?);
+    let prepared = mint(&workspace)?;
+
+    Ok(prepared.with_workspace(workspace))
 }
 
 /// Prepares a run against a session the caller already built, so a host with

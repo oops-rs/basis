@@ -20,12 +20,12 @@
 //! prompt, the workspace (AGENTS.md, skills, templates, `.mcp.json`), and
 //! config — never through code in this crate.
 //!
-//! # Two shapes
+//! # Three shapes
 //!
 //! [`Workspace`] is the SDK's shape (ADR-0010). Opening one settles everything
 //! that belongs to a repository rather than to a prompt — context documents,
-//! the credential and the resolved model, skills, templates, hooks, MCP
-//! connections — and then mints runs from it without doing any of that again:
+//! the resolved model, skills, templates, hooks, MCP connections — and then
+//! mints runs from it without doing any of that again:
 //!
 //! ```no_run
 //! # async fn example() -> Result<(), lan_core::RunError> {
@@ -41,6 +41,12 @@
 //! [`RunConfig`] in, a report out, with a workspace opened and dropped around
 //! it. They are wrappers over the same path — [`RunConfig::split`] is the seam
 //! — so nothing behaves differently for having gone through one.
+//!
+//! [`Runtime`] is the process's shape (ADR-0018), and only the N-repository
+//! host sees it: what changes when the host changes — provider and credential,
+//! the history store, the host's interceptors — is built once and every
+//! workspace borrows it through an `Arc`. `Workspace::open` builds a private
+//! one behind the scenes, so the other two shapes never name it.
 //!
 //! # Features
 //!
@@ -63,6 +69,7 @@ pub mod mcp;
 mod paths;
 pub mod provider;
 pub mod run;
+pub mod runtime;
 pub mod shell;
 pub mod skills;
 pub mod store;
@@ -103,6 +110,7 @@ pub use run::{
     NullSink, OutputReport, OutputSpec, PreparedRun, RunConfig, RunContext, RunError, RunReport,
     RunUsage, TaggedEvent, TaggedSink, TurnOptions, resume, run, run_with_approver,
 };
+pub use runtime::{Runtime, RuntimeBuilder};
 pub use shell::ShellAccess;
 // Mentra's, deliberately. These three are the types lan's own surface asks a
 // caller to *name* — a model to resolve, a provider to prefer, a token to stop

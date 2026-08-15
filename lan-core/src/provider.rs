@@ -192,7 +192,7 @@ pub fn resolve(
 /// `api_key` of `None` is [`resolve`] — the environment answers. A host that
 /// holds its key somewhere lan cannot read, a vault or a token it just
 /// exchanged, passes it here instead of exporting a variable for lan to find
-/// again ([`WorkspaceBuilder::with_api_key`](crate::WorkspaceBuilder::with_api_key)).
+/// again ([`RuntimeBuilder::with_api_key`](crate::RuntimeBuilder::with_api_key)).
 ///
 /// A supplied key still has to say *where it is for*: with neither a provider
 /// nor a base URL, lan would be choosing a service to send someone's credential
@@ -210,7 +210,7 @@ pub fn resolve_with(
 ///
 /// Private, and meant to stay that way: a host whose credential lives
 /// somewhere lan cannot read passes it to
-/// [`WorkspaceBuilder::with_api_key`](crate::WorkspaceBuilder::with_api_key),
+/// [`RuntimeBuilder::with_api_key`](crate::RuntimeBuilder::with_api_key),
 /// and a second, wider way to supply one would be a second thing to keep
 /// honest.
 fn resolve_against(

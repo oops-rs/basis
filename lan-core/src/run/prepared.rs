@@ -7,7 +7,7 @@
 //! whole pipeline against a scripted runtime, so the event contract is checked
 //! without a network call.
 
-use std::path::PathBuf;
+use std::{path::PathBuf, sync::Arc};
 
 use mentra::{
     ContentBlock, Session,
@@ -28,6 +28,7 @@ use crate::{
     event::{ContextFile, EVENT_SCHEMA_VERSION, Event, RunOutcome, SkillSummary, TemplateSummary},
     lifecycle::{LifecycleError, Supervisor, TaskHandle},
     templates::Template,
+    workspace::Workspace,
 };
 
 mod forward;
@@ -69,6 +70,14 @@ pub struct PreparedRun {
     session: Session,
     run: RunContext,
     bounds: TurnOptions,
+    /// The workspace that minted this run, when the run is what keeps it
+    /// alive ([`with_workspace`](Self::with_workspace)); `None` for a caller
+    /// that holds the workspace itself.
+    ///
+    /// Held for its `Drop`, not read: a [`Workspace`] carries its hook
+    /// registration and MCP connections, and both end the moment the last
+    /// handle to it goes.
+    workspace: Option<Arc<Workspace>>,
 }
 
 /// Hand-written because mentra's `Session` is not `Debug`, and because the
@@ -95,6 +104,7 @@ impl PreparedRun {
             session,
             run,
             bounds: TurnOptions::default(),
+            workspace: None,
         }
     }
 
@@ -113,6 +123,34 @@ impl PreparedRun {
         &self.bounds
     }
 
+    /// Makes this run the keeper of the workspace that minted it.
+    ///
+    /// A `PreparedRun` owns its session but only *describes* its workspace,
+    /// and two things live exactly as long as the workspace does: its hook
+    /// registration on the runtime's dispatcher, and its MCP connections. A
+    /// caller that drops the workspace at mint and drives the run afterwards
+    /// runs every turn with the workspace's hooks silently unenforced — the
+    /// dispatcher fails open for a directory no live workspace claims, which
+    /// is correct for a retired workspace and catastrophic for one that was
+    /// merely dropped early — and with its MCP servers torn down while the
+    /// minted roster still offers their tools. The free functions in
+    /// [`run`](mod@crate::run) attach the workspace here for exactly that
+    /// reason; a host that keeps the workspace itself needs nothing from this.
+    pub fn with_workspace(self, workspace: Arc<Workspace>) -> Self {
+        Self {
+            workspace: Some(workspace),
+            ..self
+        }
+    }
+
+    /// The workspace this run keeps alive, when it is the one keeping it.
+    ///
+    /// `None` does not mean there is no workspace — only that someone else
+    /// holds it, which is the [`Workspace::prepare`] shape.
+    pub fn workspace(&self) -> Option<&Arc<Workspace>> {
+        self.workspace.as_ref()
+    }
+
     /// The header line this run will open with, before anything is sent.
     pub fn header(&self) -> Event {
         header_for(&self.session.id().to_string(), &self.run)
@@ -129,6 +167,11 @@ impl PreparedRun {
     }
 
     /// Gives the session back, ending lan's involvement.
+    ///
+    /// A workspace this run was keeping alive
+    /// ([`with_workspace`](Self::with_workspace)) is dropped here with the
+    /// rest of the run, and its hooks and MCP connections end with it — the
+    /// session that comes back is mentra's alone.
     pub fn into_session(self) -> Session {
         self.session
     }

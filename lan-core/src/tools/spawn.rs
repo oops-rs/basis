@@ -59,6 +59,12 @@ use serde_json::{Value, json};
 
 use parse::{INPUT_FIELD, Mode, Spawn, parse};
 
+// The runtime's hook dispatcher must know whether a `spawn` call is a command
+// before denying it for a shell-off workspace, and the module docs above make
+// the rule: the `!` prefix is read exactly once, here. Re-exported crate-wide
+// so the dispatcher asks this parser rather than becoming a second reader.
+pub(crate) use parse::{Mode as SpawnMode, parse as parse_spawn};
+
 pub use depth::MAX_DEPTH;
 
 /// The name the model calls, an operator writes in a rule, and a

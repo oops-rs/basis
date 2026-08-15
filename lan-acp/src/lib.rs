@@ -30,8 +30,11 @@
 //!   `session/load` from `session/resume`.
 //! - [`SessionRegistry`] holds the open conversations, keyed by mentra's
 //!   persisted agent id so that `session/load` is just
-//!   [`resume`](lan_core::run::resume).
-//! - [`serve`] wires the handlers onto a connection.
+//!   [`Workspace::resume`](lan_core::Workspace::resume).
+//! - [`serve`] wires the handlers onto a connection, over one
+//!   [`Runtime`](lan_core::Runtime) for the process and one
+//!   [`Workspace`](lan_core::Workspace) per directory a client names
+//!   (ADR-0018).
 //! - [`serve_stdio`] is the stdin/stdout transport, and the one place lan looks
 //!   at what a peer sent before serving it.
 //! - [`available_commands`] and [`from_acp`] are the two mappings between a

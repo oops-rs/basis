@@ -17,7 +17,7 @@
 //!
 //! ```no_run
 //! use lan_core::{
-//!     HookOutcome, HookRequest, Interceptor, InterceptorError, Workspace, async_trait,
+//!     HookOutcome, HookRequest, Interceptor, InterceptorError, Runtime, Workspace, async_trait,
 //! };
 //!
 //! struct Redact;
@@ -44,8 +44,11 @@
 //! }
 //!
 //! # async fn example() -> Result<(), lan_core::RunError> {
+//! // Host scope is runtime scope (ADR-0018): the guard registers on the
+//! // runtime the workspaces share — or, as here, on the private one this
+//! // workspace's open builds from the recipe.
 //! let workspace = Workspace::builder("/repo")
-//!     .with_interceptor(Redact)
+//!     .with_runtime_builder(Runtime::builder().with_interceptor(Redact))
 //!     .open()
 //!     .await?;
 //! # let _ = workspace;

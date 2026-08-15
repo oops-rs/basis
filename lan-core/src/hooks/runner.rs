@@ -71,7 +71,7 @@ impl HookRunner {
     /// they are consulted in — see the module docs for where that sits relative
     /// to subprocess hooks, and why.
     ///
-    /// [`WorkspaceBuilder::with_interceptor`](crate::WorkspaceBuilder::with_interceptor)
+    /// [`RuntimeBuilder::with_interceptor`](crate::RuntimeBuilder::with_interceptor)
     /// is how a host normally reaches this; the constructor is here for a host
     /// building a runner for a runtime of its own.
     pub fn with_interceptor(self, interceptor: impl Interceptor + 'static) -> Self {

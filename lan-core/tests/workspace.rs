@@ -32,8 +32,8 @@ use std::{
 };
 
 use lan_core::{
-    CollectingSink, ContextConfig, RunOutcome, Snapshot, Workspace, WorkspaceBuilder,
-    hooks::HooksConfig, skills::SkillsConfig, store, templates::TemplatesConfig,
+    CollectingSink, ContextConfig, RunOutcome, Runtime, RuntimeBuilder, Snapshot, Workspace,
+    WorkspaceBuilder, hooks::HooksConfig, skills::SkillsConfig, store, templates::TemplatesConfig,
 };
 use mentra::{
     BuiltinProvider, ContentBlock, ModelSelector, agent::AgentConfig, runtime::SqliteRuntimeStore,
@@ -53,13 +53,13 @@ const CLOSED_PORT: &str = "http://127.0.0.1:1/v1";
 /// only part of opening a workspace that would otherwise make a request. The
 /// history is ephemeral, so nothing here writes to the database under the
 /// user's data directory — and the tests that are *about* persistence say
-/// [`WorkspaceBuilder::with_store_dir`] afterwards, which is the last word.
+/// [`lan_core::RuntimeBuilder::with_store_dir`] afterwards, which is the last
+/// word. The process knobs ride on the private runtime's recipe, where
+/// ADR-0018 moved them; everything else is still the workspace's.
 fn offline(workspace: &Path) -> WorkspaceBuilder {
     Workspace::builder(workspace)
-        .with_base_url(CLOSED_PORT)
-        .with_api_key("test-key")
+        .with_runtime_builder(offline_runtime())
         .with_model(ModelSelector::Id("test-model".to_string()))
-        .with_ephemeral_history()
         .with_context(ContextConfig {
             file_name: "AGENTS.md".to_string(),
             global_dir: None,
@@ -77,6 +77,16 @@ fn offline(workspace: &Path) -> WorkspaceBuilder {
             workspace_file: PathBuf::from(".lan/hooks.json"),
             global_dir: None,
         })
+}
+
+/// The process half of [`offline`], for the tests that re-say a runtime knob:
+/// `with_runtime_builder` replaces the whole recipe, so a test that wants the
+/// offline defaults plus one change starts from here.
+fn offline_runtime() -> RuntimeBuilder {
+    Runtime::builder()
+        .with_base_url(CLOSED_PORT)
+        .with_api_key("test-key")
+        .with_ephemeral_history()
 }
 
 fn write(path: &Path, body: &str) {
@@ -160,7 +170,7 @@ async fn a_conversation_is_found_again_only_through_the_directory_it_was_written
     let elsewhere = tempfile::tempdir().expect("tempdir");
 
     let opened = offline(dir.path())
-        .with_store_dir(store.path())
+        .with_runtime_builder(offline_runtime().with_store_dir(store.path()))
         .open()
         .await
         .expect("opens");
@@ -176,7 +186,7 @@ async fn a_conversation_is_found_again_only_through_the_directory_it_was_written
     );
 
     let reopened = offline(dir.path())
-        .with_store_dir(store.path())
+        .with_runtime_builder(offline_runtime().with_store_dir(store.path()))
         .open()
         .await
         .expect("opens");
@@ -189,7 +199,7 @@ async fn a_conversation_is_found_again_only_through_the_directory_it_was_written
     );
 
     let reopened = offline(dir.path())
-        .with_store_dir(elsewhere.path())
+        .with_runtime_builder(offline_runtime().with_store_dir(elsewhere.path()))
         .open()
         .await
         .expect("opens");
@@ -212,8 +222,7 @@ async fn an_ephemeral_workspace_runs_a_turn_and_resumes_its_own_conversation() {
 
     let endpoint = ScriptedEndpoint::start();
     let workspace = offline(dir.path())
-        .with_base_url(&endpoint.base_url)
-        .with_ephemeral_history()
+        .with_runtime_builder(offline_runtime().with_base_url(&endpoint.base_url))
         .open()
         .await
         .expect("opens");
@@ -256,8 +265,11 @@ async fn an_ephemeral_workspace_leaves_the_directory_it_was_offered_empty() {
     let store_dir = tempfile::tempdir().expect("tempdir");
 
     let workspace = offline(dir.path())
-        .with_store_dir(store_dir.path())
-        .with_ephemeral_history()
+        .with_runtime_builder(
+            offline_runtime()
+                .with_store_dir(store_dir.path())
+                .with_ephemeral_history(),
+        )
         .open()
         .await
         .expect("opens");
@@ -298,7 +310,7 @@ async fn an_ephemeral_conversation_is_gone_once_its_workspace_is() {
     drop(opened);
 
     let reopened = offline(dir.path())
-        .with_store_dir(store_dir.path())
+        .with_runtime_builder(offline_runtime().with_store_dir(store_dir.path()))
         .open()
         .await
         .expect("opens");
@@ -331,7 +343,7 @@ async fn a_conversation_is_listed_for_the_workspace_that_minted_it() {
     let store_dir = tempfile::tempdir().expect("tempdir");
 
     let workspace = offline(dir.path())
-        .with_store_dir(store_dir.path())
+        .with_runtime_builder(offline_runtime().with_store_dir(store_dir.path()))
         .open()
         .await
         .expect("opens");
@@ -364,7 +376,7 @@ async fn one_workspace_does_not_list_anothers_conversations() {
     let store_dir = tempfile::tempdir().expect("tempdir");
 
     let workspace = offline(mine.path())
-        .with_store_dir(store_dir.path())
+        .with_runtime_builder(offline_runtime().with_store_dir(store_dir.path()))
         .open()
         .await
         .expect("opens");
@@ -427,8 +439,11 @@ async fn a_conversation_tagged_before_workspaces_were_is_resumable_and_files_its
 
     let endpoint = ScriptedEndpoint::start();
     let workspace = offline(dir.path())
-        .with_base_url(&endpoint.base_url)
-        .with_store_dir(store_dir.path())
+        .with_runtime_builder(
+            offline_runtime()
+                .with_base_url(&endpoint.base_url)
+                .with_store_dir(store_dir.path()),
+        )
         .open()
         .await
         .expect("opens");
@@ -493,7 +508,7 @@ async fn two_runs_from_one_workspace_are_driven_concurrently() {
 
     let endpoint = ScriptedEndpoint::start();
     let workspace = offline(dir.path())
-        .with_base_url(&endpoint.base_url)
+        .with_runtime_builder(offline_runtime().with_base_url(&endpoint.base_url))
         .open()
         .await
         .expect("opens");
@@ -538,6 +553,12 @@ struct ScriptedEndpoint {
 
 impl ScriptedEndpoint {
     fn start() -> Self {
+        Self::start_with(sse_body)
+    }
+
+    /// The same endpoint answering each connection from a caller-chosen
+    /// script, for the tests whose turns need a tool call in them.
+    fn start_with(script: fn(usize) -> String) -> Self {
         let listener = TcpListener::bind("127.0.0.1:0").expect("bind test endpoint");
         let address = listener.local_addr().expect("read endpoint address");
         let served = Arc::new(AtomicUsize::new(0));
@@ -549,7 +570,7 @@ impl ScriptedEndpoint {
                 // while the first is still being answered is not made to wait
                 // — the point of the test is that both are in flight.
                 let index = counted.fetch_add(1, Ordering::SeqCst) + 1;
-                thread::spawn(move || answer(stream, index));
+                thread::spawn(move || answer(stream, script(index)));
             }
         });
 
@@ -565,10 +586,9 @@ impl ScriptedEndpoint {
 }
 
 /// Reads one request and writes one completed response.
-fn answer(mut stream: TcpStream, index: usize) {
+fn answer(mut stream: TcpStream, body: String) {
     read_http_request(&mut stream);
 
-    let body = sse_body(index);
     let response = format!(
         "HTTP/1.1 200 OK\r\nconnection: close\r\ncontent-type: text/event-stream\r\ncontent-length: {}\r\n\r\n{body}",
         body.len()

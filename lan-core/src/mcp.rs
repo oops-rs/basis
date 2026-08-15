@@ -50,6 +50,7 @@
 //! refused by name rather than dropped, because a client that configured a
 //! server and got silence has no way to tell that from a server with no tools.
 
+pub(crate) mod connections;
 mod expand;
 mod file;
 
