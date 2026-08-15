@@ -55,7 +55,7 @@ hot-reloadable extensions. Two pi decisions independently validate ours:
 | Prompt templates (/commands) | Markdown templates with args, exposed over ACP as commands ✅ | built |
 | Extensions (custom tools, event interception) | MCP servers + interception with two bindings — in-process `Interceptor`, subprocess hooks — allow/deny/modify (§3) ✅ | built |
 | Packages (shareable bundles) | Directory convention over skills/templates/hooks/MCP — defer | later |
-| RPC / headless mode | `spawn --json` event stream (`run` is a compatibility alias) + **ACP** (standard, not bespoke) ✅; local lifecycle daemon for durable task control ✅ | built |
+| RPC / headless mode | `spawn --json` event stream (`run` is a compatibility alias) + **ACP** (standard, not bespoke) ✅; durable task control over a global data directory, with no resident process of any kind ✅ | built |
 | SDK | `lan-core`: a `Workspace` opened once, runs minted from it with typed output, bounds, cancellation ✅ — other languages use ACP | built |
 | TUI / themes / keybindings | Out of scope by design — ACP clients own presentation | — |
 | Provider OAuth login flows | API-key auth first; OAuth per provider later | later |
@@ -94,23 +94,46 @@ A run that a bound ended says which one, both as `RunReport::stopped_by` in proc
 the exit-code contract of ADR-0015 is answerable without parsing prose.
 
 In-process concurrent work is owned by `lan_core::Supervisor`. The binary adds
-the same ownership rules across CLI processes: a per-workspace hidden daemon
-owns a loopback TCP endpoint, a private capability descriptor, and an atomic
-JSON journal. `spawn` returns immediately with an opaque instance/task handle;
-`wait`/`watch`/`cancel`/`inbox` reconnect through that descriptor, and terminal
-results remain repeatable after the submitting process exits. `send` records an
-opaque message ID; `send --await` and `ask` wait for the reply from that message
-turn, while `wait --message` retries the same durable reply without rerunning
-the task. Inbox bodies and replies are bounded summaries with truncation
-metadata. Attached children inherit the narrower parent deadline and downward
-cancellation. A parent's own work can finish before its attached children: the
-service keeps the parent in scope and publishes its terminal state only after
-all attached children settle; success leaves children running, while failure or
-cancellation requests them downward. A finished worker accepts no new work.
-`--detached` creates a new root. Progress is bounded and advisory, while
-terminal state is persisted on a separate control path, so a slow watcher
-cannot strand completion. The transport lives in the binary; `lan-core` remains
-protocol- and transport-free.
+the same ownership rules across CLI processes, and since
+[ADR-0019](adr/0019-the-filesystem-is-the-coordination-surface.md) it adds them
+on files rather than on a service. An agent is a directory under one global,
+workspace-keyed data directory — `LAN_DATA_DIR`, else `XDG_DATA_HOME`, else the
+platform data home — holding its metadata, its inbox, its event journal, and,
+once it exists, its terminal record. `spawn` returns immediately with an opaque
+task handle; `wait`/`watch`/`cancel`/`inbox` resolve that handle straight to
+those files, so terminal results stay repeatable after the submitting process
+exits.
+
+The liveness contract is the part to read twice: **an agent advances only while
+a process is attached to it.** Attaching is taking the agent's `fs2` lock — one
+writer, ever — resuming the conversation from mentra's last committed turn, and
+checkpointing at each turn boundary; `spawn --await`, `wait`, `ask` and
+`send --await` all attach, and a contended lock means a live executor already
+holds it, so the caller observes instead of racing it. The terminal record,
+written atomically as the executor's last act, is the completion signal: an
+agent is resumable iff that record does not exist. Nothing is resident, so
+backgrounding belongs to the OS (`&`, `nohup`, tmux, `systemd-run`, CI),
+cancellation is honored at the next turn boundary rather than instantly, and a
+crash mid-turn loses the in-flight round — re-driving it may repeat that turn's
+tool side effects, because a checkpoint restores state and never effects.
+
+The semantics above that survive from ADR-0017 are unchanged by the substrate.
+`send` appends an opaque message ID to the inbox file, consumed at the next turn
+boundary; `send --await` and `ask` wait for the reply to that message, while
+`wait --message` retries the same durable reply without rerunning the task.
+Inbox bodies and replies are bounded summaries with truncation metadata.
+Attached children inherit the narrower parent deadline and downward
+cancellation, and a parent's executor may not write its terminal record while an
+attached child lacks one — the scope rule as a single ordering constraint,
+carried out by the attached process supervising exactly its own subtree, there
+being no resident supervisor left to enforce it. Success settles children in
+place; failure or
+cancellation request them downward first. A finished worker accepts no new
+messages and no new children. `--detached` creates a new root. `watch` tails the
+event journal, which makes replay the default rather than a feature, while
+terminal state is a separate file, so a slow watcher cannot strand completion.
+All of this lives in the binary; `lan-core` remains protocol- and
+transport-free.
 
 ## 3. Extension model (without embedding a scripting language)
 
@@ -334,6 +357,32 @@ periodic check — so no single use case bends the API toward itself.
 
 Behavior a caller can observe but the sections above do not describe. The embedding
 counterpart is [`embedding.md`](embedding.md).
+
+### Where task state lives, and what E2 does not migrate
+
+One root holds everything durable about local tasks: `LAN_DATA_DIR` if set, else
+`XDG_DATA_HOME/lan` when that is absolute, else the platform data home
+(`~/Library/Application Support/lan`, `~/.local/share/lan`, `%APPDATA%\lan`). It is created
+private — `0700` where the platform has file modes — and under it each workspace gets a
+directory keyed by a digest of its canonical path:
+
+```
+<root>/workspaces/<key>/store          mentra's conversations for that workspace
+<root>/workspaces/<key>/agents/<task>  meta.json · inbox.json · events.jsonl · terminal.json …
+```
+
+Keying on a digest rather than on the path text is what keeps path-length limits out of the
+correctness story, and each `spawn` reads back the workspace path recorded beside the digest,
+so a collision is an error naming the key and both paths rather than two repositories quietly
+sharing agents. Nothing under the root holds a credential: the executor is whichever process
+attached, carrying that shell's environment.
+
+The registry the daemon kept is gone with it, and **none of it is migrated**. `LAN_REGISTRY_DIR`
+no longer exists, pre-E2 task handles do not resolve, and the conversations that daemon
+persisted are not recovered — it filed them beside its registry under `XDG_RUNTIME_DIR` (or the
+temp directory), which the platform may erase between boots. A container or CI runner that
+should resume yesterday's agents therefore mounts the data root, not just the workspace:
+[`containerization.md`](containerization.md) has the volume.
 
 ### Effort, providers, and custom endpoints
 

@@ -40,7 +40,7 @@ lan spawn --model gpt-5.6 --await "explain the module layout"
   gets there is argued in the workspace manifest, including the one deliberately absent:
   `panic = "abort"` turns any panic into a dead process, which is what an embedded harness and a
   long-lived server exist to avoid.
-- **~28k lines of Rust** across the three crates, ~38k with tests.
+- **~29k lines of Rust** across the three crates, ~40k with tests.
 
 ## The SDK
 
@@ -130,9 +130,11 @@ design: hold the answers, drop the reports.
 
 `lan_core::Supervisor` owns concurrent work in process, under the same rules the CLI's durable
 handles obey below: `spawn` returns a `TaskHandle` immediately, `wait` observes a terminal state
-without rerunning anything, `cancel` flows downward to attached descendants, detached work is a new
-root, and the wait-for cycle is rejected structurally
-([ADR-0017](docs/adr/0017-structured-agent-concurrency.md)). Stopping one turn is two signals:
+without rerunning anything, `cancel` flows downward to attached descendants, and detached work is a
+new root ([ADR-0017](docs/adr/0017-structured-agent-concurrency.md)). A wait-for cycle cannot be
+built in process at all, since the only handle there is to wait on is one you spawned yourself —
+across processes it is a handle anyone can name, which is what the wait rules below are for.
+Stopping one turn is two signals:
 `TurnOptions::cancellable()` abandons the turn and rolls it back, which is a client's stop button;
 `TurnOptions::stoppable()` ends it at the next round boundary, keeping what the model committed.
 
@@ -213,24 +215,45 @@ lan serve --bridge                 # the same ACP server on a websocket, for a b
 lan fingerprint                    # the workspace's hash, for a loop you write yourself
 ```
 
-Handles are durable: a per-workspace hidden daemon owns the tasks, so `wait`/`watch`/`cancel`/`inbox`
-still answer after the submitting process exits. Four rules are the load-bearing part, and hold in
-process and across processes alike:
+Handles are durable: an agent is a checkpoint on disk under one global data directory
+(`LAN_DATA_DIR`, else `XDG_DATA_HOME`, else the platform data home), so `wait`/`watch`/`cancel`/`inbox`
+still answer after the submitting process exits — there is no resident process of any kind
+([ADR-0019](docs/adr/0019-the-filesystem-is-the-coordination-surface.md)). The liveness contract is
+plain: **an agent advances only while a process is attached to it.** `lan spawn` without `--await`
+prints the handle of a *resumable* agent; `lan wait <ID>` attaches and produces the result, and
+backgrounding is the OS's job — `lan wait <ID> &`, `nohup`, tmux, `systemd-run`, CI. Cancellation
+is honored at turn boundaries (a hung tool call is ended by the deadline), and a crash mid-turn
+loses the in-flight round: re-driving it may repeat tool side effects, because a checkpoint
+restores state, never effects. Four rules are the load-bearing part, and hold in process and
+across processes alike:
 
 - **Ownership is a tree.** An attached child inherits its parent's cancellation and the narrower
   deadline. A successful parent keeps attached children in scope until they settle; a failed or
   cancelled one requests downward cancellation and publishes its terminal state only after they do.
   `--detached` starts an independent root. An agent's own commands inherit `LAN_TASK_ID`, so
   `!lan spawn "…"` from inside a task attaches a child to it.
-- **Waits cannot deadlock.** A blocking command registers a live wait edge: self, ancestor, and
-  same-tree peer edges are rejected outright, and an edge between independent trees is accepted only
-  if it closes no cycle.
+- **Waits cannot deadlock.** Self, ancestor, and same-tree peer waits are rejected outright. A
+  wait between independent trees is a process observing a file; a cycle is two observers, and each
+  ends at its own finite deadline with exit `3` and a durable retry handle.
 - **The inbox is bounded.** At most 16 messages over a task's lifetime; bodies and replies are
   summaries capped at 4 KiB with truncation metadata. A worker past its own turn accepts no new
   messages or children.
 - **Waiting is not owning.** If a wait times out the task continues, and `lan wait <ID> --message
   <MID>` retries the same durable reply without rerunning it. Local tasks carry a finite 30-minute
-  default deadline, since the submitter exits.
+  default deadline, since the submitter exits, and it binds an agent nobody attached to: the first
+  attach after it lapses settles the task as failed with `stopped_by: deadline` instead of starting
+  a run whose time is already spent.
+
+E2 change note, for an upgrade: the hidden per-workspace daemon and its registry are gone, and
+nothing moves with them. `LAN_REGISTRY_DIR` is removed, and whatever the registry held — under it,
+under `LAN_CONFIG_DIR/agents`, under `XDG_RUNTIME_DIR`, or in the temp directory — is **not
+migrated**, conversations included, because the daemon kept mentra's store beside its registry in a
+directory the platform is entitled to erase. Pre-E2 task handles therefore do not resolve.
+`LAN_DATA_DIR` is the override that replaces it (`LAN_CONFIG_DIR` still names the *config*
+directory and is unchanged), and conversations now live at `<data-dir>/workspaces/<key>/store` — a
+data home rather than a runtime directory, which is what makes "resume it tomorrow" mean anything.
+`lan spawn` reports `resumable` rather than `running` for an agent with no attached process, and
+the durable `orphaned` terminal state is retired: nothing restarts out from under a task anymore.
 
 `--json` gives one bounded JSON object per lifecycle command; `lan spawn --json "<prompt>"` streams
 the attended JSONL event stream instead of returning a handle, first line always `run_started` with
@@ -265,11 +288,13 @@ work. `--no-shell` shuts them off; file writes still land, so a run that must ch
 `--approve never`. Both narrow what *this run* does rather than confining the process. `--approve`
 is `always` (the CLI default), `never`, or `prompt`; read-only calls are never queued, but neither a
 command nor a delegation is a read, so both `spawn` modes reach an approver. `prompt` needs someone
-to ask: it is the default over ACP and works on the attended `--json` path, while the asynchronous
-local service **rejects** it rather than silently allowing. That service binds loopback behind a
-per-service capability token in a user-private directory; the bridge's `Origin` allowlist starts
-empty. The boundary, where you want one, is the OS's — [docs/containerization.md](docs/containerization.md)
-has the read-only-root pattern, what it protects, and what it does not.
+to ask: it is the default over ACP and works on the attended `--json` path, while asynchronous
+tasks **reject** it rather than silently allowing. Task state lives in a user-private (0700) data
+directory and never records a credential — an agent's executor is whichever process attached to
+it, holding that shell's environment, so there is nothing on disk to leak and no daemon holding a
+key on your behalf; the bridge's `Origin` allowlist starts empty. The boundary, where you want
+one, is the OS's — [docs/containerization.md](docs/containerization.md) has the read-only-root
+pattern, what it protects, and what it does not.
 
 ## Examples
 
@@ -284,10 +309,10 @@ composes the lot: one workspace, one budget, typed findings, one merged stream, 
 ## Status
 
 This README describes only what is built, and all of the above is: P0–P4 and the SDK-first redesign
-through Phase D — the ACP server with modes, session listing and history replay; conversation and
-resume; durable `spawn`/`send`/`ask`/`wait`/`cancel`/`watch`/`inbox`; MCP from `.mcp.json` and from
-the client; templates as commands; hooks and interceptors; the websocket bridge; branching; and the
-SDK proper. Named honestly, still open: compaction tuning, the packages convention, and provider
+through Phase E — the ACP server with modes, session listing and history replay; conversation and
+resume; durable `spawn`/`send`/`ask`/`wait`/`cancel`/`watch`/`inbox` over the filesystem; MCP from
+`.mcp.json` and from the client; templates as commands; hooks and interceptors; the websocket
+bridge; branching; and the SDK proper. Named honestly, still open: compaction tuning, the packages convention, and provider
 OAuth; the delegation bound-vs-tally gap above; and **nobody has driven this from Zed or JetBrains
 yet** — it is verified against the protocol and its official client library, not against the
 ecosystem. LAN's crates are not published yet; mentra, the runtime, is. CI runs fmt, clippy at
@@ -300,7 +325,7 @@ client's UI, or the OS's job — hence no TUI, no scheduler, no container, no wo
 Docs: [PROPOSAL.md](docs/PROPOSAL.md) (why) · [ARCHITECTURE.md](docs/ARCHITECTURE.md) (how, with §8
 for `--effort`, custom endpoints, and the hooks `shell`→`spawn` migration) ·
 [embedding.md](docs/embedding.md) (the SDK in detail) · [REDESIGN.md](docs/REDESIGN.md) (ledger) ·
-[adr/](docs/adr/) (17 locked decisions) · [proposals/](docs/proposals/) (deferred ideas).
+[adr/](docs/adr/) (19 locked decisions) · [proposals/](docs/proposals/) (deferred ideas).
 
 ## License
 

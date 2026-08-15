@@ -58,7 +58,7 @@ mod tests {
             ("LAN_TASK_ID".to_string(), "wrong".to_string()),
         ];
         let fixed = BTreeMap::from([
-            ("LAN_REGISTRY_DIR".to_string(), "/tmp/lan".to_string()),
+            ("LAN_DATA_DIR".to_string(), "/tmp/lan".to_string()),
             ("LAN_TASK_ID".to_string(), "task-1".to_string()),
         ]);
 
@@ -68,7 +68,7 @@ mod tests {
             current,
             vec![
                 ("PATH".to_string(), "/bin".to_string()),
-                ("LAN_REGISTRY_DIR".to_string(), "/tmp/lan".to_string()),
+                ("LAN_DATA_DIR".to_string(), "/tmp/lan".to_string()),
                 ("LAN_TASK_ID".to_string(), "task-1".to_string()),
             ]
         );

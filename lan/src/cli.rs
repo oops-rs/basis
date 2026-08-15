@@ -78,9 +78,6 @@ pub(crate) enum Command {
     Inbox(InboxArgs),
     /// Serve one explicit protocol transport.
     Serve(ServeArgs),
-    /// Own asynchronous tasks for one workspace.
-    #[command(name = "__daemon", hide = true)]
-    Daemon(DaemonArgs),
 }
 
 #[derive(Debug, clap::Args)]
@@ -157,14 +154,6 @@ pub(crate) struct InboxArgs {
     /// Emit one JSON object instead of human-readable output.
     #[arg(long)]
     pub(crate) json: bool,
-}
-
-#[derive(Debug, clap::Args)]
-pub(crate) struct DaemonArgs {
-    #[arg(long)]
-    pub(crate) workspace: PathBuf,
-    #[arg(long)]
-    pub(crate) registry: PathBuf,
 }
 
 /// Selects which server transport to expose.
@@ -339,16 +328,17 @@ pub(crate) struct RunArgs {
     #[arg(long, value_name = "LEVEL")]
     pub(crate) effort: Option<EffortArg>,
 
-    /// Approval policy for consequential calls. `prompt` requires ACP and is
-    /// rejected by the asynchronous local service.
+    /// Approval policy for consequential calls. `prompt` requires an
+    /// interactive transport and is rejected for asynchronous tasks, which
+    /// have nobody to ask.
     #[arg(long, value_name = "MODE", default_value = "always")]
     pub(crate) approve: ApproveMode,
 
     /// Give up on the run after this long: 90s, 30m, 2h.
     ///
-    /// Local tasks default to 30m because their submitting process exits.
-    /// Setting this narrows that service bound; attached children can only
-    /// narrow their parent's inherited deadline.
+    /// Local tasks default to 30m because their submitting process exits and
+    /// no daemon is left holding the clock. Setting this narrows that default;
+    /// attached children can only narrow their parent's inherited deadline.
     #[arg(long, value_name = "DURATION")]
     pub(crate) deadline: Option<DurationArg>,
 

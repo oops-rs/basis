@@ -137,15 +137,23 @@ resume any agent.
 - The bounded-journal size cap from the daemon design carries over to the
   per-agent metadata files unchanged.
 
-## Open questions
+## Open questions — all resolved at E2 (2026-08-15)
 
 - Stale-lock breaking: PID liveness is racy under PID reuse; decide between
   PID+start-time fingerprint and lock-file lease timestamps before E2 code
-  review.
+  review. **Resolved: neither.** Advisory `fs2` locks are the sole
+  authority and the kernel releases them at process death — proven live by
+  killing an executor `-9` mid-stream and re-attaching immediately. The
+  fingerprint written into the lock file is diagnostic only; lease
+  timestamps were rejected as a second clock to keep honest.
 - `watch` tail semantics on Windows while an executor holds the journal
-  open — share-mode flags or a segmented event file.
+  open — share-mode flags or a segmented event file. **Resolved:
+  share-mode.** The event log opens for shared reads; `watch` tails by
+  offset, pinned by a unit test; no segmented file was needed.
 - Whether a detached root needs anything beyond an ordinary agent directory
-  with no parent edge (expected: no).
+  with no parent edge (expected: no). **Resolved: no.** A detached root is
+  an agent directory whose `meta.json` carries `detached: true` and no
+  parent; every policy that walks parent chains simply stops there.
 
 ## References
 

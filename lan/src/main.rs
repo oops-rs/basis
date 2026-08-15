@@ -163,14 +163,6 @@ async fn main() -> ExitCode {
         }
         Some(Command::Serve(args)) if args.acp => serve_acp(args.acp_args).await,
         Some(Command::Serve(args)) => serve_bridge(args.acp_args, args.bridge_args).await,
-        Some(Command::Daemon(args)) => match local::run_daemon(args.workspace, args.registry).await
-        {
-            Ok(()) => ExitCode::SUCCESS,
-            Err(message) => {
-                eprintln!("lan service: {message}");
-                ExitCode::from(EXIT_FAILED)
-            }
-        },
         None => usage(),
     }
 }

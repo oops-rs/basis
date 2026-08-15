@@ -77,7 +77,13 @@ to whichever process is attached; liveness belongs to the OS.**
   detected and broken (holder PID plus a liveness probe). This is the one
   racy edge the design keeps, and it is far smaller than the daemon's
   replacement machinery, which existed to solve the same problem plus its
-  own.
+  own. *Resolved at E2 (2026-08-15): the edge does not exist.* Advisory
+  `fs2` locks are released by the kernel at process death, so there is no
+  stale lock to detect and nothing to break; the PID the holder writes into
+  the lock file is a diagnostic for humans, never read by code. This bullet
+  budgeted for a probe the implementation did not need — kept as written
+  because the ledger records what was decided, and corrected here because a
+  reader must not hunt for liveness code that rightly is not there.
 
 ## Consequences
 

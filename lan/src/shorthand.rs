@@ -27,6 +27,9 @@ const SUBCOMMANDS: [&str; 12] = [
     "inbox",
     "fingerprint",
     "serve",
+    // Retired with the daemon (ADR-0019) but still reserved: an old script's
+    // `lan __daemon …` must be told the subcommand is gone, not have the word
+    // silently become a spawned prompt.
     "__daemon",
     "help",
 ];

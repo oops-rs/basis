@@ -1,8 +1,12 @@
+//! The lifecycle contract, driven through the real binary: durable handles,
+//! repeatable terminal waits, and actionable hints — with no daemon to start,
+//! because there is none (ADR-0019).
+
 use std::{
     fs,
     io::Read,
     path::Path,
-    process::{Child, Command, Output, Stdio},
+    process::{Command, Output, Stdio},
     thread,
     time::{Duration, Instant},
 };
@@ -10,15 +14,6 @@ use std::{
 use serde_json::Value;
 
 const NOT_STUCK: Duration = Duration::from_secs(15);
-
-struct ChildGuard(Child);
-
-impl Drop for ChildGuard {
-    fn drop(&mut self) {
-        let _ = self.0.kill();
-        let _ = self.0.wait();
-    }
-}
 
 #[test]
 fn bare_usage_ends_with_an_actionable_hint() {
@@ -38,29 +33,15 @@ fn bare_usage_ends_with_an_actionable_hint() {
 fn task_handles_survive_clients_and_terminal_waits_are_repeatable() {
     let root = tempfile::tempdir().expect("tempdir");
     let workspace = root.path().join("workspace");
-    let config = root.path().join("config");
-    let registry = config.join("agents");
+    let data = root.path().join("data");
     fs::create_dir_all(&workspace).expect("workspace");
-    fs::create_dir_all(&registry).expect("registry");
-
-    let daemon = Command::new(env!("CARGO_BIN_EXE_lan"))
-        .args(["__daemon", "--workspace"])
-        .arg(&workspace)
-        .arg("--registry")
-        .arg(&registry)
-        .stdin(Stdio::null())
-        .stdout(Stdio::null())
-        .stderr(Stdio::null())
-        .spawn()
-        .expect("start daemon");
-    let _daemon = ChildGuard(daemon);
-    wait_for_descriptor(&registry);
 
     // An invalid provider settles without making a network request. The test
-    // is about process ownership and durable state, not provider behavior.
+    // is about durable state across processes, not provider behavior.
     let spawned = run_bounded(
         Command::new(env!("CARGO_BIN_EXE_lan"))
-            .env("LAN_CONFIG_DIR", &config)
+            .env("LAN_DATA_DIR", &data)
+            .env_remove("LAN_TASK_ID")
             .args(["spawn", "do not run", "-C"])
             .arg(&workspace)
             .args([
@@ -74,6 +55,10 @@ fn task_handles_survive_clients_and_terminal_waits_are_repeatable() {
     assert!(spawned.status.success(), "{}", stderr(&spawned));
     let output = String::from_utf8(spawned.stdout).expect("utf8 spawn output");
     assert!(
+        output.contains("resumable"),
+        "spawn without --await reports the honest unattached state: {output}"
+    );
+    assert!(
         output.contains("next: use `lan wait "),
         "spawn should teach the next lifecycle action: {output}"
     );
@@ -83,7 +68,7 @@ fn task_handles_survive_clients_and_terminal_waits_are_repeatable() {
         .and_then(|line| line.split_once(':').map(|(task, _)| task.to_string()))
         .unwrap_or_else(|| panic!("spawn did not print a task handle: {output}"));
 
-    let first = wait(&config, &task);
+    let first = wait(&data, &task);
     assert_eq!(first.status.code(), Some(1), "{}", stderr(&first));
     let first: Value = serde_json::from_slice(&first.stdout).expect("first terminal JSON");
     assert_eq!(first["state"], "failed");
@@ -94,7 +79,7 @@ fn task_handles_survive_clients_and_terminal_waits_are_repeatable() {
         "a durable terminal result should name concrete follow-up commands"
     );
 
-    let second = wait(&config, &task);
+    let second = wait(&data, &task);
     assert_eq!(second.status.code(), Some(1), "{}", stderr(&second));
     let second: Value = serde_json::from_slice(&second.stdout).expect("second terminal JSON");
     assert_eq!(
@@ -103,35 +88,13 @@ fn task_handles_survive_clients_and_terminal_waits_are_repeatable() {
     );
 }
 
-fn wait(config: &Path, task: &str) -> Output {
+fn wait(data: &Path, task: &str) -> Output {
     run_bounded(
         Command::new(env!("CARGO_BIN_EXE_lan"))
-            .env("LAN_CONFIG_DIR", config)
+            .env("LAN_DATA_DIR", data)
+            .env_remove("LAN_TASK_ID")
             .args(["wait", task, "--timeout", "10s", "--json"]),
     )
-}
-
-fn wait_for_descriptor(registry: &Path) {
-    let deadline = Instant::now() + NOT_STUCK;
-    loop {
-        let ready = fs::read_dir(registry)
-            .expect("read registry")
-            .filter_map(Result::ok)
-            .any(|entry| {
-                entry
-                    .file_name()
-                    .to_string_lossy()
-                    .starts_with("workspace-")
-            });
-        if ready {
-            return;
-        }
-        assert!(
-            Instant::now() < deadline,
-            "daemon never published its descriptor"
-        );
-        thread::sleep(Duration::from_millis(10));
-    }
 }
 
 fn run_bounded(command: &mut Command) -> Output {

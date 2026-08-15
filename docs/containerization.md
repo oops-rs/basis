@@ -24,6 +24,18 @@ the pattern lan used to ship as an image, written down so you can build it
 yourself — and so that if you don't, you know exactly what you are running
 instead.
 
+Liveness is the OS's too
+([ADR-0019](adr/0019-the-filesystem-is-the-coordination-surface.md)): no lan
+process survives a completed invocation, and an asynchronous agent advances
+only while a process is attached to it. Inside a container that means the
+container has to outlive the `lan wait` doing the work — there is no daemon to
+carry it, and backgrounding is `&`, `nohup`, tmux, `systemd-run`, or CI, on
+whichever side of the container boundary you want it. Task state lives under
+one global data directory: `LAN_DATA_DIR` if set, else `XDG_DATA_HOME/lan`,
+else the platform data home. The image below sets `XDG_DATA_HOME=/state`, so
+that root resolves to `/state/lan` and rides the same volume as the store —
+which is what makes a task spawned in one `docker run` resumable by the next.
+
 ## 2. An image to build from
 
 Nothing below is lan-specific ceremony; it is the smallest image that gives
@@ -64,10 +76,10 @@ USER lan
 
 ENV HOME=/home/lan
 
-# mentra puts its session store under the platform data-local dir, which is
-# under $HOME — unwritable once the root filesystem is read-only. Point
-# XDG_DATA_HOME at the state mount so the store lands somewhere that survives
-# both --read-only and --rm.
+# Both durable stores default under $HOME — mentra's sessions to the platform
+# data-local dir, lan's task state to the platform data home — and $HOME is
+# unwritable once the root filesystem is read-only. Point XDG_DATA_HOME at the
+# state mount so both land somewhere that survives --read-only and --rm.
 ENV XDG_DATA_HOME=/state
 
 WORKDIR /workspace
@@ -78,8 +90,8 @@ CMD ["--help"]
 Two lines there are load-bearing rather than decorative. `chown` on `/state`
 is what a fresh named volume inherits its ownership from, so without it uid
 10001 gets a root-owned mount and the store fails to open. `XDG_DATA_HOME` is
-the difference between session state landing on the volume and landing on a
-read-only path.
+the difference between session and task state landing on the volume and
+landing on a read-only path.
 
 A `.dockerignore` holding `/target` and `/.git` is worth adding beside it —
 build artifacts are rebuilt inside the image anyway, and history is not needed
@@ -114,9 +126,11 @@ Flag by flag:
   from raising privileges beyond the unprivileged user it started as.
 - `-v "$PWD":/workspace:rw` is the sole writable mount, and the reason the
   pattern is worth running at all.
-- `-v lan-state:/state` is a named volume for the session store. Without it,
-  `--rm` and `--read-only` together leave the agent nowhere to write, and it
-  fails at startup rather than degrading quietly.
+- `-v lan-state:/state` is a named volume for the session store and, under
+  `/state/lan`, for durable task state. Without it, `--rm` and `--read-only`
+  together leave the agent nowhere to write, and it fails at startup rather
+  than degrading quietly — and a task handle printed by one container would
+  name an agent directory the next container has never seen.
 - `-e ANTHROPIC_API_KEY` passes the provider key from your environment. Pass
   it at run time, never `ENV` it into the Dockerfile — image layers are
   readable by anyone who can pull the image.
