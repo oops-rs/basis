@@ -2,7 +2,17 @@
 
 > Status: Accepted · 2026-08-11
 > Retires [`0008-the-watch-baseline.md`](0008-the-watch-baseline.md);
-> supersedes [`0009-bounded-iterations.md`](0009-bounded-iterations.md).
+> supersedes [`0009-bounded-iterations.md`](0009-bounded-iterations.md);
+> bounding rule reconciled by
+> [`0020-spawn-routing-is-decided-by-the-environment.md`](0020-spawn-routing-is-decided-by-the-environment.md) · 2026-08-16.
+
+> **Reconciliation (ADR-0020):** "bounding is now explicit, everywhere" held
+> only while a run left nothing behind it. ADR-0017 shipped durable tasks with
+> a 30-minute default deadline and did not amend this ADR. The rule survives
+> with its subject corrected: the bound belongs to the *checkpoint*, not to the
+> attachment. The attended one-shot below still takes no implicit timer; any
+> route that mints a checkpoint records the finite default, because a person
+> watching a terminal cannot bound an agent they have walked away from.
 
 ## Context
 

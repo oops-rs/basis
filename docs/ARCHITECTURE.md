@@ -69,7 +69,8 @@ seems to need core changes, close the gap generically or push it to an extension
 
 ```
 lan "<prompt>"                     # shorthand: exactly `lan spawn "<prompt>"`
-lan spawn "<prompt>"               # enqueue work and return a durable handle
+lan spawn "<prompt>"               # at a shell: drive it here; in a task: return a handle
+lan spawn "<prompt>" --resumable   # return a durable handle without driving it
 lan send <ID> "<message>"          # enqueue a follow-up turn and return its message ID
 lan send <ID> "<message>" --await  # enqueue, then await that message's reply
 lan ask <ID> "<question>"          # send and await the correlated reply
@@ -99,17 +100,20 @@ the same ownership rules across CLI processes, and since
 on files rather than on a service. An agent is a directory under one global,
 workspace-keyed data directory — `LAN_DATA_DIR`, else `XDG_DATA_HOME`, else the
 platform data home — holding its metadata, its inbox, its event journal, and,
-once it exists, its terminal record. `spawn` returns immediately with an opaque
-task handle; `wait`/`watch`/`cancel`/`inbox` resolve that handle straight to
-those files, so terminal results stay repeatable after the submitting process
-exits.
+once it exists, its terminal record. Every agent has an opaque task handle from
+the moment it is minted, whether or not the minting command stays to drive it;
+`wait`/`watch`/`cancel`/`inbox` resolve that handle straight to those files, so
+terminal results stay repeatable after the submitting process exits.
 
 The liveness contract is the part to read twice: **an agent advances only while
 a process is attached to it.** Attaching is taking the agent's `fs2` lock — one
 writer, ever — resuming the conversation from mentra's last committed turn, and
-checkpointing at each turn boundary; `spawn --await`, `wait`, `ask` and
-`send --await` all attach, and a contended lock means a live executor already
-holds it, so the caller observes instead of racing it. The terminal record,
+checkpointing at each turn boundary; `wait`, `ask`, `send --await`, and `spawn`
+on any route but `--resumable` all attach, and a contended lock means a live
+executor already holds it, so the caller observes instead of racing it. Which
+route a `spawn` takes is decided by the environment rather than by its
+renderer — a shell drives, a parent task hands back a handle
+([ADR-0020](adr/0020-spawn-routing-is-decided-by-the-environment.md)). The terminal record,
 written atomically as the executor's last act, is the completion signal: an
 agent is resumable iff that record does not exist. Nothing is resident, so
 backgrounding belongs to the OS (`&`, `nohup`, tmux, `systemd-run`, CI),

@@ -1,14 +1,23 @@
 # 0015 — The CLI grammar: shorthand and explicit modes
 
 > Status: Accepted · 2026-08-11; bare-mode rule refined by
-> [`0017-structured-agent-concurrency.md`](0017-structured-agent-concurrency.md) · 2026-08-13
+> [`0017-structured-agent-concurrency.md`](0017-structured-agent-concurrency.md) · 2026-08-13;
+> shorthand meaning restored by
+> [`0020-spawn-routing-is-decided-by-the-environment.md`](0020-spawn-routing-is-decided-by-the-environment.md) · 2026-08-16
 > Extends [`0002-acp-is-the-protocol.md`](0002-acp-is-the-protocol.md) and
 > [`0007-acp-sessions-and-the-dispatch-loop.md`](0007-acp-sessions-and-the-dispatch-loop.md).
 
-> **Refinement:** ADR-0017 supersedes only the no-subcommand server rule. The
-> positional prompt shorthand, explicit `-` stdin spelling, and exit-code
-> contract below remain; current ACP entry points are `lan serve --acp` and
-> `lan serve --bridge`.
+> **Refinement:** ADR-0017 supersedes the no-subcommand server rule. The
+> explicit `-` stdin spelling and exit-code contract below remain; current ACP
+> entry points are `lan serve --acp` and `lan serve --bridge`.
+>
+> **Correction (ADR-0020):** an earlier version of this note also claimed the
+> positional prompt shorthand was untouched. That was wrong. The shorthand's
+> *spelling* survived ADR-0017's `run` → `spawn` rename, but its *meaning* did
+> not: "run it and print the answer" silently became "enqueue it and print a
+> handle". ADR-0020 restores the original meaning at a shell and names the rule
+> that decides it, so the sentence below — "the human path is the shortest
+> path" — is true again.
 
 ## Context
 

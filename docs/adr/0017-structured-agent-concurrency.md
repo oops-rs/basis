@@ -1,6 +1,7 @@
 # 0017 — Structured agent concurrency
 
-> Status: Accepted · 2026-08-13  
+> Status: Accepted · 2026-08-13; spawn's CLI routing narrowed by
+> [`0020-spawn-routing-is-decided-by-the-environment.md`](0020-spawn-routing-is-decided-by-the-environment.md) · 2026-08-16  
 > Extends [`0010-the-crate-is-the-workflow-surface.md`](0010-the-crate-is-the-workflow-surface.md),
 > [`0011-layered-crates.md`](0011-layered-crates.md), and
 > [`0015-cli-grammar.md`](0015-cli-grammar.md).  
@@ -33,8 +34,11 @@ generic lifecycle types.
 1. An attached child is a descendant of one parent. The parent owns the
    child's cancellation and deadline, and the child cannot synchronously await
    an ancestor.
-2. `spawn` returns a handle immediately. `wait` observes the child's terminal
-   state; it does not execute the child or rerun it.
+2. `spawn` returns a handle immediately *to a caller inside another task* —
+   the case this ADR is about, where blocking the parent's turn is the hazard.
+   ADR-0020 narrows the scope: at a shell there is no turn to protect, so the
+   command drives the agent and prints its answer. `wait` observes a terminal
+   state; it does not rerun work that already settled.
 3. A supervisor owns the lifecycle registry and remains able to process spawn,
    send, cancel, and completion events while callers wait.
 4. State transitions happen synchronously inside the supervisor. Long work is
@@ -89,7 +93,7 @@ edge and gives the new root an independent deadline and cancellation lifetime.
 
 ```text
 lan <PROMPT>                  # shorthand for lan spawn <PROMPT>
-lan spawn <PROMPT>            # one-shot work
+lan spawn <PROMPT>            # one-shot work (routing: ADR-0020)
 lan send ...                  # enqueue a message (or --await its reply)
 lan ask <ID> <QUESTION>       # enqueue and await the correlated reply
 lan wait <ID>                 # wait for terminal state

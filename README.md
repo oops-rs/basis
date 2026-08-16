@@ -16,16 +16,17 @@ let report = run.execute(lan_core::CollectingSink::default()).await?;
 ```
 
 To try it as a command, set a provider key — `ANTHROPIC_API_KEY`, `OPENAI_API_KEY`, `GEMINI_API_KEY`,
-or `OPENROUTER_API_KEY` — and point it at a repository. `spawn` returns a durable task handle and
-`--await` waits for the result; any OpenAI-compatible endpoint works, URL as published, `/v1` handled.
+or `OPENROUTER_API_KEY` — and point it at a repository. At a shell a prompt runs and answers, while
+leaving a durable handle behind it; any OpenAI-compatible endpoint works, URL as published, `/v1`
+handled.
 
 ```sh
 cargo install --path lan                                    # unpublished — build from a checkout
-lan "summarize what changed in the last three commits" --await
+lan "summarize what changed in the last three commits"
 lan spawn -C ../other-repo --deadline 10m --tool-budget 40 "find the slowest test, explain why"
 
 export LAN_BASE_URL=http://127.0.0.1:3455/v1 LAN_API_KEY=…
-lan spawn --model gpt-5.6 --await "explain the module layout"
+lan spawn --model gpt-5.6 "explain the module layout"
 ```
 
 ## Lightweight, as a number
@@ -200,8 +201,9 @@ names no subcommand is a prompt; bare `lan` prints usage rather than starting a 
 
 ```
 lan "<prompt>"                     # shorthand: exactly `lan spawn "<prompt>"`
-lan spawn "<prompt>"               # enqueue work and print a durable task handle
-lan spawn "<prompt>" --await       # enqueue, then wait for the terminal result
+lan spawn "<prompt>"               # at a shell: run it here and print the answer
+lan spawn "<prompt>" --resumable   # mint the agent, print its handle, drive nothing
+lan spawn "<prompt>" --await       # inside a task: wait for the terminal result
 lan send <ID> "<message>"          # enqueue a later turn and print its message ID
 lan send <ID> "<message>" --await  # enqueue, then await that message's reply
 lan ask <ID> "<question>"          # send with the correlated reply wait implied
@@ -219,8 +221,13 @@ Handles are durable: an agent is a checkpoint on disk under one global data dire
 (`LAN_DATA_DIR`, else `XDG_DATA_HOME`, else the platform data home), so `wait`/`watch`/`cancel`/`inbox`
 still answer after the submitting process exits — there is no resident process of any kind
 ([ADR-0019](docs/adr/0019-the-filesystem-is-the-coordination-surface.md)). The liveness contract is
-plain: **an agent advances only while a process is attached to it.** `lan spawn` without `--await`
-prints the handle of a *resumable* agent; `lan wait <ID>` attaches and produces the result, and
+plain: **an agent advances only while a process is attached to it.** Which process that is follows
+from where the command ran ([ADR-0020](docs/adr/0020-spawn-routing-is-decided-by-the-environment.md)):
+at a shell, `lan spawn` is that process, so it drives the agent and prints the answer, and the
+handle stays durable behind it. Inside another task (`LAN_TASK_ID` set) it prints the handle of a
+*resumable* agent instead, because a parent turn that blocks on its child is how a wait-for cycle
+starts — `--await` is the parent's explicit opt-in, and `--resumable` is the shell's opt-out.
+`lan wait <ID>` attaches to a resumable agent and produces the result, and
 backgrounding is the OS's job — `lan wait <ID> &`, `nohup`, tmux, `systemd-run`, CI. Cancellation
 is honored at turn boundaries (a hung tool call is ended by the deadline), and a crash mid-turn
 loses the in-flight round: re-driving it may repeat tool side effects, because a checkpoint
@@ -255,8 +262,8 @@ data home rather than a runtime directory, which is what makes "resume it tomorr
 `lan spawn` reports `resumable` rather than `running` for an agent with no attached process, and
 the durable `orphaned` terminal state is retired: nothing restarts out from under a task anymore.
 
-`--json` gives one bounded JSON object per lifecycle command; `lan spawn --json "<prompt>"` streams
-the attended JSONL event stream instead of returning a handle, first line always `run_started` with
+`--json` gives one bounded JSON object per lifecycle command; at a shell `lan spawn --json
+"<prompt>"` streams the attended JSONL event stream, first line always `run_started` with
 the schema version, last always `run_finished` carrying `stopped_by` when a bound ended the run.
 `lan run` is a compatibility alias. Exit codes are contract, so a caller branches without parsing:
 
@@ -288,8 +295,9 @@ work. `--no-shell` shuts them off; file writes still land, so a run that must ch
 `--approve never`. Both narrow what *this run* does rather than confining the process. `--approve`
 is `always` (the CLI default), `never`, or `prompt`; read-only calls are never queued, but neither a
 command nor a delegation is a read, so both `spawn` modes reach an approver. `prompt` needs someone
-to ask: it is the default over ACP and works on the attended `--json` path, while asynchronous
-tasks **reject** it rather than silently allowing. Task state lives in a user-private (0700) data
+to ask, and asks at the terminal of whichever process is driving the agent: it is the default over
+ACP and works wherever a run is attached to a terminal, while `--resumable` work **rejects** it
+rather than silently allowing. Task state lives in a user-private (0700) data
 directory and never records a credential — an agent's executor is whichever process attached to
 it, holding that shell's environment, so there is nothing on disk to leak and no daemon holding a
 key on your behalf; the bridge's `Origin` allowlist starts empty. The boundary, where you want
