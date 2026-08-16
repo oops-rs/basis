@@ -42,7 +42,7 @@ fn task_handles_survive_clients_and_terminal_waits_are_repeatable() {
         Command::new(env!("CARGO_BIN_EXE_lan"))
             .env("LAN_DATA_DIR", &data)
             .env_remove("LAN_TASK_ID")
-            .args(["spawn", "do not run", "-C"])
+            .args(["spawn", "do not run", "--resumable", "-C"])
             .arg(&workspace)
             .args([
                 "--provider",
@@ -56,7 +56,7 @@ fn task_handles_survive_clients_and_terminal_waits_are_repeatable() {
     let output = String::from_utf8(spawned.stdout).expect("utf8 spawn output");
     assert!(
         output.contains("resumable"),
-        "spawn without --await reports the honest unattached state: {output}"
+        "spawn --resumable reports the honest unattached state: {output}"
     );
     assert!(
         output.contains("next: use `lan wait "),

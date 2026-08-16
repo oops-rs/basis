@@ -25,7 +25,7 @@ use crate::{
 
 use super::{
     attach::{
-        POLL, WaitOutcome, cancel_tree, earlier_deadline, resolve, validate_approval,
+        POLL, WaitOutcome, can_ask, cancel_tree, earlier_deadline, resolve, validate_approval,
         wait_for_message, wait_for_terminal,
     },
     data_dir::{DataDir, canonical_workspace, restrict_directory},
@@ -44,7 +44,10 @@ const MAX_WAIT: Duration = Duration::from_secs(7 * 24 * 60 * 60);
 const DEFAULT_TASK_DEADLINE_MS: u64 = 30 * 60 * 1000;
 const CURRENT_TASK: &str = "LAN_TASK_ID";
 
-pub(crate) async fn spawn(args: RunArgs) -> Result<ExitCode, ClientError> {
+/// `attach` is [`Route::Attach`](crate::route::Route::Attach): this process
+/// drives the agent it just minted and prints its terminal result. Without it
+/// the handle comes straight back and the agent waits for an attacher.
+pub(crate) async fn spawn(args: RunArgs, attach: bool) -> Result<ExitCode, ClientError> {
     let workspace = workspace_or_current(args.workspace.clone())?;
     let prompt = prompt_from(args.prompt.clone())?;
     if prompt.trim().is_empty() {
@@ -58,7 +61,10 @@ pub(crate) async fn spawn(args: RunArgs) -> Result<ExitCode, ClientError> {
         .into());
     }
     let options = run_options(&args);
-    validate_approval(&options.approve)?;
+    // Only a process that stays to drive the agent can put a question to
+    // anyone, so the approval mode is validated against this route rather than
+    // against the mode alone.
+    validate_approval(&options.approve, attach && can_ask())?;
 
     let data = discover()?;
     let canonical = canonical_workspace(&workspace)
@@ -138,7 +144,7 @@ pub(crate) async fn spawn(args: RunArgs) -> Result<ExitCode, ClientError> {
     );
     save_meta(&paths, &meta)?;
 
-    if !args.await_result {
+    if !attach {
         let payload = json!({
             "task": task,
             "state": "resumable",

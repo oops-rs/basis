@@ -17,7 +17,7 @@
 //! children whose locks are free and observes the ones with live executors.
 
 use std::{
-    io,
+    io::{self, IsTerminal},
     path::Path,
     sync::{Arc, Mutex},
     time::Duration,
@@ -29,6 +29,8 @@ use lan_core::{
 };
 use serde_json::Value;
 use tokio::time::{self, Instant};
+
+use crate::approver::TerminalApprover;
 
 use super::{
     data_dir::{AgentPaths, DataDir, valid_task_handle},
@@ -564,11 +566,24 @@ fn parse_effort(value: &str) -> Result<Effort, String> {
     }
 }
 
-pub(crate) fn validate_approval(value: &str) -> Result<(), String> {
+/// Whether this process can put an approval question to a person.
+///
+/// Under ADR-0019 the executor is whichever process holds the attach lock, so
+/// this is a property of the attacher rather than of the agent: the terminal
+/// that ran `lan "…"` or `lan wait <ID>` is the one that gets asked.
+pub(crate) fn can_ask() -> bool {
+    std::io::stdin().is_terminal()
+}
+
+/// `interactive` is whether the caller will be driving the agent *and* has a
+/// terminal to ask at. Both halves matter: a `--resumable` agent has no
+/// attacher yet, and an attacher reading from a pipe has nobody to ask.
+pub(crate) fn validate_approval(value: &str, interactive: bool) -> Result<(), String> {
     match value {
         "always" | "never" => Ok(()),
+        "prompt" if interactive => Ok(()),
         "prompt" => Err(
-            "`--approve prompt` needs an interactive transport; use `always` or `never` for asynchronous work"
+            "`--approve prompt` needs a terminal on the process driving the agent; use `always` or `never` for work nobody is attached to"
                 .to_string(),
         ),
         value => Err(format!("unsupported approval mode `{value}`")),
@@ -576,10 +591,13 @@ pub(crate) fn validate_approval(value: &str) -> Result<(), String> {
 }
 
 fn approver(value: &str) -> Result<Box<dyn Approver>, String> {
-    validate_approval(value)?;
+    validate_approval(value, can_ask())?;
     match value {
         "always" => Ok(Box::new(AllowAll)),
         "never" => Ok(Box::new(DenyAll)),
+        // `TerminalApprover` refuses on its own if the terminal disappears
+        // between this check and the question, so the fallback stays safe.
+        "prompt" => Ok(Box::new(TerminalApprover::new())),
         _ => unreachable!("validated above"),
     }
 }

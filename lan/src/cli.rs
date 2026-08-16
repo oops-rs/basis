@@ -279,8 +279,20 @@ pub(crate) struct RunArgs {
     pub(crate) detached: bool,
 
     /// Wait for the task's terminal result instead of returning its handle.
+    ///
+    /// Implied at a shell, where this process is what drives the agent
+    /// (ADR-0020). Inside another LAN task it is the explicit opt-in, because
+    /// a parent that blocks on a child is how a wait-for cycle starts.
     #[arg(long = "await")]
     pub(crate) await_result: bool,
+
+    /// Print the handle without driving the agent. Progress happens when
+    /// something attaches to it — `lan wait`, or any process you background
+    /// yourself.
+    ///
+    /// This is the default inside another LAN task and the opt-in at a shell.
+    #[arg(long, conflicts_with = "await_result")]
+    pub(crate) resumable: bool,
 
     /// Bound the client wait. The task keeps running if the wait expires.
     #[arg(long, value_name = "DURATION", requires = "await_result")]
@@ -328,9 +340,10 @@ pub(crate) struct RunArgs {
     #[arg(long, value_name = "LEVEL")]
     pub(crate) effort: Option<EffortArg>,
 
-    /// Approval policy for consequential calls. `prompt` requires an
-    /// interactive transport and is rejected for asynchronous tasks, which
-    /// have nobody to ask.
+    /// Approval policy for consequential calls. `prompt` asks at the terminal
+    /// of whichever process is driving the agent, so it needs both a terminal
+    /// on stdin and a route that drives one (ADR-0020). It is rejected for
+    /// `--resumable` work, which has nobody to ask.
     #[arg(long, value_name = "MODE", default_value = "always")]
     pub(crate) approve: ApproveMode,
 

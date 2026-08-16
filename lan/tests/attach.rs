@@ -59,7 +59,7 @@ impl Fixture {
 
     /// Spawns a resumable agent against `endpoint` and returns its handle.
     fn spawn_agent(&self, endpoint: &ScriptedEndpoint, deadline: &str) -> String {
-        let mut command = self.lan(&["spawn", "answer briefly", "-C"]);
+        let mut command = self.lan(&["spawn", "answer briefly", "--resumable", "-C"]);
         command.arg(&self.workspace).args([
             "--base-url",
             &endpoint.base_url,
@@ -480,6 +480,75 @@ fn workspace_hooks_guard_turns_driven_through_attach() {
     assert!(
         offered.contains(&"spawn"),
         "the workspace's roster reached the model: {offered:?}"
+    );
+}
+
+/// ADR-0020: at a shell, a bare prompt is driven by the process that typed it
+/// and answers on stdout. The regression this guards is the shorthand printing
+/// a handle for an agent nothing was driving — which made the human path two
+/// commands *and* meant the work had not started when the first one returned.
+/// The durable handle has to survive that, so a follow-up is still possible.
+#[test]
+fn a_bare_prompt_at_a_shell_answers_and_keeps_its_handle() {
+    let fixture = Fixture::new();
+    let endpoint = ScriptedEndpoint::start(vec![Reply::Text]);
+
+    let mut command = fixture.lan(&["spawn", "say something", "-C"]);
+    command.arg(&fixture.workspace).args([
+        "--base-url",
+        &endpoint.base_url,
+        "--model",
+        "test-model",
+        "--deadline",
+        "5m",
+    ]);
+    let output = run_bounded(command);
+    assert!(output.status.success(), "{}", stderr(&output));
+
+    let stdout = String::from_utf8(output.stdout).expect("utf8");
+    assert!(
+        stdout.contains("reply-1"),
+        "the answer itself reaches stdout: {stdout}"
+    );
+    assert!(
+        !stdout.contains(": resumable"),
+        "a shell invocation must not hand back an undriven handle: {stdout}"
+    );
+
+    // The hint names the agent, so the run that just answered is still a task
+    // that `send`, `inbox`, and `wait` can reach.
+    let task = stdout
+        .lines()
+        .find_map(|line| line.strip_prefix("next: use `lan watch "))
+        .and_then(|rest| rest.split_once(' ').map(|(task, _)| task.to_string()))
+        .unwrap_or_else(|| panic!("no durable handle in: {stdout}"));
+    assert!(
+        fixture.agent_dir(&task).join("meta.json").is_file(),
+        "the attended run still minted a durable agent directory"
+    );
+
+    // And the terminal result is repeatable from a second process, which is
+    // the property that makes the handle worth printing at all.
+    let again = run_bounded(fixture.lan(&["wait", &task, "--json"]));
+    assert!(again.status.success(), "{}", stderr(&again));
+    assert_eq!(json_stdout(&again)["state"], "succeeded");
+}
+
+/// `--resumable` is the opt-out, and it is the one spelling that still returns
+/// a handle for work nothing has started.
+#[test]
+fn resumable_is_how_a_shell_asks_for_a_handle_instead_of_an_answer() {
+    let fixture = Fixture::new();
+    let endpoint = ScriptedEndpoint::start(vec![Reply::Text]);
+    let task = fixture.spawn_agent(&endpoint, "5m");
+
+    assert!(
+        endpoint.requests().is_empty(),
+        "a resumable agent must not have run: nothing is attached to it"
+    );
+    assert!(
+        !fixture.agent_dir(&task).join("terminal.json").exists(),
+        "and it must not have settled"
     );
 }
 

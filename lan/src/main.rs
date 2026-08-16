@@ -66,6 +66,7 @@ mod duration_arg;
 mod exit;
 mod fingerprint;
 mod local;
+mod route;
 mod run;
 mod serve;
 mod shorthand;
@@ -79,6 +80,7 @@ use crate::{
     exit::{EXIT_FAILED, EXIT_USAGE},
     fingerprint::execute_fingerprint,
     local::ClientError,
+    route::{Route, route},
     run::execute_run,
     serve::{serve_acp, serve_bridge},
     shorthand::normalize,
@@ -99,25 +101,23 @@ async fn main() -> ExitCode {
     };
 
     match cli.command {
-        Some(Command::Spawn(args))
-            if args.json && !args.detached && !args.await_result && !local::has_current_task() =>
-        {
-            match execute_run(args).await {
+        Some(Command::Spawn(args)) => match route(&args, local::has_current_task()) {
+            Route::Attended => match execute_run(args).await {
                 Ok(code) => code,
                 Err(message) => {
                     eprintln!("lan: {message}");
                     eprintln!("next: retry with `lan spawn <PROMPT>` or use `lan --help`");
                     ExitCode::from(EXIT_FAILED)
                 }
+            },
+            route => {
+                let structured = args.json;
+                match local::spawn(args, route == Route::Attach).await {
+                    Ok(code) => code,
+                    Err(error) => error.render(structured, "lan spawn <PROMPT>"),
+                }
             }
-        }
-        Some(Command::Spawn(args)) => {
-            let structured = args.json;
-            match local::spawn(args).await {
-                Ok(code) => code,
-                Err(error) => error.render(structured, "lan spawn <PROMPT>"),
-            }
-        }
+        },
         Some(Command::Send(args)) => {
             let structured = args.json;
             lifecycle_result(
