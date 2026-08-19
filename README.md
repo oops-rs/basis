@@ -9,7 +9,7 @@ no protocol, no transport and no terminal code, so an embedding host's dependenc
 it uses ([ADR-0011](docs/adr/0011-layered-crates.md)); `lan-acp` and the binary are thin shells.
 
 ```rust
-// [dependencies] lan-core = "0.1" — unpublished so far, so a git or path dependency
+// [dependencies] lan-core = "0.1"
 let workspace = lan_core::Workspace::open("/repo").await?;
 let mut run = workspace.prepare("what does this repo do?")?;
 let report = run.execute(lan_core::CollectingSink::default()).await?;
@@ -21,7 +21,7 @@ leaving a durable handle behind it; any OpenAI-compatible endpoint works, URL as
 handled.
 
 ```sh
-cargo install --path lan                                    # unpublished — build from a checkout
+cargo install lan
 lan "summarize what changed in the last three commits"
 lan spawn -C ../other-repo --deadline 10m --tool-budget 40 "find the slowest test, explain why"
 

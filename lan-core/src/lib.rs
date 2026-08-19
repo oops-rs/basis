@@ -87,7 +87,8 @@ pub use context::{
     WorkspaceContext,
 };
 pub use event::{
-    EVENT_SCHEMA_VERSION, Event, EventLine, JsonlWriter, RunOutcome, SkillSummary, TemplateSummary,
+    EVENT_SCHEMA_VERSION, Event, EventLine, JsonlWriter, Mutability, RunOutcome, SkillSummary,
+    TemplateSummary,
 };
 // `fingerprint::snapshot` keeps its module: at the crate root `snapshot` would
 // not say a snapshot of what, and the two types beside it are only meaningful
