@@ -19,7 +19,7 @@ use super::notify;
 use crate::{
     approver::AcpApprover, mode::ModedApprover, session::SessionRegistry, update::session_update,
 };
-use basis_core::{Event, run::EventSink};
+use basis::{Event, run::EventSink};
 
 /// Runs one turn, streaming its events to the client as `session/update`.
 ///
@@ -67,8 +67,8 @@ pub(super) async fn prompt(
     match report {
         Ok(report) if report.succeeded() => Ok(PromptResponse::new(StopReason::EndTurn)),
         Ok(report) => Err(Error::internal_error().data(match report.outcome {
-            basis_core::RunOutcome::Error { message } => message,
-            basis_core::RunOutcome::Ok => "the turn failed".to_string(),
+            basis::RunOutcome::Error { message } => message,
+            basis::RunOutcome::Ok => "the turn failed".to_string(),
         })),
         Err(error) => Err(Error::internal_error().data(error.to_string())),
     }

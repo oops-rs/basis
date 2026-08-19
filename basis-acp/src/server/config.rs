@@ -16,11 +16,11 @@ use std::{path::PathBuf, sync::Arc};
 
 use super::workspaces::ConfiguredSource;
 use crate::mode::ApprovalMode;
-use basis_core::{McpServer, PersistedSession, PreparedRun, RunConfig, RunError};
+use basis::{McpServer, PersistedSession, PreparedRun, RunConfig, RunError};
 
 /// Where an ACP session's [`PreparedRun`] comes from.
 ///
-/// The same seam as [`prepare_with_session`](basis_core::run::prepare_with_session),
+/// The same seam as [`prepare_with_session`](basis::run::prepare_with_session),
 /// at the protocol layer: a Rust host that already owns a mentra runtime —
 /// custom tools, its own store, a provider basis does not know — can serve ACP
 /// over it instead of letting basis build one. basis's own tests are the other
@@ -29,8 +29,8 @@ use basis_core::{McpServer, PersistedSession, PreparedRun, RunConfig, RunError};
 ///
 /// A source that builds its own runtime owns its tool authorizer too, and a
 /// session mode only reaches calls that authorizer surfaces: install
-/// [`ApprovalGate`](basis_core::approval::ApprovalGate) — which is what basis's own
-/// source gets from the [`Runtime`](basis_core::Runtime) it builds — or the
+/// [`ApprovalGate`](basis::approval::ApprovalGate) — which is what basis's own
+/// source gets from the [`Runtime`](basis::Runtime) it builds — or the
 /// client's mode picker will have nothing to decide.
 #[async_trait::async_trait]
 pub trait SessionSource: Send + Sync + 'static {
@@ -109,7 +109,7 @@ impl ServeConfig {
     /// replaces with the `cwd` its client sent.
     ///
     /// The template's process half — provider, endpoint, model — becomes the
-    /// recipe for the one [`Runtime`](basis_core::Runtime) every session runs on
+    /// recipe for the one [`Runtime`](basis::Runtime) every session runs on
     /// (ADR-0018), built on the first `session/new` rather than here, so that a
     /// missing credential still reaches the client as `auth_required` rather
     /// than stopping the server from starting.

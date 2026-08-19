@@ -4,7 +4,7 @@
 //! *and replays its message history*, while `session/resume` picks the same
 //! conversation up without replaying — for agents that cannot. basis can do
 //! both, because mentra keeps the transcript and
-//! [`PreparedRun::history`](basis_core::PreparedRun::history) hands it back, so a
+//! [`PreparedRun::history`](basis::PreparedRun::history) hands it back, so a
 //! client that reconnects sees the conversation rather than an empty pane.
 //!
 //! Only the chat messages are replayed. mentra's transcript also holds tool

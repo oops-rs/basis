@@ -22,7 +22,7 @@ use std::collections::HashMap;
 use agent_client_protocol::schema::v1::{McpServer as AcpServer, McpServerSse, McpServerStdio};
 use mentra::{McpServerConfig, McpSseServerConfig};
 
-use basis_core::mcp::{McpError, McpServer};
+use basis::mcp::{McpError, McpServer};
 
 /// How an error from this module names where the configuration came from.
 const ORIGIN: &str = "the ACP client";

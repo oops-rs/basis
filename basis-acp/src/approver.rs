@@ -26,7 +26,7 @@ use agent_client_protocol::{
     },
 };
 
-use basis_core::approval::{ApprovalAnswer, ApprovalDecision, ApprovalRequest, Approver};
+use basis::approval::{ApprovalAnswer, ApprovalDecision, ApprovalRequest, Approver};
 
 /// Option ids on the wire. Chosen by basis, echoed back by the client, and
 /// matched here — so they are a contract with ourselves and belong in one

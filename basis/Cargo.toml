@@ -1,6 +1,6 @@
 [package]
 name = "basis"
-description = "The basis CLI, over basis-core and basis-acp: headless runs, an ACP server, and a websocket bridge."
+description = "The basis SDK: workspace discovery, run lifecycle, one event stream, and the two seams. No protocol, no transport, no TTY."
 version.workspace = true
 edition.workspace = true
 rust-version.workspace = true
@@ -8,35 +8,50 @@ license.workspace = true
 readme.workspace = true
 repository.workspace = true
 homepage.workspace = true
-keywords = ["agent", "llm", "acp", "harness", "mentra"]
-categories = ["development-tools", "command-line-utilities"]
+keywords = ["agent", "llm", "harness", "mentra", "sdk"]
+categories = ["development-tools"]
+
+# MCP is one binding of the tool contract, not a privileged subsystem
+# (ADR-0012), so an embedder can compile a basis that has never heard of it:
+# no `.mcp.json` discovery, no `McpConfig` on a run, no servers registered.
+# Default-on, because the binary and `basis-acp` both want it — a client's
+# `mcpServers` on `session/new` is the protocol's own concept.
+#
+# What this cannot drop is the weight underneath: mentra's MCP client is
+# unconditional upstream, so there is nothing to forward. Gating basis's half
+# still delivers the contract point — one seam, one adapter, droppable at
+# compile time — and the day mentra gates its MCP client too, this is where
+# that gets forwarded.
+[features]
+default = ["mcp"]
+mcp = []
+
+# mentra streams the Responses wire format over HTTP+SSE or over a websocket,
+# and the second transport is the only reason tokio-tungstenite was ever in
+# this crate's tree.
+#
+# Off by default, which is a statement about reachability rather than a
+# preference: the transport is chosen per request through mentra's
+# `ProviderRequestOptions`, basis never sets that field, and the `AgentConfig`
+# that would carry it is private to workspace construction. No CLI invocation
+# can select it, so the default build linked a websocket client for a code path it
+# cannot enter. Kept nameable rather than cut outright, for an embedder driving
+# basis against an endpoint where that transport is the point; enabling it
+# forwards to mentra, which forwards to mentra-provider, which compiles the
+# transport back in.
+responses-websocket = ["mentra/responses-websocket"]
 
 [dependencies]
-basis-core.workspace = true
-basis-acp.workspace = true
 mentra.workspace = true
 
-# The bridge speaks ACP's transport traits without speaking ACP itself: it
-# relays frames between a websocket and the server basis-acp already serves.
-agent-client-protocol.workspace = true
 async-trait.workspace = true
-clap.workspace = true
-futures.workspace = true
-fs2.workspace = true
 serde.workspace = true
 serde_json.workspace = true
-tempfile.workspace = true
+serde_yaml_ng.workspace = true
 thiserror.workspace = true
 tokio.workspace = true
-tokio-tungstenite.workspace = true
-uuid.workspace = true
 
 [dev-dependencies]
 mentra = { workspace = true, features = ["test-utils"] }
 tokio = { workspace = true, features = ["time"] }
-# The bridge tests dial the bridge, which the binary itself never does.
-tokio-tungstenite = { workspace = true, features = ["connect"] }
-
-[[bin]]
-name = "basis"
-path = "src/main.rs"
+tempfile.workspace = true

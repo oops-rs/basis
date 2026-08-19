@@ -46,7 +46,7 @@ always pointed:**
   survives; `basis run` remains an alias); an unattended caller states its bounds, and the recipe shows
   how. A tripped bound stays a graceful end — committed work is kept.
 - **The fingerprint survives as a utility**: `Workspace::fingerprint()` in
-  `basis-core` and a `basis fingerprint` subcommand printing the hash for shell
+  `basis` and a `basis fingerprint` subcommand printing the hash for shell
   composition. ADR-0008's semantics carry over verbatim — `git ls-files`
   enumeration, `HEAD` in the digest, `stat`-only reads, uncertain resolves to
   changed. The *baseline policy* (record only after success) moves to the

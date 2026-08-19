@@ -240,12 +240,42 @@ checksum = "72b3254f16251a8381aa12e40e3c4d2f0199f8c6508fbecb9d91f575e0fbb8c6"
 
 [[package]]
 name = "basis"
-version = "0.1.0"
+version = "0.2.0"
+dependencies = [
+ "async-trait",
+ "mentra",
+ "serde",
+ "serde_json",
+ "serde_yaml_ng",
+ "tempfile",
+ "thiserror",
+ "tokio",
+]
+
+[[package]]
+name = "basis-acp"
+version = "0.2.0"
 dependencies = [
  "agent-client-protocol",
  "async-trait",
+ "basis",
+ "blocking",
+ "futures",
+ "mentra",
+ "serde_json",
+ "tempfile",
+ "thiserror",
+ "tokio",
+]
+
+[[package]]
+name = "basis-cli"
+version = "0.2.0"
+dependencies = [
+ "agent-client-protocol",
+ "async-trait",
+ "basis",
  "basis-acp",
- "basis-core",
  "clap",
  "fs2",
  "futures",
@@ -257,36 +287,6 @@ dependencies = [
  "tokio",
  "tokio-tungstenite",
  "uuid",
-]
-
-[[package]]
-name = "basis-acp"
-version = "0.1.0"
-dependencies = [
- "agent-client-protocol",
- "async-trait",
- "basis-core",
- "blocking",
- "futures",
- "mentra",
- "serde_json",
- "tempfile",
- "thiserror",
- "tokio",
-]
-
-[[package]]
-name = "basis-core"
-version = "0.1.0"
-dependencies = [
- "async-trait",
- "mentra",
- "serde",
- "serde_json",
- "serde_yaml_ng",
- "tempfile",
- "thiserror",
- "tokio",
 ]
 
 [[package]]

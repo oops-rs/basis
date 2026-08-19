@@ -25,7 +25,7 @@ use super::lifecycle::{list_sessions, session_info, setup_failed};
 use super::turn::prompt_text;
 use super::workspaces::{ConfiguredSource, WorkspaceKey};
 use crate::mode::ApprovalMode;
-use basis_core::{
+use basis::{
     ContextConfig, McpServer, PersistedSession, PreparedRun, RunConfig, RunError, Runtime,
     hooks::HooksConfig, mcp::McpConfig, provider::ProviderError, skills::SkillsConfig,
     templates::TemplatesConfig,
@@ -186,7 +186,7 @@ fn the_config_template_takes_the_clients_working_directory() {
     // catch: granted is the default, and a template that was dropped
     // entirely would still look right.
     let source = ConfiguredSource::new(Some(
-        RunConfig::new("/placeholder", "").with_shell(basis_core::ShellAccess::Denied),
+        RunConfig::new("/placeholder", "").with_shell(basis::ShellAccess::Denied),
     ));
 
     let built = source.config_for(PathBuf::from("/repo"), Vec::new());
@@ -194,7 +194,7 @@ fn the_config_template_takes_the_clients_working_directory() {
     assert_eq!(built.workspace, PathBuf::from("/repo"));
     assert_eq!(
         built.shell,
-        basis_core::ShellAccess::Denied,
+        basis::ShellAccess::Denied,
         "everything the client cannot say must carry through"
     );
 }

@@ -56,7 +56,7 @@ borrows. `Workspace` keeps only what the repository says.**
   the name. This is a breaking change to `Workspace::runtime()`, taken now
   because 0.1.0 is unpublished; the window closes at first release.
 - Boundary: this is a structural extraction, not orchestration. No agent
-  registry, no scheduler, no fleet manager enters `basis-core`; ADR-0010's
+  registry, no scheduler, no fleet manager enters `basis`; ADR-0010's
   line — orchestration is host-language code against the crate — holds.
 
 ## Consequences

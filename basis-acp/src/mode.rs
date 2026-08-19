@@ -7,9 +7,9 @@
 //!
 //! # Why the modes live here and not in the core
 //!
-//! basis-core has no such enum. Approval there is the
+//! basis has no such enum. Approval there is the
 //! [`Approver`] trait alone (ADR-0010): "always allow" is
-//! [`AllowAll`](basis_core::AllowAll), "refuse" is [`DenyAll`](basis_core::DenyAll),
+//! [`AllowAll`](basis::AllowAll), "refuse" is [`DenyAll`](basis::DenyAll),
 //! and "ask" is whatever the host installs. What ACP needs that a trait cannot
 //! give it is an *enumerable* set — `session/new` reports every available mode
 //! with an id, a name and a description, and the client picks one by id. That
@@ -19,8 +19,8 @@
 //!
 //! mentra takes a `ToolAuthorizer` when a runtime is built and never hands it
 //! back, so a decision made there is fixed for the session's life — which is
-//! precisely what a switchable mode cannot be. basis-core's
-//! [`ApprovalGate`](basis_core::approval::ApprovalGate) therefore surfaces every
+//! precisely what a switchable mode cannot be. basis's
+//! [`ApprovalGate`](basis::approval::ApprovalGate) therefore surfaces every
 //! consequential call without answering any, and the mode decides *here*, where
 //! it can still change between one call and the next.
 //!
@@ -45,7 +45,7 @@ use std::{
 
 use agent_client_protocol::schema::v1::{SessionMode, SessionModeId, SessionModeState};
 
-use basis_core::approval::{ApprovalAnswer, ApprovalDecision, ApprovalRequest, Approver};
+use basis::approval::{ApprovalAnswer, ApprovalDecision, ApprovalRequest, Approver};
 
 /// What a session does about a call that changes state outside the process.
 ///
@@ -243,7 +243,7 @@ impl<A> ModedApprover<A> {
 #[async_trait::async_trait]
 impl<A: Approver> Approver for ModedApprover<A> {
     async fn approve(&mut self, request: &ApprovalRequest) -> ApprovalAnswer {
-        // Read-only calls never reach here: basis-core's gate allows them
+        // Read-only calls never reach here: basis's gate allows them
         // outright, because prompting for reads trains people to approve
         // without reading.
         match self.modes.current() {

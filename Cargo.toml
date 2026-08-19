@@ -1,11 +1,11 @@
 [workspace]
-members = ["basis", "basis-acp", "basis-core"]
+members = ["basis", "basis-acp", "basis-cli"]
 resolver = "3"
 
 [workspace.package]
 # One version across the three: they are one product split by dependency
 # weight (ADR-0011), not three things that release on their own schedules.
-version = "0.1.0"
+version = "0.2.0"
 edition = "2024"
 rust-version = "1.88"
 license = "MIT"
@@ -16,15 +16,15 @@ homepage = "https://github.com/oops-rs/basis"
 [workspace.dependencies]
 # The layers of ADR-0011, named here so each crate states which of them it is
 # built on and cargo resolves one version of each.
-basis-core = { version = "0.1", path = "basis-core" }
-basis-acp = { version = "0.1", path = "basis-acp" }
+basis = { version = "0.2", path = "basis" }
+basis-acp = { version = "0.2", path = "basis-acp" }
 
 # Mentra 0.18 is published and is the runtime contract basis targets. Keeping
 # this registry-only makes a standalone checkout and a package resolve alike.
 #
 # `default-features = false` drops exactly one thing: mentra's Responses
 # websocket transport, which nothing in basis can select — every run streams over
-# HTTP+SSE. `basis-core` re-offers it as a feature for an embedder who wants it
+# HTTP+SSE. `basis` re-offers it as a feature for an embedder who wants it
 # (see its manifest); the binary and `basis-acp` do not, because neither has a
 # surface that would ask for it.
 mentra = { version = "0.18.1", default-features = false }

@@ -15,7 +15,7 @@ true."
 That posture assumed basis-the-binary running one supervised loop was the
 primary unattended case. The redesign changes the premise: basis is embedded,
 users run many basis processes inside their own programs and environments, and
-the shipped container was already the wrong unit — a host embedding `basis-core`
+the shipped container was already the wrong unit — a host embedding `basis`
 in its own binary was never going to run inside basis's image. Meanwhile the
 flag itself is theater once a process spawns: ADR-0006's own context admits a
 path check cannot confine a running command. pi reaches the same conclusion

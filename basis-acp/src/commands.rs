@@ -11,7 +11,7 @@ use agent_client_protocol::schema::v1::{
     AvailableCommand, AvailableCommandInput, UnstructuredCommandInput,
 };
 
-use basis_core::Template;
+use basis::Template;
 
 /// Maps discovered templates to the commands an ACP client can offer.
 ///
@@ -24,7 +24,7 @@ use basis_core::Template;
 /// inventing a placeholder they never wrote.
 ///
 /// Every template accepts arguments regardless — see
-/// [`Template::render`](basis_core::Template::render). The hint governs what a
+/// [`Template::render`](basis::Template::render). The hint governs what a
 /// client displays, not what basis will substitute.
 pub fn available_commands(templates: &[Template]) -> Vec<AvailableCommand> {
     templates.iter().map(available_command).collect()
@@ -44,7 +44,7 @@ mod tests {
     use std::path::PathBuf;
 
     use super::*;
-    use basis_core::ContextScope;
+    use basis::ContextScope;
 
     fn template(name: &str, hint: Option<&str>) -> Template {
         Template {

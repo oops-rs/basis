@@ -30,10 +30,10 @@ implementation.
   conventions and protocol: context discovery, ACP mapping, the CLI grammar. When basis
   hits a mentra gap, file a mentra issue even if fixing it immediately.
 - **Three crates, split by dependency weight** (ADR-0011), so new code has one right home:
-  `basis-core` is the SDK and carries no protocol, no transport, and no TTY code; `basis-acp`
+  `basis` is the SDK and carries no protocol, no transport, and no TTY code; `basis-acp`
   is the ACP adapter over it; `basis` is the binary over both. Anything that would put a
-  JSON-RPC, websocket, or terminal dependency into `basis-core` belongs in one of the other
-  two. MCP lives behind `basis-core`'s default-on `mcp` feature (ADR-0012).
+  JSON-RPC, websocket, or terminal dependency into `basis` belongs in one of the other
+  two. MCP lives behind `basis`'s default-on `mcp` feature (ADR-0012).
 
 ## Workflow Discipline
 

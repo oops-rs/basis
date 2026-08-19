@@ -7,7 +7,7 @@
 > **Note (2026-08-11):** ADR-0010…0015 redirect the design toward an SDK-first
 > shape. **Phases A, B, C and D of that transition have landed** — watch retired,
 > bounds moved onto runs, shell default flipped, no shipped container, the CLI
-> grammar of ADR-0015; the split into `basis-core` / `basis-acp` / the binary with
+> grammar of ADR-0015; the split into `basis` / `basis-acp` / the binary with
 > MCP behind a feature and approval as a trait; the SDK proper — a
 > `Workspace` opened once that mints runs, typed output, cancellation, a shared
 > budget, and tagged event fan-in; and the bindings — interception as one
@@ -17,7 +17,7 @@
 > case); where this document still describes the P0–P4 shape it says so.
 > A later wave belonging to no phase closed the last five upstream candidates,
 > which is what rev 11 records: a typed turn can now keep its tools, a run
-> names the bound that ended it, and `basis-core`'s graph carries no websocket
+> names the bound that ended it, and `basis`'s graph carries no websocket
 > stack. The ledger and phases are in [`REDESIGN.md`](REDESIGN.md).
 > Reference bar: [pi](https://github.com/earendil-works/pi) (earendil-works) — minimal core, complete harness.
 > General-purpose: no domain assumptions. Periodic bug-checking is one use case, never a design input.
@@ -56,7 +56,7 @@ hot-reloadable extensions. Two pi decisions independently validate ours:
 | Extensions (custom tools, event interception) | MCP servers + interception with two bindings — in-process `Interceptor`, subprocess hooks — allow/deny/modify (§3) ✅ | built |
 | Packages (shareable bundles) | Directory convention over skills/templates/hooks/MCP — defer | later |
 | RPC / headless mode | `spawn --json` event stream (`run` is a compatibility alias) + **ACP** (standard, not bespoke) ✅; durable task control over a global data directory, with no resident process of any kind ✅ | built |
-| SDK | `basis-core`: a `Workspace` opened once, runs minted from it with typed output, bounds, cancellation ✅ — other languages use ACP | built |
+| SDK | `basis`: a `Workspace` opened once, runs minted from it with typed output, bounds, cancellation ✅ — other languages use ACP | built |
 | TUI / themes / keybindings | Out of scope by design — ACP clients own presentation | — |
 | Provider OAuth login flows | API-key auth first; OAuth per provider later | later |
 
@@ -89,12 +89,12 @@ usage rather than starting a long-lived server. Recurrence is not in it: an inte
 systemd, CI, a tokio task), and the two pieces that are easy to get wrong — the
 fingerprint and per-run bounds — are a subcommand and three flags on `spawn` (ADR-0014). In
 process they are `Workspace::fingerprint()` and the bounds on a `RunSpec`, which is the same
-loop without the subprocess: [`basis-core/examples/watch.rs`](../basis-core/examples/watch.rs).
+loop without the subprocess: [`basis/examples/watch.rs`](../basis/examples/watch.rs).
 A run that a bound ended says which one, both as `RunReport::stopped_by` in process and as
 `run_finished`'s `stopped_by` on the stream, and the CLI exits `3` for all three of them —
 the exit-code contract of ADR-0015 is answerable without parsing prose.
 
-In-process concurrent work is owned by `basis_core::Supervisor`. The binary adds
+In-process concurrent work is owned by `basis::Supervisor`. The binary adds
 the same ownership rules across CLI processes, and since
 [ADR-0019](adr/0019-the-filesystem-is-the-coordination-surface.md) it adds them
 on files rather than on a service. An agent is a directory under one global,
@@ -136,7 +136,7 @@ cancellation request them downward first. A finished worker accepts no new
 messages and no new children. `--detached` creates a new root. `watch` tails the
 event journal, which makes replay the default rather than a feature, while
 terminal state is a separate file, so a slow watcher cannot strand completion.
-All of this lives in the binary; `basis-core` remains protocol- and
+All of this lives in the binary; `basis` remains protocol- and
 transport-free.
 
 ## 3. Extension model (without embedding a scripting language)
@@ -150,7 +150,7 @@ Rust binary. Equivalent coverage, Rust-native:
 | Event interception (block/modify tool calls) | **One contract, two bindings** (ADR-0012): an in-process `Interceptor` a host implements, and subprocess hooks a workspace declares — same request, same allow/deny/modify vocabulary, one chain |
 | Custom commands | Prompt templates, surfaced as ACP commands |
 | Custom UI | ACP client's job (permission requests, input prompts are protocol messages) |
-| In-process extension with full API access | The `basis-core` crate: the harness is a library first, binary second |
+| In-process extension with full API access | The `basis` crate: the harness is a library first, binary second |
 
 Interception is not a subsystem parallel to anything. `hooks::contract` holds the request
 and outcome types both bindings speak, one `Chain` decides what an answer *means* — first
@@ -187,7 +187,7 @@ flowchart LR
   subgraph adapter["basis-acp — the ACP adapter"]
     srv["server · session mapping · modes"]
   end
-  subgraph lib["basis-core — the SDK"]
+  subgraph lib["basis — the SDK"]
     ws["Workspace — opened once: context · model · MCP · seams"]
     lrt["Runtime — one per process: provider · credential · history · host interceptors"]
     ctx["context: AGENTS.md · skills · templates"]
@@ -222,11 +222,11 @@ flowchart LR
 - **Crate layering mirrors pi's package layering**: mentra-provider ≈ pi-ai, mentra ≈
   pi-agent-core, basis ≈ pi-coding-agent minus TUI. Since ADR-0011 basis is itself three crates,
   split by dependency weight rather than by release schedule (they share one version):
-  **`basis-core`** is the in-process SDK and carries no protocol, no transport, and no TTY
+  **`basis`** is the in-process SDK and carries no protocol, no transport, and no TTY
   code; **`basis-acp`** is the ACP adapter over its event stream and seams, opt-in by
   dependency; **`basis`** is the binary over both, and the explicit `basis serve --acp` command
   is what an editor spawns. MCP is a
-  default-on `mcp` feature of `basis-core`, so an embedder can compile a core that has never
+  default-on `mcp` feature of `basis`, so an embedder can compile a core that has never
   heard of it (ADR-0012). The websocket bridge stays in the binary, marked extractable: it
   is ACP-ecosystem tooling with no basis-specific knowledge, and never an identity argument
   for basis.

@@ -8,10 +8,8 @@
 
 use std::{path::PathBuf, sync::Arc};
 
+use basis::{PreparedRun, RunConfig, RunError, approval::ApprovalGate, run::prepare_with_session};
 use basis_acp::SessionSource;
-use basis_core::{
-    PreparedRun, RunConfig, RunError, approval::ApprovalGate, run::prepare_with_session,
-};
 use mentra::{
     RuntimePolicy,
     test::{MockRuntime, MockToolCall},
@@ -40,7 +38,7 @@ impl MockSource {
     /// The workspace is the temp dir rather than the client's cwd: the
     /// scripted runtime is what is under test, not path discovery.
     fn config(&self) -> RunConfig {
-        RunConfig::new(&self.workspace, "").with_context(basis_core::ContextConfig {
+        RunConfig::new(&self.workspace, "").with_context(basis::ContextConfig {
             file_name: "AGENTS.md".to_string(),
             global_dir: None,
             walk_parents: false,
@@ -53,7 +51,7 @@ impl SessionSource for MockSource {
     async fn create(
         &self,
         _cwd: PathBuf,
-        _mcp: Vec<basis_core::McpServer>,
+        _mcp: Vec<basis::McpServer>,
     ) -> Result<PreparedRun, RunError> {
         let session = self
             .mock
@@ -78,7 +76,7 @@ impl SessionSource for MockSource {
         &self,
         agent_id: &str,
         _cwd: PathBuf,
-        _mcp: Vec<basis_core::McpServer>,
+        _mcp: Vec<basis::McpServer>,
     ) -> Result<PreparedRun, RunError> {
         // The mock persists to a real store, so this is the same resume a
         // second process would perform — which is what `session/load` is for.
@@ -97,19 +95,16 @@ impl SessionSource for MockSource {
     /// under test here is the protocol — that a client asks, and gets back the
     /// conversations as `SessionInfo` — not basis's workspace-scoping scheme.
     /// That scheme is what `ConfiguredSource` uses in the served binary, and
-    /// `basis-core`'s `tests/workspace.rs` is where a conversation is actually
+    /// `basis`'s `tests/workspace.rs` is where a conversation is actually
     /// written and then found again under its workspace's tag.
-    async fn list_sessions(
-        &self,
-        _cwd: PathBuf,
-    ) -> Result<Vec<basis_core::PersistedSession>, RunError> {
+    async fn list_sessions(&self, _cwd: PathBuf) -> Result<Vec<basis::PersistedSession>, RunError> {
         Ok(self
             .mock
             .runtime()
             .list_persisted_agents(MOCK_RUNTIME)?
             .into_iter()
             .filter(|agent| !agent.is_teammate)
-            .map(|agent| basis_core::PersistedSession {
+            .map(|agent| basis::PersistedSession {
                 agent_id: agent.id,
                 name: agent.name,
                 messages: agent.history_len,

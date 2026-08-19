@@ -13,11 +13,11 @@ Spec: [docs/spec/2026-08-13-structured-agent-concurrency.md](../spec/2026-08-13-
    one-shot spelling, `run` remains an alias, and only `serve --acp` or
    `serve --bridge` starts a server.
 3. **Slice 3: introduce the lifecycle state machine** — files:
-   `basis-core/src/lifecycle.rs`, `basis-core/src/lib.rs`, and focused tests.
+   `basis/src/lifecycle.rs`, `basis/src/lib.rs`, and focused tests.
    Acceptance: handles have single terminal transitions, cancellation is
    downward, waits are repeatable and cancel-safe, and cycles are rejected by
    the initial descendant-only policy.
-4. **Slice 4: wire in-process spawn/wait** — files: `basis-core` workspace/run
+4. **Slice 4: wire in-process spawn/wait** — files: `basis` workspace/run
    integration and `basis` command handlers. Acceptance: an attached child can
    be spawned, awaited, cancelled, and observed without holding the parent
    turn or losing completion.
@@ -72,10 +72,10 @@ Spec: [docs/spec/2026-08-13-structured-agent-concurrency.md](../spec/2026-08-13-
 |---|---|---|
 | 1 — design | Shipped | Accepted spec, ADR-0017, and plan (`b2ec36d`) |
 | 2 — explicit CLI grammar | Shipped | Canonical `spawn`, compatible `run`, explicit serve transports, and next hints (`f48c6de`) |
-| 3 — lifecycle state machine | Shipped | Generic `basis-core` supervisor and focused transition tests (`df43494`) |
+| 3 — lifecycle state machine | Shipped | Generic `basis` supervisor and focused transition tests (`df43494`) |
 | 4 — in-process structured ownership | Shipped | Prepared runs execute under handles with repeatable waits and downward cancellation (`3db1317`) |
 | 5a — local daemon and durable IPC | Shipped | Capability descriptor, bounded journal, lifecycle commands, and process-level integration tests (`a4539dc`); wakeup, registry ownership, and connection-bound hardening (`a1c8ed8`, `7f82e17`, `b1ebf0a`) |
 | 5b — live wait graph and caller authority | Shipped | Counted wait leases, static ownership validation, dynamic cycle rejection, and downward-only task cancellation (`61c8d26`) |
 | 5c — attached parent scope | Shipped | Pending terminal results, success/failure propagation rules, and detached-root isolation (`9d2179b`) |
 | 5d — `ask` and correlated replies | Shipped | Durable per-message replies, `ask`, exact `send --await`, `wait --message`, and bounded inbox summaries (`89ee68a`) |
-| 5e — acceptance and recovery tests | Shipped with each implementation slice | `basis-core/src/lifecycle.rs`, `basis-core/tests/lifecycle_run.rs`, `basis/tests/local_lifecycle.rs`, and colocated local-service/store/registry tests cover the accepted invariants without relying on a live remote CI run |
+| 5e — acceptance and recovery tests | Shipped with each implementation slice | `basis/src/lifecycle.rs`, `basis/tests/lifecycle_run.rs`, `basis/tests/local_lifecycle.rs`, and colocated local-service/store/registry tests cover the accepted invariants without relying on a live remote CI run |

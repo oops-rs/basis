@@ -34,7 +34,7 @@
 //! that". Two are left that way deliberately:
 //!
 //! - **`authenticate`** — basis reads its credential from the environment
-//!   (`ANTHROPIC_API_KEY` and the rest, see [`provider`](basis_core::provider)).
+//!   (`ANTHROPIC_API_KEY` and the rest, see [`provider`](basis::provider)).
 //!   There is no login to perform, no token to exchange, and so no auth method
 //!   to advertise. A session opened without a credential fails with ACP's
 //!   `auth_required` instead, naming the variable to set — which is the part a

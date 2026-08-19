@@ -98,8 +98,8 @@ ledger).
 | `Workspace::fingerprint()` + `basis fingerprint` | 0014 | **Built** (`4fbe1fd`, `8b52ebf`) — `fingerprint.rs` with ADR-0008's semantics intact, plus the subcommand; the method landed on `Workspace` itself once Phase C had one to put it on, reading the tree as it is now rather than as it was at open |
 | Exit-code contract | 0015 | **Built** (`35c9ccb`, `8e35f3e`, `a2d170a`) — 0 ok / 1 failed / 2 usage / 3 bound tripped, and `3` now covers all three bounds rather than two, since a run records which one ended it. `RunReport::stopped_by` carries the distinction in-process and `run_finished` carries it on the stream [11] |
 | `basis "<prompt>"` shorthand, `spawn -`, explicit ACP signpost | 0015/0017 | **Built** (`35c9ccb`, `f48c6de`) — a positional naming no subcommand is a prompt, `--` escapes, `spawn -` reads stdin, `run` remains an alias, and a non-JSON first line under `serve --acp` exits with the signpost |
-| Crate split (`basis-core` / `basis-acp` / binary) | 0011 | **Built** (`fbcacb4`, `27ab4c8`) — three crates on one version; `agent-client-protocol`, `blocking` and — since the upstream gate exists — `tokio-tungstenite` are all out of `basis-core`'s graph, the bridge stays in the binary marked extractable [1] |
-| MCP behind a feature | 0011/0012 | **Built** (`a4c259c`) — `mcp`, default-on; `default-features = false` compiles a `basis-core` with no MCP concept at all [2] |
+| Crate split (`basis` / `basis-acp` / binary) | 0011 | **Built** (`fbcacb4`, `27ab4c8`) — three crates on one version; `agent-client-protocol`, `blocking` and — since the upstream gate exists — `tokio-tungstenite` are all out of `basis`'s graph, the bridge stays in the binary marked extractable [1] |
+| MCP behind a feature | 0011/0012 | **Built** (`a4c259c`) — `mcp`, default-on; `default-features = false` compiles a `basis` with no MCP concept at all [2] |
 | Approval enum → trait impls | 0010 | **Built** (`a4c259c`, `6192230`) — `ApprovalPolicy` is gone: `ApprovalGate` authorizes, `AllowAll` / `DenyAll` decide, the terminal approver is the binary's, and `basis_acp::ApprovalMode` holds the protocol's mode list. `--approve` is unchanged [3] [4] [5] |
 | `Workspace` / run split | 0010 | **Built** (`8b52ebf`) — `Workspace::open` settles context, credential, model, skills, templates, hooks, MCP connections and the approval gate once; `prepare(RunSpec)` mints a run *synchronously*, which is the honest signal that nothing is left to await. `Workspace::fingerprint()` lands on the type its row above promised it to. The free functions stay, as wrappers over `RunConfig::split` [6] [7] [14] |
 | `.output::<T>()` structured output | 0010 | **Built** (`07cf4d1`, over mentra `fce664a`; docs corrected in `dae4765`; the second mode in `b782e75` over mentra `be65c00`) — `PreparedRun::output::<T>()` and `output_with_options`, with `OutputSpec` / `OutputReport` basis's own and the schema the caller's to write. basis asks mentra for the raw `Value` and deserializes itself, which buys `RunError::OutputMismatch`. `OutputSpec::with_tools()` keeps the ordinary toolset on the turn, so read-then-shape is a choice rather than a ceremony [9] [12] |
@@ -113,16 +113,16 @@ ledger).
 | History location on `WorkspaceBuilder` | 0010 | **Built** (`397ca13`, `71cc59d`) — `with_store_dir(dir)` says where, `with_ephemeral_history()` says nowhere, and `store::list_in` reads back what the first wrote. One private field, so last call wins structurally. Closes the data-directory hole footnote 6 had been recording since Phase C [6] |
 | `session/list` over ACP | 0007/0010 | **Built** (`e81e5d8`) — it had never worked: basis filtered on the workspace's runtime identifier while writing every agent under mentra's `"default"`. `WorkspaceBuilder::open` now tags what it persists. Forward-only, deliberately [17] |
 | Credentials never printed | — | **Built** (`f3529be`) — `ProviderChoice` and `McpServer`'s stdio env hand-write `Debug`: names kept so a misconfiguration stays fixable, values redacted. Provider resolution reads the environment through a passed-in lookup, so the suite passes identically with `BASIS_API_KEY`/`BASIS_BASE_URL` set and unset [18] |
-| One delegation surface (`spawn`) | 0016 | **Built** (`74ef59f`, with the ACP map, the auto-mode example and these lines in the commit that carries them) — the model's only door to delegation *and* commands. `spawn("!cmd")` is parsed once, at the boundary, into `{mode, body, cwd}`, and that typed triple is what `authorization_preview` presents — so the approver, the rule store, the hooks and the audit trail all dispatch on it and none of them re-reads the string. Both modes are consequential, so neither is waved through under the reads-are-never-asked rule; command mode executes only after the answer. `shell`, `background_run` and `task` left the model's roster via `ToolProfile::hide` while staying registered on the runtime, so ADR-0013's posture is untouched — the route changed, not the availability, and `--no-shell` still refuses at the policy on the path `spawn` calls, verified end to end. The depth guard is basis's own, since mentra's floor is name-specific and does not fire for a registered tool: an agent-id ledger with RAII cleanup, refusing *in the preview* so a remembered allow-rule cannot lift a structural floor (`MAX_DEPTH` 2). The policy ladder is existing machinery tiered — a pattern rule answers first and never reaches the approver, the `Approver` sees only the residue, and a remembered refusal now carries its own reason (mentra `b895ea0`) — and `basis-core/examples/reviewed_shell.rs` walks all three rungs live. Two things about the pattern tier are traps rather than features. mentra globs with `glob-match`, where a single `*` does not cross `/`, and the serialized input carries `cwd`, which is a path: a rule written with one star silently matches nothing, and the operator sees a reviewer they thought they had bypassed rather than an error. And a remembered *answer* is stored bare (`pattern: None`), so `AllowForSession` / `DenyForSession` on `spawn` covers both modes and every body — where an operator could once allow `task` and deny `shell` by name alone, drawing that line now means writing a pattern against the parsed `mode`, which is more expressive and less obvious. **Deviation from the ADR's sketch, deliberately**: no `WorkspaceBuilder::with_tool` and no `ExecutableTool` re-export. mentra's `RuntimeBuilder::with_tool` takes its tool by value and nothing upstream implements the trait for `Box` or `Arc`, so a public registration point would need a hand-forwarded shim — where forgetting `authorization_preview` would present a host's tool to the approver as its static descriptor, the exact failure this ADR exists to remove. `SpawnTool` is public instead; adding the method later is additive. Declared subprocess tools stay held: adjacent binding of the same contract, not this use case |
-| `Runtime` split (E1, basis-core half) | 0018 | **Built** (E1, the commit that carries these lines) — `Runtime` + `RuntimeBuilder` own mentra's runtime, provider/credential/base-URL and model *policy*, store policy, host interceptors, and the command environment (executor infrastructure, added to the ADR's list deliberately); `Workspace` borrows through an `Arc`, keeps discovery, and `Workspace::open(path)` is unchanged sugar over a private runtime (`RuntimeBuilder::build_for`). `workspace.runtime()` is renamed `mentra_runtime()`. mentra 0.18 fixes pre-hooks and MCP at build time, so basis registers one `HookDispatch` pre-hook keyed on the agent's `base_dir` (per-workspace hooks, `ShellAccess` and the `.git` carve-out on shared runtimes) and owns MCP connections per workspace via `McpManager` + `register_tool`, with server-name claims and per-mint `hidden_tools` keeping one workspace's `mcp__*` tools out of another's roster — asserted on the wire. Known gap, recorded on `Runtime::mint` and `crate::store`: shared runtimes tag persisted rows `"basis:runtime"` until mentra grows a per-session persist identifier, so per-workspace `session/list` on a *shared* runtime waits on that upstream ask (the private path is unaffected); the listing acceptance test ships `#[ignore]`d. `basis-acp`'s one-runtime-per-process rewire is the row below; the binary's `task.rs` rewire landed in the same wave — a per-task `RuntimeBuilder` carrying the store directory and task environment, with the pre-split provider-before-effort error precedence restored and pinned after the rewire briefly inverted it |
-| `Runtime` split (E1, basis-acp half) | 0018 | **Built** (E1, same commit) — the default `SessionSource` stops building a runtime per session (`run::prepare_without_prompt`, which opened a workspace, minted from it and dropped it before the first turn). `server/workspaces.rs` holds one `Runtime` for the process and one `Workspace` per key, both built on the first `session/new` that needs them — lazily, so a missing credential still reaches the client as `auth_required` instead of killing the server at startup, and neither cell caches a failure. The public surface does not move: `ServeConfig::new` / `with_source` / `with_initial_mode` are unchanged, so the binary and the bridge are untouched, and a host with its own runtime still comes in through `SessionSource`. The key is the canonicalized `cwd` **and** a digest of the `mcpServers` the client sent, because those arrive per session: keying on the directory alone would hand the second session the first one's roster and silently drop what it asked for, which reads exactly like a server with nothing to offer (values are digested, never held). Nothing evicts — a cached workspace's MCP connections and hook registration have to outlive every session minted from it, and `session/close` reaches basis after the fact. Two consequences of sharing, both basis-core's design rather than a choice made here: `--no-shell` and the `.git` carve-out are enforced by the hook dispatcher instead of by policy, so those denials now arrive in basis's words rather than mentra's; and `session/list` answers only for what a *private* runtime wrote, so conversations opened over ACP are invisible to it until the per-session persist identifier `Runtime::mint` is waiting on lands upstream — the ledger row above records the same gap, this is where it becomes user-visible. Pre-existing fix: `session/list` was registered unconditionally while `initialize` advertised it conditionally, so a source that cannot enumerate answered `[]` — the empty-list-for-a-workspace-that-has-some failure the capability exists to avoid; it now answers `-32601` itself |
+| One delegation surface (`spawn`) | 0016 | **Built** (`74ef59f`, with the ACP map, the auto-mode example and these lines in the commit that carries them) — the model's only door to delegation *and* commands. `spawn("!cmd")` is parsed once, at the boundary, into `{mode, body, cwd}`, and that typed triple is what `authorization_preview` presents — so the approver, the rule store, the hooks and the audit trail all dispatch on it and none of them re-reads the string. Both modes are consequential, so neither is waved through under the reads-are-never-asked rule; command mode executes only after the answer. `shell`, `background_run` and `task` left the model's roster via `ToolProfile::hide` while staying registered on the runtime, so ADR-0013's posture is untouched — the route changed, not the availability, and `--no-shell` still refuses at the policy on the path `spawn` calls, verified end to end. The depth guard is basis's own, since mentra's floor is name-specific and does not fire for a registered tool: an agent-id ledger with RAII cleanup, refusing *in the preview* so a remembered allow-rule cannot lift a structural floor (`MAX_DEPTH` 2). The policy ladder is existing machinery tiered — a pattern rule answers first and never reaches the approver, the `Approver` sees only the residue, and a remembered refusal now carries its own reason (mentra `b895ea0`) — and `basis/examples/reviewed_shell.rs` walks all three rungs live. Two things about the pattern tier are traps rather than features. mentra globs with `glob-match`, where a single `*` does not cross `/`, and the serialized input carries `cwd`, which is a path: a rule written with one star silently matches nothing, and the operator sees a reviewer they thought they had bypassed rather than an error. And a remembered *answer* is stored bare (`pattern: None`), so `AllowForSession` / `DenyForSession` on `spawn` covers both modes and every body — where an operator could once allow `task` and deny `shell` by name alone, drawing that line now means writing a pattern against the parsed `mode`, which is more expressive and less obvious. **Deviation from the ADR's sketch, deliberately**: no `WorkspaceBuilder::with_tool` and no `ExecutableTool` re-export. mentra's `RuntimeBuilder::with_tool` takes its tool by value and nothing upstream implements the trait for `Box` or `Arc`, so a public registration point would need a hand-forwarded shim — where forgetting `authorization_preview` would present a host's tool to the approver as its static descriptor, the exact failure this ADR exists to remove. `SpawnTool` is public instead; adding the method later is additive. Declared subprocess tools stay held: adjacent binding of the same contract, not this use case |
+| `Runtime` split (E1, basis half) | 0018 | **Built** (E1, the commit that carries these lines) — `Runtime` + `RuntimeBuilder` own mentra's runtime, provider/credential/base-URL and model *policy*, store policy, host interceptors, and the command environment (executor infrastructure, added to the ADR's list deliberately); `Workspace` borrows through an `Arc`, keeps discovery, and `Workspace::open(path)` is unchanged sugar over a private runtime (`RuntimeBuilder::build_for`). `workspace.runtime()` is renamed `mentra_runtime()`. mentra 0.18 fixes pre-hooks and MCP at build time, so basis registers one `HookDispatch` pre-hook keyed on the agent's `base_dir` (per-workspace hooks, `ShellAccess` and the `.git` carve-out on shared runtimes) and owns MCP connections per workspace via `McpManager` + `register_tool`, with server-name claims and per-mint `hidden_tools` keeping one workspace's `mcp__*` tools out of another's roster — asserted on the wire. Known gap, recorded on `Runtime::mint` and `crate::store`: shared runtimes tag persisted rows `"basis:runtime"` until mentra grows a per-session persist identifier, so per-workspace `session/list` on a *shared* runtime waits on that upstream ask (the private path is unaffected); the listing acceptance test ships `#[ignore]`d. `basis-acp`'s one-runtime-per-process rewire is the row below; the binary's `task.rs` rewire landed in the same wave — a per-task `RuntimeBuilder` carrying the store directory and task environment, with the pre-split provider-before-effort error precedence restored and pinned after the rewire briefly inverted it |
+| `Runtime` split (E1, basis-acp half) | 0018 | **Built** (E1, same commit) — the default `SessionSource` stops building a runtime per session (`run::prepare_without_prompt`, which opened a workspace, minted from it and dropped it before the first turn). `server/workspaces.rs` holds one `Runtime` for the process and one `Workspace` per key, both built on the first `session/new` that needs them — lazily, so a missing credential still reaches the client as `auth_required` instead of killing the server at startup, and neither cell caches a failure. The public surface does not move: `ServeConfig::new` / `with_source` / `with_initial_mode` are unchanged, so the binary and the bridge are untouched, and a host with its own runtime still comes in through `SessionSource`. The key is the canonicalized `cwd` **and** a digest of the `mcpServers` the client sent, because those arrive per session: keying on the directory alone would hand the second session the first one's roster and silently drop what it asked for, which reads exactly like a server with nothing to offer (values are digested, never held). Nothing evicts — a cached workspace's MCP connections and hook registration have to outlive every session minted from it, and `session/close` reaches basis after the fact. Two consequences of sharing, both basis's design rather than a choice made here: `--no-shell` and the `.git` carve-out are enforced by the hook dispatcher instead of by policy, so those denials now arrive in basis's words rather than mentra's; and `session/list` answers only for what a *private* runtime wrote, so conversations opened over ACP are invisible to it until the per-session persist identifier `Runtime::mint` is waiting on lands upstream — the ledger row above records the same gap, this is where it becomes user-visible. Pre-existing fix: `session/list` was registered unconditionally while `initialize` advertised it conditionally, so a source that cannot enumerate answered `[]` — the empty-list-for-a-workspace-that-has-some failure the capability exists to avoid; it now answers `-32601` itself |
 | Structured agent concurrency | 0017 | **Built** (`9d2179b`, `89ee68a`) — `spawn` returns a durable per-workspace task handle; the hidden local service persists bounded state, accepts `send`/`ask`, and provides repeatable `wait` (including `--message`), `cancel`, `watch`, and bounded `inbox` reply summaries; attached deadlines/cancellation flow downward, a parent publishes terminal state only after attached children settle, detached roots are independent, static ownership rules reject self/ancestor/same-tree-peer waits, the live wait graph rejects cycles across ownership trees, and terminal state is separate from advisory progress. `send --await` waits for the correlated reply for its own message rather than unrelated task termination. **Substrate superseded by the row below** (E2/ADR-0019): every semantic here survives on files except the live wait graph, which is deleted — cycles across ownership trees are no longer rejected, they end at each observer's own finite deadline. **CLI routing narrowed by [ADR-0020](adr/0020-spawn-routing-is-decided-by-the-environment.md)**: handle-first is what a caller *inside a task* gets, because that is whose turn must not block; at a shell `spawn` drives the agent it minted and prints the answer, with `--resumable` as the opt-out |
 | Files as the coordination surface (E2) | 0019 | **Built** (E2, the commit that carries these lines; `cargo fmt --all`, `cargo clippy -p basis --all-targets -- -D warnings` and `cargo test --workspace` — 775 passed, 0 failed — all green) — the per-workspace daemon is retired and an agent is a directory under one global, workspace-keyed data root (`BASIS_DATA_DIR`, else an absolute `XDG_DATA_HOME`, else the platform data home; `0700`), holding `meta.json`, `inbox.json`, `events.jsonl` and — as the executor's last act — `terminal.json`, whose existence *is* the completion signal, so an agent is resumable iff it has none and every crash before that write resolves toward resumable. Attach is the primitive: take the agent's `fs2` lock, resume from mentra's last committed turn, checkpoint at turn boundaries; `spawn --await`, `wait`, `ask` and `send --await` all attach, and a contended lock means someone else is executing, so the caller observes. Deleted whole: `registry.rs` (693), `protocol.rs` (233), `service.rs` (585), `service/task.rs` (617), `service/lifecycle/*` (1,505 across eight files), `client.rs` (659), `store.rs` (532) — with the old 12-line `mod.rs` that is all 4,836 lines of `basis/src/local`, replaced by 3,337 across eleven modules (2,453 implementation, 884 tests), every file under the ceiling. Outside it, `cli.rs` loses `Daemon`/`DaemonArgs` and `main.rs` its `__daemon` arm, while `shorthand.rs` keeps `__daemon` reserved so a pre-E2 script gets "unrecognized subcommand" rather than a task whose prompt is `__daemon`. What it costs, stated where the gain is: no progress without an attached process, cancellation granular to the turn boundary rather than instant, and no rollback of a re-driven turn's tool side effects — a checkpoint restores state, never effects. What it does not cost: mentra's store moves from beside the daemon's registry (under `XDG_RUNTIME_DIR`, which the platform may erase) to `<root>/workspaces/<key>/store`, so conversations are durable for the first time, at the price of not migrating the ones that were not. Three deviations from the plan, each forced by removing the daemon's mutex: the terminal record is written under the inbox lock, so an enqueue racing a settle is either accepted before the unanswered sweep or refused by the record it would have missed; the settle pass drives free-locked unfinished children on the success path too, without which a child spawned and never waited on would hold its parent open until the deadline; and `meta.json` carries no `next_seq`, since deriving it from the journal's last line cannot drift from the file after a crash |
 
 Footnotes on the Phase B, C and D rows, because a ledger that records only
 the wins is not a ledger:
 
-1. **`cargo tree -p basis-core` showed `tokio-tungstenite`, and now does not.**
+1. **`cargo tree -p basis` showed `tokio-tungstenite`, and now does not.**
    The defect as Phase B recorded it: mentra-provider required the crate
    unconditionally for the Responses websocket transport, so there was no
    basis-side gate to close, and Phase B's acceptance named the clause it could
@@ -131,7 +131,7 @@ the wins is not a ledger:
    nothing away, with mentra's own provider dependency set to
    `default-features = false` so the forwarding bites — and basis `27ab4c8`
    closed basis's side: the workspace dependency turns the default off and
-   `basis-core` re-offers the feature for an embedder who wants it. The Phase B
+   `basis` re-offers the feature for an embedder who wants it. The Phase B
    acceptance clause is met in full for the first time.
    Two facts are worth keeping, because both are easy to get backwards. First,
    **the reason basis cannot reach that transport is not a missing capability**:
@@ -151,12 +151,12 @@ the wins is not a ledger:
    forward — its client is unconditional — so the dependency graph does not
    shrink yet. What the feature delivers is the contract point of ADR-0012:
    one seam, one adapter, droppable at compile time. The day mentra grows a
-   feature of its own, `basis-core`'s manifest is where it gets forwarded.
+   feature of its own, `basis`'s manifest is where it gets forwarded.
 3. **`RuntimeBuilder` could not be named by any downstream code, and now can
    be.** The defect the split surfaced: `RuntimeBuilder` was `pub` inside a
    *private* `mod builder`, re-exported neither by `mentra::runtime` nor at
    the crate root, so `Runtime::builder()` returned a type no caller could
-   write. Inference carried a chained build through — `basis_core::run::resolve`
+   write. Inference carried a chained build through — `basis::run::resolve`
    got by on `let builder = Runtime::builder()`, rebound as it went — but a
    helper *taking or returning* a half-built runtime could not state its
    signature at all. Fixed upstream rather than worked around, per ADR-0005:
@@ -203,7 +203,7 @@ the wins is not a ledger:
    mentra's default — `~/Library/Application Support/mentra/workspaces/<hash>/runtime.sqlite`
    on macOS, `data_local_dir()` elsewhere (`mentra/src/default_paths.rs`) —
    and basis had been building real `Runtime`s in tests since P1 (`af04f9d`):
-   `cargo test -p basis-core --test approval` alone touched that file, no
+   `cargo test -p basis --test approval` alone touched that file, no
    `Workspace` involved. Phase C made it ordinary rather than causing it, since
    `Workspace::open` makes "this test drives a real runtime" the default shape.
    Two facts made it worse than it looked. The default path is keyed by the
@@ -225,16 +225,16 @@ the wins is not a ledger:
    `cargo test --workspace`, agent rows in the machine-wide default database
    move by zero and the file's mtime does not move either — measured on all four
    paths a basis test binary could key (`b5a71edc0abf57d2` for the workspace root,
-   `e8f5371f626eb964` for `basis-core`, `9e7efd0f1007c4b0` for `basis-acp`,
+   `e8f5371f626eb964` for `basis`, `9e7efd0f1007c4b0` for `basis-acp`,
    `cc9c24177d9e277d` for `basis`). Temp directories left behind per run: zero.
-   The rows those databases already hold — 1,046 under `basis-core`'s hash, 260
+   The rows those databases already hold — 1,046 under `basis`'s hash, 260
    under the binary's, 110 under the workspace root's — are the historical
    accumulation, and nothing deletes them; the claim is about what a run adds
    from here, which is nothing.
 7. **The second sighting of footnote 3, in the place the split made most
    visible — and it closes with it.** `WorkspaceBuilder::open` folded the
    discovered MCP servers into the builder inline
-   (`basis-core/src/workspace/builder.rs`, the
+   (`basis/src/workspace/builder.rs`, the
    `servers.into_iter().fold(builder, …)` block) because a helper taking or
    returning a half-built `RuntimeBuilder` could not name its type. mentra
    `c04986a` makes the type nameable, so the fold is now an inline expression
@@ -247,7 +247,7 @@ the wins is not a ledger:
    message, and when the last committed message is a tool result there is
    none, so the turn comes back as an error. The work is kept either way; the
    report is what disagrees. Pinned by
-   `basis-core/tests/cancellation.rs::a_graceful_stop_after_a_tool_round_keeps_its_work_but_reports_failure`
+   `basis/tests/cancellation.rs::a_graceful_stop_after_a_tool_round_keeps_its_work_but_reports_failure`
    and documented on the field itself.
 9. **Two different failures share one upstream error.** "run completed without
    invoking the expected terminal tool" and a genuinely malformed provider
@@ -334,7 +334,7 @@ the wins is not a ledger:
     `0`. That is narrower than "the budget was exceeded", and it is the honest
     reading: the exit code names a decision, not an arithmetic fact.
     **The zero-budget pin changed its answer, honestly.**
-    `basis-core/tests/budget.rs::a_zero_token_budget_is_what_refusing_avoids`
+    `basis/tests/budget.rs::a_zero_token_budget_is_what_refusing_avoids`
     used to show a provider-shaped `EmptyAssistantResponse` for an accounting
     decision, because mentra compares `reported >= budget` and a zero budget is
     already crossed before the first round. The run still does nothing, but the
@@ -346,7 +346,7 @@ the wins is not a ledger:
     turn with no value returns `Err`, and the report that would otherwise carry
     `stopped_by` is not handed back — there is nothing to hand it back with. So
     the only place the bound is named is `Event::RunFinished`, pinned by
-    `basis-core/tests/output.rs::a_working_turn_out_of_budget_says_so_on_the_stream`.
+    `basis/tests/output.rs::a_working_turn_out_of_budget_says_so_on_the_stream`.
     A host that drives typed turns and reads only reports will see a
     `RunError::Runtime` with no bound in it.
     **A run that answers *and* is bounded exits `3` printing nothing on
@@ -412,7 +412,7 @@ the wins is not a ledger:
     reports go inside the branch that produced them. The sharp edge of a
     design that otherwise has none; named in the `MergedEvents` rustdoc and
     pinned by
-    `basis-core/tests/fan_in.rs::a_held_report_holds_its_branch_of_the_stream_open`.
+    `basis/tests/fan_in.rs::a_held_report_holds_its_branch_of_the_stream_open`.
 14. `ProviderError` gained `UnattributedCredential` — a key supplied with
     neither a provider nor a base URL to attribute it to is refused rather
     than guessed at — and the enum is not `#[non_exhaustive]`, so that is a
@@ -428,20 +428,20 @@ the wins is not a ledger:
     reason naming `decide_async`. It denies. A runner with no interceptors is
     unaffected, so nothing that worked before this change behaves differently;
     what changed is that a *new* combination fails closed rather than quietly.
-    `basis-core/src/hooks/runner.rs`.
+    `basis/src/hooks/runner.rs`.
 16. **Implementing a basis trait used to cost the host an `async-trait`
     dependency.** `Interceptor` and `Approver` are both `#[async_trait]`, and
-    `basis-core` did not re-export the macro, so a host writing either impl added
+    `basis` did not re-export the macro, so a host writing either impl added
     `async-trait = "0.1"` to its own manifest to spell an attribute basis's docs
     asked for without saying so. A consistent papercut rather than a defect —
     mentra's own hook trait has the same shape and the reason is the same one
     (a participant that reads a file or takes a lock must not block a runtime
     worker) — but it was a line of someone else's `Cargo.toml`. Closed basis-side
-    in `ff5fc70`: `basis_core::async_trait` is re-exported at the crate root under
+    in `ff5fc70`: `basis::async_trait` is re-exported at the crate root under
     the rule already governing `BuiltinProvider` and `ModelSelector` — a name
     basis's surface makes a caller write is a name basis re-exports, and the rule
     reads the same for a macro as for a type. The interceptor doctest and the
-    README example spell it `#[basis_core::async_trait]`, which is what pins the
+    README example spell it `#[basis::async_trait]`, which is what pins the
     re-export rather than merely asserting it.
 17. **`session/list` had never worked, and the fix is forward-only on purpose.**
     basis filtered listings on the workspace's runtime identifier
@@ -481,8 +481,8 @@ the wins is not a ledger:
     set and unset, and the `env -u` ritual that used to precede every
     invocation is retired.
 19. **Tests move to their own file at the 800-line ceiling**, adopted as a
-    convention in Phase D rather than declared: `basis-core/src/hooks/runner.rs`
-    and `basis-core/src/workspace/builder.rs` both ended `mod tests;` with the
+    convention in Phase D rather than declared: `basis/src/hooks/runner.rs`
+    and `basis/src/workspace/builder.rs` both ended `mod tests;` with the
     cases in `runner/tests.rs` and `builder/tests.rs`, which is what kept them
     under the limit while growing. Three files were named as still over it and
     all three have since been split, each at a seam that already existed rather
@@ -505,9 +505,9 @@ the wins is not a ledger:
     that file is a crate root — which is why the directory form takes a
     `main.rs`.
     **The ceiling is nonetheless not held today, and by this wave's own work.**
-    `b782e75` took `basis-core/tests/output.rs` from 474 lines to **841** and
-    `basis-core/src/run/prepared.rs` from 797 to **808**, and
-    `basis-core/src/run.rs` sits at exactly **800**. So the score is three files
+    `b782e75` took `basis/tests/output.rs` from 474 lines to **841** and
+    `basis/src/run/prepared.rs` from 797 to **808**, and
+    `basis/src/run.rs` sits at exactly **800**. So the score is three files
     brought under and two pushed over in the same series of commits, which is
     the honest shape of a convention that is real but not enforced by anything
     — no lint, no CI gate, only a number in a footnote somebody has to look at.
@@ -525,7 +525,7 @@ the wins is not a ledger:
     inside one nanosecond tick would have shared both a store path and a
     runtime identifier, and each would have listed the other's agents. That is
     offered as a *suspected* mechanism and nothing more: a flake in
-    `basis-core/tests/hooks.rs` was seen exactly once, has not reproduced since,
+    `basis/tests/hooks.rs` was seen exactly once, has not reproduced since,
     and was never reduced to a failing case, so the honest statement is that
     the collision was possible in principle and unproven in this instance.
     The mentra fix — `MockRuntime` defaulting to the volatile store, with the
@@ -540,7 +540,7 @@ the wins is not a ledger:
     and without printing a name. `be65c00`'s gate saw a single lib-test flake
     that did not recur across seven full-suite reruns. The third came from
     rev 6's own docs gate and is the first with a name attached:
-    `basis-core/tests/hooks.rs::a_hook_is_told_which_schema_it_is_talking_to`
+    `basis/tests/hooks.rs::a_hook_is_told_which_schema_it_is_talking_to`
     failed in a `cargo test --workspace` run with
     `hook 'version' … did not answer within 5000ms and was killed`, then passed
     twenty-for-twenty across five consecutive runs of that target alone, which
@@ -581,7 +581,7 @@ footnote 6); `MockRuntime` defaulting to the volatile store, which took the
 temp litter and a possible identifier collision with it (mentra `aa206b7`,
 footnote 20); a run that ends on a bound now recording which one, so basis can
 report a stop it can finally observe (mentra `5a2a68e`, footnote 11);
-the Responses websocket transport behind a feature, so `basis-core`'s graph no
+the Responses websocket transport behind a feature, so `basis`'s graph no
 longer carries a websocket stack it cannot reach (mentra `c30fa9c`, footnote
 1); a typed turn that can keep its tools, so read-then-shape is a choice
 (mentra `be65c00`, footnote 12); a `RememberedRule` that carries its refusal's
@@ -629,7 +629,7 @@ for its own `task` intrinsic and has not opened for a registered tool.
   `UsageReport` on the parent's event bus is `pub(crate)`, written for the
   intrinsic, and a host-registered tool cannot reach it. So a run can be stopped
   by a total more than ten times what `RunReport::usage` admits to, which
-  `basis-core/tests/spawn.rs::delegated_spend_lands_on_the_budget_that_delegated_it`
+  `basis/tests/spawn.rs::delegated_spend_lands_on_the_budget_that_delegated_it`
   asserts in both directions. It also makes footnote 10's second half — "an
   observer summing basis's event stream gets the same total the accounting handle
   reports" — true of `task` and no longer true of the route basis actually uses.
@@ -677,28 +677,28 @@ by the contract — and no sentence in `README.md` describes deleted machinery.
 
 ### Phase B — Structure — **landed**
 
-1. ✅ Workspace split: `basis-core`, `basis-acp`, `basis` binary (ADR-0011). Bridge
+1. ✅ Workspace split: `basis`, `basis-acp`, `basis` binary (ADR-0011). Bridge
    stays in the binary, marked extractable. — `fbcacb4`
-2. ✅ MCP behind a `mcp` feature in `basis-core`, default-on in the binary.
+2. ✅ MCP behind a `mcp` feature in `basis`, default-on in the binary.
    — `a4c259c`
 3. ✅ Dissolve `ApprovalPolicy`: `AllowAll` (default) and `DenyAll` in core,
    `TerminalApprover` + `--approve` flag wiring in the binary. Document the
    fail-closed rule on the trait. — `a4c259c`, with the denial reason restored
    in `6192230` once mentra `15fdcfe` gave it somewhere to go.
-4. ✅ Update `README.md` (the embedding story on `basis-core`, the `mcp` feature,
+4. ✅ Update `README.md` (the embedding story on `basis`, the `mcp` feature,
    approval as trait + impls), `ARCHITECTURE.md` §4 (layering and diagram), and
    this ledger.
 
 Acceptance: **met in full, and only as of rev 6.** For two revs this read "met
 in substance, with the one clause it cannot literally satisfy named rather than
-quietly dropped": `cargo tree -p basis-core` was free of `agent-client-protocol`
+quietly dropped": `cargo tree -p basis` was free of `agent-client-protocol`
 and of `blocking`, but `tokio-tungstenite` was still in there through
 mentra-provider's unconditional Responses websocket transport. That was an
 upstream gate to ask for rather than a basis defect, and asking for it is what
 eventually got it — mentra `c30fa9c` built the feature and basis `27ab4c8` turned
 it off here, so the graph is now free of all three (footnote 1). `cargo build
--p basis-core --examples` compiles both embedder examples against `basis-core`
-alone, and `cargo check -p basis-core --no-default-features --all-targets` is
+-p basis --examples` compiles both embedder examples against `basis`
+alone, and `cargo check -p basis --no-default-features --all-targets` is
 clean — the crate really does build with no MCP concept in it.
 
 ### Phase C — The SDK (the point of the exercise) — **landed**
@@ -713,9 +713,9 @@ clean — the crate really does build with no MCP concept in it.
 4. ✅ `BudgetPool` shared across runs. — `e21d632`
 5. ✅ Tagged sinks with a fan-in helper. — `07cf4d1`
 6. ✅ The two acceptance examples, written against the public API only:
-   `basis-core/examples/watch.rs` (interval + fingerprint + bounded run, and the
+   `basis/examples/watch.rs` (interval + fingerprint + bounded run, and the
    ≲ 20 lines of loop logic the criterion asked for — it is nine) and
-   `basis-core/examples/review_workflow.rs` (fan-out with structured findings,
+   `basis/examples/review_workflow.rs` (fan-out with structured findings,
    shared budget, fan-in verification). — `0ff745c`
 
 Acceptance: met, on the criterion as it was written. Both examples compile,
@@ -799,8 +799,8 @@ which is the claim `f3529be` makes and the reason the `env -u` ritual is
 retired. The data-directory probe is zero: across a full suite run, agent rows
 in the machine-wide default database move by zero and no `runtime.sqlite` under
 any of basis's four candidate paths changes mtime (footnote 6), and no temp
-directory is left behind. `RUSTDOCFLAGS="-D warnings" cargo doc -p basis-core
---no-deps` is clean, which `f76617d` is the last commit of, and the `basis-core`
+directory is left behind. `RUSTDOCFLAGS="-D warnings" cargo doc -p basis
+--no-deps` is clean, which `f76617d` is the last commit of, and the `basis`
 doctests pass under the scrubbed environment. Two hygiene notes belong with
 that rather than in the win column: the phase adopted tests-in-their-own-file
 at the 800-line ceiling and named the files then over it (footnote 19), and
@@ -822,7 +822,7 @@ original defect intact.
    carries `stopped_by`. — mentra `5a2a68e`, basis `8e35f3e`, `a2d170a`
    (footnote 11)
 3. ✅ The Responses websocket transport behind `responses-websocket`;
-   `cargo tree -p basis-core` is tungstenite-free and Phase B's last acceptance
+   `cargo tree -p basis` is tungstenite-free and Phase B's last acceptance
    clause is met. — mentra `c30fa9c`, basis `27ab4c8` (footnote 1)
 4. ✅ A typed turn can keep its tools, so read-then-shape is a choice rather
    than a constraint. — mentra `be65c00`, basis `b782e75` (footnote 12)
@@ -832,7 +832,7 @@ Riding along, because the ceiling footnote 19 named was the one piece of
 housekeeping nothing else was going to do: `basis-acp/src/server.rs` (`89ccce4`),
 `basis/src/main.rs` (`665ced6`) and `basis-acp/tests/acp.rs` (`e37f4f3`) split at
 seams they already had, zero behavior change each. Also `ff5fc70`, which
-re-exports `basis_core::async_trait` and closes footnote 16 — basis's own papercut
+re-exports `basis::async_trait` and closes footnote 16 — basis's own papercut
 rather than mentra's, and the only one on this list that needed no upstream
 change at all.
 
@@ -845,7 +845,7 @@ clean tally is a measurement of discipline, not of completeness: three new
 candidates were named on the way through and none was built, footnote 8 stays
 open, and both facts are in §2 rather than here so the tally and its caveats
 stay on one page. And the suite went red once on the way to that 641, in
-`basis-core/tests/hooks.rs`, on a five-second subprocess deadline that the same
+`basis/tests/hooks.rs`, on a five-second subprocess deadline that the same
 target clears in a third of a second when run alone — the third such sighting,
 recorded in footnote 20 rather than rerun until green and forgotten.
 

@@ -7,8 +7,8 @@
 
 use std::path::{Path, PathBuf};
 
+use basis::templates::{self, DEFAULT_WORKSPACE_TEMPLATES_DIR, TemplatesConfig};
 use basis_acp::available_commands;
-use basis_core::templates::{self, DEFAULT_WORKSPACE_TEMPLATES_DIR, TemplatesConfig};
 
 /// A config with no global root, so nothing on the developer's own machine can
 /// change an outcome here.

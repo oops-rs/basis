@@ -24,7 +24,7 @@ the design.
 **One contract per seam; transports are adapters.**
 
 Tools — the contract is mentra's `ExecutableTool`, surfaced first-class in
-`basis-core`. Three bindings:
+`basis`. Three bindings:
 
 1. **Native Rust** — an embedder registers a tool as code.
 2. **Declared subprocess** — new: a data file in the workspace declares a

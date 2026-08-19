@@ -33,7 +33,7 @@ use crate::{
     mode::ModeError,
     session::{AcpSession, SessionRegistry},
 };
-use basis_core::{PersistedSession, RunError, provider::ProviderError};
+use basis::{PersistedSession, RunError, provider::ProviderError};
 
 /// The conversations persisted for one workspace.
 ///
@@ -263,7 +263,7 @@ pub(super) fn close_session(
 /// name for. basis advertises no auth method to fix it with — there is no login,
 /// only an environment variable — so the message carries the variable's name,
 /// which is the actionable part.
-pub(super) fn setup_failed(error: basis_core::RunError) -> Error {
+pub(super) fn setup_failed(error: basis::RunError) -> Error {
     if is_missing_credential(&error) {
         return Error::auth_required().data(error.to_string());
     }
@@ -271,7 +271,7 @@ pub(super) fn setup_failed(error: basis_core::RunError) -> Error {
     Error::internal_error().data(error.to_string())
 }
 
-fn is_missing_credential(error: &basis_core::RunError) -> bool {
+fn is_missing_credential(error: &basis::RunError) -> bool {
     matches!(
         error,
         RunError::Provider(

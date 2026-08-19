@@ -3,16 +3,16 @@
 > **basis** — the minimal set everything else is built from.
 > Nothing in it reduces to anything else; your host supplies the rest.
 
-basis is an agent harness you **embed**. `basis-core` is the harness itself, as a library: open a
+basis is an agent harness you **embed**. `basis` is the harness itself, as a library: open a
 `Workspace`, mint runs from it, read one event stream, plug your own code into the seams. It carries
 no protocol, no transport and no terminal code, so an embedding host's dependency graph states what
 it uses ([ADR-0011](docs/adr/0011-layered-crates.md)); `basis-acp` and the binary are thin shells.
 
 ```rust
-// [dependencies] basis-core = "0.1"
-let workspace = basis_core::Workspace::open("/repo").await?;
+// [dependencies] basis = "0.2"
+let workspace = basis::Workspace::open("/repo").await?;
 let mut run = workspace.prepare("what does this repo do?")?;
-let report = run.execute(basis_core::CollectingSink::default()).await?;
+let report = run.execute(basis::CollectingSink::default()).await?;
 ```
 
 To try it as a command, set a provider key — `ANTHROPIC_API_KEY`, `OPENAI_API_KEY`, `GEMINI_API_KEY`,
@@ -21,7 +21,7 @@ leaving a durable handle behind it; any OpenAI-compatible endpoint works, URL as
 handled.
 
 ```sh
-cargo install basis
+cargo install basis-cli          # the binary is `basis`
 basis "summarize what changed in the last three commits"
 basis spawn -C ../other-repo --deadline 10m --tool-budget 40 "find the slowest test, explain why"
 
@@ -31,7 +31,7 @@ basis spawn --model gpt-5.6 "explain the module layout"
 
 ## Lightweight, as a number
 
-- **`basis-core`'s direct dependencies are `mentra` plus six utility crates** — `async-trait`,
+- **`basis`'s direct dependencies are `mentra` plus six utility crates** — `async-trait`,
   `serde`, `serde_json`, `serde_yaml_ng`, `thiserror`, `tokio`.
 - **MCP compiles out.** `default-features = false` builds a core with no MCP concept at all: no
   `.mcp.json` discovery, no `McpConfig` on a run, no servers registered
@@ -95,7 +95,7 @@ Dividing a limit across a fan-out starves the runs with something to say; granti
 multiplies the bill by N. A `BudgetPool` is the single figure in between:
 
 ```rust
-let pool = basis_core::BudgetPool::new(500_000);
+let pool = basis::BudgetPool::new(500_000);
 let mut reviewer = workspace.prepare(pool.spec("review the tests"))?;
 ```
 
@@ -116,7 +116,7 @@ Each run wants a sink of its own; a host wants one view of all of them without l
 what. `EventFanIn` mints one tagged sink per run and merges them:
 
 ```rust
-let fan = basis_core::EventFanIn::new();
+let fan = basis::EventFanIn::new();
 let (a, b) = (fan.sink("tests"), fan.sink("docs"));
 let mut merged = fan.into_events();   // minting closes here
 while let Some(tagged) = merged.recv().await { … }
@@ -129,7 +129,7 @@ design: hold the answers, drop the reports.
 
 ### Structured concurrency
 
-`basis_core::Supervisor` owns concurrent work in process, under the same rules the CLI's durable
+`basis::Supervisor` owns concurrent work in process, under the same rules the CLI's durable
 handles obey below: `spawn` returns a `TaskHandle` immediately, `wait` observes a terminal state
 without rerunning anything, `cancel` flows downward to attached descendants, and detached work is a
 new root ([ADR-0017](docs/adr/0017-structured-agent-concurrency.md)). A wait-for cycle cannot be
@@ -142,7 +142,7 @@ Stopping one turn is two signals:
 ## The seams
 
 **`Approver`** answers *may this happen*. `AllowAll` (what a run with no approver gets) and `DenyAll`
-ship in `basis-core`; everything between them — allow edits but deny the network, ask over Slack with a
+ship in `basis`; everything between them — allow edits but deny the network, ask over Slack with a
 timeout, escalate after the third refusal — is an impl, and a refusal names its reason, since that
 reason is what the model reads as the call's result.
 
@@ -152,7 +152,7 @@ reason is what the model reads as the call's result.
 scope is runtime scope ([ADR-0018](docs/adr/0018-the-runtime-owns-the-process.md)) — so its own
 compiled code gets the say, which is what you want when the guard needs a vault handle, a token
 you just minted, or a regex that lives in a config struct. `intercept(&HookRequest)` answers
-`HookOutcome::Allow`, `Deny`, or `Modify`, and `basis_core::async_trait` is re-exported so writing the
+`HookOutcome::Allow`, `Deny`, or `Modify`, and `basis::async_trait` is re-exported so writing the
 impl costs your manifest nothing.
 
 Both bindings speak the same allow/deny/modify vocabulary and are folded by one chain: interceptors
@@ -170,7 +170,7 @@ directory.
 ## What the workspace contributes
 
 The core has no opinions. Task-specific behavior enters through data — the prompt, the workspace, and
-config — never through code in `basis-core`:
+config — never through code in `basis`:
 
 - **`AGENTS.md`** — a global config directory, then each ancestor outermost-inward, then the workspace
   root; later files are more specific, and all are named in `run_started`.
@@ -188,7 +188,7 @@ Details of each, and of the one `spawn` tool carrying both commands and delegati
 ## The same core, two shells
 
 `basis serve --acp` speaks the [Agent Client Protocol](https://agentclientprotocol.com) (JSON-RPC 2.0
-over stdio) over `basis-core`'s event stream, so any ACP client drives it with no basis-specific client
+over stdio) over `basis`'s event stream, so any ACP client drives it with no basis-specific client
 code. An ACP session *is* a mentra agent, so `session/load` resumes a conversation from a previous
 process and basis stores no mapping of its own
 ([ADR-0007](docs/adr/0007-acp-sessions-and-the-dispatch-loop.md)); permission requests become
@@ -306,12 +306,12 @@ pattern, what it protects, and what it does not.
 
 ## Examples
 
-`cargo run -p basis-core --example <name> -- …`, with a provider key set.
-[`embed.rs`](basis-core/examples/embed.rs) reacts to events as they arrive,
-[`conversation.rs`](basis-core/examples/conversation.rs) takes two turns on one session,
-[`watch.rs`](basis-core/examples/watch.rs) is the recurring-run loop, and
-[`reviewed_shell.rs`](basis-core/examples/reviewed_shell.rs) is an `Approver` reviewing the agent's
-commands with a cheap typed turn of its own. [`review_workflow.rs`](basis-core/examples/review_workflow.rs)
+`cargo run -p basis --example <name> -- …`, with a provider key set.
+[`embed.rs`](basis/examples/embed.rs) reacts to events as they arrive,
+[`conversation.rs`](basis/examples/conversation.rs) takes two turns on one session,
+[`watch.rs`](basis/examples/watch.rs) is the recurring-run loop, and
+[`reviewed_shell.rs`](basis/examples/reviewed_shell.rs) is an `Approver` reviewing the agent's
+commands with a cheap typed turn of its own. [`review_workflow.rs`](basis/examples/review_workflow.rs)
 composes the lot: one workspace, one budget, typed findings, one merged stream, a folded verdict.
 
 ## Status

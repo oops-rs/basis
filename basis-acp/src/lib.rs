@@ -5,7 +5,7 @@
 //! basis embeddable without basis shipping a client: Zed, JetBrains, and acp-ui
 //! drive it as-is (PROPOSAL.md Bet 2, ADR-0002).
 //!
-//! This is an adapter over [`basis_core`] and nothing else: the run lifecycle,
+//! This is an adapter over [`basis`] and nothing else: the run lifecycle,
 //! the event stream and the seams are all the core's, and what is here is the
 //! translation at one edge. Opt-in by dependency, so a host embedding the
 //! harness in-process never compiles a JSON-RPC server it does not run
@@ -15,14 +15,14 @@
 //!
 //! # Shape
 //!
-//! - [`session_update`] maps basis's [`Event`](basis_core::Event) onto
+//! - [`session_update`] maps basis's [`Event`](basis::Event) onto
 //!   `session/update`. That mapping is the whole reason `Event` is basis's own
 //!   type rather than a re-export of mentra's: one normalization, many surfaces.
 //! - [`AcpApprover`] answers mentra's permission requests by asking the client,
-//!   turning basis's existing [`Approver`](basis_core::Approver) seam into
+//!   turning basis's existing [`Approver`](basis::Approver) seam into
 //!   `session/request_permission` with no new plumbing.
 //! - [`SessionModes`] is the client's permission switch: ACP session modes over
-//!   basis's [`Approver`](basis_core::Approver) seam, applied in front of the
+//!   basis's [`Approver`](basis::Approver) seam, applied in front of the
 //!   approver so the answer can still change mid-session. The three modes are
 //!   [`ApprovalMode`], which is basis-acp's own because an enumerable mode list
 //!   is a protocol concept — the core has the trait and nothing else.
@@ -30,10 +30,10 @@
 //!   `session/load` from `session/resume`.
 //! - [`SessionRegistry`] holds the open conversations, keyed by mentra's
 //!   persisted agent id so that `session/load` is just
-//!   [`Workspace::resume`](basis_core::Workspace::resume).
+//!   [`Workspace::resume`](basis::Workspace::resume).
 //! - [`serve`] wires the handlers onto a connection, over one
-//!   [`Runtime`](basis_core::Runtime) for the process and one
-//!   [`Workspace`](basis_core::Workspace) per directory a client names
+//!   [`Runtime`](basis::Runtime) for the process and one
+//!   [`Workspace`](basis::Workspace) per directory a client names
 //!   (ADR-0018).
 //! - [`serve_stdio`] is the stdin/stdout transport, and the one place basis looks
 //!   at what a peer sent before serving it.

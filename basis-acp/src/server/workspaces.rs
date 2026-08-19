@@ -2,7 +2,7 @@
 //! one workspace for each directory a client asks about.
 //!
 //! ADR-0018's shape at the protocol layer. The default source used to call
-//! [`prepare_without_prompt`](basis_core::run::prepare_without_prompt) per
+//! [`prepare_without_prompt`](basis::run::prepare_without_prompt) per
 //! session, which opens a workspace, mints one run from it, and drops it — so
 //! a server holding N editor sessions held N mentra runtimes, N provider
 //! resolutions and N store handles, and no session outlived the workspace
@@ -39,7 +39,7 @@ use std::{
     sync::{Arc, Mutex},
 };
 
-use basis_core::{
+use basis::{
     McpServer, PersistedSession, PreparedRun, RunConfig, RunError, RunSpec, Runtime,
     RuntimeBuilder, Workspace, WorkspaceBuilder,
 };
@@ -78,7 +78,7 @@ impl ConfiguredSource {
     ///
     /// Test-only because building one resolves a provider credential, which is
     /// exactly what an offline test cannot do and exactly what
-    /// [`RuntimeBuilder::with_api_key`](basis_core::RuntimeBuilder::with_api_key)
+    /// [`RuntimeBuilder::with_api_key`](basis::RuntimeBuilder::with_api_key)
     /// answers — and it is not on [`RunConfig`], which is the only thing
     /// [`ServeConfig`](super::ServeConfig) takes. A host that wants to supply
     /// its own runtime supplies its own
@@ -126,7 +126,7 @@ impl ConfiguredSource {
     ) -> Result<(Arc<Workspace>, RunSpec), RunError> {
         let config = self.config_for(cwd, mcp);
         let key = WorkspaceKey::of(&config);
-        // `split` is basis-core's own mapping from a one-prompt config to the
+        // `split` is basis's own mapping from a one-prompt config to the
         // workspace and run halves it conflates, so the two cannot drift. The
         // private runtime recipe it seeds the builder with is replaced below —
         // this process resolved its provider once already.
@@ -239,12 +239,12 @@ impl SessionSource for ConfiguredSource {
     /// SQLite table.
     ///
     /// This depends on a conversation being tagged with
-    /// [`store::runtime_identifier`](basis_core::store::runtime_identifier) for
+    /// [`store::runtime_identifier`](basis::store::runtime_identifier) for
     /// its workspace, and since ADR-0018 that is exactly what a *shared*
     /// runtime cannot do: mentra 0.18 fixes the tag per runtime at build time,
     /// so conversations opened over ACP are filed under the process's tag and
     /// stay out of every per-workspace list until the per-session override
-    /// lands upstream — see [`Runtime`](basis_core::Runtime)'s `mint`, the one
+    /// lands upstream — see [`Runtime`](basis::Runtime)'s `mint`, the one
     /// line that closes it. What this still answers for is every conversation
     /// the CLI and the free functions wrote, which do run on a private runtime
     /// per workspace; a row re-files itself the next time it persists under a
@@ -255,7 +255,7 @@ impl SessionSource for ConfiguredSource {
     /// that *are* listed correctly, and re-claiming it later would move the
     /// advertised surface under a client that had already read it.
     async fn list_sessions(&self, cwd: PathBuf) -> Result<Vec<PersistedSession>, RunError> {
-        basis_core::store::list(&cwd)
+        basis::store::list(&cwd)
     }
 }
 
@@ -272,7 +272,7 @@ impl SessionSource for ConfiguredSource {
 ///
 /// Two workspaces on one directory is the cost, and it is bounded: they differ
 /// only in their supplied servers, so they discover the same hooks and carry
-/// the same command posture, and basis-core's dispatcher — which keys on the
+/// the same command posture, and basis's dispatcher — which keys on the
 /// directory — is consulting equivalent guards whichever of them it finds.
 #[derive(Debug, PartialEq, Eq, Hash)]
 pub(super) struct WorkspaceKey {

@@ -21,7 +21,7 @@ explicit.
 
 - Humans and scripts starting one-shot agent work from a repository.
 - Agent runtimes delegating bounded work to child agents.
-- Hosts embedding `basis-core` and needing observable, cancellable child runs.
+- Hosts embedding `basis` and needing observable, cancellable child runs.
 
 ## Objectives
 
@@ -47,7 +47,7 @@ explicit.
 - Unrestricted peer-to-peer synchronous protocols or messages after a task has
   reached its terminal state. The first service supports one correlated reply
   for each message accepted while a task is running.
-- A new wire protocol in `basis-core`; transports remain in adapters or the
+- A new wire protocol in `basis`; transports remain in adapters or the
   binary.
 - A TUI, process sandbox, or replacement for Mentra's agent loop.
 - Making detached work implicitly inherit a parent's lifetime.
@@ -55,7 +55,7 @@ explicit.
 ## Constraints
 
 - Rust edition 2024, MSRV 1.88, and the existing three-crate layering.
-- `basis-core` carries generic lifecycle types only: no ACP, websocket, or TTY
+- `basis` carries generic lifecycle types only: no ACP, websocket, or TTY
   dependencies.
 - Parent cancellation and deadlines propagate to attached descendants.
 - A parent's own completion is pending while attached descendants are still

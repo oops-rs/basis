@@ -29,7 +29,7 @@ resume any agent.
 
 ## Target users
 
-- Rust hosts embedding `basis-core` across one or many repositories.
+- Rust hosts embedding `basis` across one or many repositories.
 - `basis-acp` serving many editor sessions from one process.
 - Humans and scripts driving `spawn`/`send`/`ask`/`wait`/`cancel`/`watch`
   from a shell, including under `nohup`/tmux/systemd/CI.
@@ -85,7 +85,7 @@ resume any agent.
 - No instant cancellation; a hung tool call is ended by the deadline.
 - No effect rollback: a checkpoint restores state, never effects, and a
   re-driven turn may repeat tool side effects.
-- No orchestration, agent registry, or fleet manager in `basis-core`
+- No orchestration, agent registry, or fleet manager in `basis`
   (ADR-0010's line holds).
 - No cross-machine coordination; the data directory is one machine's. Remote
   is a different design with a different ADR.

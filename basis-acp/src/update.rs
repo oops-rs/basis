@@ -15,7 +15,7 @@ use agent_client_protocol::schema::v1::{
 };
 use serde_json::Value;
 
-use basis_core::{
+use basis::{
     event::{Event, Mutability},
     tools::SPAWN,
 };
@@ -190,7 +190,7 @@ fn tool_kind(tool_name: &str, mutability: Mutability, input: &Value) -> ToolKind
 
 /// The field `spawn` takes its one string in.
 ///
-/// A literal because `basis-core` keeps the name private; see [`spawn_kind`] for
+/// A literal because `basis` keeps the name private; see [`spawn_kind`] for
 /// what that costs and what it does not.
 const SPAWN_INPUT: &str = "input";
 
@@ -214,13 +214,13 @@ const DELEGATION: ToolKind = ToolKind::Other;
 /// `spawn`'s kind, which its *mode* decides rather than its name (ADR-0016).
 ///
 /// The mode is re-derived from the raw string here, and that is a knowing
-/// second reading of the convention `basis_core::tools::spawn` parses exactly
+/// second reading of the convention `basis::tools::spawn` parses exactly
 /// once. It is not free: if the two ever disagree — a new escape, a different
 /// trim — a client renders the wrong icon and nothing says so. What keeps it
 /// tolerable is that this path decides nothing. The typed `{mode, body, cwd}`
 /// is what reaches the approver, the rule store, the hooks and the audit trail;
 /// what reaches ACP is a `ToolQueued` event carrying the string the model
-/// wrote, and basis-core exports no reader for it. The fix is that reader,
+/// wrote, and basis exports no reader for it. The fix is that reader,
 /// exported from the crate that owns the convention — not a second copy that
 /// grows.
 fn spawn_kind(input: &Value) -> ToolKind {
@@ -245,7 +245,7 @@ fn spawn_kind(input: &Value) -> ToolKind {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use basis_core::event::{NoticeSeverity, RunOutcome};
+    use basis::event::{NoticeSeverity, RunOutcome};
     use serde_json::json;
 
     fn text_of(chunk: &ContentChunk) -> String {

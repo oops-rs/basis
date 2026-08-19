@@ -1,6 +1,6 @@
 [package]
 name = "basis-acp"
-description = "The Agent Client Protocol adapter over basis-core: the same event stream and the same seams, served to editors and web UIs."
+description = "The Agent Client Protocol adapter over basis: the same event stream and the same seams, served to editors and web UIs."
 version.workspace = true
 edition.workspace = true
 rust-version.workspace = true
@@ -14,7 +14,7 @@ categories = ["development-tools"]
 [dependencies]
 # `mcp` explicitly rather than by default: ACP carries `mcpServers` on
 # `session/new`, so `from_acp` has nothing to convert into without it.
-basis-core = { workspace = true, features = ["mcp"] }
+basis = { workspace = true, features = ["mcp"] }
 mentra.workspace = true
 
 agent-client-protocol.workspace = true

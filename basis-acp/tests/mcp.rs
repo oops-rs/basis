@@ -10,8 +10,8 @@
 use std::path::{Path, PathBuf};
 
 use agent_client_protocol::schema::v1::{McpServer as AcpServer, McpServerHttp, McpServerStdio};
+use basis::mcp::{DEFAULT_WORKSPACE_MCP_FILE, McpConfig, servers};
 use basis_acp::from_acp;
-use basis_core::mcp::{DEFAULT_WORKSPACE_MCP_FILE, McpConfig, servers};
 
 /// A config that looks nowhere except where a test puts something.
 fn config() -> McpConfig {

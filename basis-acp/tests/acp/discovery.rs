@@ -22,7 +22,7 @@ use crate::source::{MockSource, text_mock, workspace};
 /// pinned here is that the request reaches it, that the answer arrives as
 /// `SessionInfo`, and that the `cwd` a client is told is the one it asked
 /// about. Whether the *right* conversations are enumerated for a workspace is
-/// `basis-core`'s question, and `basis-core/tests/workspace.rs` answers it.
+/// `basis`'s question, and `basis/tests/workspace.rs` answers it.
 #[tokio::test]
 async fn a_conversation_just_opened_comes_back_from_listing() {
     let workspace = workspace();

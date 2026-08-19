@@ -20,7 +20,7 @@
 //! basis uses mentra's **agent id**, not its session id. mentra persists agents;
 //! a `Session` is one process's view of one. Keying on the agent id is what
 //! makes `session/load` free — it is exactly the handle
-//! [`Workspace::resume`](basis_core::Workspace::resume) takes, so a client can
+//! [`Workspace::resume`](basis::Workspace::resume) takes, so a client can
 //! reconnect to a conversation this process never saw.
 
 use std::{
@@ -31,7 +31,7 @@ use std::{
 use agent_client_protocol::schema::v1::SessionId;
 
 use crate::mode::{ApprovalMode, SessionModes};
-use basis_core::{PreparedRun, run::TurnOptions};
+use basis::{PreparedRun, run::TurnOptions};
 use mentra::runtime::CancellationToken;
 
 /// One open conversation.
