@@ -20,7 +20,7 @@ and a host that opens N workspaces pays the process costs N times.
 The architecture already knows the missing layer; it just has no noun for it.
 The interception chain folds **host interceptors → global hooks → workspace
 hooks** — host scope is real in the ordering and absent from the type system.
-And the in-tree customer is already paying: `lan-acp`'s default
+And the in-tree customer is already paying: `basis-acp`'s default
 `SessionSource` builds a runtime per session from a `RunConfig`
 (`server/config.rs`), so a server holding N editor sessions holds N mentra
 runtimes, N provider resolutions, and N store handles in one process.
@@ -31,7 +31,7 @@ store policy, and provider configuration attach.
 
 ## Decision
 
-**lan gains a `Runtime`: the process-scoped substrate every workspace
+**basis gains a `Runtime`: the process-scoped substrate every workspace
 borrows. `Workspace` keeps only what the repository says.**
 
 - `Runtime` owns mentra's runtime, provider/credential/base-URL and model
@@ -51,17 +51,17 @@ borrows. `Workspace` keeps only what the repository says.**
   private default runtime, the same wrapper pattern as the free functions
   over `Workspace` (`RunConfig::split` is the seam). The one-repository host
   never sees the third noun; only the N-repository host reaches for it.
-- Naming: lan's `Runtime` owns mentra's and re-exposes it as
-  `mentra_runtime()`, so the bargain that lan does not hide mentra survives
+- Naming: basis's `Runtime` owns mentra's and re-exposes it as
+  `mentra_runtime()`, so the bargain that basis does not hide mentra survives
   the name. This is a breaking change to `Workspace::runtime()`, taken now
   because 0.1.0 is unpublished; the window closes at first release.
 - Boundary: this is a structural extraction, not orchestration. No agent
-  registry, no scheduler, no fleet manager enters `lan-core`; ADR-0010's
+  registry, no scheduler, no fleet manager enters `basis-core`; ADR-0010's
   line — orchestration is host-language code against the crate — holds.
 
 ## Consequences
 
-- `lan-acp` holds one `Runtime` per server process and opens one `Workspace`
+- `basis-acp` holds one `Runtime` per server process and opens one `Workspace`
   per distinct `cwd`; sessions stop paying process costs, and the
   runtime-per-session `SessionSource` shape is retired.
 - The interception chain's ordering gets its missing noun: host scope is

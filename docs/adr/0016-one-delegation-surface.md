@@ -12,7 +12,7 @@
 
 Two doors exist today for *do something I cannot do by thinking*: mentra's
 `shell` builtin and its `task` intrinsic. Both sit on the model's roster
-because lan leaves them there — `agent_config` (`lan-core/src/workspace/builder.rs:640`)
+because basis leaves them there — `agent_config` (`basis-core/src/workspace/builder.rs:640`)
 sets a system prompt and a base directory and takes mentra's defaults for
 everything else, and the default `ToolProfile` allows every registered tool
 (`mentra/src/agent/config.rs:168`, with `allows` at `:202`).
@@ -21,7 +21,7 @@ They are the same act at two granularities — hand work to something else, read
 back a summary — and they are governed as if they were unrelated. `shell`
 declares `ToolSideEffectLevel::Process` (`mentra/src/tool/builtin/shell.rs:115`),
 `task` declares `LocalState` (`mentra/src/runtime/intrinsic/descriptor.rs:116`),
-and each reaches lan's `ApprovalGate` under its own name. Since remembered
+and each reaches basis's `ApprovalGate` under its own name. Since remembered
 rules key on `{tool_name, pattern}` (`mentra/src/session/permission.rs:118-121`),
 two names means two rule namespaces for what an operator thinks of as one
 question, and any per-command review would have to be built once per door.
@@ -35,10 +35,10 @@ models and to humans and costs one character where a mode field costs a
 decision on every call. The way out is to read it exactly once.
 
 One prerequisite is missing and worth naming before the decision rather than
-inside it: **lan registers no tools today.** `WorkspaceBuilder::open` builds the
+inside it: **basis registers no tools today.** `WorkspaceBuilder::open` builds the
 runtime and never calls `RuntimeBuilder::with_tool` (`mentra/src/runtime/builder.rs:56`),
-and `ExecutableTool` (`mentra/src/tool/model.rs:604`) is not among `lan-core`'s
-re-exports. ADR-0012 decided that contract *was* lan's tools story; the
+and `ExecutableTool` (`mentra/src/tool/model.rs:604`) is not among `basis-core`'s
+re-exports. ADR-0012 decided that contract *was* basis's tools story; the
 ledger still records the piece as not started.
 
 ## Decision
@@ -55,7 +55,7 @@ commands.**
 
 2. **Command mode is put to the `Approver`, always.** `spawn` declares itself
    consequential, so `ApprovalGate` never lets it through under the
-   reads-are-never-asked rule (`is_consequential`, `lan-core/src/approval.rs:184`;
+   reads-are-never-asked rule (`is_consequential`, `basis-core/src/approval.rs:184`;
    the gate at `:230-251`). Per-call precision comes from overriding
    `ToolExecutor::authorization_preview` (`mentra/src/tool/model.rs:538`), whose
    default merely restates the static descriptor: `spawn` reports `Process` for
@@ -92,7 +92,7 @@ commands.**
    serialized input JSON (`RuleStore::matching_rule`, `permission.rs:189-217`).
    The `Approver` sees only the residue. Its answer can be kept:
    `AllowForSession` / `DenyForSession` become `allow_and_remember` /
-   `deny_and_remember` (`lan-core/src/run/prepared/forward.rs:145-161`), and
+   `deny_and_remember` (`basis-core/src/run/prepared/forward.rs:145-161`), and
    since mentra `b895ea0` a remembered refusal carries the words it refused
    with, so a repeat gets the explanation back with no model consulted.
 
@@ -102,7 +102,7 @@ commands.**
    surface, nothing changed in the forwarding path. Its recursion floor is
    structural rather than promised: a typed turn holds no tool but the
    answering one unless `OutputSpec::with_tools()` says otherwise
-   (`lan-core/src/run/output.rs:67-69, 98`), so a reviewer on the default spec
+   (`basis-core/src/run/output.rs:67-69, 98`), so a reviewer on the default spec
    has no `spawn`, no shell, and no way to reach the gate it is answering for.
    It gets its own budget. Fail-closed already holds — an approver that cannot
    answer denies (`approval.rs:113-133`), and `ApprovalGate::with_timeout`
@@ -120,10 +120,10 @@ commands.**
 8. **Recursive uniformity.** A subagent gets `spawn` and no direct shell at
    every depth, by construction: `DisposableSubagentTemplate::from_agent`
    clones the parent's `AgentConfig` and its hidden set
-   (`mentra/src/agent/subagent.rs:30-40`). The depth *guard* is lan's own
+   (`mentra/src/agent/subagent.rs:30-40`). The depth *guard* is basis's own
    problem — mentra's floor is name-specific
    (`hidden_tools.insert(RuntimeIntrinsicTool::Task.to_string())`,
-   `subagent.rs:43-44`) and does not fire for a lan-registered tool — so
+   `subagent.rs:43-44`) and does not fire for a basis-registered tool — so
    `spawn` carries a depth counter and refuses past a limit.
 
 The acceptance shape for the implementation wave is one demo with an auto-mode
@@ -136,8 +136,8 @@ with no model invoked.
 ## Consequences
 
 - **It depends on a piece ADR-0012 decided and nobody built.** `spawn` is the
-  first tool lan would register, so the wave that builds it also builds
-  `lan-core`'s tool-registration surface — the `ExecutableTool` re-export and a
+  first tool basis would register, so the wave that builds it also builds
+  `basis-core`'s tool-registration surface — the `ExecutableTool` re-export and a
   registration point in `WorkspaceBuilder::open`. That is a prerequisite, not a
   detail, and it is the reason this ADR is decided rather than started.
 - **Without the deterministic tier, every command costs a model round trip.**
@@ -161,15 +161,15 @@ with no model invoked.
   together, and telling them apart means writing a pattern that matches the
   parsed `mode`. That is more expressive and less obvious, which is the trade.
 - **ACP clients will render it wrong until the map is taught.** `tool_kind`
-  (`lan-acp/src/update.rs:157-176`) classifies by name and knows `shell`;
+  (`basis-acp/src/update.rs:157-176`) classifies by name and knows `shell`;
   `spawn` falls through to the mutability fallback and shows as
   `ToolKind::Other`. Worse, one name now carries two kinds, so a name-keyed map
   cannot answer correctly for both — it has to read the parsed mode out of the
   call's input, which is a small widening of what `update.rs` is allowed to
   know.
 - **Workspace hooks scoped to `shell` stop firing, silently.** A
-  `.lan/hooks.json` entry with `"tools": ["shell"]` (the shape documented at
-  `lan-core/src/hooks.rs:65`) matches on tool name, and the name the model
+  `.basis/hooks.json` entry with `"tools": ["shell"]` (the shape documented at
+  `basis-core/src/hooks.rs:65`) matches on tool name, and the name the model
   calls is now `spawn`. Nothing errors; the hook simply never runs again. The
   migration note has to ship with the change.
 - **`!` needs escaping, and the docs churn is real.** A prompt beginning with
@@ -177,7 +177,7 @@ with no model invoked.
   the README's tool vocabulary, and the hooks documentation all move together.
 - **The reviewer runs beside a blocked turn.** The approver is called from the
   event-forwarding task while mentra holds the parent turn
-  (`lan-core/src/run/prepared/forward.rs:34-40, 108-138`), so an auto-mode
+  (`basis-core/src/run/prepared/forward.rs:34-40, 108-138`), so an auto-mode
   approver's own turn must be a separate run with its own session. Re-entering
   the run it is deciding for would deadlock it.
 - **Bet 7 gets its first concrete use case on record.** The delegation and

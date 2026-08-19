@@ -1,8 +1,8 @@
-# Contributing to lan
+# Contributing to basis
 
-Start with the repository-level `AGENTS.md` and the relevant ADR. lan keeps
+Start with the repository-level `AGENTS.md` and the relevant ADR. basis keeps
 generic runtime capabilities in Mentra, transport/protocol code in adapters or
-the binary, and `lan-core` free of TTY and transport dependencies.
+the binary, and `basis-core` free of TTY and transport dependencies.
 
 Before opening a change, run the same gates as CI:
 

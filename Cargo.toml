@@ -1,5 +1,5 @@
 [workspace]
-members = ["lan", "lan-acp", "lan-core"]
+members = ["basis", "basis-acp", "basis-core"]
 resolver = "3"
 
 [workspace.package]
@@ -10,33 +10,33 @@ edition = "2024"
 rust-version = "1.88"
 license = "MIT"
 readme = "README.md"
-repository = "https://github.com/oops-rs/lan"
-homepage = "https://github.com/oops-rs/lan"
+repository = "https://github.com/oops-rs/basis"
+homepage = "https://github.com/oops-rs/basis"
 
 [workspace.dependencies]
 # The layers of ADR-0011, named here so each crate states which of them it is
 # built on and cargo resolves one version of each.
-lan-core = { version = "0.1", path = "lan-core" }
-lan-acp = { version = "0.1", path = "lan-acp" }
+basis-core = { version = "0.1", path = "basis-core" }
+basis-acp = { version = "0.1", path = "basis-acp" }
 
-# Mentra 0.18 is published and is the runtime contract LAN targets. Keeping
+# Mentra 0.18 is published and is the runtime contract basis targets. Keeping
 # this registry-only makes a standalone checkout and a package resolve alike.
 #
 # `default-features = false` drops exactly one thing: mentra's Responses
-# websocket transport, which nothing in lan can select — every run streams over
-# HTTP+SSE. `lan-core` re-offers it as a feature for an embedder who wants it
-# (see its manifest); the binary and `lan-acp` do not, because neither has a
+# websocket transport, which nothing in basis can select — every run streams over
+# HTTP+SSE. `basis-core` re-offers it as a feature for an embedder who wants it
+# (see its manifest); the binary and `basis-acp` do not, because neither has a
 # surface that would ask for it.
 mentra = { version = "0.18.1", default-features = false }
 
 async-trait = "0.1"
 # Moves a blocking reader onto its own thread, which is how stdin becomes an
 # async stream. Already in the tree via agent-client-protocol, whose own stdio
-# transport is built on it; `lan-acp` names it because it builds that transport
+# transport is built on it; `basis-acp` names it because it builds that transport
 # itself, to inspect the first line before serving (ADR-0015).
 blocking = "1"
 clap = { version = "4.6", features = ["derive"] }
-# `Sink`/`Stream` adapters for the two transports lan builds itself: `lan-acp`'s
+# `Sink`/`Stream` adapters for the two transports basis builds itself: `basis-acp`'s
 # peekable stdio one and the binary's websocket bridge. Already in the tree via
 # agent-client-protocol, whose own transports are defined in terms of these traits.
 futures = "0.3"
@@ -51,12 +51,12 @@ thiserror = "2"
 tokio = { version = "1", features = ["io-util", "macros", "net", "rt-multi-thread", "signal", "sync", "time"] }
 
 # Stable, capability-scoped identifiers for local task services. ACP already
-# brings uuid into the lockfile, but lan names it directly because transitive
+# brings uuid into the lockfile, but basis names it directly because transitive
 # dependencies are not an API contract.
 uuid = { version = "1", features = ["v4", "serde"] }
 
 # Server side only: the bridge accepts websocket connections, it never dials
-# one. Already in the tree via mentra-provider, so this names what lan itself
+# one. Already in the tree via mentra-provider, so this names what basis itself
 # needs rather than adding a dependency.
 tokio-tungstenite = { version = "0.28", default-features = false, features = [
   "handshake",
@@ -68,7 +68,7 @@ tokio-tungstenite = { version = "0.28", default-features = false, features = [
 agent-client-protocol = "=2.0.0"
 
 # A release binary that is mostly debug symbols and duplicated codegen is
-# nobody's intent; it is just cargo's default. These four settings take lan
+# nobody's intent; it is just cargo's default. These four settings take basis
 # from 24MB to 8.9MB with no behavioral change.
 #
 # Deliberately absent, and worth saying why so nobody adds it for the 1.3MB:
@@ -79,7 +79,7 @@ agent-client-protocol = "=2.0.0"
 [profile.release]
 # ~5MB of the original 24MB was symbols nobody reads in a shipped binary.
 strip = true
-# "s" rather than 3 (12MB) or "z" (6.9MB): lan spends its life waiting on a
+# "s" rather than 3 (12MB) or "z" (6.9MB): basis spends its life waiting on a
 # model, so a little code-layout speed is a cheap trade, while "z" starts
 # costing throughput in the JSON and streaming paths that do run hot.
 opt-level = "s"

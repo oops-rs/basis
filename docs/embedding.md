@@ -1,22 +1,22 @@
-# Embedding lan — the `lan-core` SDK
+# Embedding basis — the `basis-core` SDK
 
 > The reference for the surface the [README](../README.md) summarizes. Design rationale is in
 > [`ARCHITECTURE.md`](ARCHITECTURE.md); the decisions are in [`adr/`](adr/); the ledger of the
 > SDK-first transition is [`REDESIGN.md`](REDESIGN.md).
 
-In-process, the harness is **`lan-core`** — the run lifecycle, workspace discovery, the
+In-process, the harness is **`basis-core`** — the run lifecycle, workspace discovery, the
 event stream, and the seams, with no protocol, no transport, and no terminal code in the
-graph. `lan-acp` is the ACP adapter over it and the `lan` binary is the CLI over both, so
+graph. `basis-acp` is the ACP adapter over it and the `basis` binary is the CLI over both, so
 an embedding host compiles only what it runs
 ([ADR-0011](adr/0011-layered-crates.md)):
 
 ```toml
 [dependencies]
-lan-core = "0.1"   # unpublished so far — a git or path dependency until it isn't
+basis-core = "0.1"   # unpublished so far — a git or path dependency until it isn't
 ```
 
 MCP is a default-on `mcp` feature rather than a fixed part of the core:
-`default-features = false` compiles a `lan-core` with no MCP concept at all — no `.mcp.json`
+`default-features = false` compiles a `basis-core` with no MCP concept at all — no `.mcp.json`
 discovery, no servers registered ([ADR-0012](adr/0012-one-contract-many-bindings.md)).
 
 ## A workspace opens once and mints runs
@@ -27,10 +27,10 @@ Minting a run from it is then synchronous, because nothing is left to await
 ([ADR-0010](adr/0010-the-crate-is-the-workflow-surface.md)):
 
 ```rust
-let workspace = lan_core::Workspace::open("/repo").await?;
+let workspace = basis_core::Workspace::open("/repo").await?;
 
 let mut run = workspace.prepare("what does this repo do?")?;
-let report = run.execute(lan_core::CollectingSink::default()).await?;
+let report = run.execute(basis_core::CollectingSink::default()).await?;
 ```
 
 That is the shape to reach for whenever a host sends more than one prompt at a repository:
@@ -41,7 +41,7 @@ For a conversation rather than a one-shot, keep the run and send again — the s
 survives the turn, so the model sees everything said so far:
 
 ```rust
-run.send("and which of those is riskiest?", sink, lan_core::AllowAll).await?;
+run.send("and which of those is riskiest?", sink, basis_core::AllowAll).await?;
 ```
 
 `run.agent_id()` is the handle `Workspace::resume` takes, so a later process can pick the
@@ -51,19 +51,19 @@ When one prompt really is the whole job, the free functions are the same path wi
 workspace opened and dropped around it — the binary is a thin shell over this:
 
 ```rust
-let report = lan_core::run(
-    lan_core::RunConfig::new("/repo", "summarize the recent changes"),
-    lan_core::CollectingSink::new(),
+let report = basis_core::run(
+    basis_core::RunConfig::new("/repo", "summarize the recent changes"),
+    basis_core::CollectingSink::new(),
 ).await?;
 ```
 
 The bounds are builders on either shape — `RunConfig` for a one-shot, `RunSpec` for a run
 minted from a workspace — and `report.stopped_by` carries the distinction the exit code
-makes: `Some(lan_core::Bound::Deadline)`, `Some(lan_core::Bound::ToolBudget)`,
-`Some(lan_core::Bound::TokenBudget)`, or `None` when the work is what ended the run:
+makes: `Some(basis_core::Bound::Deadline)`, `Some(basis_core::Bound::ToolBudget)`,
+`Some(basis_core::Bound::TokenBudget)`, or `None` when the work is what ended the run:
 
 ```rust
-let config = lan_core::RunConfig::new("/repo", "bump the deps and fix the fallout")
+let config = basis_core::RunConfig::new("/repo", "bump the deps and fix the fallout")
     .with_deadline(Duration::from_secs(600))
     .with_tool_budget(40)
     .with_token_budget(200_000);
@@ -78,7 +78,7 @@ repository builds one and lends it out:
 
 ```rust
 use std::sync::Arc;
-use lan_core::{Runtime, Workspace};
+use basis_core::{Runtime, Workspace};
 
 let runtime = Arc::new(Runtime::builder().build()?);
 
@@ -100,11 +100,11 @@ tool registry, so a skill one workspace registered is loadable by another's runs
 from that repository's config, shut down when it drops — and every roster hides the `mcp__*`
 tools of servers its workspace does not own, so a name two repositories both configure is
 claimed once and suffixed for the second. Hooks, `ShellAccess`, and the `.git` carve-out
-remain per workspace as well, enforced on a shared runtime by the one dispatch hook lan
+remain per workspace as well, enforced on a shared runtime by the one dispatch hook basis
 registers.
 
 One thing does not work yet on a shared runtime: mentra fixes the persistence tag per
-*runtime* at build time, so conversations minted there are filed under `"lan:runtime"`
+*runtime* at build time, so conversations minted there are filed under `"basis:runtime"`
 instead of under their workspace, and `store::list` — ACP's `session/list` — does not find
 them for it. Nothing is stranded, because resume takes an agent id and never a tag, and a
 row re-files itself the next time it persists under a runtime that knows its workspace. The
@@ -130,7 +130,7 @@ let output = run
         "submit what you found, one entry per problem",
         findings_spec(),          // name, description, and a JSON Schema you write
         sink,
-        lan_core::AllowAll,
+        basis_core::AllowAll,
     )
     .await?;
 
@@ -149,7 +149,7 @@ either do the reading on an ordinary turn and ask for the shape on the next, or 
 turn its tools back:
 
 ```rust
-run.output::<Findings, _, _>(prompt, findings_spec().with_tools(), sink, lan_core::AllowAll)
+run.output::<Findings, _, _>(prompt, findings_spec().with_tools(), sink, basis_core::AllowAll)
 ```
 
 `with_tools()` keeps the ordinary toolset beside the answering tool, so one call reads and
@@ -166,7 +166,7 @@ run multiplies the bill by N. A `BudgetPool` is the single figure in between —
 every drawing run reports into one counter:
 
 ```rust
-let pool = lan_core::BudgetPool::new(500_000);
+let pool = basis_core::BudgetPool::new(500_000);
 let mut reviewer = workspace.prepare(pool.spec("review the tests"))?;
 ```
 
@@ -194,7 +194,7 @@ Each run wants a sink of its own; a host wants one view of all of them without l
 run said what. `EventFanIn` mints one tagged sink per run and merges them:
 
 ```rust
-let fan = lan_core::EventFanIn::new();
+let fan = basis_core::EventFanIn::new();
 let mut tests = workspace.prepare("review the tests")?;
 let mut docs = workspace.prepare("review the docs")?;
 let (a, b) = (fan.sink("tests"), fan.sink("docs"));
@@ -204,7 +204,7 @@ let runs = async move {
     let (tests, docs) = tokio::join!(tests.execute(a), docs.execute(b));
     // Taking the answers out drops the reports, and their sinks with them —
     // which is what tells `merged` the stream is over.
-    Ok::<_, lan_core::RunError>((tests?.final_message, docs?.final_message))
+    Ok::<_, basis_core::RunError>((tests?.final_message, docs?.final_message))
 };
 let watch = async {
     while let Some(tagged) = merged.recv().await {
@@ -227,7 +227,7 @@ and rolls it back, which is what a client's stop button means; `stoppable()` end
 next round boundary and keeps everything the model committed:
 
 ```rust
-let (options, stop) = lan_core::TurnOptions::stoppable();
+let (options, stop) = basis_core::TurnOptions::stoppable();
 tokio::spawn(async move { on_stop_pressed().await; stop.cancel(); });
 
 let report = run.execute_with_options(sink, options).await?;
@@ -238,7 +238,7 @@ turn even though nothing was discarded, because mentra still owes a final assist
 and the last committed one was a tool result. The work is kept either way; the report is
 what disagrees.
 
-In-process concurrent work is owned by `lan_core::Supervisor`, whose ownership rules —
+In-process concurrent work is owned by `basis_core::Supervisor`, whose ownership rules —
 attached versus detached, downward cancellation, repeatable terminal observation, and a
 wait graph that rejects cycles — are [ADR-0017](adr/0017-structured-agent-concurrency.md)'s
 and are the same rules the CLI's durable handles obey across processes.
@@ -246,25 +246,25 @@ and are the same rules the CLI's durable handles obey across processes.
 ## Getting a say over each tool call
 
 Interception is one contract with two bindings. A repository declares a subprocess in
-`.lan/hooks.json`; an embedding host implements `Interceptor` and its own compiled code
+`.basis/hooks.json`; an embedding host implements `Interceptor` and its own compiled code
 gets the say, which is what you want when the guard needs a vault handle, a token you just
 minted, or a regex that lives in a config struct:
 
 ```rust
-#[lan_core::async_trait]
-impl lan_core::Interceptor for Redact {
+#[basis_core::async_trait]
+impl basis_core::Interceptor for Redact {
     fn name(&self) -> &str { "redact" }
 
-    async fn intercept(&self, call: &lan_core::HookRequest)
-        -> Result<lan_core::HookOutcome, lan_core::InterceptorError>
+    async fn intercept(&self, call: &basis_core::HookRequest)
+        -> Result<basis_core::HookOutcome, basis_core::InterceptorError>
     {
         let Some(command) = call.input.get("command").and_then(|v| v.as_str()) else {
-            return Ok(lan_core::HookOutcome::Allow);
+            return Ok(basis_core::HookOutcome::Allow);
         };
         if !command.contains("--token") {
-            return Ok(lan_core::HookOutcome::Allow);
+            return Ok(basis_core::HookOutcome::Allow);
         }
-        Ok(lan_core::HookOutcome::Modify {
+        Ok(basis_core::HookOutcome::Modify {
             input: serde_json::json!({"command": "deploy --token REDACTED"}),
             reason: Some("stripped a credential".to_string()),
         })
@@ -273,8 +273,8 @@ impl lan_core::Interceptor for Redact {
 
 // Host scope is runtime scope (ADR-0018): the guard registers on the runtime —
 // the shared one every workspace borrows, or the private one this open builds.
-let workspace = lan_core::Workspace::builder("/repo")
-    .with_runtime_builder(lan_core::Runtime::builder().with_interceptor(Redact))
+let workspace = basis_core::Workspace::builder("/repo")
+    .with_runtime_builder(basis_core::Runtime::builder().with_interceptor(Redact))
     .open()
     .await?;
 ```
@@ -285,13 +285,13 @@ registration order, then global hooks, then workspace hooks — the further a pa
 from the workspace's own data, the earlier it speaks — and since the first refusal
 short-circuits, that is what lets your own guard refuse before a repository's program is
 spawned at all. A participant that errors or panics **denies**. The trait is `async`, and
-`lan_core::async_trait` is the attribute to spell it with — re-exported, so implementing a
-lan trait costs your manifest nothing.
+`basis_core::async_trait` is the attribute to spell it with — re-exported, so implementing a
+basis trait costs your manifest nothing.
 
 The other seam is `Approver`, and the two are deliberately not merged: an approver answers
 *may this happen* and feeds the permission machinery a person drives, while an interceptor
 answers *may this happen, in this form* and composes with everything else on the chain.
-`AllowAll` (what a run with no approver gets) and `DenyAll` ship in `lan-core`, and
+`AllowAll` (what a run with no approver gets) and `DenyAll` ship in `basis-core`, and
 everything between them — allow edits but deny the network, ask over Slack with a timeout,
 escalate after the third refusal — is an impl
 ([ADR-0010](adr/0010-the-crate-is-the-workflow-surface.md)). A refusal names its reason,
@@ -304,8 +304,8 @@ Conversations are persisted by mentra, and unset, it picks a database keyed by t
 and the last one called wins:
 
 ```rust
-lan_core::Runtime::builder().with_store_dir("/var/lib/myapp/history")  // there
-lan_core::Runtime::builder().with_ephemeral_history()                  // nowhere
+basis_core::Runtime::builder().with_store_dir("/var/lib/myapp/history")  // there
+basis_core::Runtime::builder().with_ephemeral_history()                  // nowhere
 ```
 
 The knobs are the runtime's (ADR-0018): history is a process fact, so a host sharing one
@@ -313,7 +313,7 @@ The knobs are the runtime's (ADR-0018): history is a process fact, so a host sha
 `WorkspaceBuilder::with_runtime_builder`.
 
 `with_store_dir` keeps this runtime's conversations in a directory you name, and
-`lan_core::store::list_in` reads them back from it. `with_ephemeral_history` uses an
+`basis_core::store::list_in` reads them back from it. `with_ephemeral_history` uses an
 in-memory store: resume works for as long as the `Runtime` holding it lives, and nothing
 survives the process — no file, no export, no way to make one durable afterwards, so a host
 that might want that later wants `with_store_dir` now.
@@ -322,7 +322,7 @@ that might want that later wants `with_store_dir` now.
 
 In-process a recurring-run loop is nine lines of host code against one long-lived
 `Workspace`, with `Workspace::fingerprint()` in place of the subcommand:
-[`lan-core/examples/watch.rs`](../lan-core/examples/watch.rs) is it, kept in the tree as a
+[`basis-core/examples/watch.rs`](../basis-core/examples/watch.rs) is it, kept in the tree as a
 standing check that it stays that short. `fingerprint()` blocks — it spawns `git` and stats
 every tracked file — so a host with a runtime to keep responsive hands it to
 `tokio::task::spawn_blocking`, which needs `'static` and so an `Arc<Workspace>` to move in;
@@ -330,12 +330,12 @@ the example calls it inline because that loop has nothing else to do while it wa
 
 ## Examples
 
-See [`lan-core/examples/embed.rs`](../lan-core/examples/embed.rs) for a host that reacts to
-events as they arrive, [`conversation.rs`](../lan-core/examples/conversation.rs) for the
-two-turn version, [`watch.rs`](../lan-core/examples/watch.rs) for the recurring-run loop,
-[`review_workflow.rs`](../lan-core/examples/review_workflow.rs) for the whole fan-out — one
+See [`basis-core/examples/embed.rs`](../basis-core/examples/embed.rs) for a host that reacts to
+events as they arrive, [`conversation.rs`](../basis-core/examples/conversation.rs) for the
+two-turn version, [`watch.rs`](../basis-core/examples/watch.rs) for the recurring-run loop,
+[`review_workflow.rs`](../basis-core/examples/review_workflow.rs) for the whole fan-out — one
 workspace, one budget, typed findings, one merged stream, and a verdict folded out of them
-— and [`reviewed_shell.rs`](../lan-core/examples/reviewed_shell.rs) for an `Approver` that
+— and [`reviewed_shell.rs`](../basis-core/examples/reviewed_shell.rs) for an `Approver` that
 reviews the agent's commands with a cheap typed turn of its own, with a remembered rule
 answering the familiar ones before it is ever asked
-(`cargo run -p lan-core --example embed -- "<prompt>"`, with a provider key set).
+(`cargo run -p basis-core --example embed -- "<prompt>"`, with a provider key set).

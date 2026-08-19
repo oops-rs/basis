@@ -3,10 +3,10 @@
 **Status:** Accepted (v1); the binary entry point was refined by
 [ADR-0017](0017-structured-agent-concurrency.md)
 
-> **Invocation refinement (2026-08-13):** ACP remains lan's wire protocol. The
-> original v1 rule that bare `lan` started ACP is superseded: the shipped
-> binary now requires the explicit `lan serve --acp` command (or
-> `lan serve --bridge` for the websocket transport). This ADR's protocol
+> **Invocation refinement (2026-08-13):** ACP remains basis's wire protocol. The
+> original v1 rule that bare `basis` started ACP is superseded: the shipped
+> binary now requires the explicit `basis serve --acp` command (or
+> `basis serve --bridge` for the websocket transport). This ADR's protocol
 > choice and consequences remain in force.
 
 ## Context
@@ -20,19 +20,19 @@ acp-ui (web/desktop/mobile), acp-mobile.
 
 ## Decision
 
-lan speaks **ACP** as its only wire protocol, via the official
+basis speaks **ACP** as its only wire protocol, via the official
 `agent-client-protocol` Rust crate. The binary serves ACP on stdio through the
-explicit `lan serve --acp` command; the websocket variant is
-`lan serve --bridge`.
+explicit `basis serve --acp` command; the websocket variant is
+`basis serve --bridge`.
 The headless `spawn --json` JSONL stream is an *output format* for scripts, not
 a protocol (`run` remains a compatibility alias) — no requests flow inward on
-it. Browser access is acp-ui plus a thin WebSocket↔stdio bridge; lan ships no
+it. Browser access is acp-ui plus a thin WebSocket↔stdio bridge; basis ships no
 web UI.
 
 ## Consequences
 
 - Every existing ACP client works day one; the web UI is adopted, not built.
-- lan's session/permission/event model must map onto ACP's — mentra's
+- basis's session/permission/event model must map onto ACP's — mentra's
   `SessionEvent` and `PermissionRequest` are near-1:1 (p0-groundwork §3).
 - Bet on ACP's evolution; if it stalls, the protocol layer is one module, and the
   crate API remains the protocol-free surface.

@@ -3,19 +3,19 @@
 > Status: **Superseded by
 > [`0014-watch-retired-runs-are-boundable.md`](0014-watch-retired-runs-are-boundable.md)**
 > · 2026-08-11 (accepted 2026-08-10). The bounds move to `RunConfig` and
-> `lan run` flags, all defaulting to unset; the deadline-defaults-to-interval
+> `basis run` flags, all defaulting to unset; the deadline-defaults-to-interval
 > coupling dies with the interval. Graceful-trip semantics and the
 > no-default-bound-when-attended rule survive in 0014.
 > Extends [`0008-the-watch-baseline.md`](0008-the-watch-baseline.md).
 
 ## Context
 
-`lan run` is watched by the person who typed it. If a turn goes wrong — the
+`basis run` is watched by the person who typed it. If a turn goes wrong — the
 model circling a problem it cannot solve, a tool loop that never converges —
 they see it and press ctrl-C. That person *is* the bound, and it is a good one:
 they can tell "thinking hard" from "stuck" in a way no timer can.
 
-`lan watch` has no such person. It exists to run while nobody is looking, and
+`basis watch` has no such person. It exists to run while nobody is looking, and
 it was shipped passing only a cancellation token — no deadline, no tool budget,
 no token budget. A stuck iteration ran until the model stopped itself, which for
 a sufficiently confused model is "not soon", and the next interval arrived
@@ -43,7 +43,7 @@ meeting a hard bug, and it is discovered on an invoice.
   (ADR-0008 already establishes this for run failures; a tripped bound is one).
 
 An explicit `--deadline` longer than the interval is allowed. Overlapping the
-next tick is a legitimate choice, and refusing it would substitute lan's
+next tick is a legitimate choice, and refusing it would substitute basis's
 judgement for the operator's on a question only they can answer.
 
 ## Consequences
@@ -60,5 +60,5 @@ judgement for the operator's on a question only they can answer.
   streamed in full, so the round that crosses the line always finishes. It ends
   the turn *gracefully*, keeping what was committed, so the work is not thrown
   away for being one round too long.
-- `lan run` gains no default bound. It has a person, and a timer that
+- `basis run` gains no default bound. It has a person, and a timer that
   interrupted someone mid-thought would be a worse harness, not a safer one.

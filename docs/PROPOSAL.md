@@ -1,6 +1,6 @@
-# lan — Proposal
+# basis — Proposal
 
-> The *why* behind lan: the problem, the one idea, and the bets we made because of
+> The *why* behind basis: the problem, the one idea, and the bets we made because of
 > it. For *what it is* see [`README.md`](../README.md); for *how it's built* see
 > [`ARCHITECTURE.md`](ARCHITECTURE.md); for ordered evolution ideas see
 > [`proposals/`](proposals/); for the locked decisions see [`adr/`](adr/). This
@@ -32,7 +32,7 @@ The existing answers each fail in a specific way:
 
 ## 2. The one idea
 
-> A harness is a **library with a protocol front door**. lan packages the generic
+> A harness is a **library with a protocol front door**. basis packages the generic
 > glue — context conventions, sessions, extension seams, confinement — over a proven
 > runtime, and speaks the standard protocol so any client drives it. The intelligence
 > is rented from the model; the presentation is owned by the client; the mission
@@ -61,10 +61,10 @@ the cautionary tales). [ADR-0002]
 
 ### Bet 3 — Rent the loop, own the glue
 **Believe:** the agent loop, providers, tools, and persistence are mentra's problem,
-already solved and tested. **Buys:** lan's effort goes to the only thing lan can be —
+already solved and tested. **Buys:** basis's effort goes to the only thing basis can be —
 conventions, protocol, packaging; nous set the precedent
 (`mentra is the loop`, the corresponding upstream runtime decision).
-**Refuse:** to re-implement runtime machinery in lan to feel in control. [ADR-0001]
+**Refuse:** to re-implement runtime machinery in basis to feel in control. [ADR-0001]
 
 ### Bet 4 — The core has no opinions
 **Believe:** task-specific behavior is data — the prompt, the workspace, config —
@@ -79,15 +79,15 @@ guarantee must come from the OS. **Buys:** the read-only-root Docker pattern giv
 guarantee at near-zero cost today; codex's per-command native sandbox is the proven v2
 path. **Refuse:** to sell in-process path checks as safety (they remain as *hygiene* —
 `.git/hooks` write-deny — not as the boundary). [ADR-0004], amended by [ADR-0013]: the
-belief stands, but lan documents the patterns ([`containerization.md`](containerization.md))
+belief stands, but basis documents the patterns ([`containerization.md`](containerization.md))
 rather than shipping an image, and commands are on by default.
 
 ### Bet 6 — Co-evolve with mentra, keep the seam honest
 **Believe:** same author on both sides is leverage, and a trap: gaps can be fixed
 where they belong, or quietly worked around where they don't. **Buys:** generic
 capability lands in mentra (session branching, compaction checkpoints, tool profiles);
-lan stays thin; every gap is filed as a mentra issue even when fixed immediately, so
-the API story stays legible to other mentra users. **Refuse:** lan-side workarounds
+basis stays thin; every gap is filed as a mentra issue even when fixed immediately, so
+the API story stays legible to other mentra users. **Refuse:** basis-side workarounds
 for mentra-shaped holes. [ADR-0005]
 
 ### Bet 7 — Earn every part
@@ -101,26 +101,26 @@ machinery that isn't pulling its weight.
 ## 4. The loop we're chasing
 
 **Embed-by-default.** The bar: when the author (or anyone) needs agent capability in a
-new context — a repo chore, a web page, an editor, a cron job — reaching for lan is
+new context — a repo chore, a web page, an editor, a cron job — reaching for basis is
 cheaper than wiring mentra by hand, and the missing piece surfaces as a mentra issue
-or a lan proposal rather than app-local glue. Every run also stress-tests mentra from
+or a basis proposal rather than app-local glue. Every run also stress-tests mentra from
 the consumer's seat — the zentox feedback loop, made permanent.
 
-## 5. What lan is not
+## 5. What basis is not
 
 - **Not a product.** No TUI, no brand experience; clients own presentation.
 - **Not a mission.** Bug-fixing, doc-tending, dependency-bumping are prompts and
-  workspace data, never lan features.
-- **Not a runtime.** The loop, tools, and persistence are mentra; lan does not
+  workspace data, never basis features.
+- **Not a runtime.** The loop, tools, and persistence are mentra; basis does not
   duplicate them.
 - **Not a security product.** The boundary is the OS's (a container you run, later a
-  native sandbox); lan's own checks are hygiene, and lan ships no boundary of its own.
+  native sandbox); basis's own checks are hygiene, and basis ships no boundary of its own.
 
 ## 6. Why this shape ages well
 
 Models improve on their own schedule; protocols and conventions compound. AGENTS.md,
 skills, and MCP are cross-agent conventions that get more valuable as more tools
-speak them; ACP clients multiply independently of lan. A harness that owns exactly
+speak them; ACP clients multiply independently of basis. A harness that owns exactly
 the glue — and rents both the intelligence and the presentation — gets better for
 free on both frontiers while staying small enough to embed anywhere.
 

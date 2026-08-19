@@ -1,0 +1,42 @@
+[package]
+name = "basis"
+description = "The basis CLI, over basis-core and basis-acp: headless runs, an ACP server, and a websocket bridge."
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+readme.workspace = true
+repository.workspace = true
+homepage.workspace = true
+keywords = ["agent", "llm", "acp", "harness", "mentra"]
+categories = ["development-tools", "command-line-utilities"]
+
+[dependencies]
+basis-core.workspace = true
+basis-acp.workspace = true
+mentra.workspace = true
+
+# The bridge speaks ACP's transport traits without speaking ACP itself: it
+# relays frames between a websocket and the server basis-acp already serves.
+agent-client-protocol.workspace = true
+async-trait.workspace = true
+clap.workspace = true
+futures.workspace = true
+fs2.workspace = true
+serde.workspace = true
+serde_json.workspace = true
+tempfile.workspace = true
+thiserror.workspace = true
+tokio.workspace = true
+tokio-tungstenite.workspace = true
+uuid.workspace = true
+
+[dev-dependencies]
+mentra = { workspace = true, features = ["test-utils"] }
+tokio = { workspace = true, features = ["time"] }
+# The bridge tests dial the bridge, which the binary itself never does.
+tokio-tungstenite = { workspace = true, features = ["connect"] }
+
+[[bin]]
+name = "basis"
+path = "src/main.rs"

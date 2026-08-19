@@ -6,7 +6,7 @@
 
 ## Context
 
-lan grew two parallel extension tracks: MCP servers for custom tools,
+basis grew two parallel extension tracks: MCP servers for custom tools,
 subprocess hooks for interception. Each is its own subsystem with its own
 config, while mentra underneath already defines the contracts both are
 partial views of — `ExecutableTool` (with descriptors: capabilities,
@@ -15,7 +15,7 @@ seam for interception. Mentra even bridges MCP servers' tools into the same
 `ToolRegistry` as builtins: internally, MCP is *already* just tools.
 
 pi's answer to the same question was to refuse MCP and make in-process
-TypeScript the only binding. lan cannot load same-language plugins into a
+TypeScript the only binding. basis cannot load same-language plugins into a
 Rust binary cheaply, and does not need to: the contract, not the binding, is
 the design.
 
@@ -24,21 +24,21 @@ the design.
 **One contract per seam; transports are adapters.**
 
 Tools — the contract is mentra's `ExecutableTool`, surfaced first-class in
-`lan-core`. Three bindings:
+`basis-core`. Three bindings:
 
 1. **Native Rust** — an embedder registers a tool as code.
 2. **Declared subprocess** — new: a data file in the workspace declares a
-   tool (name, description, JSON schema, command); lan wraps the command as
+   tool (name, description, JSON schema, command); basis wraps the command as
    an `ExecutableTool` speaking JSON over stdio — the same IO style hooks
    already use. pi's "CLI tools instead of MCP," but typed and schema-checked.
 3. **MCP** — the existing mentra client, demoted from privileged subsystem to
    one adapter, behind a cargo feature.
 
 Interception — the contract is the authorizer seam (mentra's `ToolAuthorizer`
-plus lan's `Approver`). Two bindings:
+plus basis's `Approver`). Two bindings:
 
 1. **In-process Rust** — an embedder implements the trait.
-2. **Subprocess hooks** — the existing `.lan/hooks.json` mechanism, re-founded
+2. **Subprocess hooks** — the existing `.basis/hooks.json` mechanism, re-founded
    as a binding of that seam rather than a parallel system. Fail-closed
    semantics carry over unchanged: a hook that breaks denies.
 
@@ -54,4 +54,4 @@ plus lan's `Approver`). Two bindings:
 - If a gap appears — an interception a hook cannot express that the seam
   should carry — the fix is widening the *contract* in mentra (filed per
   [`0005`](0005-mentra-coevolution-discipline.md)), never a third parallel
-  mechanism in lan.
+  mechanism in basis.

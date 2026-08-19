@@ -3,7 +3,7 @@
 **Status:** Accepted (v1) · Amended by
 [`0013-the-host-owns-the-boundary.md`](0013-the-host-owns-the-boundary.md)
 (2026-08-11): the claim stands — the boundary is the kernel's, in-process
-checks are hygiene — but lan no longer *ships* a boundary. The Docker image is
+checks are hygiene — but basis no longer *ships* a boundary. The Docker image is
 withdrawn in favor of documented confinement patterns; the native sandbox of
 `proposals/0002` remains a possible optional layer, not a default.
 
@@ -26,7 +26,7 @@ being weighed.
 
 ## Consequences
 
-- The guarantee is the kernel's; lan code reviews don't carry safety burden.
+- The guarantee is the kernel's; basis code reviews don't carry safety burden.
 - Unconfined bare-metal runs are possible and documented as such — matching pi's
   honesty rather than implying safety we don't enforce.
 - Network egress stays open in v1 (LLM APIs need it); an allowlist proxy is a

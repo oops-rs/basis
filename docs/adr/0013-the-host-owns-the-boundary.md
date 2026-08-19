@@ -12,11 +12,11 @@ default, granted by flag on bare hosts, granted by the image author inside the
 shipped Docker container — "the grant travels with the thing that makes it
 true."
 
-That posture assumed lan-the-binary running one supervised loop was the
-primary unattended case. The redesign changes the premise: lan is embedded,
-users run many lan processes inside their own programs and environments, and
-the shipped container was already the wrong unit — a host embedding `lan-core`
-in its own binary was never going to run inside lan's image. Meanwhile the
+That posture assumed basis-the-binary running one supervised loop was the
+primary unattended case. The redesign changes the premise: basis is embedded,
+users run many basis processes inside their own programs and environments, and
+the shipped container was already the wrong unit — a host embedding `basis-core`
+in its own binary was never going to run inside basis's image. Meanwhile the
 flag itself is theater once a process spawns: ADR-0006's own context admits a
 path check cannot confine a running command. pi reaches the same conclusion
 and ships the honest version: the agent runs with the user's permissions;
@@ -28,7 +28,7 @@ the value off.
 
 ## Decision
 
-**Shell and background execution are enabled by default. lan ships no
+**Shell and background execution are enabled by default. basis ships no
 container; it documents confinement patterns. The seams stay; the labels stay
 honest.**
 
@@ -42,8 +42,8 @@ honest.**
   labeled in ADR-0006's close: hygiene that shuts the route a model takes
   (the file tools), never a boundary — a shell redirect still lands.
 - The `Approver` and hook seams stay, so any embedder or workspace can
-  reintroduce gating in one place. What lan stops doing is defaulting to it.
-- Nothing in lan may *claim* confinement it does not have: no environment
+  reintroduce gating in one place. What basis stops doing is defaulting to it.
+- Nothing in basis may *claim* confinement it does not have: no environment
   sniffing to imply safety (ADR-0006's argument against inference survives
   its default), no "sandboxed" language anywhere in docs or output.
 
@@ -51,14 +51,14 @@ honest.**
 
 - The honest quadrant to name: **unattended + shell + no OS boundary** is now
   reachable by default. It is the operator's decision, made in their
-  environment, with lan's docs stating plainly what authority the process
+  environment, with basis's docs stating plainly what authority the process
   holds — pi's posture, adopted knowingly.
 - The out-of-the-box experience matches the tool's purpose: the first
-  `lan "run the tests"` works.
+  `basis "run the tests"` works.
 - ADR-0004's core claim is *amended, not reversed*: the boundary is still the
-  kernel's — lan just stops shipping one instance of it and starts documenting
+  kernel's — basis just stops shipping one instance of it and starts documenting
   the patterns. The codex-style native per-command sandbox
   ([`proposals/0002`](../proposals/0002-native-sandbox.md)) remains a
   possible future as an *optional* layer, not a revival of default-deny.
-- `LAN_ALLOW_SHELL` and `--allow-shell` are retired; a disable knob replaces
+- `BASIS_ALLOW_SHELL` and `--allow-shell` are retired; a disable knob replaces
   them.

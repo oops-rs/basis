@@ -13,7 +13,7 @@ team can share "how our agents work here" across repos.
 
 ## Motivation
 
-pi packages bundle extensions/skills/prompts/themes and proved the demand. For lan
+pi packages bundle extensions/skills/prompts/themes and proved the demand. For basis
 the equivalent bundle is pure data (Bet 4), which makes packages nearly free once
 the primitives stabilize — but defining the manifest before the primitives settle
 would lock their shapes prematurely.

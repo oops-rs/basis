@@ -9,7 +9,7 @@
 
 ## Context
 
-LAN is becoming a small agent process rather than only a one-shot wrapper. A
+basis is becoming a small agent process rather than only a one-shot wrapper. A
 parent must be able to start work, observe it, cancel it, and receive a result
 without making the parent model turn the only owner of the child lifecycle.
 
@@ -24,7 +24,7 @@ work is bounded by the parent scope and cancellation flows downward. Its
 reentrant actors give the useful supervisor rule: control messages must still
 be processed while a child is suspended. Rust and Tokio provide handles,
 cancel-safe waits, and explicit abort/detach operations, but do not provide
-logical deadlock freedom. LAN needs the combination, expressed in its own
+logical deadlock freedom. basis needs the combination, expressed in its own
 generic lifecycle types.
 
 ## Decision
@@ -92,21 +92,21 @@ edge and gives the new root an independent deadline and cancellation lifetime.
 ### CLI
 
 ```text
-lan <PROMPT>                  # shorthand for lan spawn <PROMPT>
-lan spawn <PROMPT>            # one-shot work (routing: ADR-0020)
-lan send ...                  # enqueue a message (or --await its reply)
-lan ask <ID> <QUESTION>       # enqueue and await the correlated reply
-lan wait <ID>                 # wait for terminal state
-lan wait <ID> --message <MID> # retry one message's reply
-lan cancel <ID>               # request cancellation
-lan watch <ID>                # observe progress/events
-lan inbox [ID]                # bounded message/reply summaries
-lan serve --acp               # ACP over stdio
-lan serve --bridge            # ACP over websocket
-lan fingerprint               # workspace hash
+basis <PROMPT>                  # shorthand for basis spawn <PROMPT>
+basis spawn <PROMPT>            # one-shot work (routing: ADR-0020)
+basis send ...                  # enqueue a message (or --await its reply)
+basis ask <ID> <QUESTION>       # enqueue and await the correlated reply
+basis wait <ID>                 # wait for terminal state
+basis wait <ID> --message <MID> # retry one message's reply
+basis cancel <ID>               # request cancellation
+basis watch <ID>                # observe progress/events
+basis inbox [ID]                # bounded message/reply summaries
+basis serve --acp               # ACP over stdio
+basis serve --bridge            # ACP over websocket
+basis fingerprint               # workspace hash
 ```
 
-Bare `lan` is usage output, not a server. ACP is an explicit adapter mode, so
+Bare `basis` is usage output, not a server. ACP is an explicit adapter mode, so
 an editor or host must say which transport it is starting. Existing `run` is
 retained as a compatibility alias for `spawn` during migration.
 

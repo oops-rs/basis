@@ -4,12 +4,12 @@ Status: **retired by
 [`0014-watch-retired-runs-are-boundable.md`](0014-watch-retired-runs-are-boundable.md)**
 · 2026-08-11 (accepted 2026-08-10). The `watch` command is deleted; the
 fingerprint and its semantics — §1–3 and the asymmetry rule — survive verbatim
-in `Workspace::fingerprint()` / `lan fingerprint`. The baseline policy (§4)
+in `Workspace::fingerprint()` / `basis fingerprint`. The baseline policy (§4)
 moves to the caller's loop; `--always` (§5) becomes "don't call fingerprint".
 
 ## Context
 
-`lan watch "<prompt>" --every 30m` runs the same prompt on a timer. Without a
+`basis watch "<prompt>" --every 30m` runs the same prompt on a timer. Without a
 reason not to, it pays a model on every interval regardless of whether anything
 has happened — which is the difference between a scheduler and a bill.
 
@@ -57,7 +57,7 @@ left behind.**
 
 2. **Which files comes from `git ls-files --cached --others
    --exclude-standard`** when the workspace is inside a work tree: one process,
-   `.gitignore` honoured without lan inventing an ignore convention of its own,
+   `.gitignore` honoured without basis inventing an ignore convention of its own,
    and `.git`'s constant internal churn — which would make every iteration look
    changed — kept out. A workspace that is not a repository gets a plain walk
    that skips `.git` and follows no symlinks.
@@ -65,7 +65,7 @@ left behind.**
 3. **Every uncertain answer is "changed".** A workspace that is not there, an
    enumeration that produced nothing, a walk that could not read a directory:
    each yields `Snapshot::Unknown`, and the scheduler runs on it. There is no
-   path by which lan concludes "unchanged" from a question it could not answer.
+   path by which basis concludes "unchanged" from a question it could not answer.
 
 4. **The baseline is recorded after a run, and only after one that succeeded.**
    After, so a run's own edits do not retrigger it. Only after success, because
@@ -82,7 +82,7 @@ left behind.**
 
 - Skipping is cheap: an index read and one `stat` per file, against an interval
   measured in minutes.
-- lan spawns `git` for its own scheduling decision. This is lan reading the
+- basis spawns `git` for its own scheduling decision. This is basis reading the
   workspace the way it reads `AGENTS.md`, unrelated to the shell grant of
   ADR-0006, which governs what the *agent* may execute. A missing or
   uncooperative `git` degrades to the walk rather than failing.

@@ -9,15 +9,15 @@
 Claude Code ships a workflow feature as a JavaScript DSL (`agent()`,
 `pipeline()`, `parallel()`, budgets) interpreted inside the product, because
 the product is closed: orchestration logic has to travel *to* the harness as a
-script. lan's founding bet is the inverse — the harness travels to the host as
+script. basis's founding bet is the inverse — the harness travels to the host as
 a crate. For a Rust host, `pipeline` is a loop with `.await`, `parallel` is
 `join_all`, and a judge panel is a `Vec` of futures, with real types and a real
 debugger.
 
 Proposal 0001 (embedded scripting: wasm or rhai) was written for extension
 authors, deferred until friction showed. The friction that actually showed
-points the other way: what people want is to *call lan from code they already
-write*, not to write code that lan interprets.
+points the other way: what people want is to *call basis from code they already
+write*, not to write code that basis interprets.
 
 The same review found the approval surface carrying a redundant entity:
 `ApprovalPolicy::{Always, Prompt, Never}` is an enum the core interprets,
@@ -28,7 +28,7 @@ Slack with a timeout).
 
 ## Decision
 
-**Orchestration is host-language code against the crate. lan ships primitives,
+**Orchestration is host-language code against the crate. basis ships primitives,
 never a DSL, and no embedded scripting layer.** Day 1 is Rust-only: other
 languages are not a design input until real friction is recorded.
 
@@ -41,33 +41,33 @@ The SDK surface this commits to:
 - **Structured output.** `.output::<T>()` on a run, surfacing mentra's
   existing `Agent::run_to_output` (schema-forced terminal tool, typed
   `FinalOutput<T>`). Prose return values kill programmatic composition; this
-  is the primitive workflows live on. **Already built in mentra** — lan only
+  is the primitive workflows live on. **Already built in mentra** — basis only
   exposes it.
 - **Shared budgets.** A cloneable `BudgetPool` that concurrent runs draw
   from, on top of the per-run bounds of
   [`0014`](0014-watch-retired-runs-are-boundable.md), so "this whole review
   costs ≤ 500k tokens" is one line.
 - **Cancellation.** A run accepts an abort signal. Mentra's run options
-  already carry a cancellation token; lan exposes it.
+  already carry a cancellation token; basis exposes it.
 - **Event fan-in.** Sinks taggable with a run identity so N concurrent runs
   merge into one observable stream.
 - **Approval is the trait alone.** `ApprovalPolicy` is deleted. `Approver` is
   the seam; `AllowAll` (the default) and `DenyAll` ship in the core; the
   terminal prompter moves to the binary, where TTYs live —
-  `lan spawn --approve prompt` behaves exactly as before by installing it. The
+  `basis spawn --approve prompt` behaves exactly as before by installing it. The
   trait contract inherits the fail-closed rule: an approver that cannot
   answer (no TTY, timeout, broken channel) denies.
 
 ## Consequences
 
 - Subagents and teams inside one run come from mentra's builtin `task` and
-  `team_*` tools — lan adds convention, not machinery.
+  `team_*` tools — basis adds convention, not machinery.
 - Proposal 0001 moves from Deferred to **Rejected**: the case it anticipated
   is served by the SDK, and its trigger (an extension inexpressible through
   hooks + MCP) never fired.
 - No per-language client SDKs. The versioned JSONL stream and ACP remain what
   they are — a CLI convenience and the interactive-client door — not
-  orchestration APIs. Building "lan-sdk-python" is the client-per-integrator
+  orchestration APIs. Building "basis-sdk-python" is the client-per-integrator
   trap of [`0002`](0002-acp-is-the-protocol.md), declined in advance.
 - Pre-1.0 and Rust-only, the crate API is the sole compatibility surface, so
   the `Workspace`/run reshaping can proceed without protocol or schema debt.

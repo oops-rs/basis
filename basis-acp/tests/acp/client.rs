@@ -1,0 +1,229 @@
+//! The end that drives: a real ACP client, and what it saw.
+//!
+//! The counterpart to `source`, holding both halves of what a test does over
+//! the connection — `connected` stands a client up against basis's server, and
+//! `open`, `say`, and `drive` are the requests every test sends; `Observed` is
+//! everything that came back the other way, which is where the assertions
+//! land. The timeout is here rather than in each test because it wraps the
+//! whole conversation, not any one request.
+
+use std::{
+    future::Future,
+    path::PathBuf,
+    sync::{Arc, Mutex},
+    time::Duration,
+};
+
+use agent_client_protocol::{
+    Agent, Channel, Client, ConnectionTo, Responder,
+    schema::{
+        ProtocolVersion,
+        v1::{
+            ContentBlock, InitializeRequest, NewSessionRequest, PromptRequest,
+            RequestPermissionOutcome, RequestPermissionRequest, RequestPermissionResponse,
+            SelectedPermissionOutcome, SessionId, SessionNotification, SessionUpdate, StopReason,
+            TextContent,
+        },
+    },
+};
+use basis_acp::ServeConfig;
+
+use crate::source::MockSource;
+
+/// Every exchange here is local and scripted; exceeding this means something
+/// is stuck, which is the failure these tests exist to catch.
+const NOT_STUCK: Duration = Duration::from_secs(10);
+
+/// What a test client observed.
+#[derive(Default)]
+pub(crate) struct Observed {
+    pub(crate) updates: Vec<SessionUpdate>,
+    pub(crate) permission_requests: Vec<RequestPermissionRequest>,
+}
+
+impl Observed {
+    /// Everything the agent said, concatenated.
+    pub(crate) fn agent_text(&self) -> String {
+        self.updates
+            .iter()
+            .filter_map(|update| match update {
+                SessionUpdate::AgentMessageChunk(chunk) => match &chunk.content {
+                    ContentBlock::Text(text) => Some(text.text.as_str()),
+                    _ => None,
+                },
+                _ => None,
+            })
+            .collect()
+    }
+
+    /// What the *user* is shown as having said. Only a replay produces these:
+    /// a live turn never echoes the prompt back.
+    pub(crate) fn replayed_user_text(&self) -> String {
+        self.updates
+            .iter()
+            .filter_map(|update| match update {
+                SessionUpdate::UserMessageChunk(chunk) => match &chunk.content {
+                    ContentBlock::Text(text) => Some(text.text.as_str()),
+                    _ => None,
+                },
+                _ => None,
+            })
+            .collect()
+    }
+
+    pub(crate) fn mode_changes(&self) -> Vec<String> {
+        self.updates
+            .iter()
+            .filter_map(|update| match update {
+                SessionUpdate::CurrentModeUpdate(mode) => Some(mode.current_mode_id.0.to_string()),
+                _ => None,
+            })
+            .collect()
+    }
+
+    pub(crate) fn tool_calls(&self) -> usize {
+        self.updates
+            .iter()
+            .filter(|update| matches!(update, SessionUpdate::ToolCall(_)))
+            .count()
+    }
+}
+
+/// Drives one client conversation against basis's server over an in-process
+/// pair, running `body` once the connection is up.
+///
+/// `answer` decides how the client responds to a permission request; `None`
+/// means the client is never expected to be asked.
+pub(crate) async fn connected<F, Fut, T>(
+    source: MockSource,
+    answer: Option<&'static str>,
+    body: F,
+) -> (T, Arc<Mutex<Observed>>)
+where
+    F: FnOnce(ConnectionTo<Agent>) -> Fut + Send + 'static,
+    Fut: Future<Output = Result<T, agent_client_protocol::Error>> + Send,
+    T: Send + 'static,
+{
+    let (client_side, agent_side) = Channel::duplex();
+    let observed = Arc::new(Mutex::new(Observed::default()));
+
+    let server = tokio::spawn(basis_acp::serve(
+        ServeConfig::with_source(source),
+        agent_side,
+    ));
+
+    let seen = Arc::clone(&observed);
+    let recorded = Arc::clone(&observed);
+
+    let driven = Client
+        .builder()
+        .on_receive_notification(
+            move |notification: SessionNotification, _connection| {
+                let seen = Arc::clone(&seen);
+                async move {
+                    seen.lock()
+                        .expect("not poisoned")
+                        .updates
+                        .push(notification.update);
+                    Ok(())
+                }
+            },
+            agent_client_protocol::on_receive_notification!(),
+        )
+        .on_receive_request(
+            move |request: RequestPermissionRequest,
+                  responder: Responder<RequestPermissionResponse>,
+                  _connection| {
+                let recorded = Arc::clone(&recorded);
+                async move {
+                    recorded
+                        .lock()
+                        .expect("not poisoned")
+                        .permission_requests
+                        .push(request.clone());
+
+                    let outcome = match answer {
+                        Some(option) => RequestPermissionOutcome::Selected(
+                            SelectedPermissionOutcome::new(option.to_string()),
+                        ),
+                        None => RequestPermissionOutcome::Cancelled,
+                    };
+                    responder.respond(RequestPermissionResponse::new(outcome))
+                }
+            },
+            agent_client_protocol::on_receive_request!(),
+        )
+        .connect_with(client_side, |connection: ConnectionTo<Agent>| async move {
+            let initialized = connection
+                .send_request(InitializeRequest::new(ProtocolVersion::V1))
+                .block_task()
+                .await?;
+            assert!(
+                initialized.agent_capabilities.load_session,
+                "basis resumes sessions, and must say so"
+            );
+
+            body(connection).await
+        });
+
+    let result = tokio::time::timeout(NOT_STUCK, driven)
+        .await
+        .expect("the conversation must not hang")
+        .expect("the client drives cleanly");
+
+    server.abort();
+
+    (result, observed)
+}
+
+/// Opens a session and sends `prompts` on it, one turn at a time.
+pub(crate) async fn drive(
+    source: MockSource,
+    prompts: Vec<&str>,
+    answer: Option<&'static str>,
+) -> (Vec<StopReason>, Arc<Mutex<Observed>>) {
+    let prompts: Vec<String> = prompts.into_iter().map(str::to_string).collect();
+
+    connected(source, answer, |connection| async move {
+        let session = open(&connection).await?;
+
+        let mut stop_reasons = Vec::new();
+        for prompt in prompts {
+            stop_reasons.push(say(&connection, &session, &prompt).await?);
+        }
+
+        Ok(stop_reasons)
+    })
+    .await
+}
+
+/// `session/new` in the current directory, returning the id basis minted.
+pub(crate) async fn open(
+    connection: &ConnectionTo<Agent>,
+) -> Result<SessionId, agent_client_protocol::Error> {
+    let response = connection
+        .send_request(NewSessionRequest::new(
+            std::env::current_dir().unwrap_or_else(|_| PathBuf::from("/")),
+        ))
+        .block_task()
+        .await?;
+
+    Ok(response.session_id)
+}
+
+/// One turn, returning why it stopped.
+pub(crate) async fn say(
+    connection: &ConnectionTo<Agent>,
+    session: &SessionId,
+    prompt: &str,
+) -> Result<StopReason, agent_client_protocol::Error> {
+    let response = connection
+        .send_request(PromptRequest::new(
+            session.clone(),
+            vec![ContentBlock::Text(TextContent::new(prompt))],
+        ))
+        .block_task()
+        .await?;
+
+    Ok(response.stop_reason)
+}

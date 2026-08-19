@@ -40,7 +40,7 @@ jobs:
     strategy:
       fail-fast: false
       matrix:
-        # Three platforms because lan spawns processes, reads a workspace, and
+        # Three platforms because basis spawns processes, reads a workspace, and
         # binds a loopback socket — the places where "works on my machine" is
         # least trustworthy.
         os: [ubuntu-latest, macos-latest, windows-latest]

@@ -16,12 +16,12 @@
 
 ## Context
 
-`lan watch` was three things wearing one subcommand: a timer, a
+`basis watch` was three things wearing one subcommand: a timer, a
 change-detector, and per-iteration bounds. The timer is a scheduler opinion —
 and scheduling belongs to the host (tokio interval, cron, systemd, CI), which
 the SDK direction of [`0010`](0010-the-crate-is-the-workflow-surface.md) makes
 practical for the first time. With the loop trivially writable in any language
-that can call a CLI or a crate, shipping one inside lan violates Bet 4: the
+that can call a CLI or a crate, shipping one inside basis violates Bet 4: the
 core acquiring an opinion about the host's event loop.
 
 The other two pieces are not scheduler concepts at all and never were:
@@ -29,7 +29,7 @@ The other two pieces are not scheduler concepts at all and never were:
 - The bounds (deadline, tool budget, token budget) are properties of *any run
   nobody is watching* — every workflow fan-out agent, not just a watch
   iteration. Mentra's run options already carry all three plus a cancellation
-  token; lan had merely attached them to the wrong surface.
+  token; basis had merely attached them to the wrong surface.
 - The fingerprint's judgment calls (digest over `git ls-files` + `HEAD`;
   every uncertain answer is "changed") took ADR-0008 to settle and are easy
   to get wrong when re-derived.
@@ -39,14 +39,14 @@ The other two pieces are not scheduler concepts at all and never were:
 **The `watch` subcommand is deleted. Its pieces move to where they were
 always pointed:**
 
-- **Bounds move to `RunConfig`** and to `lan spawn` as `--deadline`,
+- **Bounds move to `RunConfig`** and to `basis spawn` as `--deadline`,
   `--tool-budget`, `--token-budget`. All default to unset: ADR-0009's
   deadline-defaults-to-interval coupling dies with the interval. An attended
-  `lan spawn` still gets no implicit timer (ADR-0009's last consequence
-  survives; `lan run` remains an alias); an unattended caller states its bounds, and the recipe shows
+  `basis spawn` still gets no implicit timer (ADR-0009's last consequence
+  survives; `basis run` remains an alias); an unattended caller states its bounds, and the recipe shows
   how. A tripped bound stays a graceful end — committed work is kept.
 - **The fingerprint survives as a utility**: `Workspace::fingerprint()` in
-  `lan-core` and a `lan fingerprint` subcommand printing the hash for shell
+  `basis-core` and a `basis fingerprint` subcommand printing the hash for shell
   composition. ADR-0008's semantics carry over verbatim — `git ls-files`
   enumeration, `HEAD` in the digest, `stat`-only reads, uncertain resolves to
   changed. The *baseline policy* (record only after success) moves to the
@@ -68,11 +68,11 @@ always pointed:**
   `--always`/`--every` vocabulary are deleted.
 - Callers who roll their own loop and skip change detection will burn tokens
   on idle repos; the recipe and the `fingerprint` subcommand exist so the
-  right thing is one line. lan no longer prevents the wrong thing — that is
+  right thing is one line. basis no longer prevents the wrong thing — that is
   the host's loop now.
 - ADR-0008 is retired with its command, but its asymmetry rule (a false
   "changed" costs tokens; a false "unchanged" silently kills the loop) is
   load-bearing inside `fingerprint()` and must survive any reimplementation.
 - ADR-0009's inversion ("the default is a bound") no longer holds anywhere:
-  with no shipped unattended mode, there is no surface for lan to default it
+  with no shipped unattended mode, there is no surface for basis to default it
   on. Bounding is now explicit, everywhere, by design.

@@ -1,6 +1,6 @@
 # AGENTS
 
-lan follows the same conventions as [mentra](https://github.com/oops-rs/mentra). The sections
+basis follows the same conventions as [mentra](https://github.com/oops-rs/mentra). The sections
 below are the operative rules; when in doubt, mentra's AGENTS.md is the reference.
 
 ## Philosophy: First Principles
@@ -25,15 +25,15 @@ implementation.
   the *shipped* state and are updated as phases land, never ahead of them.
 - The core principle: **the core has no opinions** — no task-specific types,
   pipelines, or vocabulary (PROPOSAL.md Bet 4).
-- **mentra/lan split**: capabilities generic enough for any harness (session branching,
-  compaction lifecycle, hook points, MCP client) belong in mentra, not here. lan keeps
-  conventions and protocol: context discovery, ACP mapping, the CLI grammar. When lan
+- **mentra/basis split**: capabilities generic enough for any harness (session branching,
+  compaction lifecycle, hook points, MCP client) belong in mentra, not here. basis keeps
+  conventions and protocol: context discovery, ACP mapping, the CLI grammar. When basis
   hits a mentra gap, file a mentra issue even if fixing it immediately.
 - **Three crates, split by dependency weight** (ADR-0011), so new code has one right home:
-  `lan-core` is the SDK and carries no protocol, no transport, and no TTY code; `lan-acp`
-  is the ACP adapter over it; `lan` is the binary over both. Anything that would put a
-  JSON-RPC, websocket, or terminal dependency into `lan-core` belongs in one of the other
-  two. MCP lives behind `lan-core`'s default-on `mcp` feature (ADR-0012).
+  `basis-core` is the SDK and carries no protocol, no transport, and no TTY code; `basis-acp`
+  is the ACP adapter over it; `basis` is the binary over both. Anything that would put a
+  JSON-RPC, websocket, or terminal dependency into `basis-core` belongs in one of the other
+  two. MCP lives behind `basis-core`'s default-on `mcp` feature (ADR-0012).
 
 ## Workflow Discipline
 

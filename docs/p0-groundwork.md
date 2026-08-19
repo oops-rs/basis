@@ -1,24 +1,24 @@
 # P0 Groundwork
 
 > 2026-08-08 · outputs of ARCHITECTURE.md §6 P0: zentox feedback distilled, pi prior art, and the
-> concrete mentra-vs-lan split. Supersedes the provisional table in ARCHITECTURE.md §1 where they
+> concrete mentra-vs-basis split. Supersedes the provisional table in ARCHITECTURE.md §1 where they
 > disagree — this one is based on reading mentra's actual public API.
 
 ## 1. Requirements from zentox feedback (`mentra/docs/mentra-api-feedback.md`)
 
 zentox was a real Mentra-based CLI agent. Its friction list, translated into domain-free
-requirements for lan (and mentra):
+requirements for basis (and mentra):
 
 | zentox friction | Requirement | Lands in |
 |---|---|---|
 | Context-dependent tool sets need hand-rolled `with_tool(...)` gating | First-class tool profiles / runtime presets | **mentra** (its #1 priority, verbatim) |
-| App owns operational glue: path scoping, timeouts, output summarization | lan *is* that glue, packaged once — the "recommended CLI integration pattern" mentra wanted to document | **lan** |
-| No integration-test story for runtime-plus-tools assemblies | Test harness support for full assemblies; lan's own tests will need it immediately | **mentra** (`test-utils` extension) |
-| No realistic end-to-end example | lan is the realistic example — provider setup, policy, custom tools, composition, transcript inspection | **lan** (serves both repos) |
+| App owns operational glue: path scoping, timeouts, output summarization | basis *is* that glue, packaged once — the "recommended CLI integration pattern" mentra wanted to document | **basis** |
+| No integration-test story for runtime-plus-tools assemblies | Test harness support for full assemblies; basis's own tests will need it immediately | **mentra** (`test-utils` extension) |
+| No realistic end-to-end example | basis is the realistic example — provider setup, policy, custom tools, composition, transcript inspection | **basis** (serves both repos) |
 
 zentox validations to keep: policy roots (working/read/write) map cleanly to workspace scoping;
 custom tool registration is already easy; structured transcript history is good for post-run
-artifacts. lan's JSONL event stream should expose the same transcript walk zentox used for
+artifacts. basis's JSONL event stream should expose the same transcript walk zentox used for
 `record.md`.
 
 ## 2. Prior art from pi (session-format.md, compaction.md)
@@ -53,7 +53,7 @@ Mentra's public API already covers more than ARCHITECTURE.md §1 assumed:
 
 | Capability | Status in mentra | Note |
 |---|---|---|
-| MCP client + tool bridge | **exists**: `McpManager`, `McpServerConfig`, stdio client, `McpBridgedTool` | ARCHITECTURE.md said "build" — wrong; lan only wires `.mcp.json` discovery to it |
+| MCP client + tool bridge | **exists**: `McpManager`, `McpServerConfig`, stdio client, `McpBridgedTool` | ARCHITECTURE.md said "build" — wrong; basis only wires `.mcp.json` discovery to it |
 | Compaction engine | **exists**: `CompactionEngine` trait, `StandardCompactionEngine`, modes, diagnostics | gap vs pi: checkpoint semantics (`retainedTail`), split turns, cumulative file tracking — verify, then extend in mentra |
 | Skills loader | **exists but `pub(crate)`**: `runtime/skill.rs` (frontmatter, dedup, recursive discovery) | mentra gap: make public or expose via runtime builder config |
 | Permissions | **exists**: `PermissionRequest/Decision`, `RuleStore`, `RememberedRule`, `SessionPermissionHandle` | maps directly onto ACP `session/request_permission` |
@@ -61,11 +61,11 @@ Mentra's public API already covers more than ARCHITECTURE.md §1 assumed:
 | Structured transcript | **exists**: `AgentTranscript`, `TranscriptItem`, `CompactionSummary` | zentox's record-walking use case |
 | Session branching / tree | **absent**: `Session`/`SessionMetadata` only; no fork/branch/snapshot API found in public surface | mentra gap (pi tree model, §2) |
 | Round strategy / steering | **exists**: `RoundStrategy`, `SteeringHandle`, `QueueMode` | ACP `session/cancel` + prompt-during-turn map here |
-| Teams, background tasks, memory | exists | not needed for lan v1; do not wire |
+| Teams, background tasks, memory | exists | not needed for basis v1; do not wire |
 
 ## 4. The split (decision)
 
-Rule (from AGENTS.md): generic-for-any-harness → mentra; conventions and protocol → lan.
+Rule (from AGENTS.md): generic-for-any-harness → mentra; conventions and protocol → basis.
 
 **mentra gaps to file/fix (issues even when fixed immediately):**
 1. `feat(session)`: entry-tree branching — pi's `id`/`parentId` model over the SQLite store;
@@ -90,7 +90,7 @@ recorded. Filed three issues, not five.
 | 4 Tool profiles | **Closed** — `mentra::agent::ToolProfile` is public with `all`/`only`/`hide`/`allows`, is an `AgentConfig` field (`agent/config.rs:257`), enforced at `agent.rs:529`; `examples/cli_runtime.rs` uses it exactly as zentox asked. Also `FileToolProfile` + `RuntimeBuilder::with_file_tools` | — | none |
 | 5 Assembly test harness | **Closed** — `mentra::test::MockRuntime` behind the `test-utils` feature: scripted turns (`text`/`stream_text`/`tool_calls`/`failure`), `with_policy`, `with_store` | — | none |
 
-**#2, what already exists** (so lan does not re-file it): `CompactionOutcome` returns a
+**#2, what already exists** (so basis does not re-file it): `CompactionOutcome` returns a
 *replacement* transcript with the tail materialized verbatim — that **is** the
 `retainedTail` checkpoint property, plus a pre-compaction `.jsonl` snapshot at
 `transcript_path` and a documented `details` preservation guarantee (mentra ADR-0001 §6).
@@ -104,26 +104,26 @@ model chose to keep.
 
 **#3, what remains:** `register_skill_loader` *replaces* rather than merges
 (`runtime/handle/tooling.rs:103`), so a second `register_skills_dir` silently discards
-the first root — lan needs workspace-over-global precedence; and loaded skills cannot be
-enumerated (`SkillLoader`/`SkillEntry` are `pub(crate)`), which lan needs to surface
+the first root — basis needs workspace-over-global precedence; and loaded skills cannot be
+enumerated (`SkillLoader`/`SkillEntry` are `pub(crate)`), which basis needs to surface
 skills as ACP commands.
 
-**Consequence for lan:** P1 no longer needs to hand-roll tool profiles — use
-`agent::ToolProfile` directly — and lan's own assembly tests should build on
+**Consequence for basis:** P1 no longer needs to hand-roll tool profiles — use
+`agent::ToolProfile` directly — and basis's own assembly tests should build on
 `mentra::test::MockRuntime` rather than a bespoke harness. §5's "profiles can be
 hand-rolled then migrated" is obsolete.
 
 ### 4b. All four issues fixed and closed (2026-08-09, mentra 0.13.0)
 
-Fixed upstream rather than worked around, per ADR-0005. lan now depends on
+Fixed upstream rather than worked around, per ADR-0005. basis now depends on
 mentra 0.13 and carries no skills workaround.
 
-| Issue | Landed as | What lan gained |
+| Issue | Landed as | What basis gained |
 |---|---|---|
-| [#9](https://github.com/oops-rs/mentra/issues/9) | `ToolNameIndex` correlates a call from queue/start to result | `tool_completed` names its tool; lan's test asserts it |
+| [#9](https://github.com/oops-rs/mentra/issues/9) | `ToolNameIndex` correlates a call from queue/start to result | `tool_completed` names its tool; basis's test asserts it |
 | [#8](https://github.com/oops-rs/mentra/issues/8) | `register_skills_dir` additive, `register_skills_dirs`, `Runtime::skills()`, `SkillLoadError` re-exported | Workspace **and** global skill roots both register with correct precedence; the header reports every skill; `RunError::Skills` is a typed `#[from]` again |
 | [#7](https://github.com/oops-rs/mentra/issues/7) | `CompactionSummary::files_touched` accumulates; a tool-pinned turn is summarized as a unit | Long runs stop losing their file history |
-| [#6](https://github.com/oops-rs/mentra/issues/6) | `EntryId`/`parent_id` on transcript entries, `Session::branch_from`/`children`, `SessionEvent::Branched` | P5 branching is unblocked; lan maps `Branched` onto its stream today |
+| [#6](https://github.com/oops-rs/mentra/issues/6) | `EntryId`/`parent_id` on transcript entries, `Session::branch_from`/`children`, `SessionEvent::Branched` | P5 branching is unblocked; basis maps `Branched` onto its stream today |
 
 **Deliberately not done upstream, recorded on the issues:** branch
 summarization on leaving a branch (policy on top of the tree, wants the
@@ -132,14 +132,14 @@ structural — missing parent links are inferred on load); and two-part
 summarization of a long history whose final turn is separately over budget
 (needs a total-budget signal in `CompactionRequest`).
 
-**lan builds (harness-specific):**
+**basis builds (harness-specific):**
 1. AGENTS.md discovery: workspace + parent-dir walk + global; injection into system context.
 2. Prompt templates: markdown + args → ACP commands.
 3. ACP server: `agent-client-protocol` crate ↔ `SessionEvent`/`PermissionRequest` mapping.
 4. `run --json`: JSONL rendering of the `SessionEvent` stream.
 5. `watch`: interval scheduler, skip-if-unchanged. *(Built in P4, retired by
    ADR-0014 — the bounds moved onto `run`, the fingerprint became
-   `lan fingerprint`, the interval went back to the host.)*
+   `basis fingerprint`, the interval went back to the host.)*
 6. Subprocess hooks: exec-a-command JSON in/out, layered on mentra's `RuntimeHook`.
 7. Docker packaging + `.git/hooks` write-deny policy preset. *(The carve-out is
    built and kept; the shipped image was withdrawn by ADR-0013 in favor of
@@ -148,7 +148,7 @@ summarization of a long history whose final turn is separately over budget
 
 ## 5. P1 implications
 
-- P1 (`lan run`) wants mentra gap #3 (skills enumeration + multi-root, [mentra#8]) for
+- P1 (`basis run`) wants mentra gap #3 (skills enumeration + multi-root, [mentra#8]) for
   surfacing skills, but nothing blocks a first cut — skills can wait. Profiles are no
   longer a gap: use `agent::ToolProfile` directly (see §4a).
 

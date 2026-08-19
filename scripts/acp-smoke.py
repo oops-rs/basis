@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
-"""Drive lan's ACP server over real stdio, as a client would.
+"""Drive basis's ACP server over real stdio, as a client would.
 
-    LAN_API_KEY=... python3 scripts/acp-smoke.py
+    BASIS_API_KEY=... python3 scripts/acp-smoke.py
 
 Speaks the protocol by hand rather than through a library, so what it proves
 is that the bytes on the wire are right — not that two of our own pieces
@@ -14,9 +14,9 @@ import subprocess
 import sys
 import threading
 
-BASE_URL = os.environ.get("LAN_BASE_URL", "http://127.0.0.1:3455/v1")
-MODEL = os.environ.get("LAN_MODEL", "gpt-5.6-sol")
-BINARY = os.environ.get("LAN_BIN", "./target/debug/lan")
+BASE_URL = os.environ.get("BASIS_BASE_URL", "http://127.0.0.1:3455/v1")
+MODEL = os.environ.get("BASIS_MODEL", "gpt-5.6-sol")
+BINARY = os.environ.get("BASIS_BIN", "./target/debug/basis")
 
 
 def main() -> int:
@@ -41,7 +41,7 @@ def main() -> int:
 
     # Surface the agent's own diagnostics rather than swallowing them.
     threading.Thread(
-        target=lambda: [sys.stderr.write(f"  [lan] {line}") for line in agent.stderr],
+        target=lambda: [sys.stderr.write(f"  [basis] {line}") for line in agent.stderr],
         daemon=True,
     ).start()
 
@@ -72,7 +72,7 @@ def main() -> int:
 
     initialized = send("initialize", {"protocolVersion": 1, "clientCapabilities": {}})
     print(f"initialize   -> {initialized['agentInfo']}")
-    assert initialized["agentCapabilities"]["loadSession"], "lan resumes sessions"
+    assert initialized["agentCapabilities"]["loadSession"], "basis resumes sessions"
 
     session = send("session/new", {"cwd": os.path.abspath("/tmp/lanlive"), "mcpServers": []})
     session_id = session["sessionId"]

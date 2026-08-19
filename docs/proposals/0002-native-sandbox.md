@@ -7,7 +7,7 @@
 
 ## Summary
 
-Per-command OS sandboxing so bare-metal `lan` runs get the workspace guarantee
+Per-command OS sandboxing so bare-metal `basis` runs get the workspace guarantee
 without Docker: Seatbelt (`sandbox-exec`) on macOS, bubblewrap + seccomp on Linux,
 following codex's `workspace-write` design.
 
@@ -35,5 +35,5 @@ codex proves the per-command wrapper shape in production.
 
 - Same policy vocabulary as the Docker preset, so config is portable across modes.
 - Enforcement lives below the tool layer (mentra shell tool integration), not in
-  lan's protocol code.
+  basis's protocol code.
 - Windows: out of scope; document WSL2 like everyone else.

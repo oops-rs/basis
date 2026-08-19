@@ -17,7 +17,7 @@ the primary key of the persisted agent row. They are not interchangeable:
 value every time a session is constructed, including on resume.
 
 **Who may block?** The `agent-client-protocol` 2.0 handler closures run inside
-the connection's dispatch loop and hold it until they return. Meanwhile lan's
+the connection's dispatch loop and hold it until they return. Meanwhile basis's
 `Approver` is called from the event-forwarding task while the turn is blocked
 inside mentra waiting for an answer. Both facts are load-bearing, and getting
 their relationship wrong does not produce an error — it produces a hang.
@@ -27,7 +27,7 @@ their relationship wrong does not produce an error — it produces a hang.
 **The ACP session id is mentra's persisted agent id.**
 
 `session/new` returns `PreparedRun::agent_id()`. `session/load` passes it
-straight to `run::resume`, which is `Runtime::resume_session`. lan persists no
+straight to `run::resume`, which is `Runtime::resume_session`. basis persists no
 mapping table of its own, because there is nothing to map: the protocol's
 identifier and the runtime's identifier are the same string.
 
@@ -51,13 +51,13 @@ runtime."*
 ## Consequences
 
 - `session/load` costs nothing to support and works across processes, because
-  mentra already persists agents to SQLite. lan advertises `loadSession: true`
+  mentra already persists agents to SQLite. basis advertises `loadSession: true`
   honestly.
 - A client that reconnects with an id from a previous run gets its conversation
   back, with the transcript mentra kept.
 - The session id a client sees is stable across resume, which is what a client
   storing it in a workspace file needs. `Session::id()` is not, so it is not
-  what lan exposes.
+  what basis exposes.
 - Every implementation of `Approver` is async now, including `TerminalApprover`,
   whose stdin read moved to `spawn_blocking`. That is a breaking change to a
   public trait, taken in P2 rather than later because the alternative is a

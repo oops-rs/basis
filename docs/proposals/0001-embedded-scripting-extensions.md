@@ -4,7 +4,7 @@
 > [`../adr/0010-the-crate-is-the-workflow-surface.md`](../adr/0010-the-crate-is-the-workflow-surface.md)**
 > · 2026-08-11. The trigger below never fired, and the need this anticipated
 > is better served by the SDK: orchestration and extension logic are
-> host-language code against the crate, not code lan interprets. If an
+> host-language code against the crate, not code basis interprets. If an
 > interception gap ever appears, the fix is widening the seam contract in
 > mentra (ADR-0012), not an embedded language.
 > Created: 2026-08-08 (Deferred — written down per Bet 7)
@@ -21,7 +21,7 @@ lifecycle events and tool registration that pi gives its TypeScript extensions.
 
 pi's in-process TS extensions can do things process-isolated mechanisms can't do
 cheaply: intercept and *modify* tool calls with shared state, render custom UI,
-maintain in-memory state across events without serialization. lan's v1 answer is
+maintain in-memory state across events without serialization. basis's v1 answer is
 MCP (custom tools) + subprocess hooks (interception via JSON in/out). The bet is
 that this covers most real extensions; this proposal exists so the escalation path
 is designed, not improvised.

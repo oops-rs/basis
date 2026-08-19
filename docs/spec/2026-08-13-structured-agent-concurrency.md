@@ -1,12 +1,12 @@
 # Structured Agent Concurrency
 
 Status: approved  
-Owner: lan  
+Owner: basis  
 Date: 2026-08-13
 
 ## Problem
 
-LAN needs one simple command surface for starting work, communicating with an
+basis needs one simple command surface for starting work, communicating with an
 agent, and waiting for a result. The current disposable delegation path is
 bounded, but it does not provide a durable handle, an attached process model,
 or a protocol for agent-to-agent communication.
@@ -21,13 +21,13 @@ explicit.
 
 - Humans and scripts starting one-shot agent work from a repository.
 - Agent runtimes delegating bounded work to child agents.
-- Hosts embedding `lan-core` and needing observable, cancellable child runs.
+- Hosts embedding `basis-core` and needing observable, cancellable child runs.
 
 ## Objectives
 
-- Make `lan <PROMPT>` the canonical shorthand for `lan spawn <PROMPT>`.
-- Make protocol serving explicit through `lan serve --acp` or
-  `lan serve --bridge`.
+- Make `basis <PROMPT>` the canonical shorthand for `basis spawn <PROMPT>`.
+- Make protocol serving explicit through `basis serve --acp` or
+  `basis serve --bridge`.
 - Make human-readable CLI results and usage errors end with one concise
   `next:` hint; structured lifecycle results will carry the same action as
   metadata rather than requiring documentation lookup.
@@ -47,7 +47,7 @@ explicit.
 - Unrestricted peer-to-peer synchronous protocols or messages after a task has
   reached its terminal state. The first service supports one correlated reply
   for each message accepted while a task is running.
-- A new wire protocol in `lan-core`; transports remain in adapters or the
+- A new wire protocol in `basis-core`; transports remain in adapters or the
   binary.
 - A TUI, process sandbox, or replacement for Mentra's agent loop.
 - Making detached work implicitly inherit a parent's lifetime.
@@ -55,7 +55,7 @@ explicit.
 ## Constraints
 
 - Rust edition 2024, MSRV 1.88, and the existing three-crate layering.
-- `lan-core` carries generic lifecycle types only: no ACP, websocket, or TTY
+- `basis-core` carries generic lifecycle types only: no ACP, websocket, or TTY
   dependencies.
 - Parent cancellation and deadlines propagate to attached descendants.
 - A parent's own completion is pending while attached descendants are still
@@ -71,9 +71,9 @@ explicit.
 
 ## Acceptance criteria
 
-- [x] `lan <PROMPT>` and `lan spawn <PROMPT>` normalize to the same command.
-- [x] `lan serve --acp` starts ACP; `lan serve --bridge` starts the websocket
-      bridge; bare `lan` does not start a server.
+- [x] `basis <PROMPT>` and `basis spawn <PROMPT>` normalize to the same command.
+- [x] `basis serve --acp` starts ACP; `basis serve --bridge` starts the websocket
+      bridge; bare `basis` does not start a server.
 - [x] Human-readable usage/errors provide one valid `next:` action without
       changing the existing JSONL run bookends.
 - [x] A child handle has exactly one terminal state and can be waited on more

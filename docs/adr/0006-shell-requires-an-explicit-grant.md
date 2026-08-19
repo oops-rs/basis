@@ -30,12 +30,12 @@ the boundary exists**.
 
 Three candidates:
 
-1. **lan infers it** from `mentra::detect_environment()`, which reports
+1. **basis infers it** from `mentra::detect_environment()`, which reports
    `Host` / `Docker` / `Container` / `ContinuousIntegration`.
 2. **The operator states it**, explicitly, per run.
 3. **The image author states it**, once, for an environment they built.
 
-Option 1 is tempting and wrong. Detecting Docker proves lan is *inside* a
+Option 1 is tempting and wrong. Detecting Docker proves basis is *inside* a
 container; it proves nothing about how that container was run. `docker run -v
 /:/host` is a container with no boundary at all. Inferring a guarantee from a
 signal that does not establish it is exactly the "selling in-process checks as
@@ -44,11 +44,11 @@ safety" that ADR-0004 refuses — it would just move the pretence one layer out.
 ## Decision
 
 **Shell and background execution are denied unless explicitly granted.** The
-grant is an act by whoever knows the boundary holds, never an inference by lan.
+grant is an act by whoever knows the boundary holds, never an inference by basis.
 
 - `RunConfig::shell` defaults to `ShellAccess::Denied`.
-- `lan run --allow-shell`, or `LAN_ALLOW_SHELL=1`, grants it.
-- lan's Docker image sets `LAN_ALLOW_SHELL=1` in its own environment. That is
+- `basis run --allow-shell`, or `BASIS_ALLOW_SHELL=1`, grants it.
+- basis's Docker image sets `BASIS_ALLOW_SHELL=1` in its own environment. That is
   the image author granting it for an environment they control: read-only root
   filesystem, workspace as the sole writable mount. The grant travels with the
   thing that makes it true.
@@ -60,15 +60,15 @@ grant is an act by whoever knows the boundary holds, never an inference by lan.
 - The default stays safe and the failure mode stays legible: a user who wants
   commands is told to ask for them, rather than discovering the limit through a
   model's confused recovery.
-- `lan run --allow-shell` on a laptop is a real grant of real authority, and
-  says so. That is the honest shape: the user, not lan, is asserting that
+- `basis run --allow-shell` on a laptop is a real grant of real authority, and
+  says so. That is the honest shape: the user, not basis, is asserting that
   losing the workspace is acceptable.
 - Inside the official image, shell is on with no flag, because there the
   boundary is the kernel's and the image author can vouch for it.
 - A host embedding the crate gets `ShellAccess::Denied` unless it opts in, so
   no embedder inherits command execution by surprise.
 - ~~`.git/hooks` write-deny is not expressible~~ — **closed.** mentra 0.17 added
-  `RuntimePolicy::with_denied_write_root`, and lan denies `.git/hooks` and
+  `RuntimePolicy::with_denied_write_root`, and basis denies `.git/hooks` and
   `.git/config` by default. Verified live: the builtin `files` tool is refused
   with a reason the model reads and acts on. The limit is equally verified —
   `sh -c 'echo hi > .git/hooks/pre-commit'` still lands, because nothing parses

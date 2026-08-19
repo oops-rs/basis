@@ -1,6 +1,6 @@
 # Security policy
 
-lan runs with the authority of the user who starts it. The shell executor is
+basis runs with the authority of the user who starts it. The shell executor is
 not a sandbox; use operating-system isolation when a boundary is required.
 
 The local lifecycle service binds only to loopback and requires a per-service

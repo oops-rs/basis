@@ -1,14 +1,14 @@
-# lan — Containerization
+# basis — Containerization
 
 > 2026-08-11 · Replaces the Dockerfile withdrawn by
 > [ADR-0013](adr/0013-the-host-owns-the-boundary.md).
 > [ADR-0004](adr/0004-kernel-enforced-confinement.md)'s claim is unchanged —
-> the boundary is the kernel's, in-process checks are hygiene — but lan no
+> the boundary is the kernel's, in-process checks are hygiene — but basis no
 > longer ships an instance of it. This document is what it shipped instead.
 
 ## 1. Posture
 
-**lan ships no container and claims no sandbox.** A bare-host run carries the
+**basis ships no container and claims no sandbox.** A bare-host run carries the
 full authority of the user account that starts it: every file that account can
 read, every file it can write, every command it can execute. Shell is part of
 that authority and is on by default, because a harness that cannot run the
@@ -20,25 +20,25 @@ for first, the file tools, and a shell redirect walks straight past them. They
 are not a boundary and are never described as one.
 
 Isolation, where you want it, comes from the OS. The rest of this document is
-the pattern lan used to ship as an image, written down so you can build it
+the pattern basis used to ship as an image, written down so you can build it
 yourself — and so that if you don't, you know exactly what you are running
 instead.
 
 Liveness is the OS's too
-([ADR-0019](adr/0019-the-filesystem-is-the-coordination-surface.md)): no lan
+([ADR-0019](adr/0019-the-filesystem-is-the-coordination-surface.md)): no basis
 process survives a completed invocation, and an asynchronous agent advances
 only while a process is attached to it. Inside a container that means the
-container has to outlive the `lan wait` doing the work — there is no daemon to
+container has to outlive the `basis wait` doing the work — there is no daemon to
 carry it, and backgrounding is `&`, `nohup`, tmux, `systemd-run`, or CI, on
 whichever side of the container boundary you want it. Task state lives under
-one global data directory: `LAN_DATA_DIR` if set, else `XDG_DATA_HOME/lan`,
+one global data directory: `BASIS_DATA_DIR` if set, else `XDG_DATA_HOME/basis`,
 else the platform data home. The image below sets `XDG_DATA_HOME=/state`, so
-that root resolves to `/state/lan` and rides the same volume as the store —
+that root resolves to `/state/basis` and rides the same volume as the store —
 which is what makes a task spawned in one `docker run` resumable by the next.
 
 ## 2. An image to build from
 
-Nothing below is lan-specific ceremony; it is the smallest image that gives
+Nothing below is basis-specific ceremony; it is the smallest image that gives
 the next section something to mount. Two stages, so the Rust toolchain does
 not ride along into the runtime.
 
@@ -54,7 +54,7 @@ RUN apt-get update \
     && rm -rf /var/lib/apt/lists/*
 
 COPY . .
-RUN cargo build --release --locked --bin lan
+RUN cargo build --release --locked --bin basis
 
 FROM debian:bookworm-slim
 
@@ -65,25 +65,25 @@ RUN apt-get update \
         ca-certificates git \
     && rm -rf /var/lib/apt/lists/*
 
-COPY --from=build /src/target/release/lan /usr/local/bin/lan
+COPY --from=build /src/target/release/basis /usr/local/bin/basis
 
 # An unprivileged user, so a run that forgets --read-only still cannot
 # rewrite the image's own binaries.
-RUN useradd --create-home --uid 10001 lan \
+RUN useradd --create-home --uid 10001 basis \
     && mkdir -p /workspace /state \
-    && chown lan:lan /workspace /state
-USER lan
+    && chown basis:basis /workspace /state
+USER basis
 
-ENV HOME=/home/lan
+ENV HOME=/home/basis
 
 # Both durable stores default under $HOME — mentra's sessions to the platform
-# data-local dir, lan's task state to the platform data home — and $HOME is
+# data-local dir, basis's task state to the platform data home — and $HOME is
 # unwritable once the root filesystem is read-only. Point XDG_DATA_HOME at the
 # state mount so both land somewhere that survives --read-only and --rm.
 ENV XDG_DATA_HOME=/state
 
 WORKDIR /workspace
-ENTRYPOINT ["lan"]
+ENTRYPOINT ["basis"]
 CMD ["--help"]
 ```
 
@@ -98,7 +98,7 @@ build artifacts are rebuilt inside the image anyway, and history is not needed
 to compile.
 
 ```sh
-docker build -t lan:local .
+docker build -t basis:local .
 ```
 
 The image resolves Mentra 0.18 from crates.io, so `COPY . .` is a complete
@@ -111,9 +111,9 @@ docker run --rm \
   --read-only --tmpfs /tmp \
   --security-opt no-new-privileges \
   -v "$PWD":/workspace:rw \
-  -v lan-state:/state \
+  -v basis-state:/state \
   -e ANTHROPIC_API_KEY \
-  lan:local run "run the tests and tell me what broke"
+  basis:local run "run the tests and tell me what broke"
 ```
 
 Flag by flag:
@@ -126,8 +126,8 @@ Flag by flag:
   from raising privileges beyond the unprivileged user it started as.
 - `-v "$PWD":/workspace:rw` is the sole writable mount, and the reason the
   pattern is worth running at all.
-- `-v lan-state:/state` is a named volume for the session store and, under
-  `/state/lan`, for durable task state. Without it, `--rm` and `--read-only`
+- `-v basis-state:/state` is a named volume for the session store and, under
+  `/state/basis`, for durable task state. Without it, `--rm` and `--read-only`
   together leave the agent nowhere to write, and it fails at startup rather
   than degrading quietly — and a task handle printed by one container would
   name an agent directory the next container has never seen.
@@ -136,7 +136,7 @@ Flag by flag:
   readable by anyone who can pull the image.
 
 Inside, a command that reaches past the workspace is refused by the kernel
-rather than by lan:
+rather than by basis:
 
 ```
 /bin/sh: 1: cannot create /etc/breach.txt: Read-only file system
@@ -161,7 +161,7 @@ narrowed; nothing in this pattern narrows it today.
 
 **And it is only as good as the mount set you pass.** `docker run -v /:/host`
 is a container with no boundary at all. The flags above are a claim about a
-specific invocation, not about containers in general — which is also why lan
+specific invocation, not about containers in general — which is also why basis
 does not sniff its environment and infer safety from it. Being inside a
 container proves nothing about how that container was run.
 

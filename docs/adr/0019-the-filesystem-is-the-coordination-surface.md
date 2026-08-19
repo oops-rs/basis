@@ -25,7 +25,7 @@ machinery. It also keeps a second durability layer beside mentra's, and it
 fails the identity check on all three arms: not a seam, not a convention
 other agents speak, and invisible to embedders — so not cheaper embedding.
 
-The doctrine already decided this shape once. lan ships no scheduler because
+The doctrine already decided this shape once. basis ships no scheduler because
 an interval belongs to whatever already runs things on your machine; the same
 cut applies one layer down. Keeping a process alive is the OS's job.
 
@@ -34,9 +34,9 @@ cut applies one layer down. Keeping a process alive is the OS's job.
 **The daemon is retired. An agent is a checkpoint on disk; execution belongs
 to whichever process is attached; liveness belongs to the OS.**
 
-- One global data directory (workspace-keyed; `LAN_DATA_DIR`, else the XDG
+- One global data directory (workspace-keyed; `BASIS_DATA_DIR`, else the XDG
   data home) holds task metadata and the mentra store. The repository's
-  `.lan/` remains configuration only. This also retires the wart of a store
+  `.basis/` remains configuration only. This also retires the wart of a store
   keyed by the *process's* current directory rather than the workspace.
 - **Attach** is the primitive: take the agent's `fs2` file lock — one writer,
   ever — resume from the last committed turn, execute, checkpoint at turn
@@ -87,7 +87,7 @@ to whichever process is attached; liveness belongs to the OS.**
 
 ## Consequences
 
-- `lan/src/local/` shrinks from roughly 4,400 lines to an estimated 1,500:
+- `basis/src/local/` shrinks from roughly 4,400 lines to an estimated 1,500:
   `registry.rs`, `protocol.rs`, and the service actor go, and with them the
   failure modes the recent commits were fixing — a stale wait edge cannot
   recur in code that no longer exists.
