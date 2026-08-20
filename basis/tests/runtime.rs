@@ -564,3 +564,34 @@ fn read_http_request(stream: &mut TcpStream) -> String {
 
     String::from_utf8_lossy(&bytes).into_owned()
 }
+
+/// A host that builds software needs more than two minutes.
+///
+/// The default suits the commands a harness usually runs and does not suit
+/// `docker compose build`. Past the limit the process is killed mid-stream and
+/// the caller gets truncated output with no error in it, which reads as a
+/// silent failure rather than a stopped one.
+#[test]
+fn a_host_can_ask_for_more_command_patience() {
+    let runtime = Runtime::builder()
+        .with_base_url("http://127.0.0.1:1/v1")
+        .with_api_key("test-key")
+        .with_ephemeral_history()
+        .with_command_timeout(std::time::Duration::from_secs(600))
+        .build();
+    assert!(
+        runtime.is_ok(),
+        "a longer timeout is not a reason to fail: {:?}",
+        runtime.err()
+    );
+}
+
+#[test]
+fn asking_for_nothing_keeps_the_default() {
+    let runtime = Runtime::builder()
+        .with_base_url("http://127.0.0.1:1/v1")
+        .with_api_key("test-key")
+        .with_ephemeral_history()
+        .build();
+    assert!(runtime.is_ok(), "{:?}", runtime.err());
+}

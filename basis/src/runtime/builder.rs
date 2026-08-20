@@ -49,6 +49,7 @@ const SHARED_IDENTIFIER: &str = "basis:runtime";
 /// credential. `with_*` returns a new value, so a host can keep a
 /// half-configured builder and finish it differently per runtime.
 pub struct RuntimeBuilder {
+    command_timeout: Option<std::time::Duration>,
     provider: Option<BuiltinProvider>,
     base_url: Option<String>,
     api_key: Option<String>,
@@ -103,6 +104,7 @@ impl std::fmt::Debug for RuntimeBuilder {
 impl Default for RuntimeBuilder {
     fn default() -> Self {
         Self {
+            command_timeout: None,
             provider: None,
             base_url: None,
             api_key: None,
@@ -286,6 +288,26 @@ impl RuntimeBuilder {
         }
     }
 
+    /// How long a command may run before it is killed.
+    ///
+    /// Two minutes by default, which suits the commands a harness usually runs
+    /// and does not suit the ones that build software. A host whose agent runs
+    /// container builds, test suites, or archives needs to say so: past the
+    /// limit the process is killed mid-stream, and what reaches the caller is
+    /// truncated output with no error in it — a build that looks like it
+    /// failed silently rather than one that was stopped.
+    ///
+    /// Clamped by mentra's ceiling for the runtime's policy; asking for longer
+    /// than that grants the ceiling rather than failing, because a host that
+    /// asked for patience should not get less than the default for asking.
+    #[must_use]
+    pub fn with_command_timeout(self, timeout: std::time::Duration) -> Self {
+        Self {
+            command_timeout: Some(timeout),
+            ..self
+        }
+    }
+
     /// Adds one fixed environment value to every command this runtime runs.
     ///
     /// Mentra clears the ambient environment, so a host must state execution
@@ -322,7 +344,8 @@ impl RuntimeBuilder {
     /// a workspace that says [`ShellAccess::Denied`] is enforced per-workspace
     /// by the runtime's hook dispatcher instead of by this shared policy.
     pub fn build(self) -> Result<Runtime, RunError> {
-        self.build_with(SHARED_IDENTIFIER.to_string(), shared_policy())
+        let policy = with_command_patience(shared_policy(), self.command_timeout);
+        self.build_with(SHARED_IDENTIFIER.to_string(), policy)
     }
 
     /// The sugar path: the same build, bound to one workspace.
@@ -342,6 +365,7 @@ impl RuntimeBuilder {
         let policy = git_protected(RuntimePolicy::workspace_bounded(workspace), workspace)
             .allow_shell_commands(shell.is_granted())
             .allow_background_commands(shell.is_granted());
+        let policy = with_command_patience(policy, self.command_timeout);
 
         self.build_with(store::runtime_identifier(workspace), policy)
     }
@@ -434,6 +458,24 @@ pub(crate) fn shared_policy() -> RuntimePolicy {
         // and private runtimes different command patience.
         .with_default_command_timeout(std::time::Duration::from_secs(120))
         .with_max_command_timeout(std::time::Duration::from_secs(600))
+}
+
+/// Applies a host's chosen command timeout, raising the ceiling to match.
+///
+/// The ceiling moves with the default because the two mean different things to
+/// mentra — one is what a command gets when it asks for nothing, the other is
+/// the most it may ask for — and a host setting the first past the second
+/// would otherwise be silently clamped back to a number it did not choose.
+fn with_command_patience(
+    policy: RuntimePolicy,
+    timeout: Option<std::time::Duration>,
+) -> RuntimePolicy {
+    match timeout {
+        None => policy,
+        Some(timeout) => policy
+            .with_default_command_timeout(timeout)
+            .with_max_command_timeout(timeout),
+    }
 }
 
 /// Keeps the parts of `.git` that decide what *runs* out of reach.

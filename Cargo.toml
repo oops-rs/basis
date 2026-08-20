@@ -5,7 +5,7 @@ resolver = "3"
 [workspace.package]
 # One version across the three: they are one product split by dependency
 # weight (ADR-0011), not three things that release on their own schedules.
-version = "0.2.0"
+version = "0.3.0"
 edition = "2024"
 rust-version = "1.88"
 license = "MIT"
@@ -16,8 +16,8 @@ homepage = "https://github.com/oops-rs/basis"
 [workspace.dependencies]
 # The layers of ADR-0011, named here so each crate states which of them it is
 # built on and cargo resolves one version of each.
-basis = { version = "0.2", path = "basis" }
-basis-acp = { version = "0.2", path = "basis-acp" }
+basis = { version = "0.3", path = "basis" }
+basis-acp = { version = "0.3", path = "basis-acp" }
 
 # Mentra 0.18 is published and is the runtime contract basis targets. Keeping
 # this registry-only makes a standalone checkout and a package resolve alike.
