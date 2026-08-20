@@ -1,0 +1,314 @@
+//! The wrapper: one declaration, presented to mentra as an `ExecutableTool`.
+//!
+//! What the model sees is an ordinary tool — a name, a description, a JSON
+//! schema. What happens when it calls one is that basis writes the input object
+//! to a program's stdin and reads its stdout back as the result. Nothing is
+//! quoted, escaped, or handed to a shell anywhere on that path, which is the
+//! whole point of the binding (see [`super`]).
+
+use std::{
+    path::{Path, PathBuf},
+    sync::Arc,
+    time::Duration,
+};
+
+use async_trait::async_trait;
+use mentra::tool::{
+    ParallelToolContext, RuntimeToolDescriptor, ToolApprovalCategory, ToolAuthorizationPreview,
+    ToolCapability, ToolDefinition, ToolDurability, ToolExecutionCategory, ToolExecutor,
+    ToolResult,
+};
+use serde_json::{Value, json};
+
+use crate::subprocess::{self, Completion};
+
+use super::manifest::DeclaredToolSpec;
+
+/// How much later than the tool's own deadline mentra's is set.
+///
+/// basis's deadline is the one that matters, because it is the one that kills
+/// the process: mentra enforces `execution_timeout` by dropping the future, and
+/// a `spawn_blocking` future dropped mid-wait abandons the thread rather than
+/// stopping the program it is waiting on. So the descriptor still carries a
+/// deadline — a turn must not hang on a saturated blocking pool — and it is set
+/// deliberately later, so the message the model reads is the one that names the
+/// tool and says it was stopped, not the generic one from outside.
+const TIMEOUT_BACKSTOP: Duration = Duration::from_secs(5);
+
+/// One tool a workspace declared, wrapped as the thing mentra can run.
+///
+/// Cheap to clone in the sense that matters: the declaration sits behind an
+/// `Arc`, so the per-call clone `spawn_blocking` needs costs a refcount rather
+/// than a copy of the schema.
+#[derive(Debug, Clone)]
+pub struct DeclaredTool {
+    spec: Arc<DeclaredToolSpec>,
+    /// The workspace root the manifest was discovered from — what a relative
+    /// `cwd` and a relative program path are resolved against.
+    workspace: PathBuf,
+}
+
+impl DeclaredTool {
+    pub fn new(spec: DeclaredToolSpec, workspace: impl Into<PathBuf>) -> Self {
+        Self {
+            spec: Arc::new(spec),
+            workspace: workspace.into(),
+        }
+    }
+
+    /// The name the model calls and an operator writes in a rule.
+    pub fn name(&self) -> &str {
+        &self.spec.name
+    }
+
+    /// The declaration this was built from.
+    pub fn spec(&self) -> &DeclaredToolSpec {
+        &self.spec
+    }
+}
+
+impl ToolDefinition for DeclaredTool {
+    fn descriptor(&self) -> RuntimeToolDescriptor {
+        RuntimeToolDescriptor::builder(&self.spec.name)
+            .description(&self.spec.description)
+            .input_schema(self.spec.input_schema.clone())
+            // `ProcessExec` and nothing else: basis knows a program will run and
+            // knows nothing about what it touches, and a capability list that
+            // guessed would be worse than one that is merely coarse.
+            .capabilities(vec![ToolCapability::ProcessExec])
+            .side_effect_level(self.spec.side_effect.level())
+            .durability(ToolDurability::Ephemeral)
+            // Never batched with anything. basis cannot know what somebody's
+            // program writes, so it never lets one run beside another call.
+            .execution_category(ToolExecutionCategory::ExclusiveLocalMutation)
+            .approval_category(ToolApprovalCategory::Process)
+            .execution_timeout(self.spec.timeout() + TIMEOUT_BACKSTOP)
+            .build()
+    }
+}
+
+#[async_trait]
+impl ToolExecutor for DeclaredTool {
+    /// What the approver sees, and it is deliberately not the default.
+    ///
+    /// The default preview restates the static descriptor and passes the raw
+    /// input through as the structured input, which for this binding would show
+    /// an approver the arguments and leave out the only thing they actually
+    /// need: *which program is about to run*. A declared tool's name is chosen
+    /// by the same file that chooses its command, so the name is not evidence.
+    ///
+    /// So `structured_input` carries `{tool, command, cwd, input}` — what an
+    /// approver renders, what mentra globs a remembered rule's pattern against
+    /// (`RuleStore::matching_rule`), and what the audit trail keeps. **`env` is
+    /// not in it**, and that is the one asymmetry worth stating: the command
+    /// and its arguments are how a spawn is understood, while the environment
+    /// is where the credential is, and a preview travels further than a glance.
+    fn authorization_preview(
+        &self,
+        _ctx: &ParallelToolContext,
+        input: &Value,
+    ) -> Result<ToolAuthorizationPreview, String> {
+        preview(&self.spec, &self.workspace, &self.descriptor(), input)
+    }
+
+    async fn execute(&self, _ctx: ParallelToolContext, input: Value) -> ToolResult {
+        run(Arc::clone(&self.spec), self.workspace.clone(), input).await
+    }
+}
+
+/// Assembles the per-call preview.
+///
+/// A free function rather than the method's body so the shape an approver is
+/// shown can be asserted without a runtime to build a context from — the
+/// context is unused here anyway, because everything this presents comes from
+/// the declaration rather than from the call's surroundings.
+fn preview(
+    spec: &DeclaredToolSpec,
+    workspace: &Path,
+    descriptor: &RuntimeToolDescriptor,
+    input: &Value,
+) -> Result<ToolAuthorizationPreview, String> {
+    // Refused here, ahead of the approver: a call that cannot run is not worth
+    // a person's attention, and asking about one teaches them that approving is
+    // what makes errors go away.
+    check_input(spec, input)?;
+
+    let cwd = spec.working_directory(workspace);
+
+    Ok(ToolAuthorizationPreview {
+        capabilities: descriptor.capabilities.clone(),
+        side_effect_level: descriptor.side_effect_level,
+        durability: descriptor.durability,
+        execution_category: descriptor.execution_category,
+        approval_category: descriptor.approval_category,
+        raw_input: input.clone(),
+        structured_input: json!({
+            "tool": spec.name,
+            "command": spec.command,
+            "cwd": cwd,
+            "input": input,
+        }),
+        working_directory: cwd,
+    })
+}
+
+/// Runs the program and turns what it did into the call's result.
+async fn run(spec: Arc<DeclaredToolSpec>, workspace: PathBuf, input: Value) -> ToolResult {
+    // Asked again rather than trusted from the preview: the preview is only
+    // reached when an authorizer is installed, and a check that a missing
+    // authorizer removes is not a check.
+    check_input(&spec, &input)?;
+
+    let payload = serde_json::to_string(&input).map_err(|error| {
+        format!(
+            "{} was called with input basis could not serialize: {error}",
+            spec.name
+        )
+    })?;
+
+    let running = Arc::clone(&spec);
+
+    // Spawning a process and waiting for it is genuinely blocking work, so it
+    // goes to a thread meant for it rather than onto a runtime worker — which
+    // holds on every runtime flavor, including the `current_thread` an embedder
+    // inside an editor is likely to have.
+    let completion = tokio::task::spawn_blocking(move || {
+        subprocess::execute(
+            &running.command,
+            &running.working_directory(&workspace),
+            &running.env,
+            &payload,
+            running.timeout(),
+        )
+    })
+    .await
+    .map_err(|error| format!("{} could not be run: {error}", spec.name))?;
+
+    answer(&spec, completion)
+}
+
+/// Turns how the program ended into what the model reads.
+///
+/// Every failure is an `Err`, which reaches the model as that call's result and
+/// is the only thing telling it what to do next — so each one says what
+/// happened rather than that something did. The program's own stderr is quoted
+/// because it is the program's own explanation; the manifest's `env` is not,
+/// anywhere.
+fn answer(spec: &DeclaredToolSpec, completion: std::io::Result<Completion>) -> ToolResult {
+    let completion = completion.map_err(|error| {
+        // The io error names the failure, never the command: a `${VAR}` in a
+        // program path was resolved before it got here.
+        format!("{} could not be started: {error}", spec.name)
+    })?;
+
+    let (code, stdout, stderr) = match completion {
+        Completion::TimedOut => {
+            return Err(format!(
+                "{} did not finish within {} seconds and was stopped",
+                spec.name,
+                spec.timeout().as_secs()
+            ));
+        }
+        Completion::Exited {
+            code,
+            stdout,
+            stderr,
+        } => (code, stdout, stderr),
+    };
+
+    match code {
+        Some(0) => Ok(succeeded(spec, stdout)),
+        Some(code) => Err(failed(spec, code, &stdout, &stderr)),
+        None => Err(format!(
+            "{} was killed by a signal before it answered",
+            spec.name
+        )),
+    }
+}
+
+/// stdout, verbatim but for the trailing newline every program prints.
+///
+/// How much of it survives is mentra's `ToolOutputLimiter`, which bounds and
+/// spills every tool result on the runtime; a second cap here would only make
+/// the two disagree.
+fn succeeded(spec: &DeclaredToolSpec, stdout: String) -> String {
+    if stdout.trim().is_empty() {
+        // A result that is empty or only whitespace reads to a model as a tool
+        // that did nothing, which is a different thing from one that succeeded
+        // quietly.
+        return format!("{} finished and printed nothing", spec.name);
+    }
+
+    // Only the trailing newline, and only from the end: what a program printed
+    // in between is the answer, indentation and blank lines included.
+    stdout.trim_end_matches('\n').to_string()
+}
+
+/// Names the tool, the exit code, and whatever the program said about itself.
+///
+/// stderr first because that is where a program explains a failure, and stdout
+/// as the fallback because plenty of them do not — a failure that quotes
+/// neither leaves the model with "it failed" and nothing to act on.
+fn failed(spec: &DeclaredToolSpec, code: i32, stdout: &str, stderr: &str) -> String {
+    let explanation = if stderr.trim().is_empty() {
+        subprocess::truncated_output(stdout)
+    } else {
+        stderr.trim().to_string()
+    };
+
+    if explanation.is_empty() {
+        return format!("{} exited {code} and said nothing", spec.name);
+    }
+
+    format!("{} exited {code}: {explanation}", spec.name)
+}
+
+/// The half of "schema-checked" basis can do without a JSON Schema
+/// implementation.
+///
+/// mentra does not validate a call against the `input_schema` a tool declares —
+/// the schema goes to the provider and the raw `Value` comes back — so a tool
+/// that wants the guarantee its own descriptor advertises has to check. This
+/// checks the two things that make the difference between a legible error and
+/// an inscrutable one: the input is an object, and the properties the schema
+/// calls `required` are there. Anything deeper is the program's own business,
+/// and real validation belongs upstream where every binding would get it
+/// (recorded as an upstream candidate in `docs/REDESIGN.md` §2).
+fn check_input(spec: &DeclaredToolSpec, input: &Value) -> Result<(), String> {
+    if !input.is_object() {
+        return Err(format!(
+            "{} takes a JSON object matching its input schema",
+            spec.name
+        ));
+    }
+
+    let missing: Vec<&str> = spec
+        .input_schema
+        .get("required")
+        .and_then(Value::as_array)
+        .map(|required| {
+            required
+                .iter()
+                .filter_map(Value::as_str)
+                .filter(|field| input.get(*field).is_none())
+                .collect()
+        })
+        .unwrap_or_default();
+
+    if missing.is_empty() {
+        return Ok(());
+    }
+
+    Err(format!(
+        "{} was called without {}, which its input schema requires",
+        spec.name,
+        missing
+            .iter()
+            .map(|field| format!("`{field}`"))
+            .collect::<Vec<_>>()
+            .join(", ")
+    ))
+}
+
+#[cfg(test)]
+mod tests;

@@ -17,7 +17,9 @@ use std::{
 use mentra::{McpServerConfig, McpSseServerConfig};
 use serde::Deserialize;
 
-use super::{McpError, McpServer, expand::expand};
+use crate::expand::expand;
+
+use super::{McpError, McpServer};
 
 /// The whole file.
 #[derive(Debug, Deserialize)]

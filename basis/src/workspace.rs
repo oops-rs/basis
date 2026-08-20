@@ -68,6 +68,7 @@ use crate::{
     run::{Effort, LoadedSkill, PreparedRun, RunContext, RunError},
     runtime::{Runtime, dispatch::HookRegistration},
     templates::Template,
+    tools::declared::DeclaredTools,
 };
 
 /// One workspace, resolved: the runtime it borrows, the model, and everything
@@ -107,6 +108,11 @@ pub struct Workspace {
     templates: Vec<Template>,
     mcp_files: Vec<ContextFile>,
     mcp_servers: Vec<String>,
+    declared_tool_files: Vec<ContextFile>,
+    declared_tools: Vec<String>,
+    /// Keeps this workspace's declared tools claimed on the runtime's single
+    /// registry; releases the claims on drop.
+    declared_registration: DeclaredTools,
     /// Keeps this workspace's hooks and guards registered on the runtime's
     /// dispatcher; deregisters on drop.
     #[allow(dead_code, reason = "held for its Drop")]
@@ -129,6 +135,7 @@ impl std::fmt::Debug for Workspace {
             .field("skills", &self.skills.len())
             .field("templates", &self.templates.len())
             .field("mcp_servers", &self.mcp_servers)
+            .field("declared_tools", &self.declared_tools)
             .finish_non_exhaustive()
     }
 }
@@ -266,6 +273,24 @@ impl Workspace {
         &self.mcp_servers
     }
 
+    /// The tools this workspace's manifests declared, by name, after layering
+    /// — this workspace's own first, name-ordered within each manifest.
+    ///
+    /// Names only, for [`mcp_servers`](Self::mcp_servers)'s reason: nothing
+    /// here echoes a command or a credential.
+    pub fn declared_tools(&self) -> &[String] {
+        &self.declared_tools
+    }
+
+    /// The tool manifests that took effect, most specific first.
+    ///
+    /// A file that says which programs the model may run is the last thing that
+    /// should apply invisibly, which is why discovery reports its sources the
+    /// way `.mcp.json`'s does.
+    pub fn declared_tool_files(&self) -> &[ContextFile] {
+        &self.declared_tool_files
+    }
+
     /// The mentra runtime the runs are minted on, for a host that wants
     /// mentra's own surface — the task board, teams, the store — alongside
     /// basis's.
@@ -278,18 +303,27 @@ impl Workspace {
         self.runtime.mentra_runtime()
     }
 
-    /// The agent config this mint offers the model: the one built at open,
-    /// with every `mcp__*` tool this workspace does not own hidden.
+    /// The agent config this mint offers the model: the one built at open, with
+    /// every tool on the shared registry that belongs to another workspace
+    /// hidden — bridged `mcp__*` tools, and tools a sibling's
+    /// `.basis/tools.json` declared.
     ///
     /// Per mint rather than per open, because the shared registry moves as
     /// sibling workspaces come and go, and a roster is honest only about the
     /// registry it was minted against. Hidden, not unregistered — the registry
     /// is single and has no unregister — which also keeps a dropped sibling's
-    /// stale bridged tools inert.
-    #[cfg(feature = "mcp")]
+    /// stale entries inert.
     fn minted_agent(&self) -> AgentConfig {
         let mut agent = self.agent.clone();
 
+        for name in self
+            .runtime
+            .foreign_declared_tools(self.declared_registration.root())
+        {
+            agent.tool_profile.hidden_tools.insert(name);
+        }
+
+        #[cfg(feature = "mcp")]
         for descriptor in self.runtime.mentra_runtime().tools() {
             let name = &descriptor.provider.name;
             if let Some((server, _)) = mentra::mcp::parse_mcp_tool_name(name)
@@ -300,14 +334,6 @@ impl Workspace {
         }
 
         agent
-    }
-
-    /// Built without MCP there is nothing to hide: basis registered no bridged
-    /// tools, and a host that registered its own past basis's surface asked for
-    /// them.
-    #[cfg(not(feature = "mcp"))]
-    fn minted_agent(&self) -> AgentConfig {
-        self.agent.clone()
     }
 
     /// Wraps a freshly created or resumed session in the run context this

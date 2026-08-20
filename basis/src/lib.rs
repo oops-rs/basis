@@ -2,10 +2,10 @@
 //! embeddable agent harness built on [Mentra](https://github.com/oops-rs/mentra).
 //!
 //! This crate is the harness itself: workspace discovery (AGENTS.md, skills,
-//! templates, `.mcp.json`), the run lifecycle, one event stream, and the seams
-//! a host plugs into (approval, hooks). It carries no protocol, no transport
-//! and no terminal code, so an embedder's dependency graph states what they
-//! actually use (ADR-0011).
+//! templates, `.basis/tools.json`, `.mcp.json`), the run lifecycle, one event
+//! stream, and the seams a host plugs into (approval, hooks). It carries no
+//! protocol, no transport and no terminal code, so an embedder's dependency
+//! graph states what they actually use (ADR-0011).
 //!
 //! Embedding surfaces, in order of preference:
 //!
@@ -54,13 +54,15 @@
 //!   tool contract. Built without it, the crate has no MCP concept at all: no
 //!   `McpConfig` on a run, no servers registered, and a run header that names
 //!   none (ADR-0012). Custom tools remain, because MCP was only ever one of the
-//!   ways to reach them.
+//!   ways to reach them: [`tools::declared`] is core, and a workspace's
+//!   `.basis/tools.json` works in a build that has never heard of MCP.
 
 pub mod approval;
 pub mod branch;
 pub mod budget;
 pub mod context;
 pub mod event;
+mod expand;
 pub mod fingerprint;
 pub mod hooks;
 pub mod lifecycle;
@@ -73,6 +75,7 @@ pub mod runtime;
 pub mod shell;
 pub mod skills;
 pub mod store;
+mod subprocess;
 pub mod templates;
 pub mod tools;
 pub mod workspace;
@@ -136,4 +139,14 @@ pub use templates::{Template, TemplateError, TemplateSource, TemplatesConfig};
 // beside a dozen types that are not tools, and the name an operator writes in a
 // rule or a hook is only meaningful next to the tool it names.
 pub use tools::SpawnTool;
+// The declared binding's *configuration* comes to the root, beside its
+// siblings `HooksConfig`, `SkillsConfig` and `TemplatesConfig` — a host
+// pointing basis at a different manifest is doing the same thing it does for
+// those, and `DeclaredToolError` is what a failed open hands back. The tool
+// type and the declaration stay in `tools::declared`, next to the format they
+// only make sense beside.
+pub use tools::declared::{
+    DEFAULT_GLOBAL_TOOLS_FILE, DEFAULT_WORKSPACE_TOOLS_FILE, DeclaredToolError,
+    TOOLS_SCHEMA_VERSION, ToolsConfig, ToolsSource,
+};
 pub use workspace::{RunSpec, Workspace, WorkspaceBuilder};

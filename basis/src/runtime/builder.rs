@@ -9,12 +9,10 @@
 //! workspace is what the repository says.
 
 use std::{
-    collections::BTreeMap,
+    collections::{BTreeMap, HashMap},
     path::{Path, PathBuf},
-    sync::Arc,
+    sync::{Arc, Mutex},
 };
-#[cfg(feature = "mcp")]
-use std::{collections::HashMap, sync::Mutex};
 
 use mentra::{
     BuiltinProvider, ModelSelector, ProviderId, RuntimePolicy,
@@ -436,6 +434,7 @@ impl RuntimeBuilder {
             dispatch,
             #[cfg(feature = "mcp")]
             mcp_claims: Mutex::new(HashMap::new()),
+            declared_claims: Mutex::new(HashMap::new()),
         })
     }
 }

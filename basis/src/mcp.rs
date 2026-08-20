@@ -51,7 +51,6 @@
 //! server and got silence has no way to tell that from a server with no tools.
 
 pub(crate) mod connections;
-mod expand;
 mod file;
 
 use std::path::{Path, PathBuf};

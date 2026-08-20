@@ -1,21 +1,28 @@
-//! Running one hook process, with a deadline.
+//! Running somebody else's program on a deadline, with JSON on its stdin.
 //!
-//! A hook is somebody else's program, so the two things that matter here are
-//! that it cannot hang the turn and that whatever it did say survives being
-//! killed. Everything is `std::process`: the interception point mentra offers
-//! is a synchronous trait method, so there is no async process to await.
+//! ADR-0012 gives two seams a subprocess binding — interception
+//! ([`crate::hooks`]) and tools ([`crate::tools::declared`]) — and both speak
+//! the same IO: one payload in, whatever the program prints out, a deadline
+//! over the whole exchange. This is that IO, written once, so the two bindings
+//! cannot drift on what a killed process or an unreadable pipe means.
+//!
+//! Everything is `std::process`. The interception point mentra offers is a
+//! synchronous trait method, so there is no async process to await there; the
+//! tool binding *is* async and reaches this from `spawn_blocking`, which is the
+//! thread a blocking wait belongs on either way (see [`crate::hooks`] on why
+//! that choice is not `block_in_place`).
 //!
 //! # The deadline covers reading, not just waiting
 //!
-//! Killing a hook does not kill what the hook started, and a grandchild
-//! inherits the pipes. So a script whose last line is `sleep 60` leaves the
-//! read end open long after the shell is gone, and `read_to_end` would sit
-//! there for the full minute — the timeout would have killed the process and
-//! still lost the turn. Output is therefore collected over a channel with the
-//! same deadline, and the reader threads are detached rather than joined: they
-//! end when the pipes finally close, and nothing waits for that.
+//! Killing a program does not kill what it started, and a grandchild inherits
+//! the pipes. So a script whose last line is `sleep 60` leaves the read end
+//! open long after the shell is gone, and `read_to_end` would sit there for the
+//! full minute — the timeout would have killed the process and still lost the
+//! turn. Output is therefore collected over a channel with the same deadline,
+//! and the reader threads are detached rather than joined: they end when the
+//! pipes finally close, and nothing waits for that.
 //!
-//! What basis does *not* do is kill the hook's descendants. A hook that
+//! What basis does *not* do is kill the program's descendants. One that
 //! backgrounds work leaves that work running; bounding it is the job of
 //! whatever confines the process (ADR-0004), the same as for any other command.
 
@@ -28,37 +35,37 @@ use std::{
     time::{Duration, Instant},
 };
 
-/// How much of a hook's stderr is kept for the failure message.
+/// How much of a program's stderr is kept for the failure message.
 ///
 /// Enough for a stack trace's first frames, bounded because the text ends up
-/// in a denial the model reads.
+/// in a denial or a tool error the model reads.
 const STDERR_CAPTURE_LIMIT: usize = 2048;
 
-/// How much of a hook's stdout is quoted back when it was not a decision.
+/// How much of a program's stdout is quoted back when it was not a decision.
 ///
 /// Shorter than stderr: the point is to let someone recognize what their hook
 /// printed, not to reproduce it.
 const OUTPUT_QUOTE_LIMIT: usize = 512;
 
-/// Quotes a hook's stdout for a failure message.
-pub(super) fn truncated_output(stdout: &str) -> String {
+/// Quotes a program's stdout for a failure message.
+pub(crate) fn truncated_output(stdout: &str) -> String {
     truncate(stdout.trim(), OUTPUT_QUOTE_LIMIT)
 }
 
-/// The longest basis waits between checks on a running hook. The poll starts far
-/// tighter, so the common case — a script that answers in milliseconds — is not
-/// made slow by the ceiling that keeps a slow one cheap.
+/// The longest basis waits between checks on a running program. The poll starts
+/// far tighter, so the common case — a script that answers in milliseconds — is
+/// not made slow by the ceiling that keeps a slow one cheap.
 const MAX_POLL_INTERVAL: Duration = Duration::from_millis(20);
 
-/// How long a hook that exited on time still gets for its pipes to drain.
+/// How long a program that exited on time still gets for its pipes to drain.
 ///
-/// A hook that answers with a millisecond to spare should not be failed for the
+/// One that answers with a millisecond to spare should not be failed for the
 /// scheduling latency between its exit and its output arriving.
 const DRAIN_GRACE: Duration = Duration::from_millis(250);
 
-/// How a hook process ended.
+/// How a child process ended.
 #[derive(Debug, Clone, PartialEq, Eq)]
-pub(super) enum Completion {
+pub(crate) enum Completion {
     Exited {
         /// `None` when a signal ended it, which is a failure like any other.
         code: Option<i32>,
@@ -72,35 +79,40 @@ pub(super) enum Completion {
 
 /// Runs `command` in `working_dir`, feeding it `payload` on stdin.
 ///
+/// `env` is added to the environment the child inherits, which is where a
+/// declared tool's credential arrives; nothing here ever prints it.
+///
 /// Returns `Err` only when the process could not be started or supervised at
-/// all. A hook that ran and misbehaved is a [`Completion`], because the caller
-/// decides what misbehavior means.
-pub(super) fn execute(
+/// all. A program that ran and misbehaved is a [`Completion`], because the
+/// caller decides what misbehavior means.
+pub(crate) fn execute(
     command: &[String],
     working_dir: &Path,
+    env: &[(String, String)],
     payload: &str,
     timeout: Duration,
 ) -> io::Result<Completion> {
     let (program, args) = command
         .split_first()
-        .ok_or_else(|| io::Error::other("hook has no command to run"))?;
+        .ok_or_else(|| io::Error::other("no command to run"))?;
 
     // Started before the spawn, because forking a process is part of what the
-    // hook is being given time for.
+    // program is being given time for.
     let deadline = Instant::now() + timeout;
 
     let mut child = Command::new(resolve_program(program, working_dir))
         .args(args)
+        .envs(env.iter().map(|(key, value)| (key, value)))
         .current_dir(working_dir)
         .stdin(Stdio::piped())
         .stdout(Stdio::piped())
         .stderr(Stdio::piped())
         .spawn()?;
 
-    // Every pipe gets its own thread. Writing inline would deadlock on a hook
-    // that answers without reading its stdin once the payload outgrows the
-    // pipe buffer, and reading inline would deadlock the mirror image. None of
-    // the three is ever joined — see the module docs: a descendant holding a
+    // Every pipe gets its own thread. Writing inline would deadlock on a
+    // program that answers without reading its stdin once the payload outgrows
+    // the pipe buffer, and reading inline would deadlock the mirror image. None
+    // of the three is ever joined — see the module docs: a descendant holding a
     // pipe open would turn a join into exactly the wait the deadline exists to
     // prevent.
     let mut stdin = child.stdin.take().ok_or_else(|| pipe_missing("stdin"))?;
@@ -110,8 +122,9 @@ pub(super) fn execute(
     let owned_payload = payload.to_string();
     thread::spawn(move || {
         // A broken pipe here is not an error: `echo '{"decision":"allow"}'` is
-        // a legitimate hook, and it exits without ever reading. What the hook
-        // printed and how it exited answer the question; this only offers.
+        // a legitimate hook, and it exits without ever reading. What the
+        // program printed and how it exited answer the question; this only
+        // offers.
         let _ = stdin.write_all(owned_payload.as_bytes());
         let _ = stdin.flush();
     });
@@ -162,8 +175,8 @@ fn supervise(child: &mut std::process::Child, deadline: Instant) -> io::Result<S
 
         let remaining = deadline.saturating_duration_since(Instant::now());
         if remaining.is_zero() {
-            // The whole reason a hook has a budget: a hanging one must cost the
-            // turn its timeout, not the turn itself.
+            // The whole reason there is a budget at all: a hanging program must
+            // cost the turn its timeout, not the turn itself.
             let _ = child.kill();
             let _ = child.wait();
             return Ok(Supervised::Killed);
@@ -174,7 +187,7 @@ fn supervise(child: &mut std::process::Child, deadline: Instant) -> io::Result<S
     }
 }
 
-/// Where a relative hook program lives.
+/// Where a relative program lives.
 ///
 /// A path — anything with a directory part — is relative to the workspace, so
 /// `./.basis/hooks/guard.sh` means what the file says it means regardless of
@@ -248,7 +261,8 @@ mod tests {
     }
 
     fn run(script: &str, payload: &str, timeout: Duration) -> Completion {
-        execute(&sh(script), Path::new("."), payload, timeout).expect("the process is supervised")
+        execute(&sh(script), Path::new("."), &[], payload, timeout)
+            .expect("the process is supervised")
     }
 
     #[test]
@@ -340,10 +354,37 @@ mod tests {
     }
 
     #[test]
+    fn supplied_variables_reach_the_child() {
+        // How a declared tool's credential gets to the program that needs it,
+        // without ever being written in the file that names the tool.
+        let completion = execute(
+            &sh("printf %s \"$BASIS_TEST_TOKEN\""),
+            Path::new("."),
+            &[(
+                "BASIS_TEST_TOKEN".to_string(),
+                "from-the-caller".to_string(),
+            )],
+            "",
+            Duration::from_secs(5),
+        )
+        .expect("the process is supervised");
+
+        assert_eq!(
+            completion,
+            Completion::Exited {
+                code: Some(0),
+                stdout: "from-the-caller".to_string(),
+                stderr: String::new(),
+            }
+        );
+    }
+
+    #[test]
     fn a_program_that_does_not_exist_is_an_error_not_a_verdict() {
         let error = execute(
             &["/definitely/not/a/real/program".to_string()],
             Path::new("."),
+            &[],
             "",
             Duration::from_secs(1),
         )

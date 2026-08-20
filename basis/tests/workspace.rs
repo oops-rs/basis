@@ -34,6 +34,7 @@ use std::{
 use basis::{
     CollectingSink, ContextConfig, RunOutcome, Runtime, RuntimeBuilder, Snapshot, Workspace,
     WorkspaceBuilder, hooks::HooksConfig, skills::SkillsConfig, store, templates::TemplatesConfig,
+    tools::declared::ToolsConfig,
 };
 use mentra::{
     BuiltinProvider, ContentBlock, ModelSelector, agent::AgentConfig, runtime::SqliteRuntimeStore,
@@ -75,6 +76,10 @@ fn offline(workspace: &Path) -> WorkspaceBuilder {
         })
         .with_hooks(HooksConfig {
             workspace_file: PathBuf::from(".basis/hooks.json"),
+            global_dir: None,
+        })
+        .with_tools(ToolsConfig {
+            workspace_file: PathBuf::from(".basis/tools.json"),
             global_dir: None,
         })
 }

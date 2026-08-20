@@ -177,6 +177,11 @@ config — never through code in `basis`:
 - **Skills** — `.basis/skills/`, loaded by name on demand, so only descriptions cost context.
 - **Prompt templates** — `.basis/templates/*.md` with `$ARGUMENTS` and `$1`, `$2`…; a nested path is a
   namespace (`git/commit.md` → `git:commit`). ACP clients get them as commands.
+- **Declared tools** — `.basis/tools.json`: a name, a description, a JSON schema and an argv array,
+  and the model gets a tool that pipes its input to that program's stdin and reads stdout back. No
+  shell anywhere on the path, so nothing has to be quoted or encoded around quoting. Every one is
+  consequential — the format cannot say "read-only" — and the approver is shown the command, not
+  just the name.
 - **MCP servers** — `.mcp.json`, the same shape other agents read, with `${VAR}` expansion. An ACP
   client can send servers on `session/new`; both sets are honored.
 - **Hooks** — `.basis/hooks.json`: commands that take JSON on stdin and answer `allow`, `deny` with a

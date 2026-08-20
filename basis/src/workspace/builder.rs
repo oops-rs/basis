@@ -38,6 +38,7 @@ use crate::{
     skills::{self, SkillsConfig},
     store,
     templates::{self, Template, TemplatesConfig},
+    tools::declared::{self, DeclaredTools, ToolsConfig},
 };
 
 use super::Workspace;
@@ -64,6 +65,7 @@ pub struct WorkspaceBuilder {
     mcp: McpConfig,
     templates: TemplatesConfig,
     hooks: HooksConfig,
+    tools: ToolsConfig,
     shell: ShellAccess,
 }
 
@@ -92,6 +94,7 @@ impl std::fmt::Debug for WorkspaceBuilder {
             .field("skills", &self.skills)
             .field("templates", &self.templates)
             .field("hooks", &self.hooks)
+            .field("tools", &self.tools)
             .field("shell", &self.shell)
             .finish_non_exhaustive()
     }
@@ -112,6 +115,7 @@ impl WorkspaceBuilder {
             mcp: McpConfig::default(),
             templates: TemplatesConfig::default(),
             hooks: HooksConfig::default(),
+            tools: ToolsConfig::default(),
             // Granted, per ADR-0013, and from the enum's own default rather
             // than from anything ambient: what a run may do is stated here, in
             // configuration, not read out of the environment behind the caller.
@@ -197,6 +201,18 @@ impl WorkspaceBuilder {
         Self { hooks, ..self }
     }
 
+    /// Sets where declared subprocess tools are discovered.
+    ///
+    /// A declared tool is a command the workspace offers the *model* as a tool,
+    /// with a JSON schema for its input; see [`crate::tools::declared`] for the
+    /// manifest and for what a failing one tells the model. The tools are
+    /// registered on the runtime this workspace borrows and deregistered — as
+    /// far as mentra's registry allows — when the workspace drops, so a
+    /// repository's tools never reach another repository's runs.
+    pub fn with_tools(self, tools: ToolsConfig) -> Self {
+        Self { tools, ..self }
+    }
+
     /// Grants or denies command execution, for every run this workspace mints.
     ///
     /// Granted by default (ADR-0013). Denying is the read-only posture: it
@@ -251,6 +267,12 @@ impl WorkspaceBuilder {
         // or worse, never.
         let loaded_hooks = hooks::load(&self.path, &self.hooks)?;
 
+        // Read here for the same reason, and one of its own: a manifest that
+        // does not parse is a tool the model's instructions assume and will not
+        // find. Registering it needs the runtime, so that waits until there is
+        // one.
+        let declared_sources = declared::discover(&self.path, &self.tools)?;
+
         let shared = matches!(self.runtime, RuntimeSource::Shared(_));
         let runtime = match self.runtime {
             RuntimeSource::Shared(runtime) => runtime,
@@ -272,6 +294,18 @@ impl WorkspaceBuilder {
                 path: skill.path,
             })
             .collect();
+
+        // Beside the skills and for the same reason: a tool has to be on the
+        // runtime before any session spawns, or the first roster is offered
+        // without it. The names are claimed first, so a manifest naming a tool
+        // this runtime already answers to — `spawn`, a mentra builtin, another
+        // workspace's declaration — refuses the open instead of replacing it.
+        let declared_tools = DeclaredTools::register(
+            Arc::clone(&runtime),
+            &dispatch::canonical(&self.path),
+            &declared_sources,
+        )?;
+        let declared_tool_names = declared_tools.names().to_vec();
 
         // Templates need no runtime registration — they are basis-side convention
         // data, rendered into a prompt by whatever surface offers them.
@@ -326,11 +360,29 @@ impl WorkspaceBuilder {
             templates,
             mcp_files,
             mcp_servers,
+            declared_tool_files: sourced(&declared_sources),
+            declared_tools: declared_tool_names,
+            declared_registration: declared_tools,
             hook_registration,
             #[cfg(feature = "mcp")]
             mcp_connections,
         })
     }
+}
+
+/// Which tool manifests took effect, for the workspace's own report.
+///
+/// The same shape `.mcp.json`'s discovery reports, because the two files raise
+/// the same question: a caller looking at a run should be able to see which
+/// file put a program within the model's reach.
+fn sourced(sources: &[declared::ToolsSource]) -> Vec<ContextFile> {
+    sources
+        .iter()
+        .map(|source| ContextFile {
+            path: source.path.clone(),
+            scope: source.scope.label(),
+        })
+        .collect()
 }
 
 /// Discovers the MCP servers this workspace connects, and which files said so.

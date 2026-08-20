@@ -38,11 +38,12 @@ use mentra::{
 };
 use thiserror::Error;
 
+use crate::subprocess::{self, Completion};
+
 use super::{
     HookEvent, HookSpec, Interceptor,
     chain::{Answer, Chain, Participant},
     contract::{HookCall, HookOutcome, HookRequest},
-    exec::{self, Completion},
     wire::HookResponse,
 };
 
@@ -259,8 +260,16 @@ impl HookRunner {
     fn ask(&self, spec: &HookSpec, request: &HookRequest) -> Result<HookResponse, HookFailure> {
         let payload = serde_json::to_string(request).map_err(HookFailure::Payload)?;
 
-        let completion = exec::execute(&spec.command, &self.workspace, &payload, spec.timeout())
-            .map_err(HookFailure::Spawn)?;
+        // No environment of its own: a hook is asked a question, not handed a
+        // credential to act on. The tool binding is where `env` belongs.
+        let completion = subprocess::execute(
+            &spec.command,
+            &self.workspace,
+            &[],
+            &payload,
+            spec.timeout(),
+        )
+        .map_err(HookFailure::Spawn)?;
 
         let (code, stdout, stderr) = match completion {
             Completion::TimedOut => {
@@ -289,7 +298,7 @@ impl HookRunner {
         }
 
         serde_json::from_str(&stdout).map_err(|source| HookFailure::Malformed {
-            output: exec::truncated_output(&stdout),
+            output: subprocess::truncated_output(&stdout),
             source,
         })
     }

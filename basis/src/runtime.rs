@@ -36,13 +36,9 @@ pub(crate) mod builder;
 pub(crate) mod dispatch;
 mod environment;
 
-#[cfg(feature = "mcp")]
 use std::collections::HashMap;
-#[cfg(feature = "mcp")]
 use std::path::{Path, PathBuf};
-use std::sync::Arc;
-#[cfg(feature = "mcp")]
-use std::sync::Mutex;
+use std::sync::{Arc, Mutex};
 
 use mentra::{BuiltinProvider, ModelInfo, ModelSelector, Session, agent::AgentConfig};
 
@@ -74,6 +70,21 @@ pub struct Runtime {
     /// configuring one name must be told apart here.
     #[cfg(feature = "mcp")]
     mcp_claims: Mutex<HashMap<String, PathBuf>>,
+    /// Which workspace owns each declared tool name on the same single
+    /// registry. See [`Runtime::claim_declared_tool`] for why this exists and
+    /// why a released claim is remembered rather than removed.
+    declared_claims: Mutex<HashMap<String, DeclaredClaim>>,
+}
+
+/// A declared tool name that has been registered on this runtime at least once.
+///
+/// `holders` rather than a bare owner because one root may be open twice — a
+/// host that opens the same repository for two concurrent callers — and the
+/// first of those to drop must not free a name the second is still serving.
+#[derive(Debug)]
+struct DeclaredClaim {
+    root: PathBuf,
+    holders: usize,
 }
 
 /// Hand-written because mentra's runtime is not `Debug`. No credential lives
@@ -199,6 +210,99 @@ impl Runtime {
         if claims.get(name).is_some_and(|owner| owner == root) {
             claims.remove(name);
         }
+    }
+
+    /// Claims a declared tool's name for the workspace at `root`, or says who
+    /// holds it.
+    ///
+    /// Refused rather than suffixed, which is where this parts company with
+    /// [`claim_mcp_server`](Self::claim_mcp_server). A bridged tool's name is
+    /// already synthetic (`mcp__<server>__<tool>`), so renaming one on a
+    /// collision costs nothing; a declared tool's name is what the model calls,
+    /// what an operator writes in a remembered rule, and what a
+    /// `.basis/hooks.json` entry matches on, so a silently renamed one is a
+    /// guard that silently stops matching.
+    ///
+    /// The check that matters is the first-time one: mentra's registry is a map
+    /// and `register_tool` *replaces*, so without this a workspace file could
+    /// declare a tool called `spawn` and take over the name basis's own tool —
+    /// and every rule an operator ever wrote about it — answers to.
+    ///
+    /// A released claim is kept with `holders: 0` rather than removed, because
+    /// mentra has no public unregister: the entry a dropped workspace left
+    /// behind is still in the registry, and forgetting that basis put it there
+    /// would make the same workspace's next open refuse its own tool.
+    pub(crate) fn claim_declared_tool(&self, name: &str, root: &Path) -> Result<(), String> {
+        let mut claims = self
+            .declared_claims
+            .lock()
+            .expect("declared tool claim map poisoned");
+
+        match claims.get_mut(name) {
+            Some(claim) if claim.holders > 0 && claim.root != root => Err(
+                "another workspace open on this runtime declares a tool by that name".to_string(),
+            ),
+            Some(claim) => {
+                claim.root = root.to_path_buf();
+                claim.holders += 1;
+                Ok(())
+            }
+            None if self.registers_tool(name) => {
+                Err("this runtime already offers a tool by that name".to_string())
+            }
+            None => {
+                claims.insert(
+                    name.to_string(),
+                    DeclaredClaim {
+                        root: root.to_path_buf(),
+                        holders: 1,
+                    },
+                );
+                Ok(())
+            }
+        }
+    }
+
+    /// Releases a claim [`claim_declared_tool`](Self::claim_declared_tool)
+    /// granted. Only the owning root can release, so one workspace's drop
+    /// cannot free a name another still serves.
+    pub(crate) fn release_declared_tool(&self, name: &str, root: &Path) {
+        let mut claims = self
+            .declared_claims
+            .lock()
+            .expect("declared tool claim map poisoned");
+
+        if let Some(claim) = claims.get_mut(name)
+            && claim.root == root
+        {
+            claim.holders = claim.holders.saturating_sub(1);
+        }
+    }
+
+    /// Every declared tool name on this runtime that belongs to some *other*
+    /// workspace, including one that has since been dropped.
+    ///
+    /// What a mint hides, for the reason it hides another workspace's `mcp__*`
+    /// tools: the registry is the runtime's and single, but a tool declared by
+    /// a repository is that repository's, and offering it to a run in a
+    /// different one would run a program that workspace never asked for.
+    pub(crate) fn foreign_declared_tools(&self, root: &Path) -> Vec<String> {
+        self.declared_claims
+            .lock()
+            .expect("declared tool claim map poisoned")
+            .iter()
+            .filter(|(_, claim)| claim.root != root)
+            .map(|(name, _)| name.clone())
+            .collect()
+    }
+
+    /// Whether mentra's registry already answers to `name` — a builtin,
+    /// basis's own `spawn`, or a bridged MCP tool.
+    fn registers_tool(&self, name: &str) -> bool {
+        self.mentra
+            .tools()
+            .iter()
+            .any(|descriptor| descriptor.provider.name == name)
     }
 }
 

@@ -1,15 +1,19 @@
 # basis — Redesign plan
 
-> rev 10 · 2026-08-13 · The transition from the P0–P4 harness to the SDK-first
+> rev 12 · 2026-08-20 · The transition from the P0–P4 harness to the SDK-first
 > shape decided in [ADR-0010](adr/0010-the-crate-is-the-workflow-surface.md)
 > through [ADR-0017](adr/0017-structured-agent-concurrency.md). This document is the
 > honest ledger of that transition: what exists, what is in between, what is not
 > started. `README.md` and `ARCHITECTURE.md` describe the *shipped* state and
 > are updated per phase as work lands — never ahead of it.
 > **Phases A, B, C and D have landed** (rev 5), with one Phase D item — declared
-> subprocess tools — deliberately **held** rather than built, because no
-> concrete use case exists for it on record and the phase's own rule is that
-> its items ship only against one (Bet 7).
+> subprocess tools — deliberately **held** rather than built for seven revs,
+> because no concrete use case existed for it on record and the phase's own rule
+> is that its items ship only against one (Bet 7). **Rev 12 ships it**, against
+> the use case that finally arrived: see the row in §2 and the item in §3's
+> Phase D. The rule held — the feature waited for evidence, and the evidence
+> shaped it — which is the outcome Bet 7 was betting on rather than a
+> concession to it.
 > **Rev 6 records a wave that built no phase.** The five upstream candidates
 > §2's tally still had open were closed in mentra and met on basis's side, so the
 > footnotes below are records of fixed holes rather than of open ones. What the
@@ -38,6 +42,18 @@
 > three crates, and E2 has landed — the daemon, its registry, and the wait
 > graph are deleted, and `basis/src/local` is the file surface §3 records.
 > Phase E is complete.
+> **Rev 12 closes Phase D**, which had been carrying one held item since rev 5.
+> A production host embedding basis needed Jenkins access as tools, and without
+> a registration surface those became shell scripts behind `spawn`, with their
+> arguments base64-encoded into command lines to survive shell quoting — a
+> concrete cost, on record, of the thing not existing. `.basis/tools.json` is
+> the answer ADR-0012 sketched, and the evidence shaped it: the whole design
+> turns on there being no shell on the path, and on three refusals — a
+> declaration cannot call itself read-only, cannot hide its command from the
+> approver, and cannot take a name the runtime already answers to. It reopened
+> the §2 tally with two new candidates, both found the same way ADR-0016's
+> three were: by registering a kind of tool mentra had not been asked for
+> before.
 
 ## 1. The target in one paragraph
 
@@ -107,7 +123,7 @@ ledger).
 | Tagged sinks / event fan-in | 0010 | **Built** (`07cf4d1`) — `EventFanIn` mints one `TaggedSink` per run and merges them into `MergedEvents`; the tag rides outside `Event`, so the versioned wire schema is untouched [13] |
 | Cancellation on the public API | 0010 | **Built** (`07cf4d1`) — `TurnOptions::cancellable()` / `stoppable()` / `with_cancel` / `with_stop`, `execute_with_options` and its neighbours on every entry point, and `CancellationToken` re-exported under the rule the commit writes down: every mentra type basis's surface makes a caller *name*, basis re-exports [8] |
 | Recipe + review-workflow examples | 0010/0014 | **Built** (`0ff745c`) — `examples/watch.rs` and `examples/review_workflow.rs`, public-API only, both run live [12] |
-| Declared subprocess tools | 0012 | **Not started** — held for a concrete use case (Bet 7) |
+| Declared subprocess tools | 0012 | **Built** (rev 12, the commit that carries these lines) — held for seven revs and shipped against the use case that arrived. **The evidence**: iBot, a production Rust host embedding basis, needed Jenkins operations available to the model. With no tool-registration surface at all they became shell scripts reached through `spawn`'s command mode — and because that mode takes *one string*, the SQL queries and free-text questions those scripts act on ended up **base64-encoded inside the command line** to survive shell quoting. The model was writing a shell command, so every value it carried had to be escaped by a model that cannot be relied on to escape anything, and the workaround was an encoding the model had to perform correctly instead. `.basis/tools.json` declares a name, a description, an input JSON schema and an argv array; the model fills the schema, basis writes that object to the program's stdin, and stdout comes back as the result. There is no shell on the path, so there is nothing to quote and nothing to encode around quoting. The manifest is an object keyed by name — `.mcp.json`'s shape rather than `hooks.json`'s array — because here the name *is* the tool: two hooks may share a name and both still run, two tools may not, so saying it twice is not expressible. Layering (workspace shadows global), `${VAR}` expansion and the no-echo error rule are `.mcp.json`'s, and two files moved so nothing is written twice: the expander to `basis/src/expand.rs`, and hooks' process supervisor to `basis/src/subprocess.rs`, where both of ADR-0012's subprocess bindings now share one deadline, one kill, and one answer to what a descendant holding a pipe means. **Three decisions are security rather than ergonomics**, each closing a way this could have been unsafe rather than merely awkward. The side-effect field has *no read-only variant* — `process` (the default) or `external` — because `is_consequential` waves `None` past the approver, so a spellable "read-only" would be a file a repository ships routing a subprocess around the approval gate by writing one word. `authorization_preview` is overridden to present `{tool, command, cwd, input}`, because the name in the roster was chosen by the same file that chose the program, so the name is not evidence — and `env` is deliberately *not* in it, since a preview is globbed against remembered rules and kept in the audit trail while the environment is where the credential is. And a name the runtime already answers to **cannot be claimed at all**: `ToolRegistry::register_tool` is a `HashMap::insert`, so without the claim a manifest declaring `spawn` would replace basis's own tool and inherit every rule an operator ever wrote about commands. Collisions refuse rather than suffix, which is the mirror image of the MCP claim and for a stated reason — a bridged name is synthetic (`mcp__server__tool`) and costs nothing to rename, a declared name is what an operator writes rules and `hooks.json` matchers against, so a silent rename is a guard that silently stops matching. On a shared runtime the same claim keeps one repository's tools out of another's roster, asserted on the wire beside the `mcp__*` case. **What it costs**: every call reaches the approver, which is correct and is also one prompt per Jenkins query for a host that installs a real one; a released claim is *remembered* rather than removed, because mentra has no public unregister and forgetting would make the same workspace's next open refuse its own tool, so a long-lived runtime keeps one map entry per declared name for its life; and "schema-checked" is, on basis's side, an object-shape and `required` check rather than JSON Schema (new candidate, §2). **What it newly exposes**: a repository can now put a program within the model's reach through a committed file, which is `.basis/hooks.json`'s exposure arriving at a second door — bounded the same way, by whatever confines the process (ADR-0004), and not by a check in basis. Deliberately unchanged: still no `WorkspaceBuilder::with_tool`. basis constructs the `DeclaredTool` itself, so mentra's by-value `with_tool` costs this binding nothing, and the hazard the ADR-0016 row records — a hand-forwarded shim that could drop `authorization_preview` — is untouched |
 | Hooks re-founded as authorizer binding | 0012 | **Built** (`e81e5d8`) — interception is one contract with two bindings: an in-process `Interceptor` trait and subprocess hooks, folded by one `Chain` so first-refusal-wins and composing modifications hold for both by construction. `Approver` stays a *sibling* seam rather than a parent — asking a person and rewriting a call are different questions, and mentra keeps them apart for the same reason [15] [16] |
 | Subagents / teams surfaced | 0010 | **Built for delegation, still open for teams.** `task` is no longer in the default reach at all: ADR-0016 hid it with `shell` and `background_run` and made delegation `spawn`'s agent mode, which is the deliberate surfacing this row asked for. The accounting that made "reachable by default" tolerable in the meantime is mentra `0436bae`, and half of it survives the change of route — a delegated run still shares the parent's handle and bounds, but the child's usage no longer reaches the parent's *stream*, because that relay is internal to the `task` intrinsic (new candidate, below). `team_*` is still reachable and still awaiting a concrete use case before basis surfaces it deliberately [10] |
 | History location on `WorkspaceBuilder` | 0010 | **Built** (`397ca13`, `71cc59d`) — `with_store_dir(dir)` says where, `with_ephemeral_history()` says nowhere, and `store::list_in` reads back what the first wrote. One private field, so last call wins structurally. Closes the data-directory hole footnote 6 had been recording since Phase C [6] |
@@ -590,7 +606,8 @@ downstream code can name it (mentra `c04986a`, footnotes 3 and 7). **The
 ninth was basis's own** rather than mentra's — a store knob on `WorkspaceBuilder`
 — and `397ca13` plus `71cc59d` built it (footnote 6). **Zero were open, for one
 day.** ADR-0016's first wave then found three more, all upstream-shaped and all
-open, named further down.
+open, and rev 12's declared tools found two more after them. All five are named
+further down.
 
 That is still the first time this ledger has been clean, and it is worth being
 precise about what it measures. Not that mentra is finished, and not that basis
@@ -650,6 +667,32 @@ for its own `task` intrinsic and has not opened for a registered tool.
 
 None is blocking and none is built. They go upstream rather than into a
 basis-side workaround, which is the whole of the discipline this tally measures.
+
+**And rev 12's declared tools put two more in it**, found the same way — by
+registering a kind of tool mentra had not been asked for before. Both are about
+the registry rather than about execution, which is where a *declaration*-driven
+binding differs from a code-driven one: the thing being registered arrives from
+a file that a repository ships, so the registry's defaults become a security
+question rather than an ergonomic one.
+
+- **A tool's declared `input_schema` is never checked against the call.** mentra
+  sends the schema to the provider and hands the raw `Value` back, so every tool
+  that wants the guarantee its own descriptor advertises has to re-implement the
+  check. For a tool written in Rust that is a nuisance; for one whose schema is
+  *data* it is the difference between "typed and schema-checked" (ADR-0012's
+  words) and a promise the binding cannot keep, because there is no code to put
+  the check in. basis does the cheap half — the input is an object, and the
+  properties `required` names are present — and stops there rather than pulling a
+  JSON Schema implementation into the SDK's graph for a check every binding
+  would benefit from having once, upstream.
+- **`ToolRegistry::register_tool` replaces on a duplicate name, and nothing can
+  ask it not to.** There is no `try_register`, no `is_registered`, and
+  `unregister_tool` is `pub(crate)`. So basis reads the roster, decides, and then
+  registers — a check-then-act that is only safe because basis's own claim map
+  serializes it, and that a second registrar on the same runtime would walk
+  straight past. What it protects is not hypothetical: the name it would take is
+  `spawn`. The absence of an unregister is the same gap seen from the other end,
+  and it is why a released claim has to be remembered rather than dropped.
 
 ## 3. Phases
 
@@ -747,12 +790,23 @@ became a default rather than a law (`OutputSpec::with_tools()`, over mentra
 turns, deliberately — a fan-out wants each reviewer's reading in a context of
 its own — so what changed is the ceremony's status, not this example's shape.
 
-### Phase D — Bindings (evidence-gated) — **landed, less the item held**
+### Phase D — Bindings (evidence-gated) — **landed**
 
-1. ⏸ Declared subprocess tools: manifest discovery + stdio wrapper over
-   `ExecutableTool`. **Held, not built.** No concrete use case exists for it on
-   record, and the rule below is that a Phase D item ships only against one.
-   Building it anyway would be the phase failing its own test.
+1. ✅ Declared subprocess tools: manifest discovery + stdio wrapper over
+   `ExecutableTool`. — rev 12, the commit that carries these lines. **Held for
+   seven revs, then built against a use case on record**, which is the rule
+   working rather than the rule bending: the row in §2 carries the evidence, the
+   design it forced, and what it cost. Worth saying here is what the wait bought,
+   because a held item that ships unchanged proves nothing. It did not ship
+   unchanged. The ADR sketched "a data file declares a tool (name, description,
+   JSON schema, command)"; the use case — arguments the model had been
+   base64-encoding to get them past a shell — is what made *no shell anywhere on
+   the path* the property everything else is arranged around, and what turned
+   three fields the sketch does not mention into non-negotiable ones: a
+   side-effect level with no read-only spelling, a preview that shows the
+   command rather than the name, and a name that cannot be taken from the
+   runtime. A version of this built in rev 5 against nobody's problem would have
+   had the manifest and none of the three.
 2. ✅ Hook/authorizer unification per ADR-0012. — `e81e5d8`. It came out as one
    contract with two bindings rather than as a merge: `hooks::contract` holds
    the types both bindings speak, one `Chain` decides what any answer means, and
@@ -791,6 +845,9 @@ planned; each was found by doing the planned work.
 
 Each Phase D item ships only against a concrete use case, per Bet 7. Gaps
 found here are filed as mentra issues even when fixed immediately (ADR-0005).
+Item 1 is the only place in this document where that rule was ever *tested* —
+the other items all had their evidence up front — and the test is the seven revs
+it spent unbuilt, not the rev it shipped in.
 
 Acceptance: met, with item 1 held rather than claimed. `cargo test --workspace`
 was 625 passed, 0 failed at the time this was written, and it was that in both

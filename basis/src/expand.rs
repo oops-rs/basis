@@ -1,11 +1,17 @@
-//! `${VAR}` substitution inside a `.mcp.json` entry.
+//! `${VAR}` substitution inside a workspace data file.
 //!
-//! Every agent that reads an MCP file expands these, and the reason is that a
-//! server's credential belongs in the environment rather than in a file people
-//! commit. A reader that passed `${GITHUB_TOKEN}` through verbatim would hand
-//! the server a password spelled `${GITHUB_TOKEN}` and leave the operator
-//! reading a handshake failure to find out why — so basis expands, and treats an
-//! unset variable with no default as an error rather than as an empty string.
+//! Two files reach for this — `.mcp.json` and `.basis/tools.json` — and both
+//! for the same
+//! reason: what they name is a program to spawn and the environment to spawn it
+//! with, so the credential belongs in that environment rather than in a file
+//! people commit. Every agent that reads an MCP file expands these already. A
+//! reader that passed `${GITHUB_TOKEN}` through verbatim would hand the program
+//! a password spelled `${GITHUB_TOKEN}` and leave the operator reading a
+//! handshake failure to find out why — so basis expands, and treats an unset
+//! variable with no default as an error rather than as an empty string.
+//!
+//! One implementation rather than one per reader, so the two files cannot come
+//! to disagree about what `${TOKEN:-}` means.
 //!
 //! The lookup is a parameter rather than a call to [`std::env::var`] so the
 //! rules below are testable without mutating the process environment.
@@ -23,8 +29,8 @@
 /// *or* empty. A bare `$` is literal, because nothing in this format uses it.
 ///
 /// The error is a reason fragment reading after "has a `<field>` value that";
-/// the caller knows which file, which server, and which field it belongs to.
-pub(super) fn expand(raw: &str, lookup: &dyn Fn(&str) -> Option<String>) -> Result<String, String> {
+/// the caller knows which file, which entry, and which field it belongs to.
+pub(crate) fn expand(raw: &str, lookup: &dyn Fn(&str) -> Option<String>) -> Result<String, String> {
     let mut expanded = String::with_capacity(raw.len());
     let mut rest = raw;
 

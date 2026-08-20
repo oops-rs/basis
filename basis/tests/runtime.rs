@@ -5,8 +5,9 @@
 //! 1. **Sharing is real.** Two workspaces opened with one `Arc<Runtime>` run
 //!    on the same mentra runtime, write one store file, and mint runs that can
 //!    be driven concurrently.
-//! 2. **Sharing does not leak.** A `mcp__*` tool one workspace's registry
-//!    entry brought never reaches another workspace's roster — asserted on the
+//! 2. **Sharing does not leak.** A tool one workspace put on the shared
+//!    registry — a `mcp__*` bridged one, or one its `.basis/tools.json`
+//!    declared — never reaches another workspace's roster, asserted on the
 //!    wire, in the `tools` array of the request the model actually receives.
 //! 3. **The dispatcher's key holds.** The `working_directory` mentra hands a
 //!    pre-hook is the agent's `base_dir` — the assumption basis's per-workspace
@@ -28,6 +29,7 @@ use std::{
 use basis::{
     CollectingSink, ContextConfig, RunOutcome, Runtime, Workspace, WorkspaceBuilder,
     hooks::HooksConfig, skills::SkillsConfig, store, templates::TemplatesConfig,
+    tools::declared::ToolsConfig,
 };
 use mentra::ModelSelector;
 use serde_json::json;
@@ -54,6 +56,10 @@ fn pinned(workspace: &Path, runtime: Arc<Runtime>) -> WorkspaceBuilder {
         })
         .with_hooks(HooksConfig {
             workspace_file: PathBuf::from(".basis/hooks.json"),
+            global_dir: None,
+        })
+        .with_tools(ToolsConfig {
+            workspace_file: PathBuf::from(".basis/tools.json"),
             global_dir: None,
         })
 }
@@ -252,6 +258,98 @@ mod roster {
         assert!(
             !offered.contains(&"mcp__foreign__peek"),
             "a tool this workspace never configured must not be offered to its model: {offered:?}"
+        );
+    }
+}
+
+/// The same claim for ADR-0012's other subprocess binding — and it needs its own
+/// module rather than a case in [`roster`], because declared tools are core
+/// rather than part of the `mcp` feature, and so is the claim.
+mod declared_roster {
+    use super::*;
+
+    /// A workspace whose manifest declares one tool, and the tool's name.
+    fn declaring(dir: &Path) -> &'static str {
+        std::fs::create_dir_all(dir.join(".basis")).expect("create .basis");
+        std::fs::write(
+            dir.join(".basis/tools.json"),
+            r#"{"schema": 1, "tools": {"jenkins_job": {
+                "description": "trigger a job",
+                "input_schema": {"type": "object", "properties": {}},
+                "command": ["./ci/jenkins"]
+            }}}"#,
+        )
+        .expect("write manifest");
+
+        "jenkins_job"
+    }
+
+    /// The tool names in the nth request's `tools` array — the roster the model
+    /// was actually offered, which is the only honest observable.
+    fn roster(endpoint: &ScriptedEndpoint, index: usize) -> Vec<String> {
+        let requests = endpoint.requests();
+        let body: serde_json::Value = serde_json::from_str(
+            requests[index]
+                .split("\r\n\r\n")
+                .nth(1)
+                .expect("a request body"),
+        )
+        .expect("a JSON request");
+
+        body["tools"]
+            .as_array()
+            .expect("a tools array")
+            .iter()
+            .filter_map(|tool| tool["name"].as_str().map(str::to_string))
+            .collect()
+    }
+
+    #[tokio::test]
+    async fn a_declared_tool_is_offered_to_its_own_workspace_and_to_no_other() {
+        // A declared tool carries no `mcp__` prefix, so nothing about its *name*
+        // keeps it out of a sibling's roster on a shared registry — only the
+        // claim basis holds on it does. Both halves are asserted, because a rule
+        // that hid the tool from everybody would pass the second one.
+        let endpoint = ScriptedEndpoint::start(Vec::new());
+        let runtime = shared_runtime(&endpoint);
+
+        let declaring_dir = workspace_dir();
+        let declared = declaring(declaring_dir.path());
+        let owner = pinned(declaring_dir.path(), Arc::clone(&runtime))
+            .open()
+            .await
+            .expect("opens");
+        assert_eq!(owner.declared_tools(), [declared]);
+
+        let bystander_dir = workspace_dir();
+        let bystander = pinned(bystander_dir.path(), runtime)
+            .open()
+            .await
+            .expect("opens");
+
+        for workspace in [&owner, &bystander] {
+            let report = workspace
+                .prepare("go")
+                .expect("mints")
+                .execute(CollectingSink::default())
+                .await
+                .expect("completes");
+            assert!(matches!(report.outcome, RunOutcome::Ok));
+        }
+
+        let (owners, bystanders) = (roster(&endpoint, 0), roster(&endpoint, 1));
+
+        assert!(
+            owners.iter().any(|tool| tool == "spawn"),
+            "the roster parsed: basis's own tool must be in it: {owners:?}"
+        );
+        assert!(
+            owners.iter().any(|tool| tool == declared),
+            "the workspace that declared it must be offered it: {owners:?}"
+        );
+        assert!(
+            !bystanders.iter().any(|tool| tool == declared),
+            "a program another repository declared must not be offered here: {bystanders:?}"
         );
     }
 }
@@ -457,13 +555,6 @@ impl ScriptedEndpoint {
         }
     }
 
-    #[cfg_attr(
-        not(feature = "mcp"),
-        allow(
-            dead_code,
-            reason = "read back only by the roster test, which is mcp-gated"
-        )
-    )]
     fn requests(&self) -> Vec<String> {
         self.requests.lock().expect("requests").clone()
     }

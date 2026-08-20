@@ -498,6 +498,9 @@ pub enum RunError {
 
     #[error("failed to load hooks: {0}")]
     Hooks(#[from] crate::hooks::HookConfigError),
+
+    #[error("failed to load declared tools: {0}")]
+    Tools(#[from] crate::tools::declared::DeclaredToolError),
 }
 
 /// Runs one prompt to completion, streaming events into `sink`.

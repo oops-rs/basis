@@ -63,7 +63,7 @@ hot-reloadable extensions. Two pi decisions independently validate ours:
 ## 2. Principle: the core has no opinions
 
 Task-specific behavior enters through data, never code: the **prompt**, the **workspace** (its
-AGENTS.md, skills, templates, `.mcp.json`), and **config**. A periodic code-health check, a
+AGENTS.md, skills, templates, `.basis/tools.json`, `.mcp.json`), and **config**. A periodic code-health check, a
 nightly dependency bump, an interactive refactor are all the same to the binary. If a use case
 seems to need core changes, close the gap generically or push it to an extension point.
 
@@ -146,13 +146,34 @@ Rust binary. Equivalent coverage, Rust-native:
 
 | pi extension capability | basis mechanism |
 |---|---|
-| Custom tools for the LLM | **MCP servers** (`rmcp`): any language, process-isolated, ecosystem standard |
+| Custom tools for the LLM | **One contract, three bindings** (ADR-0012): a tool a host registers in Rust, a command a workspace declares in `.basis/tools.json`, and an **MCP server** (`rmcp`) — all arriving as the same `ExecutableTool`; any language, process-isolated |
 | Event interception (block/modify tool calls) | **One contract, two bindings** (ADR-0012): an in-process `Interceptor` a host implements, and subprocess hooks a workspace declares — same request, same allow/deny/modify vocabulary, one chain |
 | Custom commands | Prompt templates, surfaced as ACP commands |
 | Custom UI | ACP client's job (permission requests, input prompts are protocol messages) |
 | In-process extension with full API access | The `basis` crate: the harness is a library first, binary second |
 
-Interception is not a subsystem parallel to anything. `hooks::contract` holds the request
+Tools are not a subsystem parallel to MCP either. A **declared tool** is an entry in
+`.basis/tools.json` — a name, a description, an input JSON schema, and an argv array — that
+basis wraps as an `ExecutableTool`: the model fills in the schema, basis writes that object
+to the program's stdin, and stdout comes back as the tool's result. The manifest layers the
+way the other conventions do (the workspace's file, then the global one, most specific
+winning) and expands `${VAR}` the way `.mcp.json` does, so a credential rides in `env`
+rather than in a committed file. Not behind the `mcp` feature: custom tools were never
+MCP's to own.
+
+Three things about it are deliberate, and each answers a way the binding could have been
+unsafe rather than merely inconvenient. **The format cannot say "read-only"** — the only
+side-effect levels it offers are `process` (the default) and `external`, because basis waves
+read-only calls past the approver, and a file a repository ships must not be able to route a
+subprocess around that by writing one word. **The approver is shown the command**, not just
+the tool's name: the name was chosen by the same file that chose the program, so the name is
+not evidence. And **a name the runtime already answers to cannot be claimed** — mentra's
+registry replaces on a duplicate name, so without that check a manifest could quietly become
+`spawn` and inherit every rule an operator ever wrote about it. On a shared runtime the same
+claim keeps one repository's tools out of another's roster, exactly as the `mcp__*` hiding
+does.
+
+Interception is not a subsystem parallel to anything either. `hooks::contract` holds the request
 and outcome types both bindings speak, one `Chain` decides what an answer *means* — first
 refusal wins, modifications compose, nothing is smuggled past a later guard — and the one
 hook basis registers with mentra dispatches each call to the calling workspace's own
@@ -191,7 +212,7 @@ flowchart LR
     ws["Workspace — opened once: context · model · MCP · seams"]
     lrt["Runtime — one per process: provider · credential · history · host interceptors"]
     ctx["context: AGENTS.md · skills · templates"]
-    ext["interception (2 bindings) · MCP client (mcp feature)"]
+    ext["declared tools · interception (2 bindings) · MCP client (mcp feature)"]
     runs["runs — minted cheaply: typed output · bounds · cancel · fan-in"]
     sess["sessions · branching · compaction"]
     rt["Mentra runtime"]
@@ -236,7 +257,7 @@ flowchart LR
   becoming a server (ADR-0017).
 - **A workspace is opened once and mints runs** (ADR-0010). Everything that belongs to a
   repository rather than to a prompt — context documents, the resolved model, skills,
-  templates, hooks, MCP connections — is settled by `Workspace::open`, and `prepare` mints
+  templates, hooks, declared tools, MCP connections — is settled by `Workspace::open`, and `prepare` mints
   a run from it *synchronously*, because nothing is left to await. A twenty-way fan-out
   therefore reads `AGENTS.md` once. What a run carries of its own is the honestly per-run
   half: the prompt, the session name, the effort, and the bounds. The free functions
@@ -251,9 +272,10 @@ flowchart LR
   is unchanged sugar over a private one bound to that path, so the one-repository host never
   meets the noun. What stays per workspace is what a repository says: hooks, `ShellAccess`,
   the `.git` carve-out — enforced on a shared runtime by the single dispatch hook basis
-  registers, since mentra fixes hooks at build time and workspaces arrive later — and its
-  MCP connections, which are minted from its own config and die with it while the tool
-  registry underneath is the runtime's.
+  registers, since mentra fixes hooks at build time and workspaces arrive later — its
+  declared tools, and its MCP connections. The last two are minted from its own config and
+  die with it while the tool registry underneath is the runtime's, so each is claimed by name
+  at open, released at drop, and hidden from every other workspace's roster.
 - **A run answers with a value when asked.** `PreparedRun::output::<T>()` runs a turn that
   must answer through a generated terminal tool whose input *is* the answer, which is what
   makes a workflow composable in host Rust rather than in prose-parsing. The stream is
