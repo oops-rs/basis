@@ -684,7 +684,8 @@ question rather than an ergonomic one.
   the check in. basis does the cheap half — the input is an object, and the
   properties `required` names are present — and stops there rather than pulling a
   JSON Schema implementation into the SDK's graph for a check every binding
-  would benefit from having once, upstream.
+  would benefit from having once, upstream. Filed as
+  [mentra#23](https://github.com/oops-rs/mentra/issues/23).
 - **`ToolRegistry::register_tool` replaces on a duplicate name, and nothing can
   ask it not to.** There is no `try_register`, no `is_registered`, and
   `unregister_tool` is `pub(crate)`. So basis reads the roster, decides, and then
@@ -692,7 +693,8 @@ question rather than an ergonomic one.
   serializes it, and that a second registrar on the same runtime would walk
   straight past. What it protects is not hypothetical: the name it would take is
   `spawn`. The absence of an unregister is the same gap seen from the other end,
-  and it is why a released claim has to be remembered rather than dropped.
+  and it is why a released claim has to be remembered rather than dropped. Filed
+  as [mentra#24](https://github.com/oops-rs/mentra/issues/24).
 
 **And one more, which is the first this ledger carries a workaround for.** It
 was found where the other five were — by a production host, iBot, hitting it —
