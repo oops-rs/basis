@@ -9,7 +9,7 @@ no protocol, no transport and no terminal code, so an embedding host's dependenc
 it uses ([ADR-0011](docs/adr/0011-layered-crates.md)); `basis-acp` and the binary are thin shells.
 
 ```rust
-// [dependencies] basis = "0.3"
+// [dependencies] basis = "0.4"
 let workspace = basis::Workspace::open("/repo").await?;
 let mut run = workspace.prepare("what does this repo do?")?;
 let report = run.execute(basis::CollectingSink::default()).await?;
