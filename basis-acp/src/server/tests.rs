@@ -27,7 +27,7 @@ use super::workspaces::{ConfiguredSource, WorkspaceKey};
 use crate::mode::ApprovalMode;
 use basis::{
     ContextConfig, McpServer, PersistedSession, PreparedRun, RunConfig, RunError, Runtime,
-    hooks::HooksConfig, mcp::McpConfig, provider::ProviderError, skills::SkillsConfig,
+    ToolsConfig, hooks::HooksConfig, mcp::McpConfig, provider::ProviderError, skills::SkillsConfig,
     templates::TemplatesConfig,
 };
 use mentra::ModelSelector;
@@ -304,6 +304,10 @@ fn offline_template() -> RunConfig {
         })
         .with_hooks(HooksConfig {
             workspace_file: PathBuf::from(".basis/hooks.json"),
+            global_dir: None,
+        })
+        .with_tools(ToolsConfig {
+            workspace_file: PathBuf::from(".basis/tools.json"),
             global_dir: None,
         })
         .with_mcp(McpConfig {

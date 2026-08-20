@@ -39,6 +39,7 @@ use crate::{
     shell::ShellAccess,
     skills::SkillsConfig,
     templates::TemplatesConfig,
+    tools::declared::ToolsConfig,
     workspace::{
         DEFAULT_SESSION_NAME, RunSpec, Workspace, WorkspaceBuilder, load_templates,
         resolved_workspace,
@@ -135,6 +136,9 @@ pub struct RunConfig {
     /// Where to look for subprocess hooks — external commands with a say over
     /// each tool call.
     pub hooks: HooksConfig,
+    /// Where to look for declared subprocess tools — programs a workspace's
+    /// manifest puts on the model's roster.
+    pub tools: ToolsConfig,
     /// Whether the agent may run commands. Granted by default; see ADR-0013.
     pub shell: ShellAccess,
     /// How hard the model should think. `None` leaves the provider's default;
@@ -173,6 +177,7 @@ impl RunConfig {
             mcp: McpConfig::default(),
             templates: TemplatesConfig::default(),
             hooks: HooksConfig::default(),
+            tools: ToolsConfig::default(),
             // Granted, per ADR-0013, and from the enum's own default rather
             // than from anything ambient: what a run may do is stated here, in
             // the config, not read out of the environment behind the caller.
@@ -236,6 +241,15 @@ impl RunConfig {
     /// breaks.
     pub fn with_hooks(self, hooks: HooksConfig) -> Self {
         Self { hooks, ..self }
+    }
+
+    /// Sets where declared subprocess tools are discovered.
+    ///
+    /// A declared tool is a program a workspace manifest puts on the model's
+    /// roster, called with JSON on stdin; see [`crate::tools::declared`] for
+    /// the manifest and what a failing one tells the model.
+    pub fn with_tools(self, tools: ToolsConfig) -> Self {
+        Self { tools, ..self }
     }
 
     /// Grants or denies command execution.
@@ -336,6 +350,7 @@ impl RunConfig {
             .with_skills(self.skills.clone())
             .with_templates(self.templates.clone())
             .with_hooks(self.hooks.clone())
+            .with_tools(self.tools.clone())
             .with_shell(self.shell);
 
         #[cfg(feature = "mcp")]
