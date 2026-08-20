@@ -27,7 +27,10 @@
 //! hand-forward all seven of `ToolExecutor`'s methods — where forgetting
 //! `authorization_preview` would leave a host's tool presenting to the approver
 //! as something other than what it is. That is not a shim to write on the way
-//! past a security feature, and adding the method later is additive.
+//! past a security feature, and adding the method later is additive. The
+//! forwarding impls are asked of mentra itself
+//! ([oops-rs/mentra#22](https://github.com/oops-rs/mentra/issues/22)), where
+//! the trait's owner writes them once, beside the trait.
 //!
 //! The by-value signature costs [`declared`] nothing, because basis builds the
 //! `DeclaredTool` itself and hands mentra a value it owns. A host that wants

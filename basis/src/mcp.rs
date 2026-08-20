@@ -49,6 +49,10 @@
 //! reach. Streamable HTTP is neither — a configuration asking for it is
 //! refused by name rather than dropped, because a client that configured a
 //! server and got silence has no way to tell that from a server with no tools.
+//! The gap is upstream and filed
+//! ([oops-rs/mentra#20](https://github.com/oops-rs/mentra/issues/20)): the
+//! client half is mentra's, and once it can reach the transport the refusal
+//! here becomes a third variant.
 
 pub(crate) mod connections;
 mod file;
