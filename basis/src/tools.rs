@@ -39,8 +39,20 @@
 //!
 //! Registered on the runtime, like `spawn` (ADR-0018's host scope): visible to
 //! every workspace and subagent that runtime opens, not to one session.
+//!
+//! Building one needs mentra's own tool-authoring types, re-exported below
+//! rather than left for a host to reach through basis to a `mentra`
+//! dependency it would otherwise have no reason to declare directly. The set
+//! mirrors exactly what [`spawn`]'s own `ExecutableTool` impl uses — proof
+//! it is complete enough to write a real tool against, not a guess at what
+//! one might need.
 
 pub mod declared;
 pub mod spawn;
 
+pub use mentra::tool::{
+    ExecutableTool, ParallelToolContext, RuntimeToolDescriptor, ToolApprovalCategory,
+    ToolAuthorizationPreview, ToolCapability, ToolContext, ToolDefinition, ToolDurability,
+    ToolExecutionCategory, ToolExecutor, ToolResult, ToolSideEffectLevel,
+};
 pub use spawn::{MAX_DEPTH, SPAWN, SpawnTool};
