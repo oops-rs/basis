@@ -298,6 +298,7 @@ impl<A: Approver> ModedApprover<A> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use basis::ToolSideEffectLevel;
     use serde_json::json;
     use std::sync::atomic::{AtomicUsize, Ordering};
 
@@ -323,6 +324,7 @@ mod tests {
             tool_name: tool_name.to_string(),
             description: "wants to write".to_string(),
             input: json!({}),
+            side_effect_level: Some(ToolSideEffectLevel::LocalState),
         }
     }
 

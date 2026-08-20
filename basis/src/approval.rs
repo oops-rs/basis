@@ -14,23 +14,51 @@
 //! enum could never express, the trait can: allow edits but deny the network,
 //! ask over Slack with a timeout, escalate after the third refusal.
 //!
+//! The first of those is the one this module has to make *writable* rather than
+//! merely describable, and it is written on [`Approver`]. It reads
+//! [`ApprovalRequest::side_effect_level`] and names no tool, which is the whole
+//! point: a policy spelled as a list of tool names is a policy that silently
+//! stops covering the next MCP server a workspace connects.
+//!
 //! Nothing installs an approver by default, and that is deliberate: with no
 //! approver the run gets [`AllowAll`], which is what a headless run needs.
 //! Anything stricter is one argument to
 //! [`run_with_approver`](crate::run::run_with_approver).
+
+mod levels;
 
 use std::time::Duration;
 
 use async_trait::async_trait;
 use mentra::{
     error::RuntimeError,
-    tool::{
-        ToolAuthorizationDecision, ToolAuthorizationRequest, ToolAuthorizer, ToolSideEffectLevel,
-    },
+    tool::{ToolAuthorizationDecision, ToolAuthorizationRequest, ToolAuthorizer},
 };
 use serde_json::Value;
 
+pub use levels::SideEffectLevels;
+
+/// How far outside this process a call reaches: nothing, this machine's state,
+/// another process, or the world.
+///
+/// mentra's, deliberately, and re-exported here under the rule written on
+/// [`CancellationToken`](crate::CancellationToken) — every mentra type basis's
+/// surface makes a caller *name*, basis re-exports. Both
+/// [`is_consequential`] and [`ApprovalRequest::side_effect_level`] ask an
+/// approver to name it, and without this line writing the policy those exist
+/// for would mean adding mentra to the host's own manifest, pinned to whatever
+/// version basis happens to resolve.
+pub use mentra::tool::ToolSideEffectLevel;
+
 /// What the agent wants to do, as put to an [`Approver`].
+///
+/// Deliberately not `#[non_exhaustive]`, though hosts read it far more often
+/// than they build one. The struct has no constructor and no builder, so
+/// sealing it would make an `ApprovalRequest` *unconstructable* outside this
+/// crate — and every host testing its own approver builds one, as `basis-acp`
+/// and `basis-cli` both do. Sealing would trade a compile error that names the
+/// new field, on the day a field is added, for a permanent one with no way past
+/// it.
 #[derive(Debug, Clone, PartialEq)]
 pub struct ApprovalRequest {
     pub request_id: String,
@@ -40,6 +68,32 @@ pub struct ApprovalRequest {
     pub description: String,
     /// The tool's input, parsed when it is JSON.
     pub input: Value,
+    /// How far outside this process the call reaches, when basis knows.
+    ///
+    /// This is what lets a policy be written about *what a call does* rather
+    /// than about which tools happen to be installed —
+    /// [`LocalState`](ToolSideEffectLevel::LocalState) for an edit to this
+    /// checkout, [`External`](ToolSideEffectLevel::External) for an MCP server
+    /// or a declared tool that leaves the machine. See [`Approver`] for the
+    /// worked example.
+    ///
+    /// **`None` means unknown, never harmless.** Read-only calls do not reach
+    /// an approver at all ([`is_consequential`]), so nothing that arrives here
+    /// is a read; a `None` is only ever basis failing to recover a fact it
+    /// could not carry. The fail-closed reading is to treat it as
+    /// [`External`](ToolSideEffectLevel::External) — judge it by the most it
+    /// could be doing, the same rule the rest of this module runs on.
+    ///
+    /// It is an `Option` because the classification takes an interim route:
+    /// mentra's permission event does not carry it, so basis relays it from the
+    /// authorizer through [`SideEffectLevels`], and that channel can honestly
+    /// miss — most plainly for a host that built its own mentra runtime and
+    /// never wired the handle through
+    /// ([`PreparedRun::with_side_effect_levels`](crate::PreparedRun::with_side_effect_levels)).
+    /// Tracked upstream as
+    /// [mentra#21](https://github.com/oops-rs/mentra/issues/21); the field
+    /// survives the fix, the relay does not.
+    pub side_effect_level: Option<ToolSideEffectLevel>,
 }
 
 /// What an [`Approver`] decided.
@@ -131,6 +185,42 @@ impl From<ApprovalDecision> for ApprovalAnswer {
 /// [`ApprovalDecision`]'s own default is [`Deny`](ApprovalDecision::Deny) for
 /// the same reason, and so is mentra's when an authorizer times out: silence is
 /// never a yes.
+///
+/// # Allow edits, deny the network
+///
+/// The policy this module's own documentation has always named as the reason
+/// the seam is a trait, written out. Nothing in it names a tool — every call is
+/// judged by how far it reaches — so a workspace that connects a new MCP server
+/// tomorrow, or ships a `.basis/tools.json` declaring a program, is covered by
+/// the rule that was already there.
+///
+/// ```
+/// use basis::{
+///     ApprovalAnswer, ApprovalDecision, ApprovalRequest, Approver, ToolSideEffectLevel,
+///     async_trait,
+/// };
+///
+/// struct EditsButNotTheNetwork;
+///
+/// #[async_trait]
+/// impl Approver for EditsButNotTheNetwork {
+///     async fn approve(&mut self, request: &ApprovalRequest) -> ApprovalAnswer {
+///         match request.side_effect_level {
+///             // Changes this machine's state and nothing past it: the file
+///             // tools, and a delegation to a subagent.
+///             Some(ToolSideEffectLevel::LocalState) => ApprovalDecision::Allow.into(),
+///
+///             // Everything else. `Process` is a command, which can reach the
+///             // network by running `curl`; `External` says so outright; and
+///             // `None` is a level basis could not recover, which is judged by
+///             // the most it could be rather than the least. `ToolSideEffectLevel::None`
+///             // never arrives — a read is not put to an approver at all.
+///             _ => ApprovalAnswer::new(ApprovalDecision::Deny)
+///                 .because("this run may change this checkout and nothing beyond it"),
+///         }
+///     }
+/// }
+/// ```
 #[async_trait]
 pub trait Approver: Send + 'static {
     async fn approve(&mut self, request: &ApprovalRequest) -> ApprovalAnswer;
@@ -201,9 +291,16 @@ pub fn is_consequential(level: ToolSideEffectLevel) -> bool {
 /// request can ever be raised. Surfacing unconditionally is what lets the
 /// answer be chosen per turn — or changed mid-session, which is how an ACP
 /// client's mode picker works at all.
-#[derive(Debug, Default, Clone, Copy)]
+///
+/// Clone, not `Copy`, since it grew the [`SideEffectLevels`] handle: mentra
+/// takes an authorizer by value, so a caller who wants
+/// [`ApprovalRequest::side_effect_level`] filled in clones the gate and keeps
+/// [`levels`](Self::levels). basis's own [`Runtime`](crate::Runtime) does this
+/// for every workspace it carries.
+#[derive(Debug, Default, Clone)]
 pub struct ApprovalGate {
     timeout: Option<Duration>,
+    levels: SideEffectLevels,
 }
 
 impl ApprovalGate {
@@ -212,6 +309,7 @@ impl ApprovalGate {
             // No timeout by default: a person reading a diff should not lose
             // the turn to a stopwatch. A host that needs one sets it.
             timeout: None,
+            levels: SideEffectLevels::new(),
         }
     }
 
@@ -223,7 +321,28 @@ impl ApprovalGate {
     pub fn with_timeout(self, timeout: Duration) -> Self {
         Self {
             timeout: Some(timeout),
+            ..self
         }
+    }
+
+    /// The end of the side channel this gate writes to, for whoever builds the
+    /// [`ApprovalRequest`] to read from.
+    ///
+    /// Only a host that installs the gate on a mentra runtime *itself* needs
+    /// this — the [`prepare_with_session`](crate::run::prepare_with_session)
+    /// shape. Hand what comes back to
+    /// [`PreparedRun::with_side_effect_levels`](crate::PreparedRun::with_side_effect_levels)
+    /// and the level reaches the approver; skip it and every request reports
+    /// `None`, which is unknown rather than harmless. Every other shape — a
+    /// [`Workspace`](crate::Workspace), the free functions in
+    /// [`run`](mod@crate::run) — is wired already.
+    ///
+    /// **Interim.** It exists only until mentra's permission event carries the
+    /// classification itself
+    /// ([mentra#21](https://github.com/oops-rs/mentra/issues/21)); see
+    /// [`SideEffectLevels`].
+    pub fn levels(&self) -> SideEffectLevels {
+        self.levels.clone()
     }
 }
 
@@ -236,6 +355,17 @@ impl ToolAuthorizer for ApprovalGate {
         if !is_consequential(request.preview.side_effect_level) {
             return Ok(ToolAuthorizationDecision::allow());
         }
+
+        // The last place the classification is in hand: mentra reads this
+        // preview to build `PermissionRequested` and then drops it, so without
+        // this line the approver could only guess from the tool's name. See
+        // `SideEffectLevels` — interim, and mentra#21 is where it ends.
+        //
+        // Recorded here rather than above the filter because only this path
+        // raises a request: a call allowed outright never reaches an approver,
+        // so an entry for one would be litter with nobody coming for it.
+        self.levels
+            .record(&request.tool_call_id, request.preview.side_effect_level);
 
         // The reason becomes the description the approver shows, so it says
         // what is being asked rather than that something is.
@@ -296,6 +426,7 @@ mod tests {
             tool_name: "shell".to_string(),
             description: "d".to_string(),
             input: json!({}),
+            side_effect_level: Some(ToolSideEffectLevel::Process),
         }
     }
 
@@ -342,6 +473,48 @@ mod tests {
 
         let reason = decision.reason.expect("a prompt must say what it is about");
         assert!(reason.contains("files"), "{reason}");
+    }
+
+    #[tokio::test]
+    async fn only_a_call_that_raises_a_request_is_written_to_the_side_channel() {
+        // The gate is the last place a call's side-effect level exists —
+        // mentra reads the preview to build `PermissionRequested` and drops it
+        // — so this is where the approver's copy is taken from. Recording a
+        // read too would leave an entry nobody ever comes for, since an
+        // allowed call reaches no approver.
+        let gate = ApprovalGate::new();
+        let levels = gate.levels();
+
+        gate.authorize(&request("check_background", ToolSideEffectLevel::None))
+            .await
+            .expect("no error");
+        assert_eq!(levels.pending(), 0, "a read raises nothing to answer");
+
+        gate.authorize(&request("files", ToolSideEffectLevel::LocalState))
+            .await
+            .expect("no error");
+        assert_eq!(
+            levels.take("tc-1"),
+            Some(ToolSideEffectLevel::LocalState),
+            "and a call that is put to the approver arrives with what it does"
+        );
+    }
+
+    #[tokio::test]
+    async fn a_gate_and_its_clone_write_to_one_channel() {
+        // What the runtime relies on: mentra takes the authorizer by value, so
+        // the half basis keeps has to be the same channel as the half mentra
+        // calls.
+        let gate = ApprovalGate::new();
+        let levels = gate.levels();
+        let installed = gate.clone();
+
+        installed
+            .authorize(&request("publish", ToolSideEffectLevel::External))
+            .await
+            .expect("no error");
+
+        assert_eq!(levels.take("tc-1"), Some(ToolSideEffectLevel::External));
     }
 
     #[test]

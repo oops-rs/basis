@@ -123,6 +123,7 @@ mod tests {
             tool_name: "shell".to_string(),
             description: "wants to run a command".to_string(),
             input,
+            side_effect_level: Some(basis::ToolSideEffectLevel::Process),
         }
     }
 

@@ -694,6 +694,44 @@ question rather than an ergonomic one.
   `spawn`. The absence of an unregister is the same gap seen from the other end,
   and it is why a released claim has to be remembered rather than dropped.
 
+**And one more, which is the first this ledger carries a workaround for.** It
+was found where the other five were — by a production host, iBot, hitting it —
+and it is the only candidate so far whose absence made a *documented* feature
+unwritable rather than merely awkward.
+
+- **`SessionEvent::PermissionRequested` drops the authorization preview.**
+  `Approver`'s own module doc has named "allow edits but deny the network" as
+  the policy the seam exists for since ADR-0010, and it could not be written:
+  the event carries five strings, none of them the `side_effect_level` the
+  authorizer had in hand a moment earlier — and its `preview` field, despite the
+  name, is the tool's `structured_input` rather than the
+  `ToolAuthorizationPreview` it is read from. So a host that wanted the policy
+  had to re-derive levels from tool names, which is a policy that silently stops
+  covering the next MCP server a workspace connects. Filed as
+  [mentra#21](https://github.com/oops-rs/mentra/issues/21). The
+  `ToolQueued`-correlation route is not an alternative and was checked: mentra
+  hardcodes that event's `mutability` to `Unknown`, and even wired it would
+  collapse `Process` and `External`, which is the distinction the policy turns
+  on.
+  **The interim, under ADR-0005's one exemption** — "basis may carry a temporary
+  workaround only with a linked mentra issue and a removal note" — is
+  `basis/src/approval/levels.rs`, and it is a side channel through basis's own
+  gate: `ApprovalGate::authorize` sees the whole preview and runs strictly
+  before mentra emits the event, so it writes `tool_call_id → level` into a
+  handle the forwarder takes it back out of when it builds the
+  `ApprovalRequest`. Keyed on `tool_call_id` because it is the only field the
+  authorization request and the permission event share; taken rather than read,
+  because a request is resolved exactly once; capped at 256 with the oldest
+  evicted, because a request whose event a lagging receiver dropped leaves an
+  entry nobody comes for and a `Runtime` lives as long as the process. Every way
+  it can miss — an unwired host, an evicted entry, two runs colliding on one
+  provider-assigned id — reads as `None`, which the approver is told to judge as
+  `External`. `ApprovalRequest::side_effect_level` is the part that survives the
+  fix, since `Option` is also the honest shape for a fact the event may not
+  carry; `SideEffectLevels`, `ApprovalGate::levels`,
+  `PreparedRun::with_side_effect_levels` and the `Runtime` field between them
+  are deleted with the file the day mentra#21 lands.
+
 ## 3. Phases
 
 Ordering rule: honesty first (cheap deletions and default flips, so docs stop

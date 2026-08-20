@@ -80,8 +80,15 @@ pub mod templates;
 pub mod tools;
 pub mod workspace;
 
+// `ToolSideEffectLevel` is mentra's, and comes to the root under the same rule
+// as `CancellationToken` below: `is_consequential` and
+// `ApprovalRequest::side_effect_level` both make a caller name it, and a policy
+// written against it should not cost the host a mentra dependency of its own.
+// `SideEffectLevels` deliberately stays behind `approval::` — it is the interim
+// relay that mentra#21 deletes, and the root is for what basis intends to keep.
 pub use approval::{
     AllowAll, ApprovalAnswer, ApprovalDecision, ApprovalGate, ApprovalRequest, Approver, DenyAll,
+    ToolSideEffectLevel,
 };
 pub use branch::{BranchError, EntryKind, TranscriptEntry};
 pub use budget::BudgetPool;

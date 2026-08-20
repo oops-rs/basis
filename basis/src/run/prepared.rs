@@ -23,7 +23,7 @@ use super::{
     turn::{bounded, drawable},
 };
 use crate::{
-    approval::{AllowAll, Approver},
+    approval::{AllowAll, Approver, SideEffectLevels},
     context::WorkspaceContext,
     event::{ContextFile, EVENT_SCHEMA_VERSION, Event, RunOutcome, SkillSummary, TemplateSummary},
     lifecycle::{LifecycleError, Supervisor, TaskHandle},
@@ -78,6 +78,11 @@ pub struct PreparedRun {
     /// registration and MCP connections, and both end the moment the last
     /// handle to it goes.
     workspace: Option<Arc<Workspace>>,
+    /// The reading end of the runtime's side channel; see
+    /// [`with_side_effect_levels`](Self::with_side_effect_levels). Empty for a
+    /// run whose caller never wired one, which costs the run nothing but the
+    /// level on each [`ApprovalRequest`](crate::ApprovalRequest).
+    levels: SideEffectLevels,
 }
 
 /// Hand-written because mentra's `Session` is not `Debug`, and because the
@@ -105,6 +110,7 @@ impl PreparedRun {
             run,
             bounds: TurnOptions::default(),
             workspace: None,
+            levels: SideEffectLevels::new(),
         }
     }
 
@@ -149,6 +155,43 @@ impl PreparedRun {
     /// holds it, which is the [`Workspace::prepare`] shape.
     pub fn workspace(&self) -> Option<&Arc<Workspace>> {
         self.workspace.as_ref()
+    }
+
+    /// Connects this run to the side channel its runtime's
+    /// [`ApprovalGate`](crate::ApprovalGate) writes to, so every
+    /// [`ApprovalRequest`](crate::ApprovalRequest) carries what the call
+    /// actually reaches.
+    ///
+    /// Needed only on the [`prepare_with_session`](super::prepare_with_session)
+    /// path, where the caller built the mentra runtime and installed the gate
+    /// itself. Take the handle off that gate before handing it over — mentra
+    /// takes an authorizer by value and never gives it back:
+    ///
+    /// ```no_run
+    /// # fn example(session: mentra::Session, config: &basis::RunConfig)
+    /// # -> Result<basis::PreparedRun, basis::RunError> {
+    /// let gate = basis::ApprovalGate::new();
+    /// let levels = gate.levels();
+    /// let runtime = mentra::Runtime::builder().with_tool_authorizer(gate);
+    /// # let _ = runtime;
+    ///
+    /// Ok(basis::run::prepare_with_session(session, config, "openai", "a-model")?
+    ///     .with_side_effect_levels(levels))
+    /// # }
+    /// ```
+    ///
+    /// [`Workspace::prepare`] and the free functions in
+    /// [`run`](mod@crate::run) do this themselves, so no caller of those has
+    /// anything to wire. Unwired, the run works exactly as before and every
+    /// request reports `None` — unknown, which an approver should read as the
+    /// worst the call could be rather than the least.
+    ///
+    /// **Interim.** This method exists only until mentra's permission event
+    /// carries the classification itself
+    /// ([mentra#21](https://github.com/oops-rs/mentra/issues/21)); see
+    /// [`SideEffectLevels`](crate::approval::SideEffectLevels).
+    pub fn with_side_effect_levels(self, levels: SideEffectLevels) -> Self {
+        Self { levels, ..self }
     }
 
     /// The header line this run will open with, before anything is sent.
@@ -585,6 +628,7 @@ impl PreparedRun {
             done_rx,
             approver,
             permissions,
+            self.levels.clone(),
         ));
 
         Ok(Turn {

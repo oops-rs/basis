@@ -377,6 +377,14 @@ impl RuntimeBuilder {
 
         let dispatch = Arc::new(HookDispatch::new(self.interceptors));
 
+        // Cloned into mentra below rather than moved, because the gate is the
+        // only thing that sees a call's side-effect level and mentra never
+        // hands an authorizer back. The kept half is what puts that level on
+        // the `ApprovalRequest` an approver reads — interim, and mentra#21 is
+        // where it ends (`crate::approval::SideEffectLevels`).
+        let gate = ApprovalGate::new();
+        let levels = gate.levels();
+
         let builder = mentra::Runtime::builder()
             // Which conversations belong where, which is the only question
             // `session/list` can honestly answer (see `crate::store`). Unset,
@@ -388,7 +396,7 @@ impl RuntimeBuilder {
             // and no permission request can ever be raised — so the gate goes
             // on even for a runtime whose runs approve everything (see
             // `crate::approval`).
-            .with_tool_authorizer(ApprovalGate::new())
+            .with_tool_authorizer(gate)
             // The one tool basis registers (ADR-0016). It has to be on the
             // runtime rather than on a session, because a subagent shares its
             // parent's runtime registry and `spawn` must reach the model at
@@ -432,6 +440,7 @@ impl RuntimeBuilder {
             provider_label: ProviderId::from(choice.provider).to_string(),
             model: self.model,
             dispatch,
+            levels,
             #[cfg(feature = "mcp")]
             mcp_claims: Mutex::new(HashMap::new()),
             declared_claims: Mutex::new(HashMap::new()),
