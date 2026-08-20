@@ -627,7 +627,7 @@ impl PreparedRun {
             Ended::Failed(error) => (
                 None,
                 RunOutcome::Error {
-                    message: error.to_string(),
+                    message: chain_message(error),
                 },
                 ended_on(observed, Some(error)),
             ),
@@ -722,6 +722,45 @@ fn tripped_bound(error: &mentra::error::RuntimeError) -> Option<Bound> {
         // provider error, a cancelled turn, an unreadable transcript.
         _ => None,
     }
+}
+
+/// Renders `error`'s message together with whatever its `source()` chain adds
+/// that the message does not already say.
+///
+/// thiserror interpolates a `#[source]` straight into `Display` wherever a
+/// variant's format string names it, and every
+/// [`RuntimeError`](mentra::error::RuntimeError) variant does — so
+/// `error.to_string()` already reads several layers deep on its own, down to
+/// whatever the innermost wrapped type's `Display` shows. The gap is past
+/// that point: `reqwest::Error`'s `Display` only classifies itself ("error
+/// sending request for url (...)") and never describes its own `source()`, so
+/// a DNS failure, a refused connection, or a TLS handshake error — the actual
+/// reason a `ProviderError::Transport` or `ProviderError::Decode` failed —
+/// reaches neither `to_string()` nor, since mentra's own stream event for the
+/// same failure is built the same way (`Session::finish_turn`), the event
+/// stream either. Walking the chain here recovers it, and is the only place
+/// in basis that needs to: everywhere else a `RuntimeError`'s `Display`
+/// already says everything its sources do.
+///
+/// Safe to run unconditionally. Nothing reachable from a `RuntimeError` today
+/// forwards a request or response body through `source()` — that path is
+/// `ProviderError::Http`, which interpolates its body into `Display` directly
+/// rather than through a source, and this function does not change what it
+/// shows. The substring check below is what keeps a level whose text a parent
+/// already interpolated — exactly what happens one hop up, via thiserror's
+/// own `{0}` — from being repeated.
+fn chain_message(error: &dyn std::error::Error) -> String {
+    let mut message = error.to_string();
+    let mut cause = error.source();
+    while let Some(source) = cause {
+        let text = source.to_string();
+        if !message.contains(&text) {
+            message.push_str(": ");
+            message.push_str(&text);
+        }
+        cause = source.source();
+    }
+    message
 }
 
 /// Builds the opening line. Kept separate so [`PreparedRun::header`] and the
@@ -893,5 +932,155 @@ mod tests {
             ),
             Some(Bound::Deadline)
         );
+    }
+
+    /// A leaf with no further source — what most of `RuntimeError`'s own
+    /// variants look like.
+    #[derive(Debug)]
+    struct Leaf(&'static str);
+
+    impl std::fmt::Display for Leaf {
+        fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+            f.write_str(self.0)
+        }
+    }
+
+    impl std::error::Error for Leaf {}
+
+    /// A wrapper whose `Display` does not repeat its source's text — the
+    /// shape `reqwest::Error` takes, and the one `chain_message` exists for.
+    #[derive(Debug)]
+    struct Opaque {
+        own_text: &'static str,
+        source: Leaf,
+    }
+
+    impl std::fmt::Display for Opaque {
+        fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+            f.write_str(self.own_text)
+        }
+    }
+
+    impl std::error::Error for Opaque {
+        fn source(&self) -> Option<&(dyn std::error::Error + 'static)> {
+            Some(&self.source)
+        }
+    }
+
+    /// A wrapper whose `Display` interpolates its source's text directly —
+    /// the shape every `RuntimeError` variant takes via thiserror's `{0}`.
+    #[derive(Debug)]
+    struct Interpolated {
+        source: Leaf,
+    }
+
+    impl std::fmt::Display for Interpolated {
+        fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+            write!(f, "wrapper failed: {}", self.source)
+        }
+    }
+
+    impl std::error::Error for Interpolated {
+        fn source(&self) -> Option<&(dyn std::error::Error + 'static)> {
+            Some(&self.source)
+        }
+    }
+
+    #[test]
+    fn a_leaf_error_is_left_exactly_as_its_own_display_wrote_it() {
+        let error = Leaf("no providers are registered");
+
+        assert_eq!(chain_message(&error), "no providers are registered");
+    }
+
+    #[test]
+    fn a_source_a_wrappers_display_never_mentions_is_appended() {
+        // `reqwest::Error`'s own case: "error sending request for url (...)"
+        // says nothing about *why* the request failed, because it never
+        // describes its `source()`. Without walking the chain, that reason —
+        // here, "connection refused" — is gone the moment `.to_string()` is
+        // called, on the report and on mentra's own stream event alike.
+        let error = Opaque {
+            own_text: "error sending request for url (http://127.0.0.1:1/)",
+            source: Leaf("connection refused (os error 61)"),
+        };
+
+        assert_eq!(
+            chain_message(&error),
+            "error sending request for url (http://127.0.0.1:1/): connection refused (os error 61)"
+        );
+    }
+
+    #[test]
+    fn a_source_a_wrappers_display_already_quotes_is_not_repeated() {
+        // Exactly what every `RuntimeError` variant does one hop up, via
+        // thiserror's `{0}`: the source's text is already in the parent's
+        // `Display`, so walking `source()` too would say it twice.
+        let error = Interpolated {
+            source: Leaf("disk quota exceeded"),
+        };
+
+        assert_eq!(
+            chain_message(&error),
+            "wrapper failed: disk quota exceeded",
+            "the source's text must appear once, not twice"
+        );
+    }
+
+    #[test]
+    fn a_chain_three_levels_deep_still_reaches_its_root_cause() {
+        struct Middle {
+            source: Opaque,
+        }
+
+        impl std::fmt::Debug for Middle {
+            fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+                f.debug_struct("Middle").finish()
+            }
+        }
+
+        impl std::fmt::Display for Middle {
+            fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+                write!(f, "failed to send provider request: {}", self.source)
+            }
+        }
+
+        impl std::error::Error for Middle {
+            fn source(&self) -> Option<&(dyn std::error::Error + 'static)> {
+                Some(&self.source)
+            }
+        }
+
+        // `RuntimeError::FailedToSendRequest` wrapping `ProviderError::Transport`
+        // wrapping `reqwest::Error`: two levels interpolate cleanly into
+        // `Display`, and the third — the one that doesn't — is where the
+        // actual cause was hiding.
+        let error = Middle {
+            source: Opaque {
+                own_text: "provider transport error: error sending request for url (http://127.0.0.1:1/)",
+                source: Leaf("connection refused (os error 61)"),
+            },
+        };
+
+        assert_eq!(
+            chain_message(&error),
+            "failed to send provider request: provider transport error: error sending request for url (http://127.0.0.1:1/): connection refused (os error 61)"
+        );
+    }
+
+    #[test]
+    fn a_real_runtime_errors_already_complete_message_is_unchanged() {
+        // serde_json's `Display` is already the full story — message, line,
+        // and column — and its `source()` is written to skip back to
+        // whatever `Display` already showed rather than repeat it, the same
+        // shape as most of `RuntimeError`'s own variants. The chain walk must
+        // add nothing here, on a real mentra error rather than a synthetic one.
+        use mentra::error::RuntimeError;
+
+        let parse_error =
+            serde_json::from_str::<Value>("{").expect_err("truncated JSON does not parse");
+        let error = RuntimeError::FailedToSerializeTasks(parse_error);
+
+        assert_eq!(chain_message(&error), error.to_string());
     }
 }

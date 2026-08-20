@@ -353,6 +353,49 @@ async fn a_failing_turn_still_closes_the_stream() {
     );
 }
 
+/// `finish()` now renders the failure's source chain rather than calling
+/// `.to_string()` directly (see `chain_message` in `run/prepared.rs`), and
+/// this pins the ordinary case: a `ProviderError::Serialize` wraps a
+/// `serde_json::Error` whose own `Display` is already the complete story, so
+/// the chain walk has nothing to add and the report must read exactly as
+/// `to_string()` would have written it — no repeated clause, no dropped one.
+#[tokio::test]
+async fn a_failed_turns_message_is_unchanged_when_its_source_adds_nothing_new() {
+    let workspace = workspace_with_context("rules");
+    let scripted_failure = mentra::ProviderError::Serialize(
+        serde_json::from_str::<Value>("{").expect_err("truncated JSON does not parse"),
+    );
+    let expected =
+        mentra::error::RuntimeError::FailedToStreamResponse(mentra::ProviderError::Serialize(
+            serde_json::from_str::<Value>("{").expect_err("truncated JSON does not parse"),
+        ))
+        .to_string();
+
+    let mock = MockRuntime::builder()
+        .model("mock-model", "openai")
+        .with_policy(RuntimePolicy::permissive())
+        .failure(scripted_failure)
+        .build()
+        .expect("mock runtime builds");
+    let session = mock
+        .runtime()
+        .create_session("test", mock.model())
+        .expect("session");
+
+    let config = config(workspace.path(), "go");
+    let mut prepared =
+        prepare_with_session(session, &config, "openai", "mock-model").expect("prepared");
+    let report = prepared
+        .execute(CollectingSink::new())
+        .await
+        .expect("the run itself reports rather than erroring");
+
+    let RunOutcome::Error { message } = report.outcome else {
+        panic!("a scripted provider failure must fail the turn");
+    };
+    assert_eq!(message, expected);
+}
+
 /// A run whose deadline has already passed, so the bound trips on the first
 /// check rather than after a wall-clock wait.
 #[tokio::test]

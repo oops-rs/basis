@@ -110,7 +110,12 @@ pub enum TaskStatus {
 pub enum RunOutcome {
     /// The turn completed and the assistant produced a final message.
     Ok,
-    /// The run failed. `message` is the operator-facing reason.
+    /// The run failed. `message` is the operator-facing reason: the failure's
+    /// own words together with whatever its cause chain adds that those words
+    /// did not already say (see `chain_message` in `run/prepared.rs`) — so it
+    /// can read as more than the identically-worded [`Event::Error`], which
+    /// mentra builds from the bare message alone and puts on the stream for
+    /// the same failure.
     Error { message: String },
 }
 
