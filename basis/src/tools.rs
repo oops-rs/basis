@@ -17,26 +17,28 @@
 //! The third is MCP (`crate::mcp`), which is mentra's client behind a cargo
 //! feature and registers nothing of basis's own.
 //!
-//! # What is deliberately not here yet
+//! # The fourth: a host's own native tool
 //!
-//! There is still no `WorkspaceBuilder::with_tool`, and [`declared`] does not
-//! change that. Registering a tool basis *constructs* needs no public surface;
-//! a public one taking `impl ExecutableTool` is a larger commitment than it
-//! looks. mentra's `RuntimeBuilder::with_tool` takes its tool by value, nothing
-//! upstream implements the trait for `Box` or `Arc`, and so basis would have to
-//! hand-forward all seven of `ToolExecutor`'s methods — where forgetting
-//! `authorization_preview` would leave a host's tool presenting to the approver
-//! as something other than what it is. That is not a shim to write on the way
-//! past a security feature, and adding the method later is additive. The
-//! forwarding impls are asked of mentra itself
-//! ([oops-rs/mentra#22](https://github.com/oops-rs/mentra/issues/22)), where
-//! the trait's owner writes them once, beside the trait.
+//! [`RuntimeBuilder::with_tool`](crate::RuntimeBuilder::with_tool) registers a
+//! type the *embedding program* implements, in its own process — for a tool
+//! that needs context [`declared`]'s subprocesses cannot have: a client
+//! handle, a connection, which caller or conversation this call belongs to.
+//! Unlike [`declared`], nothing about the tool is data a repository reviews;
+//! the host's compiled code is the whole of what it does.
 //!
-//! The by-value signature costs [`declared`] nothing, because basis builds the
-//! `DeclaredTool` itself and hands mentra a value it owns. A host that wants
-//! its *own* type registered is the case still waiting, and ADR-0012's answer
-//! for now is that it declares the tool in a file, or lends basis a runtime and
-//! registers on mentra's surface directly.
+//! This does *not* hand-forward `ToolExecutor`'s methods to some boxed
+//! `dyn ExecutableTool` basis stores — nothing upstream implements the trait
+//! for `Box` or `Arc`, so a stored trait object was never how this works, and
+//! [oops-rs/mentra#22](https://github.com/oops-rs/mentra/issues/22) (adding
+//! those forwarding impls at the trait's owner) stays open and unneeded. What
+//! `with_tool` actually stores is a closure that captures the caller's
+//! concrete tool by value and applies it to mentra's own by-value
+//! `RuntimeBuilder::with_tool` at [`build`](crate::RuntimeBuilder::build)
+//! time — the concrete type is erased behind `FnOnce`, not behind the trait,
+//! so there is no forwarding impl to get right or wrong.
+//!
+//! Registered on the runtime, like `spawn` (ADR-0018's host scope): visible to
+//! every workspace and subagent that runtime opens, not to one session.
 
 pub mod declared;
 pub mod spawn;

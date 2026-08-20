@@ -11,6 +11,7 @@ use std::net::{TcpListener, TcpStream};
 use std::thread;
 
 use super::*;
+use crate::tools::SPAWN;
 
 fn read_http_request(stream: &mut TcpStream) -> String {
     let mut bytes = Vec::new();
@@ -281,6 +282,74 @@ fn the_shared_policy_grants_commands_with_workspace_bounded_patience() {
         "no roots: each agent is confined to its own base_dir, and no \
          workspace's root may widen another's: {printed}"
     );
+}
+
+/// A minimal native tool, standing in for whatever a host actually needs:
+/// close over an id, echo it back. Proves `with_tool` carries a concrete
+/// type through to mentra's own registry without basis touching its shape.
+struct Echo(&'static str);
+
+impl mentra::tool::ToolDefinition for Echo {
+    fn descriptor(&self) -> mentra::tool::RuntimeToolDescriptor {
+        mentra::tool::RuntimeToolDescriptor::builder(self.0)
+            .description("echoes its own name")
+            .input_schema(serde_json::json!({"type": "object", "properties": {}}))
+            .build()
+    }
+}
+
+#[async_trait::async_trait]
+impl mentra::tool::ToolExecutor for Echo {
+    async fn execute(
+        &self,
+        _ctx: mentra::tool::ParallelToolContext,
+        _input: serde_json::Value,
+    ) -> mentra::tool::ToolResult {
+        Ok(self.0.to_string())
+    }
+}
+
+#[test]
+fn a_host_tool_reaches_mentras_own_registry() {
+    // The whole point of `with_tool`: a type basis never defined, carried
+    // through build() by value, ends up exactly where `spawn` does.
+    let runtime = RuntimeBuilder::default()
+        .with_base_url("http://127.0.0.1:1/v1")
+        .with_api_key("test-key")
+        .with_ephemeral_history()
+        .with_tool(Echo("host_echo"))
+        .build()
+        .expect("builds offline");
+
+    let tools = runtime.mentra_runtime().tools();
+    assert!(
+        tools.iter().any(|tool| tool.provider.name == "host_echo"),
+        "a host tool registered via with_tool must reach mentra's own registry: {tools:?}"
+    );
+    assert!(
+        tools.iter().any(|tool| tool.provider.name == SPAWN),
+        "a host tool must not replace basis's own spawn: {tools:?}"
+    );
+}
+
+#[test]
+fn host_tools_register_in_the_order_they_were_added() {
+    let runtime = RuntimeBuilder::default()
+        .with_base_url("http://127.0.0.1:1/v1")
+        .with_api_key("test-key")
+        .with_ephemeral_history()
+        .with_tool(Echo("first"))
+        .with_tool(Echo("second"))
+        .build()
+        .expect("builds offline");
+
+    let tools = runtime.mentra_runtime().tools();
+    for name in ["first", "second"] {
+        assert!(
+            tools.iter().any(|tool| tool.provider.name == name),
+            "missing {name}: {tools:?}"
+        );
+    }
 }
 
 #[test]

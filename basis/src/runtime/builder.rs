@@ -55,6 +55,15 @@ pub struct RuntimeBuilder {
     history: Option<History>,
     interceptors: Vec<Arc<dyn Interceptor>>,
     command_environment: BTreeMap<String, String>,
+    /// Registrars for host-supplied tools, applied in [`build_with`](Self::build_with)
+    /// after basis's own `spawn`. A closure rather than a stored tool value
+    /// because mentra's own `with_tool` is generic over the concrete tool type
+    /// — nothing upstream implements `ExecutableTool` for `Box` or `Arc` (see
+    /// `crate::tools`'s module doc) — so the concrete type has to be captured
+    /// at the call site, in [`with_tool`](Self::with_tool), and erased behind
+    /// `FnOnce` instead of behind the trait it can't yet be boxed as.
+    host_tools:
+        Vec<Box<dyn FnOnce(mentra::RuntimeBuilder) -> mentra::RuntimeBuilder + Send + Sync>>,
 }
 
 /// What a caller said about where this runtime's conversations go.
@@ -110,6 +119,7 @@ impl Default for RuntimeBuilder {
             history: None,
             interceptors: Vec::new(),
             command_environment: BTreeMap::new(),
+            host_tools: Vec::new(),
         }
     }
 }
@@ -286,6 +296,37 @@ impl RuntimeBuilder {
         }
     }
 
+    /// Registers a tool the *host* implements, in the embedding program's own
+    /// process — mentra's `ExecutableTool`, not a [`crate::tools::declared`]
+    /// manifest entry.
+    ///
+    /// The gap this closes: `.basis/tools.json` gives a workspace's own repo a
+    /// tool, wrapping a subprocess that speaks JSON over stdio and sees
+    /// nothing beyond that JSON — no session, no caller identity, nothing the
+    /// host knows about the call it is answering. A host tool runs in the same
+    /// process as the code that is driving the run, so it can close over
+    /// whatever context that code already has (a client handle, a connection,
+    /// which conversation this is) instead of receiving it, or failing to.
+    ///
+    /// Registered on the runtime (ADR-0018's host scope), so — like `spawn` —
+    /// it is visible to every workspace and every subagent this runtime opens,
+    /// not to one session. A host that wants a tool visible to only *some*
+    /// workspaces still needs one runtime per audience; there is no per-
+    /// workspace host-tool registration yet.
+    pub fn with_tool<T>(self, tool: T) -> Self
+    where
+        T: mentra::tool::ExecutableTool + 'static,
+    {
+        Self {
+            host_tools: {
+                let mut host_tools = self.host_tools;
+                host_tools.push(Box::new(move |builder| builder.with_tool(tool)));
+                host_tools
+            },
+            ..self
+        }
+    }
+
     /// How long a command may run before it is killed.
     ///
     /// Two minutes by default, which suits the commands a harness usually runs
@@ -406,6 +447,15 @@ impl RuntimeBuilder {
             // build time only, and workspaces arrive later, through the
             // dispatcher (see `runtime::dispatch`).
             .with_pre_hook(DispatchHook(Arc::clone(&dispatch)));
+
+        // Host tools registered via `with_tool`, applied after basis's own
+        // `spawn` — order that matches every other builder chain above, where
+        // basis's fixed registrations run first and a caller's own choices
+        // build on top of them.
+        let builder = self
+            .host_tools
+            .into_iter()
+            .fold(builder, |builder, register| register(builder));
 
         let builder = if self.command_environment.is_empty() {
             builder
