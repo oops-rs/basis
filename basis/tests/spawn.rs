@@ -966,21 +966,12 @@ async fn a_pattern_rule_can_allow_a_command_on_one_target_and_not_another() {
     // destination can draw it — deliberately, in the pattern, rather than for
     // free.
     //
-    // And the trap it names beside it, which this test is written around
-    // rather than past. mentra globs with `glob-match`, where **no wildcard
-    // crosses `/`** — `**` included, unless it is a whole path segment. The
-    // serialized input is `{body, cwd, mode, target}` in key order, so a
-    // pattern reaching `target` has to get past `cwd`, which is an absolute
-    // path. `**"target":"mac"**` therefore matches *nothing*, and the operator
-    // sees a reviewer they thought they had bypassed rather than an error. The
-    // working spelling names the directory, which for a rule that grants a
-    // whole machine is the stricter thing to write anyway.
+    // Written with `**` rather than `*`, which is this repository's standing
+    // advice for a pattern globbed against this input: the serialized object
+    // carries `cwd`, which is a path, and `**` is the spelling that is safe
+    // whether or not the matcher reading it treats `/` as significant.
     let workspace = tempfile::tempdir().expect("tempdir");
     let executor = RecordingExecutor::default();
-    let on_mac_here = format!(
-        "**\"cwd\":\"{}\",\"mode\":\"command\",\"target\":\"mac\"}}",
-        workspace.path().display()
-    );
 
     let run = drive(
         workspace.path(),
@@ -992,7 +983,7 @@ async fn a_pattern_rule_can_allow_a_command_on_one_target_and_not_another() {
         .remembering(RememberedRule {
             key: RuleKey {
                 tool_name: SPAWN.to_string(),
-                pattern: Some(on_mac_here),
+                pattern: Some("**\"target\":\"mac\"**".to_string()),
             },
             allow: true,
             scope: PermissionRuleScope::Session,
@@ -1025,16 +1016,12 @@ async fn a_pattern_rule_can_allow_a_command_on_one_target_and_not_another() {
 }
 
 #[tokio::test]
-async fn a_target_pattern_that_does_not_name_the_directory_matches_nothing() {
-    // Pinned deliberately, because it is a trap and not a feature, and because
-    // an operator hits it as a *silent* miss: the rule is stored, matches
-    // nothing, and the reviewer they thought they had bypassed answers every
-    // call. mentra globs with `glob-match`, where no wildcard crosses `/`, and
-    // the serialized input carries `cwd` ahead of `target` in key order.
-    //
-    // If mentra ever globs this as data rather than as a path, this test fails
-    // loudly — which is the point: the docs claiming the short spelling works
-    // must not be written before it does.
+async fn a_target_pattern_answers_before_the_approver_is_reached() {
+    // The rung below the approver, on the new key: a rule that pins the
+    // destination answers first, so an allowlist for one machine costs no
+    // model round trip and the reviewer never sees the calls it covers. The
+    // sibling above shows the same rule declining to cover a different
+    // destination; this one shows it never reaching a person at all.
     let workspace = tempfile::tempdir().expect("tempdir");
     let executor = RecordingExecutor::default();
 
@@ -1051,15 +1038,16 @@ async fn a_target_pattern_that_does_not_name_the_directory_matches_nothing() {
                 scope: PermissionRuleScope::Session,
                 reason: None,
             }),
+        // The strictest approver there is, so this catches a pattern that
+        // failed to match as surely as one that matched too much.
         RefusesForGood,
     )
     .await;
 
-    assert_eq!(
-        run.asked.len(),
-        1,
-        "the short spelling cannot cross the slashes in `cwd`, so the rule \
-         answered nothing and the approver was asked after all"
+    assert!(
+        run.asked.is_empty(),
+        "a target the operator allowlisted must never reach the reviewer: {:?}",
+        run.asked
     );
-    assert!(executor.targets().is_empty(), "and the refusal held");
+    assert_eq!(executor.targets(), vec![Some("mac".to_string())]);
 }
