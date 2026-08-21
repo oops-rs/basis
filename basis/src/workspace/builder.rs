@@ -71,9 +71,15 @@ pub struct WorkspaceBuilder {
 
 /// Where this workspace's runtime comes from: borrowed from the host, or
 /// built privately from a recipe, bound to this workspace's path.
+///
+/// The recipe is boxed because it is two orders of magnitude larger than the
+/// `Arc` beside it — a provider, a credential, a history policy, an
+/// interceptor list, a command environment and a target map — and every
+/// `WorkspaceBuilder` would otherwise carry room for all of it whether or not
+/// it holds one.
 enum RuntimeSource {
     Shared(Arc<Runtime>),
-    Private(RuntimeBuilder),
+    Private(Box<RuntimeBuilder>),
 }
 
 /// Hand-written for the reason [`RuntimeBuilder`]'s is: the private recipe can
@@ -86,7 +92,7 @@ impl std::fmt::Debug for WorkspaceBuilder {
                 "runtime",
                 match &self.runtime {
                     RuntimeSource::Shared(runtime) => runtime,
-                    RuntimeSource::Private(recipe) => recipe,
+                    RuntimeSource::Private(recipe) => &**recipe,
                 },
             )
             .field("model", &self.model)
@@ -107,7 +113,7 @@ impl WorkspaceBuilder {
             // A private default runtime, so the one-repository host never sees
             // the third noun (ADR-0018): `Workspace::open(path)` behaves as it
             // always has.
-            runtime: RuntimeSource::Private(RuntimeBuilder::default()),
+            runtime: RuntimeSource::Private(Box::default()),
             model: None,
             context: ContextConfig::default(),
             skills: SkillsConfig::default(),
@@ -148,7 +154,7 @@ impl WorkspaceBuilder {
     /// and hands it here.
     pub fn with_runtime_builder(self, runtime: RuntimeBuilder) -> Self {
         Self {
-            runtime: RuntimeSource::Private(runtime),
+            runtime: RuntimeSource::Private(Box::new(runtime)),
             ..self
         }
     }

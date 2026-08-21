@@ -34,7 +34,7 @@
 
 pub(crate) mod builder;
 pub(crate) mod dispatch;
-mod environment;
+mod executor;
 
 use std::collections::HashMap;
 use std::path::{Path, PathBuf};

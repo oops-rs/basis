@@ -20,14 +20,22 @@ use mentra::{
 };
 
 use crate::{
-    approval::ApprovalGate, hooks::Interceptor, provider, run::RunError, shell::ShellAccess, store,
-    tools::SpawnTool,
+    approval::ApprovalGate,
+    hooks::Interceptor,
+    provider,
+    run::RunError,
+    shell::ShellAccess,
+    store,
+    tools::{
+        SpawnTool,
+        spawn::{LOCAL_TARGET, is_target_name},
+    },
 };
 
 use super::{
     Runtime,
     dispatch::{DispatchHook, HookDispatch},
-    environment::EnvironmentExecutor,
+    executor::{CommandTargets, TargetedExecutor},
 };
 
 /// The persist tag a shared runtime's own conversations carry until mentra can
@@ -55,6 +63,10 @@ pub struct RuntimeBuilder {
     history: Option<History>,
     interceptors: Vec<Arc<dyn Interceptor>>,
     command_environment: BTreeMap<String, String>,
+    /// The executors this runtime routes `!@<name>` commands to (ADR-0021).
+    /// Names are validated at [`build`](Self::build) rather than here, which
+    /// is where this builder answers every other piece of bad input.
+    command_targets: CommandTargets,
     /// Registrars for host-supplied tools, applied in [`build_with`](Self::build_with)
     /// after basis's own `spawn`. A closure rather than a stored tool value
     /// because mentra's own `with_tool` is generic over the concrete tool type
@@ -104,6 +116,13 @@ impl std::fmt::Debug for RuntimeBuilder {
                 "command_environment",
                 &self.command_environment.keys().collect::<Vec<_>>(),
             )
+            // Names, never executors: a host's executor closes over whatever
+            // reaches its machine — a key path, a token, a connection — and
+            // none of that belongs in a log line.
+            .field(
+                "command_targets",
+                &self.command_targets.keys().collect::<Vec<_>>(),
+            )
             .finish()
     }
 }
@@ -119,6 +138,7 @@ impl Default for RuntimeBuilder {
             history: None,
             interceptors: Vec::new(),
             command_environment: BTreeMap::new(),
+            command_targets: CommandTargets::new(),
             host_tools: Vec::new(),
         }
     }
@@ -367,6 +387,52 @@ impl RuntimeBuilder {
         self
     }
 
+    /// Registers an executor this runtime's commands can be routed to by name.
+    ///
+    /// ADR-0021. `spawn` is still the model's one door, and *where a command
+    /// runs* is a dimension of a call through it rather than a second tool:
+    /// `!@<name> <command>` reaches the executor registered here under `name`,
+    /// and a command with no `@` reaches the local one exactly as before. The
+    /// case this exists for is basis running inside a Linux container on a
+    /// macOS build machine, where `cargo test` belongs in the container and
+    /// `xcodebuild` does not exist there at all.
+    ///
+    /// **basis ships no executors and claims nothing about what one reaches.**
+    /// The host writes it — SSH to a forced command, `docker exec`, an agent
+    /// on a build box — and a target is exactly as trusted as that code.
+    /// `docs/targets.md` has the worked pattern, what the executor receives,
+    /// and the honesty this cannot be written without: routing a command
+    /// elsewhere is not confinement, and nothing here may be described as a
+    /// sandbox (ADR-0013).
+    ///
+    /// What the executor is handed is a `CommandRequest` with this runtime's
+    /// fixed command environment already merged, a timeout mentra has already
+    /// clamped, and the `target` name still on it, so one executor registered
+    /// under two names can tell which it was called as. The `cwd` is
+    /// **advisory**: it is a path in *this* process's filesystem, and what it
+    /// means on the far side is the executor's to decide.
+    ///
+    /// A later call with the same name replaces the earlier one, the same rule
+    /// [`with_command_environment`](Self::with_command_environment) follows.
+    /// Names are `[A-Za-z0-9_-]+` and may not be `local`, which is the wire
+    /// word for *here*; a name that breaks either rule is a
+    /// [`RunError::CommandTarget`] from [`build`](Self::build) rather than a
+    /// panic here, because a host reading its targets out of its own
+    /// configuration should be able to report a bad one the way it reports
+    /// every other bad setting.
+    ///
+    /// Runtime-scoped, for ADR-0018's reason and one of its own: a target that
+    /// changed per repository would be a different machine per repository,
+    /// which is not a thing a repository knows.
+    pub fn with_command_target(
+        mut self,
+        name: impl Into<String>,
+        executor: impl mentra::runtime::RuntimeExecutor + 'static,
+    ) -> Self {
+        self.command_targets.insert(name.into(), Arc::new(executor));
+        self
+    }
+
     /// Builds the workspace-agnostic runtime: the substrate an N-repository
     /// host hands to every [`WorkspaceBuilder::with_runtime`](crate::WorkspaceBuilder::with_runtime).
     ///
@@ -410,6 +476,11 @@ impl RuntimeBuilder {
     }
 
     fn build_with(self, identifier: String, policy: RuntimePolicy) -> Result<Runtime, RunError> {
+        // Before anything is resolved or assembled, because a name that cannot
+        // be routed on is a configuration mistake and not a runtime condition.
+        validate_target_names(&self.command_targets)?;
+        let target_names = self.command_targets.keys().cloned().collect::<Vec<_>>();
+
         let choice = provider::resolve_with(
             self.provider,
             self.base_url.as_deref(),
@@ -442,7 +513,14 @@ impl RuntimeBuilder {
             // runtime rather than on a session, because a subagent shares its
             // parent's runtime registry and `spawn` must reach the model at
             // every depth — the uniformity the ADR calls recursive.
-            .with_tool(SpawnTool::new())
+            //
+            // Told the target names, and only the names: the tool needs them to
+            // teach the `!@` prefix and to refuse one nothing registered, while
+            // *which executor* a name resolves to stays the runtime's business
+            // (ADR-0021). With none registered this is `SpawnTool::new()` in
+            // every observable respect, including that the model is never told
+            // the prefix exists.
+            .with_tool(SpawnTool::with_targets(target_names))
             // The one pre-hook basis registers, always: mentra takes hooks at
             // build time only, and workspaces arrive later, through the
             // dispatcher (see `runtime::dispatch`).
@@ -457,10 +535,16 @@ impl RuntimeBuilder {
             .into_iter()
             .fold(builder, |builder, register| register(builder));
 
-        let builder = if self.command_environment.is_empty() {
+        // Installed whenever either half has something to say. With both
+        // empty, mentra keeps its own local executor and basis adds no layer
+        // at all — the runtime a host that asked for neither has always had.
+        let builder = if self.command_environment.is_empty() && self.command_targets.is_empty() {
             builder
         } else {
-            builder.with_executor(EnvironmentExecutor::new(self.command_environment))
+            builder.with_executor(TargetedExecutor::new(
+                self.command_environment,
+                self.command_targets,
+            ))
         };
 
         // Left alone unless the caller said something, because mentra's default
@@ -496,6 +580,41 @@ impl RuntimeBuilder {
             declared_claims: Mutex::new(HashMap::new()),
         })
     }
+}
+
+/// Refuses a target name basis cannot route on, before a runtime is built
+/// around it.
+///
+/// Two rules, and both are about what the name has to survive downstream. It
+/// is glob-matched inside a serialized rule pattern and printed into refusals
+/// the model reads, so a name carrying a quote, a slash or a space would mean
+/// one thing to the operator who wrote the rule and another to the matcher
+/// reading it — hence the charset, which is the same predicate the `!@` parser
+/// applies, from the same function, so the two can never disagree about which
+/// names exist. And `local` is the wire word for *here*
+/// ([`LOCAL_TARGET`]), so a target answering to it would make
+/// `"target":"local"` mean two things in one field.
+fn validate_target_names(targets: &CommandTargets) -> Result<(), RunError> {
+    for name in targets.keys() {
+        if !is_target_name(name) {
+            return Err(RunError::CommandTarget {
+                name: name.clone(),
+                reason: "a target name is one or more of letters, digits, `_` and `-`".to_string(),
+            });
+        }
+
+        if name == LOCAL_TARGET {
+            return Err(RunError::CommandTarget {
+                name: name.clone(),
+                reason: format!(
+                    "`{LOCAL_TARGET}` is what the wire contract calls a command that names no \
+                     target, so nothing may be registered under it"
+                ),
+            });
+        }
+    }
+
+    Ok(())
 }
 
 /// The command posture a shared runtime grants: shell and background on, with

@@ -180,7 +180,7 @@ fn target(rest: &str) -> Result<Spawn, String> {
 /// refusals, so a name carrying a quote, a slash or a space would be a name
 /// that means one thing to an operator writing a rule and another to the
 /// matcher reading it.
-fn is_target_name(name: &str) -> bool {
+pub(crate) fn is_target_name(name: &str) -> bool {
     !name.is_empty()
         && name
             .chars()

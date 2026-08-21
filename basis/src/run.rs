@@ -516,6 +516,19 @@ pub enum RunError {
 
     #[error("failed to load declared tools: {0}")]
     Tools(#[from] crate::tools::declared::DeclaredToolError),
+
+    /// A command target name that cannot be routed on
+    /// ([`RuntimeBuilder::with_command_target`](crate::RuntimeBuilder::with_command_target),
+    /// ADR-0021).
+    ///
+    /// Raised by `build` rather than by a panic at the registering call,
+    /// because that is where this builder answers every other piece of bad
+    /// input — an unattributed credential is refused by `provider::resolve_with`
+    /// at exactly the same moment. A host reading its targets out of its own
+    /// configuration can then report a bad name the way it reports every other
+    /// bad setting, instead of losing the process to it.
+    #[error("`{name}` cannot be a command target name: {reason}")]
+    CommandTarget { name: String, reason: String },
 }
 
 /// Runs one prompt to completion, streaming events into `sink`.
