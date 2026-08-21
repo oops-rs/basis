@@ -22,7 +22,7 @@ use basis_acp::StdioError;
 use mentra::ModelSelector;
 
 use crate::{
-    bridge,
+    bridge, cli,
     cli::{AcpArgs, BridgeArgs},
     exit::{EXIT_FAILED, EXIT_OK, EXIT_USAGE},
 };
@@ -153,6 +153,13 @@ fn acp_config(args: AcpArgs) -> Result<basis_acp::ServeConfig, String> {
     }
 
     config = config.with_shell(ShellAccess::from_flag(!args.no_shell));
+
+    // Every session this server opens gets it: the operator started this
+    // process for a purpose, and a client that names a `cwd` is not thereby
+    // entitled to a different voice.
+    if let Some(system_prompt) = cli::system_prompt(args.system_prompt, args.append_system_prompt) {
+        config = config.with_system_prompt(system_prompt);
+    }
 
     if let Some(effort) = args.effort {
         config = config.with_effort(effort.into());

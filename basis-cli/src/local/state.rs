@@ -38,6 +38,17 @@ pub(crate) struct RunOptions {
     pub base_url: Option<String>,
     pub model: Option<String>,
     pub no_shell: bool,
+    /// The host's say over the system prompt, as the two flags spell it:
+    /// `system_prompt` replaces the workspace's context, `append_system_prompt`
+    /// follows it. Flattened rather than held as a `basis::SystemPrompt`
+    /// because that is what this record already does with an effort — and
+    /// because clap has refused both at once by the time either is written, so
+    /// the pair cannot disagree. Defaulted, so a `meta.json` written before
+    /// these existed still loads.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub system_prompt: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub append_system_prompt: Option<String>,
     pub effort: Option<String>,
     pub approve: String,
     pub deadline_ms: Option<u64>,
