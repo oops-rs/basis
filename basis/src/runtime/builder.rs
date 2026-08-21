@@ -33,7 +33,7 @@ use crate::{
 };
 
 use super::{
-    Runtime, RuntimeExecutor,
+    ProviderRetry, Runtime, RuntimeExecutor,
     dispatch::{DispatchHook, HookDispatch},
     executor::{CommandTargets, TargetedExecutor},
 };
@@ -63,6 +63,22 @@ pub struct RuntimeBuilder {
     history: Option<History>,
     interceptors: Vec<Arc<dyn Interceptor>>,
     command_environment: BTreeMap<String, String>,
+    /// How patiently a run waits out a failing provider
+    /// ([`with_provider_retry`](Self::with_provider_retry)).
+    ///
+    /// A plain value rather than an `Option`, unlike [`History`] below: *unset*
+    /// and *mentra's default* are the same schedule here, so there is nothing
+    /// for a `None` to mean that `ProviderRetry::default()` does not already
+    /// say. Applying it unconditionally therefore leaves a builder nobody
+    /// touched building exactly the `RunOptions` mentra would have.
+    provider_retry: ProviderRetry,
+    /// How many attempts that schedule gets
+    /// ([`with_provider_retry_budget`](Self::with_provider_retry_budget)).
+    ///
+    /// Separate from the field above because mentra keeps the two apart —
+    /// `RunOptions::retry_budget` is a bare count beside the typed schedule —
+    /// and seeded from mentra's own default for the same reason that one is.
+    provider_retry_budget: usize,
     /// The executors this runtime routes `!@<name>` commands to (ADR-0021).
     /// Names are validated at [`build`](Self::build) rather than here, which
     /// is where this builder answers every other piece of bad input.
@@ -112,6 +128,8 @@ impl std::fmt::Debug for RuntimeBuilder {
                     .map(|interceptor| interceptor.name())
                     .collect::<Vec<_>>(),
             )
+            .field("provider_retry", &self.provider_retry)
+            .field("provider_retry_budget", &self.provider_retry_budget)
             .field(
                 "command_environment",
                 &self.command_environment.keys().collect::<Vec<_>>(),
@@ -137,6 +155,8 @@ impl Default for RuntimeBuilder {
             model: ModelSelector::NewestAvailable,
             history: None,
             interceptors: Vec::new(),
+            provider_retry: ProviderRetry::default(),
+            provider_retry_budget: mentra::runtime::RunOptions::default().retry_budget,
             command_environment: BTreeMap::new(),
             command_targets: CommandTargets::new(),
             host_tools: Vec::new(),
@@ -192,6 +212,85 @@ impl RuntimeBuilder {
     /// the resolved id stays a [`Workspace`](crate::Workspace) fact (ADR-0018).
     pub fn with_model(self, model: ModelSelector) -> Self {
         Self { model, ..self }
+    }
+
+    /// How patiently every run minted on this runtime waits out a provider
+    /// that is failing transiently.
+    ///
+    /// mentra retries a transient provider error on a doubling backoff and
+    /// gives up when the budget runs out. Its default — five attempts, from
+    /// 500ms, capped at 5s — spends about **12.5 seconds** before the run
+    /// fails, which is tuned for a provider that hiccups and not for one that
+    /// is rate-limiting you: a gateway's 429 routinely names a window longer
+    /// than that, so the whole schedule elapses inside a limit that was never
+    /// going to lift, and the caller reads a provider failure where the honest
+    /// answer was *wait*.
+    ///
+    /// What a host knows that basis cannot is how long its own caller will
+    /// hold still. An interactive editor session should fail fast, because
+    /// somebody is watching a cursor blink; a chat bot whose turn already
+    /// takes eight minutes can afford to spend one of them waiting, and would
+    /// far rather do that than hand back an error the user has to re-ask. That
+    /// is the judgement this knob is for, and it is why the number is the
+    /// host's rather than a constant here.
+    ///
+    /// Runtime-scoped (ADR-0018) because it describes the *connection to the
+    /// provider* — the same kind of fact as the credential and the base URL
+    /// beside it, and not the kind of fact one prompt decides. Every run
+    /// [`Workspace`](crate::Workspace) mints on this runtime carries it, and
+    /// so does every subagent a run delegates to through
+    /// [`spawn`](crate::tools::spawn): a child that reset to the default would
+    /// be a delegated run quietly less patient than the run that delegated it,
+    /// against the same rate limit.
+    ///
+    /// Unset is exactly mentra's default, so a host that never calls this gets
+    /// the behavior it has always had. Takes mentra's own
+    /// [`ProviderRetry`] rather than a basis type — see the re-export in
+    /// [`crate::runtime`] for why there is only one spelling of this policy.
+    ///
+    /// **Not a deadline.** [`TurnOptions::with_deadline`](crate::TurnOptions::with_deadline)
+    /// still bounds the whole turn, and a generous schedule inside a short
+    /// deadline is bounded by the deadline. Set both, and set them knowingly.
+    ///
+    /// **Sets the waits, not the count.** mentra keeps *how many* attempts a
+    /// run gets on its own `RunOptions::retry_budget`, so widening the
+    /// schedule alone still gives up after five tries —
+    /// [`with_provider_retry_budget`](Self::with_provider_retry_budget) is the
+    /// other half, and the rate-limit case above needs both.
+    #[must_use]
+    pub fn with_provider_retry(self, provider_retry: ProviderRetry) -> Self {
+        Self {
+            provider_retry,
+            ..self
+        }
+    }
+
+    /// How many times a run minted here retries a transient provider error
+    /// before giving up. Five by default.
+    ///
+    /// The count half of [`with_provider_retry`](Self::with_provider_retry),
+    /// separate because mentra keeps the two apart: the schedule is a value
+    /// with a type, the count is a bare number on each run's options. They are
+    /// two knobs here rather than one because they are genuinely two questions
+    /// — *how long between tries* and *how many tries* — and because the
+    /// commonest adjustment is this one alone, which should not require
+    /// constructing a [`ProviderRetry`] to express.
+    ///
+    /// Worth doing the arithmetic before choosing: with the default schedule
+    /// the waits double from 500ms to a 5s ceiling, so raising the count from
+    /// five to eight buys about 27 seconds rather than the minute a rate-limit
+    /// window usually wants. Widening the schedule is what makes a larger
+    /// count worth having.
+    ///
+    /// Runtime-scoped and inherited by delegated runs, exactly as the schedule
+    /// is; see [`with_provider_retry`](Self::with_provider_retry) for why that
+    /// scope is the right one.
+    #[must_use]
+    pub fn with_provider_retry_budget(self, budget: usize) -> Self {
+        Self {
+            provider_retry_budget: budget,
+            ..self
+        }
     }
 
     /// Keeps this runtime's conversations in `dir` rather than in the
@@ -593,6 +692,8 @@ impl RuntimeBuilder {
             provider: choice.provider,
             provider_label: ProviderId::from(choice.provider).to_string(),
             model: self.model,
+            provider_retry: self.provider_retry,
+            provider_retry_budget: self.provider_retry_budget,
             dispatch,
             levels,
             #[cfg(feature = "mcp")]

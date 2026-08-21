@@ -366,6 +366,12 @@ impl Workspace {
         // `prepare` and `resume` go through, so the two cannot disagree about
         // whether a run's requests carry it.
         .with_side_effect_levels(self.runtime.side_effect_levels())
+        // The runtime's answer to how patiently a failing provider is waited
+        // out, for the same reason and in the same place: it describes the
+        // provider connection this workspace borrows (ADR-0018), and mentra
+        // takes it per run, so the mint is where a runtime-scoped knob becomes
+        // a per-run option.
+        .with_provider_retry(self.runtime.provider_retry())
     }
 }
 

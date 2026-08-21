@@ -106,6 +106,14 @@ fn read_back(output: CommandOutput) -> ToolResult {
 /// first round boundary with nothing said, which mentra reports as
 /// `EmptyAssistantResponse` — a failed tool call the model reads, rather than
 /// an empty answer it might believe.
+///
+/// Those options also carry the runtime's provider retry schedule and its
+/// budget, which is what keeps a delegated run as patient as the run that
+/// delegated it: a subagent that reset to mentra's default would give up after
+/// twelve and a half seconds against the same rate limit its parent was told
+/// to wait a minute for. basis sets that schedule once, on the runtime
+/// ([`RuntimeBuilder::with_provider_retry`](crate::RuntimeBuilder::with_provider_retry)),
+/// and mentra's `RunOptions::child` carries it here.
 pub(super) async fn delegate(
     ledger: &Depth,
     ctx: &mut ToolContext<'_>,

@@ -7,7 +7,7 @@
 
 use std::time::{Duration, SystemTime};
 
-use mentra::runtime::{CancellationToken, RunOptions};
+use mentra::runtime::{CancellationToken, ProviderRetry, RunOptions};
 
 use super::RunError;
 use crate::budget::BudgetPool;
@@ -160,13 +160,25 @@ impl TurnOptions {
         }
     }
 
-    pub(super) fn into_run_options(self) -> RunOptions {
+    /// `provider_retry` and `retry_budget` are the *runtime's*, not this
+    /// turn's: how patiently a failing provider is waited out describes the
+    /// provider connection (ADR-0018), so both arrive from
+    /// [`Runtime`](crate::Runtime) through the run rather than from knobs on
+    /// this type. They are parameters rather than fields for exactly that
+    /// reason — a `TurnOptions` a caller built has no business carrying them.
+    pub(super) fn into_run_options(
+        self,
+        provider_retry: ProviderRetry,
+        retry_budget: usize,
+    ) -> RunOptions {
         let options = RunOptions {
             cancellation: self.cancel,
             stop: self.stop,
             deadline: self.deadline.map(|after| SystemTime::now() + after),
             tool_budget: self.tool_budget,
             token_budget: self.token_budget,
+            provider_retry,
+            retry_budget,
             ..RunOptions::default()
         };
 
@@ -228,6 +240,15 @@ pub(super) fn drawable(options: &TurnOptions) -> Result<(), RunError> {
 mod tests {
     use super::*;
     use crate::run::RunUsage;
+
+    /// Builds the mentra options for a turn whose provider connection is
+    /// nobody's business here: every test below is about a *bound*, and the
+    /// retry schedule beside it is the runtime's
+    /// ([`RuntimeBuilder::with_provider_retry`](crate::RuntimeBuilder::with_provider_retry)),
+    /// asserted where it is set rather than restated in each of these.
+    fn as_mentra_would(options: TurnOptions) -> RunOptions {
+        options.into_run_options(ProviderRetry::default(), RunOptions::default().retry_budget)
+    }
 
     #[test]
     fn attaching_a_token_does_not_unbound_a_configured_run() {
@@ -320,7 +341,7 @@ mod tests {
         let pool = BudgetPool::new(500_000);
         let options = TurnOptions::default().with_budget(pool.clone());
 
-        assert_eq!(options.into_run_options().token_budget, Some(500_000));
+        assert_eq!(as_mentra_would(options).token_budget, Some(500_000));
     }
 
     #[test]
@@ -329,9 +350,7 @@ mod tests {
         // counter, each run would get the pool's limit to itself and the job
         // would cost N times what was asked for.
         let pool = BudgetPool::new(1_000);
-        let run_options = TurnOptions::default()
-            .with_budget(pool.clone())
-            .into_run_options();
+        let run_options = as_mentra_would(TurnOptions::default().with_budget(pool.clone()));
 
         pool.record(RunUsage {
             input_tokens: 300,
@@ -350,12 +369,8 @@ mod tests {
         // Two unpooled runs must not accidentally share accounting, which they
         // would if basis reused one handle instead of letting mentra's default
         // mint a fresh one per turn.
-        let first = TurnOptions::default()
-            .with_token_budget(100)
-            .into_run_options();
-        let second = TurnOptions::default()
-            .with_token_budget(100)
-            .into_run_options();
+        let first = as_mentra_would(TurnOptions::default().with_token_budget(100));
+        let second = as_mentra_would(TurnOptions::default().with_token_budget(100));
 
         assert!(!std::sync::Arc::ptr_eq(
             &first.token_usage,
@@ -378,12 +393,12 @@ mod tests {
         let capped = TurnOptions::default()
             .with_budget(pool.clone())
             .with_token_budget(50_000);
-        assert_eq!(capped.into_run_options().token_budget, Some(250_000));
+        assert_eq!(as_mentra_would(capped).token_budget, Some(250_000));
 
         let generous = TurnOptions::default()
             .with_budget(pool)
             .with_token_budget(u64::MAX);
-        assert_eq!(generous.into_run_options().token_budget, Some(500_000));
+        assert_eq!(as_mentra_would(generous).token_budget, Some(500_000));
     }
 
     #[test]

@@ -66,6 +66,17 @@ pub use mentra::runtime::{
     CommandOutput, CommandRequest, CommandSpec, LocalRuntimeExecutor, RuntimeExecutor,
 };
 
+/// How patiently a run waits out a provider that is failing transiently, as
+/// [`RuntimeBuilder::with_provider_retry`] takes it.
+///
+/// Mentra's own type, re-exported under the rule on
+/// [`CancellationToken`](crate::CancellationToken): the builder makes a host
+/// *name* this to call the method, so basis re-exports it rather than sending
+/// the host to its own `mentra` dependency and a version pin that can skew.
+/// basis defines no schedule of its own — a parallel type here would be two
+/// spellings of one policy, and mentra is the half that does the sleeping.
+pub use mentra::runtime::ProviderRetry;
+
 use crate::{approval::SideEffectLevels, run::RunError};
 
 use dispatch::{HookDispatch, HookRegistration, WorkspaceGuardEntry};
@@ -97,6 +108,21 @@ pub struct Runtime {
     /// The default model *policy*; a workspace may override the selector, and
     /// the resolved id is always the workspace's own fact.
     model: ModelSelector,
+    /// How patiently every run minted here waits out a failing provider, from
+    /// [`RuntimeBuilder::with_provider_retry`].
+    ///
+    /// Runtime-scoped for ADR-0018's reason: it describes the *connection* to
+    /// the provider, like the credential and the base URL beside it, and not
+    /// what one prompt may spend. Kept here because mentra takes it on each
+    /// run's options rather than on its runtime, so this is the value every
+    /// [`PreparedRun`](crate::PreparedRun) minted on this runtime copies.
+    provider_retry: ProviderRetry,
+    /// How many attempts that schedule gets, from
+    /// [`RuntimeBuilder::with_provider_retry_budget`]. Kept beside the
+    /// schedule and travelling with it for the same reason: mentra splits the
+    /// count from the waits, and a runtime that widened one without the other
+    /// would be half a statement.
+    provider_retry_budget: usize,
     /// The one pre-hook basis registered, and the registry workspaces join.
     dispatch: Arc<HookDispatch>,
     /// The reading end of the approval gate's side channel, handed to every run
@@ -162,6 +188,16 @@ impl Runtime {
     /// string — what every run from every workspace on it reports.
     pub fn provider(&self) -> &str {
         &self.provider_label
+    }
+
+    /// The retry schedule and attempt count every run minted on this runtime
+    /// carries.
+    ///
+    /// Read at mint by `Workspace::minted`, which is what makes a
+    /// runtime-scoped knob reach a per-run option. The two travel together
+    /// because they are one statement about one provider connection.
+    pub(crate) fn provider_retry(&self) -> (ProviderRetry, usize) {
+        (self.provider_retry, self.provider_retry_budget)
     }
 
     /// Resolves the model a workspace will use: its own override when it has

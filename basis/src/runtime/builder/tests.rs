@@ -527,3 +527,165 @@ fn a_runtime_with_no_targets_never_mentions_the_prefix() {
         "a door that is not there must not be advertised: {described}"
     );
 }
+
+/// A schedule visibly unlike mentra's default in every field, so a test that
+/// finds it somewhere knows it travelled rather than coincided.
+fn patient() -> ProviderRetry {
+    ProviderRetry {
+        base_delay: std::time::Duration::from_secs(2),
+        max_delay: std::time::Duration::from_secs(30),
+        retry_after_cap: std::time::Duration::from_secs(120),
+    }
+}
+
+#[test]
+fn a_retry_schedule_and_its_budget_reach_the_runtime_together() {
+    // They are one statement about one provider connection, set by two knobs
+    // because mentra keeps the count and the waits apart. A runtime that
+    // carried one and dropped the other would be half of what the host said.
+    let runtime = offline()
+        .with_provider_retry(patient())
+        .with_provider_retry_budget(9)
+        .build()
+        .expect("builds offline");
+
+    assert_eq!(runtime.provider_retry(), (patient(), 9));
+}
+
+#[test]
+fn an_untouched_builder_retries_exactly_as_mentra_would() {
+    // The load-bearing default. basis applies the schedule unconditionally, so
+    // if this ever drifted from mentra's own, every run basis mints would
+    // silently retry on a schedule nobody chose.
+    let runtime = offline().build().expect("builds offline");
+    let mentra_default = mentra::runtime::RunOptions::default();
+
+    assert_eq!(
+        runtime.provider_retry(),
+        (mentra_default.provider_retry, mentra_default.retry_budget),
+        "an unset builder must reproduce mentra's own schedule and count"
+    );
+}
+
+#[test]
+fn the_last_word_about_retrying_is_the_one_that_counts() {
+    // The rule every single-valued knob on this builder follows, restated for
+    // these two because a helper handing out patient builders has to be
+    // overridable by a caller that wants to fail fast.
+    let builder = RuntimeBuilder::default()
+        .with_provider_retry(patient())
+        .with_provider_retry_budget(9)
+        .with_provider_retry(ProviderRetry::default())
+        .with_provider_retry_budget(2);
+
+    assert_eq!(builder.provider_retry, ProviderRetry::default());
+    assert_eq!(builder.provider_retry_budget, 2);
+}
+
+#[test]
+fn the_retry_schedule_is_named_in_the_debug_view() {
+    // The Debug impl is hand-written to keep a credential out of a log, so
+    // each new field has to be added to it deliberately.
+    let printed = format!(
+        "{:?}",
+        RuntimeBuilder::default().with_provider_retry(patient())
+    );
+
+    assert!(printed.contains("provider_retry"), "{printed}");
+    assert!(printed.contains("provider_retry_budget"), "{printed}");
+    assert!(
+        printed.contains("30s"),
+        "the chosen ceiling should print: {printed}"
+    );
+}
+
+/// A workspace on `runtime` over an empty directory, looking nowhere except
+/// where this test put something — the same pinning `tests/workspace.rs`
+/// explains, so no developer's real global config can reach these assertions.
+async fn workspace_on(runtime: std::sync::Arc<Runtime>, root: &Path) -> crate::Workspace {
+    crate::Workspace::builder(root)
+        .with_runtime(runtime)
+        // An id rather than `NewestAvailable`, which would ask the provider
+        // for a model list and so reach the closed port `offline()` names.
+        .with_model(ModelSelector::Id("test-model".to_string()))
+        .with_context(crate::ContextConfig {
+            file_name: "AGENTS.md".to_string(),
+            global_dir: None,
+            walk_parents: false,
+        })
+        .with_skills(crate::SkillsConfig {
+            workspace_subdir: PathBuf::from(".basis/skills"),
+            global_dir: None,
+        })
+        .with_templates(crate::TemplatesConfig {
+            workspace_subdir: PathBuf::from(".basis/templates"),
+            global_dir: None,
+        })
+        .open()
+        .await
+        .expect("a pinned workspace opens offline")
+}
+
+#[tokio::test]
+async fn a_prepared_runs_options_carry_the_runtimes_retry_schedule() {
+    // The end of the wiring, and the only assertion that proves the knob does
+    // anything: a runtime-scoped value has to survive the mint and land on the
+    // `RunOptions` a turn is actually driven on.
+    let dir = tempfile::tempdir().expect("tempdir");
+    let runtime = std::sync::Arc::new(
+        offline()
+            .with_provider_retry(patient())
+            .with_provider_retry_budget(9)
+            .build()
+            .expect("builds offline"),
+    );
+
+    let workspace = workspace_on(runtime, dir.path()).await;
+    let run = workspace.prepare("go").expect("mints");
+    let options = run.run_options(crate::TurnOptions::default());
+
+    assert_eq!(options.provider_retry, patient());
+    assert_eq!(options.retry_budget, 9);
+}
+#[tokio::test]
+async fn a_delegated_runs_options_carry_it_too() {
+    // `spawn`'s delegation drives its subagent on `ToolContext::child_run_options`
+    // — mentra's `RunOptions::child` — so a delegated run is exactly as patient
+    // as the run that delegated it. That is not basis's code to get right, it
+    // is basis's dependency: a `child` that reset these to the default would
+    // make a subagent give up after twelve and a half seconds against the same
+    // rate limit its parent was told to wait a minute for, and nothing in basis
+    // would say so. Pinned here rather than assumed.
+    let dir = tempfile::tempdir().expect("tempdir");
+    let runtime = std::sync::Arc::new(
+        offline()
+            .with_provider_retry(patient())
+            .with_provider_retry_budget(9)
+            .build()
+            .expect("builds offline"),
+    );
+
+    let workspace = workspace_on(runtime, dir.path()).await;
+    let run = workspace.prepare("go").expect("mints");
+    let child = run.run_options(crate::TurnOptions::default()).child();
+
+    assert_eq!(child.provider_retry, patient());
+    assert_eq!(child.retry_budget, 9);
+}
+
+#[tokio::test]
+async fn a_run_on_an_untouched_runtime_is_left_exactly_as_it_was() {
+    // The other half of the default claim, asserted where it matters: not just
+    // that the runtime holds mentra's numbers, but that a run minted from one
+    // is indistinguishable from a run whose options basis never touched.
+    let dir = tempfile::tempdir().expect("tempdir");
+    let runtime = std::sync::Arc::new(offline().build().expect("builds offline"));
+
+    let workspace = workspace_on(runtime, dir.path()).await;
+    let run = workspace.prepare("go").expect("mints");
+    let options = run.run_options(crate::TurnOptions::default());
+    let untouched = mentra::runtime::RunOptions::default();
+
+    assert_eq!(options.provider_retry, untouched.provider_retry);
+    assert_eq!(options.retry_budget, untouched.retry_budget);
+}

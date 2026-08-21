@@ -11,7 +11,7 @@ use std::{path::PathBuf, sync::Arc};
 
 use mentra::{
     ContentBlock, Session,
-    runtime::{EarlyEnd, RunOptions},
+    runtime::{EarlyEnd, ProviderRetry, RunOptions},
 };
 use serde::de::DeserializeOwned;
 use serde_json::Value;
@@ -83,6 +83,21 @@ pub struct PreparedRun {
     /// run whose caller never wired one, which costs the run nothing but the
     /// level on each [`ApprovalRequest`](crate::ApprovalRequest).
     levels: SideEffectLevels,
+    /// How patiently this run's turns wait out a failing provider, copied from
+    /// the [`Runtime`](crate::Runtime) that minted it.
+    ///
+    /// A per-run field for a runtime-scoped knob because that is the shape
+    /// mentra offers: the schedule rides on `RunOptions`, so a runtime's
+    /// answer has to be carried to each run rather than set once upstream.
+    /// [`Workspace`](crate::Workspace) puts it here at mint; a caller on the
+    /// [`prepare_with_session`](super::prepare_with_session) path built the
+    /// mentra runtime itself and gets mentra's default, which is the only
+    /// honest answer when basis was never told about a provider connection.
+    provider_retry: ProviderRetry,
+    /// How many attempts that schedule gets, carried from the same runtime and
+    /// for the same reason. mentra splits the count from the waits; basis
+    /// keeps them together, because a host set them as one policy.
+    retry_budget: usize,
 }
 
 /// Hand-written because mentra's `Session` is not `Debug`, and because the
@@ -111,7 +126,36 @@ impl PreparedRun {
             bounds: TurnOptions::default(),
             workspace: None,
             levels: SideEffectLevels::new(),
+            provider_retry: ProviderRetry::default(),
+            retry_budget: RunOptions::default().retry_budget,
         }
+    }
+
+    /// Carries the minting runtime's provider retry schedule onto this run.
+    ///
+    /// Set by [`Workspace`](crate::Workspace) at mint, at the one place both
+    /// `prepare` and `resume` go through, so two runs from one runtime cannot
+    /// disagree about how patient they are.
+    pub(crate) fn with_provider_retry(
+        self,
+        (provider_retry, retry_budget): (ProviderRetry, usize),
+    ) -> Self {
+        Self {
+            provider_retry,
+            retry_budget,
+            ..self
+        }
+    }
+
+    /// The mentra options one turn runs on: what the caller asked for, filled
+    /// in from this run's bounds by the caller, plus the runtime's retry
+    /// schedule.
+    ///
+    /// The one place basis composes a [`RunOptions`], so the untyped and typed
+    /// turns below cannot drift about what a turn carries — and so a test can
+    /// read the same value a turn is about to be driven on.
+    pub(crate) fn run_options(&self, options: TurnOptions) -> RunOptions {
+        options.into_run_options(self.provider_retry, self.retry_budget)
     }
 
     /// Sets what every turn on this run may spend.
@@ -526,7 +570,7 @@ impl PreparedRun {
         // Kept rather than passed straight in: mentra takes the options by
         // value, and the clone is how the run's own account of why it ended
         // gets back here. See [`ended_on`].
-        let run_options = options.into_run_options();
+        let run_options = self.run_options(options);
         let observed = run_options.clone();
 
         let result = self
@@ -567,7 +611,7 @@ impl PreparedRun {
         // The same clone the untyped turn keeps, for the same reason: a typed
         // turn is boundable like any other and owes the same account of why it
         // ended.
-        let run_options = options.into_run_options();
+        let run_options = self.run_options(options);
         let observed = run_options.clone();
 
         let result = self
