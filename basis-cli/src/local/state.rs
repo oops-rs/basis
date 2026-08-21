@@ -13,6 +13,7 @@ use std::{
     time::{SystemTime, UNIX_EPOCH},
 };
 
+use basis::RunUsage;
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
 
@@ -109,6 +110,23 @@ pub(crate) struct TaskMeta {
     pub workspace: String,
     /// The mentra resume key; empty until the first attach prepares the run.
     pub agent_id: String,
+    /// The conversation this task was told to pick up, when `spawn` was given
+    /// `--continue` or `--session`. The first attach resumes it instead of
+    /// minting one, which is what lets a new handle carry an old dialogue —
+    /// and why continuing a settled task is a new task rather than a message
+    /// to a closed inbox (ADR-0019).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub continues: Option<String>,
+    /// How many assistant turns the conversation already held when this task
+    /// first attached to it.
+    ///
+    /// Zero for a task that opened its own conversation. Nonzero only for a
+    /// continued one, where the previous answers are on the transcript from
+    /// the very first turn — and where the resume recovery in `attach` would
+    /// otherwise read one of them as this task's own answer and settle
+    /// `succeeded` without ever asking its prompt.
+    #[serde(default)]
+    pub answered_before: usize,
     pub prompt: String,
     pub options: RunOptions,
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -117,6 +135,14 @@ pub(crate) struct TaskMeta {
     pub result_truncated: bool,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub stopped_by: Option<String>,
+    /// What every turn this task has driven reported spending, summed.
+    ///
+    /// Kept in `meta.json` rather than recomputed from the event journal
+    /// because a task outlives the process that drove it: two attaches, each
+    /// running turns, both add to one tally, and the journal may have been
+    /// capped ([`MAX_EVENTS_BYTES`]) long before anyone asks.
+    #[serde(default)]
+    pub usage: RunUsage,
     pub deadline_at_ms: Option<u64>,
     pub created_ms: u64,
     pub updated_ms: u64,
@@ -139,14 +165,31 @@ impl TaskMeta {
             detached,
             workspace,
             agent_id: String::new(),
+            continues: None,
+            answered_before: 0,
             prompt,
             options,
             pending_terminal: None,
             result_truncated: false,
             stopped_by: None,
+            usage: RunUsage::default(),
             deadline_at_ms,
             created_ms: now,
             updated_ms: now,
+        }
+    }
+
+    /// Records the conversation this task continues, when it continues one.
+    ///
+    /// A field rather than a pre-set `agent_id`, because the two mean
+    /// different things to the executor: `agent_id` says *this task has
+    /// attached before*, and taking a continued conversation for a resumed
+    /// one is how a task settles on someone else's answer.
+    #[must_use]
+    pub(crate) fn continuing(self, agent_id: Option<String>) -> Self {
+        Self {
+            continues: agent_id,
+            ..self
         }
     }
 
@@ -172,13 +215,27 @@ impl TaskMeta {
             ),
             PendingTerminal::Cancelled => serde_json::json!({"state": "cancelled"}),
         };
-        Some(payload)
+        Some(with_usage(payload, self.usage))
     }
 }
 
 fn with_stopped_by(mut payload: Value, stopped_by: Option<&str>) -> Value {
     if let Some(stopped_by) = stopped_by {
         payload["stopped_by"] = Value::String(stopped_by.to_string());
+    }
+    payload
+}
+
+/// Adds what the task spent, when it spent anything.
+///
+/// A record that names no usage is a task whose turns reported none — a
+/// cancellation that never reached the model is the ordinary case — and a
+/// `usage` object full of zeros would claim a measurement nobody made. The
+/// same rule the finish line follows (`Event::RunFinished::usage`), so the
+/// stream and the record cannot disagree.
+fn with_usage(mut payload: Value, usage: RunUsage) -> Value {
+    if usage != RunUsage::default() {
+        payload["usage"] = serde_json::json!(usage);
     }
     payload
 }
@@ -341,6 +398,38 @@ mod tests {
             serde_json::json!({"state": "cancelled"}),
             "a cancelled terminal never reports a bound"
         );
+    }
+
+    /// The terminal record is what `basis wait --json` and `basis list --json`
+    /// read, and it is the only place a settled task's cost survives: the
+    /// event journal can be capped, and the process that spent the tokens is
+    /// gone.
+    #[test]
+    fn a_settled_task_records_what_it_spent_only_when_it_spent_something() {
+        let dir = tempfile::tempdir().unwrap();
+        let paths = agent(&dir);
+        let mut record = meta(&paths);
+        record.pending_terminal = Some(PendingTerminal::Succeeded {
+            result: "done".to_string(),
+        });
+
+        assert_eq!(
+            record.terminal_payload().unwrap(),
+            serde_json::json!({"state": "succeeded", "result": "done"}),
+            "a task whose turns reported nothing claims no measurement"
+        );
+
+        record.usage = RunUsage {
+            input_tokens: 900,
+            output_tokens: 100,
+            cache_read_tokens: 7,
+            cache_creation_tokens: 3,
+        };
+        let payload = record.terminal_payload().unwrap();
+        assert_eq!(payload["usage"]["input_tokens"], 900);
+        assert_eq!(payload["usage"]["output_tokens"], 100);
+        assert_eq!(payload["usage"]["cache_read_tokens"], 7);
+        assert_eq!(payload["usage"]["cache_creation_tokens"], 3);
     }
 
     #[test]

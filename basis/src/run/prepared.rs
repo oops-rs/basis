@@ -867,9 +867,13 @@ impl PreparedRun {
             ),
         };
 
+        // Stated even when every counter is zero: this producer *did* report,
+        // and "the provider said nothing" is a fact worth being able to read
+        // off the line rather than infer from its absence.
         sink.emit(Event::RunFinished {
             outcome: outcome.clone(),
             stopped_by,
+            usage: Some(usage),
         })?;
 
         Ok(RunReport {

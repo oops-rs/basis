@@ -631,6 +631,23 @@ async fn a_plain_turn_reports_what_it_spent_too() {
 
     assert!(report.succeeded());
     assert_eq!(report.usage.total_tokens(), 100);
+
+    // And the same figure closes the stream, because a consumer that only
+    // ever sees JSONL — `basis spawn --json`, `basis watch` — has no report to
+    // read it off. Asserted on the serialized line rather than the enum: the
+    // wire shape is the contract, and `usage` is the field a host prices a
+    // run from.
+    let finish = serde_json::to_value(
+        report
+            .sink
+            .into_events()
+            .pop()
+            .expect("the stream closes with a finish line"),
+    )
+    .expect("serializes");
+    assert_eq!(finish["type"], "run_finished");
+    assert_eq!(finish["usage"]["input_tokens"], 90);
+    assert_eq!(finish["usage"]["output_tokens"], 10);
 }
 
 #[tokio::test]

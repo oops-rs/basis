@@ -315,6 +315,22 @@ pub enum Event {
         /// schema-1 consumer that never heard of it reads the line unchanged.
         #[serde(skip_serializing_if = "Option::is_none", default)]
         stopped_by: Option<crate::run::Bound>,
+        /// What the run reported spending, summed over its rounds — the same
+        /// figure [`RunReport::usage`](crate::RunReport) carries in-process,
+        /// for the consumers that only ever see the stream.
+        ///
+        /// It rides the finish line because a total is only a total once the
+        /// run is over; the per-round [`Event::Usage`] reports are still there
+        /// for anyone metering as it goes. basis ships no price table — that
+        /// is the host's, and prices change — so this is the last basis-side
+        /// fact between a run and a bill.
+        ///
+        /// Absent, not zero, when the producer stated nothing: an old stream
+        /// and a run that cost nothing are different claims, and only one of
+        /// them is worth acting on. Optional and additive, so
+        /// [`EVENT_SCHEMA_VERSION`] does not move for it.
+        #[serde(skip_serializing_if = "Option::is_none", default)]
+        usage: Option<crate::run::RunUsage>,
     },
 }
 
@@ -423,6 +439,7 @@ mod tests {
             Event::RunFinished {
                 outcome: RunOutcome::Ok,
                 stopped_by: None,
+                usage: None,
             },
         ))
         .expect("serializes");
@@ -442,11 +459,67 @@ mod tests {
                     message: "boom".to_string(),
                 },
                 stopped_by: None,
+                usage: None,
             },
         ))
         .expect("serializes");
         assert_eq!(failed["status"], "error");
         assert_eq!(failed["message"], "boom");
+    }
+
+    /// The counts a consumer needs to price a run, on the line that says the
+    /// run is over. basis ships no price table, and that argument only holds
+    /// if the numbers arrive: until now the total existed in-process
+    /// (`RunReport::usage`) and nowhere on the wire.
+    ///
+    /// Optional and additive, which is why [`EVENT_SCHEMA_VERSION`] does not
+    /// move: an absent `usage` means a producer that reported none, and a
+    /// schema-1 reader that ignores the key reads the line exactly as before.
+    #[test]
+    fn a_finish_line_reports_what_the_run_spent() {
+        let line = serde_json::to_value(EventLine::new(
+            4,
+            Event::RunFinished {
+                outcome: RunOutcome::Ok,
+                stopped_by: None,
+                usage: Some(crate::RunUsage {
+                    input_tokens: 12_300,
+                    output_tokens: 1_200,
+                    cache_read_tokens: 40,
+                    cache_creation_tokens: 5,
+                }),
+            },
+        ))
+        .expect("serializes");
+
+        assert_eq!(line["usage"]["input_tokens"], 12_300);
+        assert_eq!(line["usage"]["output_tokens"], 1_200);
+        assert_eq!(line["usage"]["cache_read_tokens"], 40);
+        assert_eq!(line["usage"]["cache_creation_tokens"], 5);
+
+        let unreported = serde_json::to_value(EventLine::new(
+            4,
+            Event::RunFinished {
+                outcome: RunOutcome::Ok,
+                stopped_by: None,
+                usage: None,
+            },
+        ))
+        .expect("serializes");
+        assert!(
+            !unreported
+                .as_object()
+                .expect("an object")
+                .contains_key("usage"),
+            "a producer that reported nothing says nothing, and the line keeps its schema-1 shape"
+        );
+
+        let read_back: EventLine =
+            serde_json::from_value(unreported).expect("a line without usage still parses");
+        assert!(matches!(
+            read_back.event,
+            Event::RunFinished { usage: None, .. }
+        ));
     }
 
     #[test]
@@ -460,6 +533,7 @@ mod tests {
             Event::RunFinished {
                 outcome: RunOutcome::Ok,
                 stopped_by: Some(crate::run::Bound::TokenBudget),
+                usage: None,
             },
         ))
         .expect("serializes");
