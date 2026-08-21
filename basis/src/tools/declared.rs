@@ -70,6 +70,29 @@
 //! and `env`, with `${VAR:-default}` as in a shell, which is how a credential
 //! reaches the program without being written in a file people commit.
 //!
+//! # What the program's environment is made of
+//!
+//! Three layers, outermost first, each overriding the one before it for a name
+//! they share:
+//!
+//! 1. **What the process inherits.** Nothing is cleared — `PATH`, `HOME` and
+//!    the rest are how a program is found and how most of them work at all.
+//!    (This is where a declared tool parts company with a `spawn` command,
+//!    which mentra's executor runs with the ambient environment cleared.)
+//! 2. **The runtime's fixed command environment**, from
+//!    [`RuntimeBuilder::with_command_environment`](crate::RuntimeBuilder::with_command_environment).
+//!    A host saying where its service lives is saying it about *every* process
+//!    the runtime spawns, and a declared tool's program is one of those.
+//! 3. **The manifest's `env`**, which is this tool's own statement and
+//!    therefore the last word: between two statements about one name, the more
+//!    specific one holds — the same direction in which a workspace's
+//!    `tools.json` already beats the global one.
+//!
+//! None of the three is printed anywhere. `env` values are redacted from every
+//! `Debug`, and neither layer appears in the approver's preview: the command
+//! and its arguments are how a spawn is understood, while the environment is
+//! where the credential is.
+//!
 //! What is *not* in the format is as deliberate: no `enabled` flag (a tool
 //! nobody wants is a tool nobody declares), and no way to say a tool is
 //! read-only — see [`SideEffect`].

@@ -102,8 +102,11 @@ pub struct DeclaredToolSpec {
     /// Where the program runs, relative to the workspace root. Absent means the
     /// root itself.
     pub cwd: Option<PathBuf>,
-    /// Added to the environment the program inherits. Sorted, so a spec is
-    /// comparable; never printed, so a credential cannot reach a log.
+    /// Added to the environment the program inherits, on top of the runtime's
+    /// fixed command environment and overriding it for any name they share —
+    /// this is the tool's own statement, and the more specific one holds (see
+    /// the module docs' three layers). Sorted, so a spec is comparable; never
+    /// printed, so a credential cannot reach a log.
     pub env: Vec<(String, String)>,
     /// Absent means [`DEFAULT_TOOL_TIMEOUT`].
     pub timeout_ms: Option<u64>,

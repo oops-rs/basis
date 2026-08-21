@@ -158,8 +158,11 @@ basis wraps as an `ExecutableTool`: the model fills in the schema, basis writes 
 to the program's stdin, and stdout comes back as the tool's result. The manifest layers the
 way the other conventions do (the workspace's file, then the global one, most specific
 winning) and expands `${VAR}` the way `.mcp.json` does, so a credential rides in `env`
-rather than in a committed file. Not behind the `mcp` feature: custom tools were never
-MCP's to own.
+rather than in a committed file. The program's environment is three layers, each
+overriding the last: what the process inherits (never cleared — `PATH` lives there), the
+runtime's fixed command environment from `with_command_environment`, and the manifest's own
+`env`, which wins because it is the tool's own statement. Not behind the `mcp` feature:
+custom tools were never MCP's to own.
 
 Three things about it are deliberate, and each answers a way the binding could have been
 unsafe rather than merely inconvenient. **The format cannot say "read-only"** — the only
