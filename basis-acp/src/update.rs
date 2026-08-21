@@ -163,6 +163,17 @@ fn title(summary: &str, tool_name: &str) -> String {
 /// [`SPAWN`] is the exception, and the reason this takes the call's input at
 /// all. Since ADR-0016 one name carries two acts — a command and a delegation —
 /// so a name-keyed answer is necessarily wrong for one of them.
+///
+/// **The mutability fallback is only ever a last resort, and `files` is the
+/// only builtin that still reaches it.** mentra reports `Unknown` on *every*
+/// queued call (`session/mapping.rs`, `ToolUseReady`), and a queued call is the
+/// one this function classifies — so for a name the map answers by mutability,
+/// the mutability it reads is always `Unknown`. `files` keeps that arm because
+/// one name genuinely carries both acts there and `Edit` is the conservative
+/// render of a batch that may write. A tool that only ever reads must be
+/// answered by name, or it renders as an edit for the whole time it is
+/// pending: mentra's split `read` is exactly such a tool, and that is why it
+/// sits on its own arm below rather than beside `files`.
 fn tool_kind(tool_name: &str, mutability: Mutability, input: &Value) -> ToolKind {
     if tool_name == SPAWN {
         return spawn_kind(input);
@@ -170,14 +181,23 @@ fn tool_kind(tool_name: &str, mutability: Mutability, input: &Value) -> ToolKind
 
     match tool_name {
         "shell" | "bash" | "command" | "background_command" => ToolKind::Execute,
-        "files" | "read" | "read_file" => match mutability {
+        // The batched profile's one tool, which is a read or a write depending
+        // on the ops inside it. Nothing but mutability can answer, and at queue
+        // time mutability says `Unknown` — so a pending `files` call renders as
+        // an edit, which is the safe half to be wrong about.
+        "files" => match mutability {
             Mutability::ReadOnly => ToolKind::Read,
             _ => ToolKind::Edit,
         },
+        "read" | "read_file" => ToolKind::Read,
         "write" | "write_file" | "edit" | "edit_file" | "apply_patch" => ToolKind::Edit,
         "delete" | "remove" => ToolKind::Delete,
         "move" | "rename" => ToolKind::Move,
-        "search" | "grep" | "glob" | "find" => ToolKind::Search,
+        // `ls` sits with `glob` and `find` rather than with `read`: what all
+        // three return is *which paths exist*, never a file's contents, and
+        // ACP's `Search` is the kind for locating things. `Read` would promise
+        // a client that a file was opened.
+        "search" | "grep" | "glob" | "find" | "ls" | "list_directory" => ToolKind::Search,
         "fetch" | "web_fetch" | "http" => ToolKind::Fetch,
         "think" | "load_skill" => ToolKind::Think,
         _ => match mutability {
@@ -442,6 +462,10 @@ mod tests {
 
         // An unknown tool falls back to what mentra says it does, and admits
         // ignorance when mentra does not know either.
+        //
+        // (The split-file-tool cases live in their own test below, because the
+        // property that matters for them is that they *never* consult the
+        // fallback.)
         assert_eq!(
             tool_kind("something_new", Mutability::ReadOnly, &no_input),
             ToolKind::Read
@@ -450,6 +474,39 @@ mod tests {
             tool_kind("something_new", Mutability::Unknown, &no_input),
             ToolKind::Other
         );
+    }
+
+    #[test]
+    fn the_split_file_tools_are_classified_by_name_at_every_mutability() {
+        // The default roster since `RuntimeBuilder::with_file_tools`, and the
+        // reason each has to be answered by name: `ToolQueued` carries
+        // `Mutability::Unknown` always, so anything reaching the fallback
+        // renders as `Other` — and anything on the old `files` arm renders as
+        // an *edit*, which is what a pending `read` used to show as. Every
+        // mutability is asserted because the right answer here does not depend
+        // on one.
+        let no_input = json!({});
+
+        for mutability in [
+            Mutability::ReadOnly,
+            Mutability::Mutating,
+            Mutability::Unknown,
+        ] {
+            for (name, expected) in [
+                ("read", ToolKind::Read),
+                ("ls", ToolKind::Search),
+                ("grep", ToolKind::Search),
+                ("glob", ToolKind::Search),
+                ("write", ToolKind::Edit),
+                ("edit", ToolKind::Edit),
+            ] {
+                assert_eq!(
+                    tool_kind(name, mutability, &no_input),
+                    expected,
+                    "{name} at {mutability:?}"
+                );
+            }
+        }
     }
 
     #[test]
