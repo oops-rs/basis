@@ -218,9 +218,13 @@ names no subcommand is a prompt; bare `basis` prints usage rather than starting 
 
 ```
 basis "<prompt>"                     # shorthand: exactly `basis spawn "<prompt>"`
+basis "/<template> <args>"           # a prompt that is a `.basis/templates` command
 basis spawn "<prompt>"               # at a shell: run it here and print the answer
 basis spawn "<prompt>" --resumable   # mint the agent, print its handle, drive nothing
 basis spawn "<prompt>" --await       # inside a task: wait for the terminal result
+basis spawn "<prompt>" --continue    # a new task on this workspace's newest conversation
+basis spawn "<prompt>" --session <TASK>  # the same, on the one that handle names
+basis list                           # this workspace's tasks, newest first
 basis send <ID> "<message>"          # enqueue a later turn and print its message ID
 basis send <ID> "<message>" --await  # enqueue, then await that message's reply
 basis ask <ID> "<question>"          # send with the correlated reply wait implied
@@ -244,7 +248,16 @@ at a shell, `basis spawn` is that process, so it drives the agent and prints the
 handle stays durable behind it. What that terminal sees is split by stream: **stdout is the
 assistant's answer, streamed as it is produced; stderr is the work behind it** — the model, each
 tool call and how it ended, and the one `next:` line at the end. So `basis "summarize this" >
-notes.md` leaves a file holding the summary, and `2> progress.log` keeps the rest of it.
+notes.md` leaves a file holding the summary, and `2> progress.log` keeps the rest of it — with
+one compact `12.3k in · 1.2k out` at the end, the same counts `--json` carries as `usage`.
+Closing the terminal costs you nothing: `basis list` reads the same task directories back, newest
+first, and `--continue` starts a *new* task on the newest conversation there — a new handle over
+the same history, because a settled task accepts no messages at all, and this run's bounds and
+model are this run's. `--session <TASK>` names one instead, refusing a task something is already
+driving. A prompt whose first token is `/name` is one of the workspace's
+[`.basis/templates`](docs/ARCHITECTURE.md) commands, rendered with the rest of the line as its
+arguments — the same names an ACP client offers; a first token with a second slash is a path and
+passes through, and `basis spawn -` sends a literal one on stdin.
 Inside another task (`BASIS_TASK_ID` set) it prints the handle of a
 *resumable* agent instead, because a parent turn that blocks on its child is how a wait-for cycle
 starts — `--await` is the parent's explicit opt-in, and `--resumable` is the shell's opt-out.

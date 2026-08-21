@@ -69,8 +69,12 @@ seems to need core changes, close the gap generically or push it to an extension
 
 ```
 basis "<prompt>"                     # shorthand: exactly `basis spawn "<prompt>"`
+basis "/<template> <args>"           # a first token naming a `.basis/templates` command
 basis spawn "<prompt>"               # at a shell: drive it here; in a task: return a handle
 basis spawn "<prompt>" --resumable   # return a durable handle without driving it
+basis spawn "<prompt>" --continue    # a new task on this workspace's newest conversation
+basis spawn "<prompt>" --session <TASK>  # the same, on the conversation that handle names
+basis list                           # this workspace's tasks, newest first
 basis send <ID> "<message>"          # enqueue a follow-up turn and return its message ID
 basis send <ID> "<message>" --await  # enqueue, then await that message's reply
 basis ask <ID> "<question>"          # send and await the correlated reply
@@ -92,7 +96,19 @@ process they are `Workspace::fingerprint()` and the bounds on a `RunSpec`, which
 loop without the subprocess: [`basis/examples/watch.rs`](../basis/examples/watch.rs).
 A run that a bound ended says which one, both as `RunReport::stopped_by` in process and as
 `run_finished`'s `stopped_by` on the stream, and the CLI exits `3` for all three of them —
-the exit-code contract of ADR-0015 is answerable without parsing prose.
+the exit-code contract of ADR-0015 is answerable without parsing prose. What it *spent* travels
+the same three ways: `RunReport::usage`, `run_finished`'s `usage`, and a `usage` object on the
+terminal record that `wait --json` and `list --json` read. basis ships no price table — prices are
+the host's — so the counts are the last basis-side fact between a run and a bill.
+
+`list` and the two continuation flags are the shell's way back into a durable conversation.
+Continuing is a **new task on an old conversation**: a task holding a terminal record accepts no
+messages (ADR-0019), so the new task records the agent id it continues and its first attach
+resumes that agent instead of minting one — new handle, one conversation, this invocation's
+bounds. A task something is currently driving is refused, since one executor per conversation is
+what the attach lock guarantees. A first token of the form `/name` is resolved against
+`basis::templates::load` — the same discovery ACP hands its command list from — and the rendered
+text is what the task records; a first token with a second slash is a path and passes through.
 
 In-process concurrent work is owned by `basis::Supervisor`. The binary adds
 the same ownership rules across CLI processes, and since
