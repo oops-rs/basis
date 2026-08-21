@@ -5,6 +5,11 @@
 //! ordering, the compatible provider — moved with them, to
 //! `runtime/builder/tests.rs`.
 
+use mentra::{
+    ContentBlock,
+    test::{MockRuntime, MockToolCall},
+};
+
 use crate::context::{ContextDocument, ContextScope};
 
 use super::*;
@@ -134,4 +139,94 @@ fn a_builder_holding_a_credentialed_recipe_does_not_print_it() {
 
     assert!(!printed.contains("sk-secret-value"), "{printed}");
     assert!(printed.contains("redacted"), "{printed}");
+}
+
+/// A workspace holding five files a model would read before it edits anything,
+/// each one long enough to be worth eliding — mentra blanks a tool result over
+/// 100 bytes — and each carrying a marker no other file has.
+fn workspace_of_five_files() -> tempfile::TempDir {
+    let dir = tempfile::tempdir().expect("tempdir");
+
+    for index in 1..=5 {
+        std::fs::write(
+            dir.path().join(format!("file{index}.txt")),
+            format!("marker-{index} {}", "x".repeat(200)),
+        )
+        .expect("write file");
+    }
+
+    dir
+}
+
+/// One tool-calling turn per file, then the sentence the model ends on.
+fn reading_all_five(workspace: &Path) -> MockRuntime {
+    let mut builder = MockRuntime::builder().model("mock-model", "openai");
+
+    for index in 1..=5 {
+        builder = builder.tool_calls(vec![
+            MockToolCall::new(
+                "files",
+                serde_json::json!({
+                    "operations": [{
+                        "op": "read",
+                        "path": workspace.join(format!("file{index}.txt")),
+                    }],
+                }),
+            )
+            .with_id(format!("read-{index}")),
+        ]);
+    }
+
+    builder
+        .text("read them all")
+        .build()
+        .expect("the mock runtime builds")
+}
+
+#[tokio::test]
+async fn every_tool_result_the_model_read_is_still_in_front_of_it() {
+    // The defect this pins. mentra's `keep_recent_tool_results` defaults to 3,
+    // so from the fourth tool call on, every older result is replaced by
+    // `[Previous: used files]` on the way to the provider — silently, with no
+    // event, at any context size, on any model. A coding agent that reads five
+    // files and then edits one would be editing from a transcript where the
+    // first two are gone. basis keeps them all unless a host asks for elision
+    // by number.
+    let workspace = workspace_of_five_files();
+    let mock = reading_all_five(workspace.path());
+    let mut session = mock
+        .runtime()
+        .create_session_with_config(
+            "compaction",
+            mock.model(),
+            agent_config(workspace.path(), &WorkspaceContext::default()),
+        )
+        .expect("session");
+
+    session
+        .append_turn(vec![ContentBlock::Text {
+            text: "read every file".to_string(),
+        }])
+        .await
+        .expect("the scripted turn runs");
+
+    let requests = mock.recorded_requests().await;
+    let last = requests.last().expect("the model was asked something");
+    let results: Vec<String> = last
+        .messages
+        .iter()
+        .flat_map(|message| &message.content)
+        .filter_map(|block| match block {
+            ContentBlock::ToolResult { content, .. } => Some(content.to_display_string()),
+            _ => None,
+        })
+        .collect();
+
+    assert_eq!(results.len(), 5, "five reads, five results");
+    for (index, result) in results.iter().enumerate() {
+        assert!(
+            result.contains(&format!("marker-{}", index + 1)),
+            "the model can no longer see what it read: {result}"
+        );
+    }
 }
