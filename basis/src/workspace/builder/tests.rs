@@ -66,7 +66,96 @@ fn hiding_is_a_roster_fact_and_not_a_capability_one() {
         agent.tool_profile.allowed_tools, None,
         "an allow-list here would silently drop every tool nobody thought to name"
     );
-    assert!(agent.tool_profile.allows("files"));
+    assert!(agent.tool_profile.allows("read"));
+}
+
+#[tokio::test]
+async fn the_default_roster_is_exactly_this() {
+    // The whole visible set, from the runtime's own registry rather than from
+    // a list written here, so a tool mentra adds upstream arrives as a failing
+    // test instead of as a silent new door. Adding a name to this list is a
+    // decision to offer it; removing one is a decision to stop.
+    //
+    // Sorted, because `mentra::Runtime::tools` sorts by name.
+    let runtime = crate::runtime::Runtime::builder()
+        .with_base_url("http://127.0.0.1:1/v1")
+        .with_api_key("test-key")
+        .with_ephemeral_history()
+        .build()
+        .expect("builds offline");
+    let agent = agent_config(Path::new("/repo"), &WorkspaceContext::default());
+
+    let offered = runtime
+        .mentra_runtime()
+        .tools()
+        .into_iter()
+        .map(|tool| tool.provider.name)
+        .filter(|name| agent.tool_profile.allows(name))
+        .collect::<Vec<_>>();
+
+    assert_eq!(
+        offered,
+        [
+            // mentra's compaction intrinsic, and its three memory intrinsics.
+            "compact",
+            // mentra's split file tools (`RuntimeBuilder::with_file_tools`).
+            "edit",
+            "glob",
+            "grep",
+            "ls",
+            "memory_forget",
+            "memory_pin",
+            "memory_search",
+            "read",
+            // basis's own, and ADR-0016's one door.
+            crate::tools::SPAWN,
+            "write",
+        ],
+        "the model's whole API, in one place"
+    );
+
+    // Registered later rather than at build — mentra registers `load_skill`
+    // when a skill loader is installed — so it cannot appear above, and its
+    // visibility is asserted here instead. Skills are basis's own convention;
+    // this tool is how one is loaded.
+    assert!(agent.tool_profile.allows("load_skill"));
+}
+
+#[test]
+fn the_doors_basis_does_not_surface_stay_shut() {
+    // Named individually rather than read off `UNSURFACED_TOOLS`, because a
+    // test that reads the constant it is checking asserts nothing. Each of
+    // these fails a different way and none of the failures is visible to the
+    // person running the agent — see the constant for which is which.
+    let agent = agent_config(Path::new("/repo"), &WorkspaceContext::default());
+
+    for shut in [
+        // A second delegation door beside `spawn`, which is what ADR-0016
+        // removed `task` for; plus the yield back to a teammate loop basis
+        // never starts, which on a basis run just ends the turn.
+        "team_spawn",
+        "team_send",
+        "team_read_inbox",
+        "team_broadcast",
+        "team_request",
+        "team_respond",
+        "team_list_requests",
+        "idle",
+        // A board nothing in basis reads: every call succeeds and nothing
+        // observable happens.
+        "task_create",
+        "task_claim",
+        "task_update",
+        "task_list",
+        "task_get",
+        // Reports on `background_run`, which ADR-0016 hid.
+        "check_background",
+    ] {
+        assert!(
+            !agent.tool_profile.allows(shut),
+            "{shut} is still offered to the model"
+        );
+    }
 }
 
 #[test]

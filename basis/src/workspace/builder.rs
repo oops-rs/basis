@@ -472,15 +472,19 @@ pub(crate) fn resolved_workspace(requested: &Path, context: &WorkspaceContext) -
 /// stays at mentra's defaults — opinions belong in the prompt and the
 /// workspace, not here.
 ///
-/// # Why three tools leave the roster
+/// # Why tools leave the roster
 ///
 /// ADR-0016 gives the model one door for *do something I cannot do by
-/// thinking*: [`spawn`](crate::tools::spawn). `shell` and `background_run` and
+/// thinking*: [`spawn`](crate::tools::spawn). `shell`, `background_run` and
 /// `task` are the doors it replaces, and leaving them alongside it would
 /// restore exactly what the ADR removed — three names at the approval gate, and
-/// three rule namespaces, for one question.
+/// three rule namespaces, for one question. [`UNSURFACED_TOOLS`] is the other
+/// half of the same argument, applied to intrinsics that were never a decision
+/// at all: they are on the roster because mentra registers everything it has
+/// and basis never said otherwise, which is not the same as basis offering
+/// them.
 ///
-/// **Hidden is a roster fact, not a capability fact.** All three stay
+/// **Hidden is a roster fact, not a capability fact.** Every one of them stays
 /// registered on the runtime, which is precisely why `spawn` can still reach
 /// the command executor underneath. What a caller said about commands is still
 /// decided by [`ShellAccess`] — baked into policy on a private runtime,
@@ -497,7 +501,7 @@ pub(crate) fn resolved_workspace(requested: &Path, context: &WorkspaceContext) -
 fn agent_config(workspace: &Path, context: &WorkspaceContext) -> mentra::agent::AgentConfig {
     mentra::agent::AgentConfig {
         system: context.render(),
-        tool_profile: mentra::agent::ToolProfile::hide(REPLACED_TOOLS),
+        tool_profile: mentra::agent::ToolProfile::hide(hidden_tools()),
         workspace: mentra::agent::WorkspaceConfig {
             base_dir: workspace.to_path_buf(),
             ..Default::default()
@@ -506,8 +510,72 @@ fn agent_config(workspace: &Path, context: &WorkspaceContext) -> mentra::agent::
     }
 }
 
+/// Every name basis takes off the model's roster: what `spawn` replaced, and
+/// what basis has never surfaced.
+///
+/// Two constants rather than one list because the two carry different
+/// arguments and a reader deserves to know which applies to a given name.
+fn hidden_tools() -> impl Iterator<Item = &'static str> {
+    REPLACED_TOOLS.into_iter().chain(UNSURFACED_TOOLS)
+}
+
 /// The tools `spawn` replaces, by the names mentra registers them under.
 const REPLACED_TOOLS: [&str; 3] = ["shell", "background_run", "task"];
+
+/// What mentra registers that basis has never deliberately offered.
+///
+/// Registration is mentra's default posture — `register_tools` walks every
+/// intrinsic variant it has — so a name reaching the model here is the absence
+/// of a decision rather than one. Each of these fails a different way, and none
+/// of the failures is visible to the person running the agent:
+///
+/// - **`team_spawn` and its six siblings are delegation by another name.** A
+///   second door for *hand work to something else, read back a summary* is
+///   exactly what ADR-0016 removed `task` for: two names arriving at one
+///   approval gate, and two namespaces of remembered rules, for a question an
+///   operator asks once. Nothing in basis mints a team, reads a teammate inbox,
+///   or renders a `team_request`, so the door does not even lead where its
+///   description says. `docs/REDESIGN.md` has recorded these as awaiting a
+///   concrete use case since Phase D; reachable-by-accident is not the
+///   deliberate surfacing that row is waiting for.
+/// - **`idle` is that surface's exit.** Its whole effect is
+///   `Agent::request_idle`, which mentra's orchestrator reads as
+///   `should_end_turn` — a yield *back to the teammate loop* basis never
+///   starts. On a basis run the model calling it ends its own turn mid-task
+///   and the caller reads a short answer with no error in it.
+/// - **`task_create` and the other four write a board nothing reads.** basis
+///   surfaces no task board — not on the event stream, not over ACP, not in
+///   the CLI — so a model that files, claims and updates work items gets
+///   plausible success back from every call and nothing observable happens.
+///   Confident bookkeeping into a void is worse than no bookkeeping, because
+///   it reads to the model as coordination.
+/// - **`check_background` reports on a tool that is hidden.** The only thing it
+///   can report on is `background_run`, which left the roster with ADR-0016's
+///   two other doors, so it can answer nothing but "no such task".
+///
+/// Deliberately still offered, and each for a reason: `load_skill`, because
+/// on-demand skills are basis's own convention and that tool is how a skill is
+/// loaded; `compact`, because a model that can see its context filling should
+/// be able to act on it (that the *user* has no matching control is a separate
+/// gap, and hiding this would not close it); and `memory_pin` / `memory_forget`
+/// / `memory_search`, which are out of scope here — mentra persists what they
+/// write and basis has not yet decided what it wants that to mean.
+const UNSURFACED_TOOLS: [&str; 14] = [
+    "check_background",
+    "idle",
+    "task_create",
+    "task_claim",
+    "task_update",
+    "task_list",
+    "task_get",
+    "team_spawn",
+    "team_send",
+    "team_read_inbox",
+    "team_broadcast",
+    "team_request",
+    "team_respond",
+    "team_list_requests",
+];
 
 #[cfg(test)]
 mod tests;
