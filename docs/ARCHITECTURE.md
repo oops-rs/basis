@@ -49,7 +49,7 @@ hot-reloadable extensions. Two pi decisions independently validate ours:
 | Session persistence + resume | SQLite-backed sessions, snapshots | mentra |
 | Compaction | Memory compaction exists in mentra; wire to session lifecycle | mentra + glue |
 | Session branching / tree | mentra's transcript tree, exposed on `PreparedRun` ✅ | built |
-| Builtin tools (shell, files, background exec, tasks) | Mentra builtins | mentra |
+| Builtin tools (files, shell, background exec, tasks) | Mentra builtins, with the roster basis's: `read`, `ls`, `grep`, `glob`, `write`, `edit` (mentra's split file tools, `RuntimeBuilder::with_file_tools`), `compact`, `memory_pin`/`memory_forget`/`memory_search`, `load_skill`, and `spawn` for commands and delegation. `shell`, `background_run`, `check_background`, `task`, `task_*`, `team_*` and `idle` are registered but not offered ✅ | mentra + built |
 | Context files (AGENTS.md) | Loader: workspace + global, parent-dir walk | build |
 | Skills (on-demand) | SKILL.md discovery, description-first loading | build |
 | Prompt templates (/commands) | Markdown templates with args, exposed over ACP as commands ✅ | built |
@@ -466,6 +466,26 @@ call's own input, where `input` is the string the model wrote and a single leadi
 (never `!!`) is what makes it a command (ADR-0016). A command may also name *where* it runs
 — `!@<target> <command>` — and a hook that cares which destination a command was headed for
 reads the same string ([ADR-0021](adr/0021-a-command-names-where-it-runs.md)).
+
+### Hooks: the `files` → split-tools migration
+
+Same shape, same silence. An entry scoped `"tools": ["files"]` no longer fires, because the
+model is now offered mentra's split file tools — `read`, `ls`, `grep`, `glob`, `write`,
+`edit` — instead of one batched `files`. Nothing errors; the hook simply never runs again.
+Match the names you actually mean: `write` and `edit` are the two that change a file, and
+each takes its path in `path` (`file_path` and `filePath` are accepted spellings of the same
+field) rather than inside an `operations` array. A hook that guarded writes by walking that
+array needs rewriting, not just renaming.
+
+Remembered approval rules key on the tool name too, so a `RuleKey` written against `files`
+stops matching for the same reason.
+
+A host that is not ready to rewrite either keeps the old roster in one line:
+`RuntimeBuilder::with_file_tools(FileToolProfile::Batched)` registers `files` and nothing
+else, exactly as before. That is a migration path with no deadline on it; the default is
+`Split` because the roster is the model's API and the split names are the ones models are
+trained on — and because `glob`, and `grep`'s `ignore_case`/`literal`/`context`/`multiline`
+knobs, exist only there.
 
 ### Command targets
 
