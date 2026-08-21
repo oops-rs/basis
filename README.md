@@ -173,8 +173,14 @@ The core has no opinions. Task-specific behavior enters through data — the pro
 config — never through code in `basis`:
 
 - **`AGENTS.md`** — a global config directory, then each ancestor outermost-inward, then the workspace
-  root; later files are more specific, and all are named in `run_started`.
-- **Skills** — `.basis/skills/`, loaded by name on demand, so only descriptions cost context.
+  root; later files are more specific, and all are named in `run_started`. `CLAUDE.md` is read where a
+  directory has no `AGENTS.md`, so a repository that carries only the older name is not a repository
+  with no instructions; a directory holding both contributes the `AGENTS.md`.
+- **Skills** — four roots, most specific first: `.basis/skills/` and `.agents/skills/` in the
+  workspace, then `skills/` in the global config directory and `~/.agents/skills/`. The `.agents`
+  pair is the directory other harnesses read, so a skill written once is found here too. Loaded by
+  name on demand, so only descriptions cost context, and a nearer root shadows a name rather than a
+  whole directory.
 - **Prompt templates** — `.basis/templates/*.md` with `$ARGUMENTS` and `$1`, `$2`…; a nested path is a
   namespace (`git/commit.md` → `git:commit`). ACP clients get them as commands.
 - **Declared tools** — `.basis/tools.json`: a name, a description, a JSON schema and an argv array,

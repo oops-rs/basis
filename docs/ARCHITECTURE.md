@@ -50,8 +50,8 @@ hot-reloadable extensions. Two pi decisions independently validate ours:
 | Compaction | Memory compaction exists in mentra; wire to session lifecycle | mentra + glue |
 | Session branching / tree | mentra's transcript tree, exposed on `PreparedRun` ✅ | built |
 | Builtin tools (shell, files, background exec, tasks) | Mentra builtins | mentra |
-| Context files (AGENTS.md) | Loader: workspace + global, parent-dir walk | build |
-| Skills (on-demand) | SKILL.md discovery, description-first loading | build |
+| Context files (AGENTS.md) | Loader: workspace + global, parent-dir walk; `CLAUDE.md` per directory where there is no `AGENTS.md` | build |
+| Skills (on-demand) | SKILL.md discovery, description-first loading, four roots — `.basis/skills` and `.agents/skills` in the workspace, `skills/` in the global config dir and `~/.agents/skills` | build |
 | Prompt templates (/commands) | Markdown templates with args, exposed over ACP as commands ✅ | built |
 | Extensions (custom tools, event interception) | MCP servers + interception with two bindings — in-process `Interceptor`, subprocess hooks — allow/deny/modify (§3) ✅ | built |
 | Packages (shareable bundles) | Directory convention over skills/templates/hooks/MCP — defer | later |

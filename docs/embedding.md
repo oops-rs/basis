@@ -125,6 +125,46 @@ surface is still unhidden, under a name that now says whose it is:
 `Runtime::mentra_runtime()`, and `Workspace::mentra_runtime()` for a host that has only the
 workspace in hand.
 
+## What the host says on top of the workspace
+
+basis ships no system prompt: unset, the prompt is the discovered context files and nothing
+else. That is deliberate and it stays — but it left an embedding host with no way to give
+its product a voice, or to say *for my runs, answer in Chinese*, short of writing into the
+user's repository's `AGENTS.md`, which is the one file that is not the host's to edit.
+`with_system_prompt` is the seam; the text is still the host's, so the core gains no opinion:
+
+```rust
+use basis::{SystemPrompt, Workspace};
+
+// After the repository's own instructions, as the most specific block.
+let workspace = Workspace::builder("/repo")
+    .with_system_prompt(SystemPrompt::Append("Answer in Chinese.".to_string()))
+    .open()
+    .await?;
+
+// Or instead of them, discovery left out of the prompt entirely.
+let bare = Workspace::builder("/repo")
+    .with_system_prompt(SystemPrompt::Replace("You are Acme's release reviewer.".to_string()))
+    .open()
+    .await?;
+```
+
+`Append` goes **last**, where the rendered context block's own preamble says the most
+specific statement goes: a repository cannot know which product is running it, and a knob a
+repository could override by writing a file is not a knob. The weakest end of that scale was
+already covered — the global `AGENTS.md` is a personal append below every workspace file.
+
+`Replace` drops the context from the prompt, including the global file, but not from the
+report: `run_started` still names what discovery found, because *which context files does
+this workspace have* has one true answer and the host that replaced the prompt already knows
+it did. `Replace("")` is how to ask for no system prompt at all; `Append("")` is a no-op.
+Neither variant touches the skills block — mentra appends that itself, after whatever basis
+hands it.
+
+One enum rather than two methods, because the two are alternatives and not layers: one
+field, last call wins, and *both at once* is unspellable. And it is a **workspace** knob, so
+a host serving many repositories off one shared `Runtime` can give each its own voice.
+
 ## How patiently a failing provider is waited out
 
 mentra retries a transient provider error on a doubling backoff and gives up when the budget
