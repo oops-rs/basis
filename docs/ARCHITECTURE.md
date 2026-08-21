@@ -55,7 +55,7 @@ hot-reloadable extensions. Two pi decisions independently validate ours:
 | Prompt templates (/commands) | Markdown templates with args, exposed over ACP as commands ✅ | built |
 | Extensions (custom tools, event interception) | MCP servers + interception with two bindings — in-process `Interceptor`, subprocess hooks — allow/deny/modify (§3) ✅ | built |
 | Packages (shareable bundles) | Directory convention over skills/templates/hooks/MCP — defer | later |
-| RPC / headless mode | `spawn --json` event stream (`run` is a compatibility alias) + **ACP** (standard, not bespoke) ✅; durable task control over a global data directory, with no resident process of any kind ✅ | built |
+| RPC / headless mode | `spawn --json` event stream (`run` is a compatibility alias) + **ACP** (standard, not bespoke) ✅; durable task control over a global data directory, with no resident process of any kind ✅; the model and the reasoning effort are per-session config options a client sets over the protocol, where pi spends six RPC commands ✅ | built |
 | SDK | `basis`: a `Workspace` opened once, runs minted from it with typed output, bounds, cancellation ✅ — other languages use ACP | built |
 | TUI / themes / keybindings | Out of scope by design — ACP clients own presentation | — |
 | Provider OAuth login flows | API-key auth first; OAuth per provider later | later |
