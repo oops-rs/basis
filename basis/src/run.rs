@@ -475,6 +475,9 @@ pub enum RunError {
     NoSuchSession,
 
     #[error(transparent)]
+    Config(#[from] crate::config::ConfigError),
+
+    #[error(transparent)]
     Context(#[from] ContextError),
 
     #[error(transparent)]

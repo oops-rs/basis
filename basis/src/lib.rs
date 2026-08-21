@@ -61,6 +61,7 @@ pub mod approval;
 pub mod branch;
 pub mod budget;
 pub mod compaction;
+pub mod config;
 pub mod context;
 pub mod event;
 mod expand;
@@ -97,6 +98,10 @@ pub use budget::BudgetPool;
 // keeps is set on `WorkspaceBuilder`, so the type naming it belongs where a
 // host already looks for `ShellAccess` and `ContextConfig`.
 pub use compaction::Compaction;
+pub use config::{
+    CONFIG_SCHEMA_VERSION, Config, ConfigError, DEFAULT_GLOBAL_CONFIG_FILE,
+    DEFAULT_WORKSPACE_CONFIG_FILE, Setting,
+};
 pub use context::{
     ContextConfig, ContextDocument, ContextError, ContextScope, DEFAULT_CONTEXT_FALLBACK_FILE,
     DEFAULT_CONTEXT_FILE, SystemPrompt, WorkspaceContext,
