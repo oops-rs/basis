@@ -21,7 +21,7 @@ use std::{
 use crate::runtime::Runtime;
 
 use super::{
-    manifest::{DeclaredToolError, ToolsSource, layer},
+    manifest::{DeclaredToolError, DeclaredToolSpec, ToolsSource, layer},
     tool::DeclaredTool,
 };
 
@@ -76,7 +76,7 @@ impl DeclaredTools {
             claimed
                 .runtime
                 .mentra_runtime()
-                .register_tool(DeclaredTool::new(spec, root));
+                .register_tool(wrapped(&claimed.runtime, spec, root));
         }
 
         Ok(claimed)
@@ -94,6 +94,18 @@ impl DeclaredTools {
     pub(crate) fn root(&self) -> &Path {
         &self.root
     }
+}
+
+/// One declaration, wrapped with everything it needs from both scopes.
+///
+/// The seam this exists to name: a manifest is a *repository's* statement and a
+/// command environment is the *runtime's* (ADR-0018), and a declared tool needs
+/// both. The registry is where the two meet, because it is built per workspace
+/// out of a runtime the workspace borrows — so this is the one place the
+/// runtime's pairs are handed over, and it is a named function so a test can
+/// ask what a tool was built with rather than infer it.
+fn wrapped(runtime: &Runtime, spec: DeclaredToolSpec, root: &Path) -> DeclaredTool {
+    DeclaredTool::new(spec, root).with_command_environment(runtime.command_environment())
 }
 
 impl Drop for DeclaredTools {
@@ -126,23 +138,24 @@ mod tests {
         )
     }
 
+    fn spec(name: &str) -> DeclaredToolSpec {
+        DeclaredToolSpec {
+            name: name.to_string(),
+            description: "does the thing".to_string(),
+            input_schema: json!({"type": "object", "properties": {}}),
+            command: vec!["./x".to_string()],
+            cwd: None,
+            env: Vec::new(),
+            timeout_ms: None,
+            side_effect: SideEffect::Process,
+        }
+    }
+
     fn source(path: &str, names: &[&str]) -> ToolsSource {
         ToolsSource {
             path: PathBuf::from(path),
             scope: ContextScope::Workspace,
-            tools: names
-                .iter()
-                .map(|name| DeclaredToolSpec {
-                    name: (*name).to_string(),
-                    description: "does the thing".to_string(),
-                    input_schema: json!({"type": "object", "properties": {}}),
-                    command: vec!["./x".to_string()],
-                    cwd: None,
-                    env: Vec::new(),
-                    timeout_ms: None,
-                    side_effect: SideEffect::Process,
-                })
-                .collect(),
+            tools: names.iter().map(|name| spec(name)).collect(),
         }
     }
 
@@ -163,6 +176,43 @@ mod tests {
                 .iter()
                 .any(|tool| tool.provider.name == "jenkins_job")
         );
+    }
+
+    #[test]
+    fn a_declared_tool_is_built_with_the_runtimes_command_environment() {
+        // The seam: a manifest is a repository's statement and the command
+        // environment is the runtime's (ADR-0018), and this is the one place
+        // the two meet. A host that told the runtime where its service lives
+        // expects the program a declared tool runs to be told as well — that
+        // it was not is the bug this closes.
+        let runtime = Arc::new(
+            Runtime::builder()
+                .with_base_url("http://127.0.0.1:1/v1")
+                .with_api_key("test-key")
+                .with_ephemeral_history()
+                .with_command_environment("NOUS_URL", "http://nous.internal")
+                .build()
+                .expect("builds"),
+        );
+
+        let tool = wrapped(&runtime, spec("ask_nous"), Path::new("/repo"));
+
+        assert_eq!(
+            tool.command_environment(),
+            [("NOUS_URL".to_string(), "http://nous.internal".to_string())]
+        );
+        assert_eq!(
+            tool.name(),
+            "ask_nous",
+            "and it is still the manifest's tool"
+        );
+    }
+
+    #[test]
+    fn a_runtime_that_was_told_nothing_hands_over_nothing() {
+        let tool = wrapped(&runtime(), spec("ask_nous"), Path::new("/repo"));
+
+        assert!(tool.command_environment().is_empty());
     }
 
     #[test]

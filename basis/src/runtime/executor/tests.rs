@@ -93,7 +93,7 @@ async fn a_named_command_reaches_the_executor_registered_under_that_name() {
     let (mac, mac_seen) = Recording::new("mac");
     let (builder, builder_seen) = Recording::new("builder");
     let executor = TargetedExecutor::new(
-        BTreeMap::new(),
+        Arc::new(BTreeMap::new()),
         CommandTargets::from([
             ("mac".to_string(), Arc::new(mac) as Arc<dyn RuntimeExecutor>),
             (
@@ -132,7 +132,7 @@ async fn the_fixed_environment_is_merged_before_anything_routes() {
     // keep in step, and nobody would notice the day they drifted.
     let (mac, seen) = Recording::new("mac");
     let executor = TargetedExecutor::new(
-        environment(),
+        Arc::new(environment()),
         CommandTargets::from([("mac".to_string(), Arc::new(mac) as Arc<dyn RuntimeExecutor>)]),
     );
 
@@ -156,7 +156,7 @@ async fn the_fixed_environment_is_merged_before_anything_routes() {
 async fn an_untargeted_command_never_reaches_a_target() {
     let (mac, seen) = Recording::new("mac");
     let executor = TargetedExecutor::new(
-        BTreeMap::new(),
+        Arc::new(BTreeMap::new()),
         CommandTargets::from([("mac".to_string(), Arc::new(mac) as Arc<dyn RuntimeExecutor>)]),
     );
 
@@ -185,7 +185,7 @@ async fn a_target_nothing_serves_is_an_error_and_never_a_local_run() {
     // to prevent.
     let (mac, _) = Recording::new("mac");
     let executor = TargetedExecutor::new(
-        BTreeMap::new(),
+        Arc::new(BTreeMap::new()),
         CommandTargets::from([("mac".to_string(), Arc::new(mac) as Arc<dyn RuntimeExecutor>)]),
     );
 
@@ -200,7 +200,7 @@ async fn a_target_nothing_serves_is_an_error_and_never_a_local_run() {
 
 #[tokio::test]
 async fn a_runtime_with_no_targets_says_so_rather_than_listing_nothing() {
-    let executor = TargetedExecutor::new(environment(), CommandTargets::new());
+    let executor = TargetedExecutor::new(Arc::new(environment()), CommandTargets::new());
 
     let error = executor
         .run(request(Some("mac"), PathBuf::from("/repo")))

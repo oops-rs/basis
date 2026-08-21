@@ -56,6 +56,18 @@ use dispatch::{HookDispatch, HookRegistration, WorkspaceGuardEntry};
 /// `Send` and `Sync`; sessions are minted from `&self`.
 pub struct Runtime {
     mentra: mentra::Runtime,
+    /// The fixed pairs every process this runtime spawns receives, from
+    /// [`RuntimeBuilder::with_command_environment`].
+    ///
+    /// Kept here rather than only inside the executor because "every process"
+    /// means more than commands: a declared tool
+    /// ([`crate::tools::declared`]) spawns a program of its own, and a host
+    /// that told the runtime where its service lives expects that program to
+    /// be told too. The registry is built per workspace and this is
+    /// runtime-scoped (ADR-0018), so the runtime is where the workspace
+    /// borrows it from. Shared with the executor rather than copied, so there
+    /// is one statement and not two.
+    command_environment: Arc<std::collections::BTreeMap<String, String>>,
     /// The resolved choice, kept for model resolution at workspace open.
     provider: BuiltinProvider,
     /// The `ProviderId` string workspaces copy into their run headers.
@@ -167,6 +179,18 @@ impl Runtime {
     /// [`mint`](Self::mint) for why it is a place at all.
     pub(crate) fn resume_minted(&self, agent_id: &str) -> Result<Session, RunError> {
         Ok(self.mentra.resume_session(agent_id)?)
+    }
+
+    /// The fixed command environment, as the pairs a spawned program is given.
+    ///
+    /// A `Vec` rather than the map it is stored as, because that is the shape
+    /// [`crate::subprocess::execute`] takes and what a declared tool merges its
+    /// own `env` over. Sorted, because the map is.
+    pub(crate) fn command_environment(&self) -> Vec<(String, String)> {
+        self.command_environment
+            .iter()
+            .map(|(name, value)| (name.clone(), value.clone()))
+            .collect()
     }
 
     /// The side channel this runtime's approval gate writes to, for the mint

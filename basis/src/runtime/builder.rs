@@ -367,11 +367,21 @@ impl RuntimeBuilder {
         }
     }
 
-    /// Adds one fixed environment value to every command this runtime runs.
+    /// Adds one fixed environment value to every process this runtime spawns.
     ///
-    /// Mentra clears the ambient environment, so a host must state execution
-    /// context explicitly. A later call with the same name replaces the
-    /// earlier value. Debug output names variables but redacts values.
+    /// Mentra clears the ambient environment before running a model command, so
+    /// a host must state execution context explicitly. A later call with the
+    /// same name replaces the earlier value. Debug output names variables but
+    /// redacts values.
+    ///
+    /// **Every process** is meant literally, and it did not used to be: a
+    /// command through [`spawn`](crate::tools::spawn) received these pairs and
+    /// a declared tool's program did not, so a host that had told the runtime
+    /// where its service lived watched `.basis/tools.json` tools fail at the
+    /// far end asking for a variable the runtime was holding. Both get them
+    /// now. A declared tool's own `env` block still wins for a name they share,
+    /// because that is the tool's own statement about itself
+    /// ([`crate::tools::declared`]).
     ///
     /// Runtime-scoped, so on a shared runtime every workspace's commands see
     /// the same pairs. A host that wants two concurrently driven workspaces to
@@ -480,6 +490,11 @@ impl RuntimeBuilder {
         // be routed on is a configuration mistake and not a runtime condition.
         validate_target_names(&self.command_targets)?;
         let target_names = self.command_targets.keys().cloned().collect::<Vec<_>>();
+        // Behind an `Arc` from here on, because two things read it: the
+        // executor every `spawn` command goes through, and — since these pairs
+        // are the host's statement about *every* process this runtime spawns —
+        // each declared tool's subprocess (`crate::tools::declared`).
+        let command_environment = Arc::new(self.command_environment);
 
         let choice = provider::resolve_with(
             self.provider,
@@ -538,11 +553,11 @@ impl RuntimeBuilder {
         // Installed whenever either half has something to say. With both
         // empty, mentra keeps its own local executor and basis adds no layer
         // at all — the runtime a host that asked for neither has always had.
-        let builder = if self.command_environment.is_empty() && self.command_targets.is_empty() {
+        let builder = if command_environment.is_empty() && self.command_targets.is_empty() {
             builder
         } else {
             builder.with_executor(TargetedExecutor::new(
-                self.command_environment,
+                Arc::clone(&command_environment),
                 self.command_targets,
             ))
         };
@@ -570,6 +585,7 @@ impl RuntimeBuilder {
 
         Ok(Runtime {
             mentra,
+            command_environment,
             provider: choice.provider,
             provider_label: ProviderId::from(choice.provider).to_string(),
             model: self.model,

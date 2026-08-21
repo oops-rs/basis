@@ -156,6 +156,76 @@ fn a_schema_that_requires_nothing_accepts_an_empty_call() {
     check_input(&declared, &json!({})).expect("nothing is required");
 }
 
+#[test]
+fn the_manifest_wins_over_the_runtime_for_the_same_name() {
+    // The precedence rule, as a function, because it is the whole of the
+    // design decision: the runtime's pairs are the host's statement about every
+    // process it spawns, and the manifest's are this one tool's own — the more
+    // specific statement about a name is the one that holds.
+    let runtime = [
+        ("NOUS_URL".to_string(), "http://nous".to_string()),
+        ("SHARED".to_string(), "runtime".to_string()),
+    ];
+    let manifest = [("SHARED".to_string(), "manifest".to_string())];
+
+    assert_eq!(
+        environment(&runtime, &manifest),
+        vec![
+            ("NOUS_URL".to_string(), "http://nous".to_string()),
+            ("SHARED".to_string(), "manifest".to_string()),
+        ],
+        "the overridden name appears once, with the manifest's value"
+    );
+}
+
+#[test]
+fn either_side_alone_is_simply_that_side() {
+    let runtime = [("NOUS_URL".to_string(), "http://nous".to_string())];
+    let manifest = [("CI_TOKEN".to_string(), "secret".to_string())];
+
+    assert_eq!(environment(&runtime, &[]), runtime.to_vec());
+    assert_eq!(environment(&[], &manifest), manifest.to_vec());
+    assert!(environment(&[], &[]).is_empty(), "and nothing is nothing");
+}
+
+#[test]
+fn a_declared_tool_carries_no_runtime_environment_until_it_is_given_one() {
+    // `new` takes what the manifest said; the runtime's contribution arrives
+    // separately, from the workspace open that has a runtime in hand.
+    let bare = tool(vec!["./ci/jenkins"]);
+    assert!(bare.command_environment().is_empty());
+
+    let given =
+        bare.with_command_environment([("NOUS_URL".to_string(), "http://nous".to_string())]);
+    assert_eq!(
+        given.command_environment(),
+        [("NOUS_URL".to_string(), "http://nous".to_string())]
+    );
+}
+
+#[test]
+fn neither_environment_is_printed() {
+    // `Debug` is hand-written on both this and the spec for one reason, and a
+    // second field carrying host-supplied values is exactly why it stays that
+    // way.
+    let printed = format!(
+        "{:?}",
+        DeclaredTool::new(
+            DeclaredToolSpec {
+                env: vec![("CI_TOKEN".to_string(), "manifest-secret".to_string())],
+                ..spec(vec!["./ci/jenkins"])
+            },
+            "/repo",
+        )
+        .with_command_environment([("NOUS_URL".to_string(), "runtime-secret".to_string())])
+    );
+
+    assert!(!printed.contains("manifest-secret"), "{printed}");
+    assert!(!printed.contains("runtime-secret"), "{printed}");
+    assert!(printed.contains("CI_TOKEN"), "a name is fixable: {printed}");
+    assert!(printed.contains("NOUS_URL"), "{printed}");
+}
+
 #[cfg(unix)]
 mod subprocess_cases {
     use super::*;
@@ -164,9 +234,32 @@ mod subprocess_cases {
         vec!["/bin/sh", "-c", script]
     }
 
-    /// Runs `script` as the tool's program, in a directory that exists.
+    /// Runs `script` as the tool's program, in a directory that exists, with
+    /// the runtime contributing nothing — which is every host that never
+    /// called `with_command_environment`.
     async fn call(script: &str, input: Value) -> ToolResult {
-        run(Arc::new(spec(sh(script))), PathBuf::from("."), input).await
+        run(Arc::new(spec(sh(script))), PathBuf::from("."), &[], input).await
+    }
+
+    /// The same, with the runtime's fixed pairs in force.
+    async fn call_with_runtime_environment(
+        declared: DeclaredToolSpec,
+        runtime: &[(String, String)],
+    ) -> ToolResult {
+        run(
+            Arc::new(declared),
+            PathBuf::from("."),
+            runtime,
+            json!({"job": "nightly"}),
+        )
+        .await
+    }
+
+    fn pairs(named: &[(&str, &str)]) -> Vec<(String, String)> {
+        named
+            .iter()
+            .map(|(name, value)| ((*name).to_string(), (*value).to_string()))
+            .collect()
     }
 
     #[tokio::test]
@@ -203,15 +296,54 @@ mod subprocess_cases {
             ..spec(sh("printf %s \"$CI_TOKEN\""))
         };
 
-        let answer = run(
-            Arc::new(declared),
-            PathBuf::from("."),
-            json!({"job": "nightly"}),
+        let answer = call_with_runtime_environment(declared, &[])
+            .await
+            .expect("the program succeeded");
+
+        assert_eq!(answer, "secret-value");
+    }
+
+    #[tokio::test]
+    async fn the_runtimes_command_environment_reaches_a_declared_program() {
+        // The bug this fixes: a host called `with_command_environment` to say
+        // where its service lives, commands through `spawn` were told, and a
+        // declared tool's program was not — so it failed at the far end
+        // complaining about a variable the runtime had been given.
+        let answer =
+            call_with_runtime_environment(spec(sh("printf %s \"$X\"")), &pairs(&[("X", "1")]))
+                .await
+                .expect("the program succeeded");
+
+        assert_eq!(answer, "1");
+    }
+
+    #[tokio::test]
+    async fn a_manifest_variable_overrides_the_runtimes_value_for_that_name() {
+        let declared = DeclaredToolSpec {
+            env: pairs(&[("X", "2")]),
+            ..spec(sh("printf %s \"$X\""))
+        };
+
+        let answer = call_with_runtime_environment(declared, &pairs(&[("X", "1")]))
+            .await
+            .expect("the program succeeded");
+
+        assert_eq!(answer, "2", "the tool's own statement is the specific one");
+    }
+
+    #[tokio::test]
+    async fn the_inherited_environment_survives_both_of_them() {
+        // Neither set clears what the process already had: `PATH` is how the
+        // shell in every one of these cases is found at all, and a manifest
+        // that used to work must not stop working.
+        let answer = call_with_runtime_environment(
+            spec(sh("test -n \"$PATH\" && printf inherited")),
+            &pairs(&[("X", "1")]),
         )
         .await
         .expect("the program succeeded");
 
-        assert_eq!(answer, "secret-value");
+        assert_eq!(answer, "inherited");
     }
 
     #[tokio::test]
@@ -268,13 +400,9 @@ mod subprocess_cases {
         };
         let started = std::time::Instant::now();
 
-        let error = run(
-            Arc::new(declared),
-            PathBuf::from("."),
-            json!({"job": "nightly"}),
-        )
-        .await
-        .expect_err("stopped at the deadline");
+        let error = call_with_runtime_environment(declared, &[])
+            .await
+            .expect_err("stopped at the deadline");
 
         assert!(error.contains("jenkins_job"), "{error}");
         assert!(
@@ -285,13 +413,10 @@ mod subprocess_cases {
 
     #[tokio::test]
     async fn a_program_that_is_not_there_is_a_tool_error_the_model_can_read() {
-        let error = run(
-            Arc::new(spec(vec!["/definitely/not/a/real/program"])),
-            PathBuf::from("."),
-            json!({"job": "nightly"}),
-        )
-        .await
-        .expect_err("cannot be started");
+        let error =
+            call_with_runtime_environment(spec(vec!["/definitely/not/a/real/program"]), &[])
+                .await
+                .expect_err("cannot be started");
 
         assert!(error.contains("jenkins_job"), "{error}");
         assert!(error.contains("could not be started"), "{error}");

@@ -52,9 +52,12 @@ pub(super) struct TargetedExecutor {
 }
 
 impl TargetedExecutor {
-    pub(super) fn new(environment: BTreeMap<String, String>, targets: CommandTargets) -> Self {
+    /// Takes the environment behind an `Arc` because the runtime keeps the same
+    /// one: a declared tool's subprocess receives these pairs too, and two
+    /// copies of the host's statement would be two things to keep in step.
+    pub(super) fn new(environment: Arc<BTreeMap<String, String>>, targets: CommandTargets) -> Self {
         Self {
-            environment: Arc::new(environment),
+            environment,
             targets: Arc::new(targets),
         }
     }

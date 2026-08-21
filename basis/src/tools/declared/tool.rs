@@ -40,12 +40,37 @@ const TIMEOUT_BACKSTOP: Duration = Duration::from_secs(5);
 /// Cheap to clone in the sense that matters: the declaration sits behind an
 /// `Arc`, so the per-call clone `spawn_blocking` needs costs a refcount rather
 /// than a copy of the schema.
-#[derive(Debug, Clone)]
+#[derive(Clone)]
 pub struct DeclaredTool {
     spec: Arc<DeclaredToolSpec>,
     /// The workspace root the manifest was discovered from — what a relative
     /// `cwd` and a relative program path are resolved against.
     workspace: PathBuf,
+    /// The runtime's fixed command environment, which this program receives on
+    /// top of the one it inherits. Empty unless the host said otherwise.
+    environment: Arc<Vec<(String, String)>>,
+}
+
+/// Hand-written for [`DeclaredToolSpec`]'s reason, now with a second field
+/// that needs it: the runtime's command environment can hold whatever the host
+/// put there, and a derived impl would put every value of it in every `{:?}`
+/// of anything holding one. Names survive, because naming a variable is what
+/// makes a misconfiguration fixable and repeats nothing that was read.
+impl std::fmt::Debug for DeclaredTool {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("DeclaredTool")
+            .field("spec", &self.spec)
+            .field("workspace", &self.workspace)
+            .field(
+                "environment",
+                &self
+                    .environment
+                    .iter()
+                    .map(|(name, _)| (name, "<redacted>"))
+                    .collect::<std::collections::BTreeMap<_, _>>(),
+            )
+            .finish()
+    }
 }
 
 impl DeclaredTool {
@@ -53,6 +78,33 @@ impl DeclaredTool {
         Self {
             spec: Arc::new(spec),
             workspace: workspace.into(),
+            environment: Arc::new(Vec::new()),
+        }
+    }
+
+    /// Adds the runtime's fixed command environment to what this program is
+    /// spawned with.
+    ///
+    /// The gap this closes: a host calls
+    /// [`RuntimeBuilder::with_command_environment`](crate::RuntimeBuilder::with_command_environment)
+    /// to say where its service lives, and reasonably expects every process the
+    /// runtime spawns to be told. Commands through
+    /// [`spawn`](crate::tools::spawn) were; a declared tool's program was not,
+    /// and failed at the far end complaining about a variable the runtime had
+    /// been given.
+    ///
+    /// Separate from [`new`](Self::new) rather than a third argument to it,
+    /// because it is the *runtime's* contribution and `new` takes what the
+    /// manifest said. [`crate::Workspace`] applies it at open, from the runtime
+    /// the workspace borrows.
+    #[must_use]
+    pub fn with_command_environment(
+        self,
+        environment: impl IntoIterator<Item = (String, String)>,
+    ) -> Self {
+        Self {
+            environment: Arc::new(environment.into_iter().collect()),
+            ..self
         }
     }
 
@@ -64,6 +116,12 @@ impl DeclaredTool {
     /// The declaration this was built from.
     pub fn spec(&self) -> &DeclaredToolSpec {
         &self.spec
+    }
+
+    /// The runtime pairs this program is spawned with, before the manifest's
+    /// own `env` is layered over them.
+    pub fn command_environment(&self) -> &[(String, String)] {
+        &self.environment
     }
 }
 
@@ -112,7 +170,13 @@ impl ToolExecutor for DeclaredTool {
     }
 
     async fn execute(&self, _ctx: ParallelToolContext, input: Value) -> ToolResult {
-        run(Arc::clone(&self.spec), self.workspace.clone(), input).await
+        run(
+            Arc::clone(&self.spec),
+            self.workspace.clone(),
+            &self.environment,
+            input,
+        )
+        .await
     }
 }
 
@@ -153,7 +217,12 @@ fn preview(
 }
 
 /// Runs the program and turns what it did into the call's result.
-async fn run(spec: Arc<DeclaredToolSpec>, workspace: PathBuf, input: Value) -> ToolResult {
+async fn run(
+    spec: Arc<DeclaredToolSpec>,
+    workspace: PathBuf,
+    runtime_environment: &[(String, String)],
+    input: Value,
+) -> ToolResult {
     // Asked again rather than trusted from the preview: the preview is only
     // reached when an authorizer is installed, and a check that a missing
     // authorizer removes is not a check.
@@ -167,6 +236,7 @@ async fn run(spec: Arc<DeclaredToolSpec>, workspace: PathBuf, input: Value) -> T
     })?;
 
     let running = Arc::clone(&spec);
+    let environment = environment(runtime_environment, &spec.env);
 
     // Spawning a process and waiting for it is genuinely blocking work, so it
     // goes to a thread meant for it rather than onto a runtime worker — which
@@ -176,7 +246,7 @@ async fn run(spec: Arc<DeclaredToolSpec>, workspace: PathBuf, input: Value) -> T
         subprocess::execute(
             &running.command,
             &running.working_directory(&workspace),
-            &running.env,
+            &environment,
             &payload,
             running.timeout(),
         )
@@ -185,6 +255,31 @@ async fn run(spec: Arc<DeclaredToolSpec>, workspace: PathBuf, input: Value) -> T
     .map_err(|error| format!("{} could not be run: {error}", spec.name))?;
 
     answer(&spec, completion)
+}
+
+/// What one declared program is spawned with, over the environment it
+/// inherits.
+///
+/// **The manifest wins.** The runtime's pairs are the host's statement about
+/// every process this runtime spawns; the manifest's are this one tool's own,
+/// and between two statements about the same name the more specific one holds —
+/// the same direction the workspace's `tools.json` already beats the global
+/// one. A host that wants the opposite is asking for a value a repository
+/// cannot override, which is a different feature and not this one.
+///
+/// Neither set clears the inherited environment, and that is deliberate:
+/// `PATH`, `HOME` and the rest come from there, and a program that lost them
+/// would be a manifest that used to work and now does not.
+fn environment(
+    runtime: &[(String, String)],
+    manifest: &[(String, String)],
+) -> Vec<(String, String)> {
+    runtime
+        .iter()
+        .filter(|(name, _)| !manifest.iter().any(|(declared, _)| declared == name))
+        .chain(manifest.iter())
+        .cloned()
+        .collect()
 }
 
 /// Turns how the program ended into what the model reads.
