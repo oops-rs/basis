@@ -258,6 +258,7 @@ version = "0.4.4"
 dependencies = [
  "agent-client-protocol",
  "async-trait",
+ "base64",
  "basis",
  "blocking",
  "futures",

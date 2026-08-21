@@ -38,6 +38,11 @@ basis-acp = { version = "0.4", path = "basis-acp" }
 mentra = { version = "0.18.3", default-features = false }
 
 async-trait = "0.1"
+# ACP carries an image in a prompt as base64; basis's `PromptPart` carries the
+# bytes, because that is what mentra hands a provider. `basis-acp` is the one
+# place the two meet, so it is the only crate here that names this. Already in
+# the tree via mentra-provider, which does the encoding on the way back out.
+base64 = "0.22"
 # Moves a blocking reader onto its own thread, which is how stdin becomes an
 # async stream. Already in the tree via agent-client-protocol, whose own stdio
 # transport is built on it; `basis-acp` names it because it builds that transport

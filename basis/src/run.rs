@@ -47,7 +47,7 @@ use crate::{
 };
 
 pub use output::{OutputReport, OutputSpec};
-pub use prepared::{LoadedSkill, PreparedRun, RunContext};
+pub use prepared::{LoadedSkill, PreparedRun, PromptPart, RunContext};
 pub use sink::{
     CollectingSink, EventFanIn, EventSink, FnSink, MergedEvents, NullSink, TaggedEvent, TaggedSink,
 };
