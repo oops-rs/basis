@@ -19,18 +19,23 @@ homepage = "https://github.com/oops-rs/basis"
 basis = { version = "0.4", path = "basis" }
 basis-acp = { version = "0.4", path = "basis-acp" }
 
-# Mentra 0.18 is the runtime contract basis targets. 0.18.2 is the floor for two
-# reasons, both ADR-0021's: a command target rides on `CommandRequest::target`
-# and `ToolContext::execute_shell_command_on` is how `spawn` names one; and
-# 0.18.2 matches a remembered rule's pattern as data rather than as a path,
-# without which no rule could match `target` or `mode` at all.
+# Mentra 0.18 is the runtime contract basis targets. 0.18.3 is the floor because
+# both of `RuntimeBuilder`'s provider-connection knobs are its: `ProviderRetry`
+# and `RunOptions::provider_retry` are how a host says how patiently a failing
+# provider is waited out, and `RuntimeBuilder::with_responses_transport` is how
+# it picks the wire the Responses format streams over. Before that, 0.18.2 was
+# the floor for two of ADR-0021's reasons: a command target rides on
+# `CommandRequest::target` and `ToolContext::execute_shell_command_on` is how
+# `spawn` names one; and 0.18.2 matches a remembered rule's pattern as data
+# rather than as a path, without which no rule could match `target` or `mode`
+# at all.
 #
 # `default-features = false` drops exactly one thing: mentra's Responses
-# websocket transport, which nothing in basis can select — every run streams over
-# HTTP+SSE. `basis` re-offers it as a feature for an embedder who wants it
-# (see its manifest); the binary and `basis-acp` do not, because neither has a
-# surface that would ask for it.
-mentra = { version = "0.18.2", default-features = false }
+# websocket transport. `basis` re-offers it as a `responses-websocket` feature
+# for an embedder who wants it (see its manifest), which is also the feature
+# `with_responses_transport` needs before it can select that wire; the binary
+# and `basis-acp` do not, because neither has a surface that would ask for it.
+mentra = { version = "0.18.3", default-features = false }
 
 async-trait = "0.1"
 # Moves a blocking reader onto its own thread, which is how stdin becomes an
@@ -88,3 +93,13 @@ strip = true
 opt-level = "s"
 lto = true
 codegen-units = 1
+
+# **Temporary, and it stays until mentra 0.18.3 is published.** The two knobs
+# this workspace's `RuntimeBuilder` grew need `ProviderRetry`,
+# `RunOptions::provider_retry` and `RuntimeBuilder::with_responses_transport`,
+# which landed in mentra after 0.18.2 went to crates.io. Until the release is
+# out, a standalone checkout of basis does not resolve without this line and the
+# sibling checkout it names — which is exactly the state this comment exists to
+# make impossible to forget.
+[patch.crates-io]
+mentra = { path = "/Users/wendell/developer/oops-rs/mentra/mentra" }
