@@ -185,6 +185,12 @@ config — never through code in `basis`:
   whole directory.
 - **Prompt templates** — `.basis/templates/*.md` with `$ARGUMENTS` and `$1`, `$2`…; a nested path is a
   namespace (`git/commit.md` → `git:commit`). ACP clients get them as commands.
+- **The model choice** — `.basis/config.json`: `provider`, `model`, `effort`, schema-versioned, with
+  `${VAR}` expansion, layered over a `config.json` in the global config directory. Without it, no
+  `--model` means whatever the provider lists newest *today*, which is not a thing a repository
+  chose. A flag still wins; the file still beats the environment. `base_url` is honored only from
+  your own global file, and a workspace file that sets it is refused by name: a file a repository
+  ships must not be able to point the model's traffic — and the key on it — somewhere you did not.
 - **Declared tools** — `.basis/tools.json`: a name, a description, a JSON schema and an argv array,
   and the model gets a tool that pipes its input to that program's stdin and reads stdout back. No
   shell anywhere on the path, so nothing has to be quoted or encoded around quoting. Every one is
@@ -194,6 +200,9 @@ config — never through code in `basis`:
   client can send servers on `session/new`; both sets are honored.
 - **Hooks** — `.basis/hooks.json`: commands that take JSON on stdin and answer `allow`, `deny` with a
   reason the model sees, or `modify` with a replacement input. Any language; one that breaks denies.
+
+[docs/conventions.md](docs/conventions.md) is the one-page reference: every file, every directory,
+every `BASIS_*` variable, and which wins when two say the same thing.
 
 - **Command targets** — a host can register executors by name, and a command can say which one
   it wants: `!@mac xcodebuild -list` where `!cargo test` runs where basis is running. For the
@@ -364,6 +373,7 @@ client's UI, or the OS's job — hence no TUI, no scheduler, no container, no wo
 
 Docs: [PROPOSAL.md](docs/PROPOSAL.md) (why) · [ARCHITECTURE.md](docs/ARCHITECTURE.md) (how, with §8
 for `--effort`, custom endpoints, and the hooks `shell`→`spawn` migration) ·
+[conventions.md](docs/conventions.md) (every file and variable basis reads, in precedence order) ·
 [embedding.md](docs/embedding.md) (the SDK in detail) · [targets.md](docs/targets.md) (running a
 command somewhere else) · [REDESIGN.md](docs/REDESIGN.md) (ledger) ·
 [adr/](docs/adr/) (21 locked decisions) · [proposals/](docs/proposals/) (deferred ideas).

@@ -880,3 +880,97 @@ fn a_chosen_file_tool_profile_is_named_in_the_debug_view() {
     assert!(printed.contains("file_tools"), "{printed}");
     assert!(printed.contains("Batched"), "{printed}");
 }
+
+/// A config file discovered in a fresh directory, for the layering assertions
+/// below. The temp directory comes back because it must outlive the read.
+fn config_saying(body: &str) -> (tempfile::TempDir, crate::Config) {
+    let dir = tempfile::tempdir().expect("tempdir");
+    let global = dir.path().join("global");
+    std::fs::create_dir_all(&global).expect("create global");
+    std::fs::write(global.join("config.json"), body).expect("write global config");
+
+    let config = crate::Config::discover(dir.path(), Some(&global)).expect("a well-formed file");
+
+    (dir, config)
+}
+
+/// A file with an answer to every key this builder can take from one.
+const EVERY_KEY: &str = r#"{
+    "schema": 1,
+    "provider": "openai",
+    "base_url": "http://from-the-file/v1",
+    "model": "from-the-file"
+}"#;
+
+#[test]
+fn a_config_answers_only_what_the_builder_was_not_told() {
+    let (_dir, config) = config_saying(EVERY_KEY);
+
+    let filled = RuntimeBuilder::default().with_config(&config);
+
+    assert_eq!(filled.provider, Some(BuiltinProvider::OpenAI));
+    assert_eq!(filled.base_url.as_deref(), Some("http://from-the-file/"));
+    assert_eq!(
+        filled.model,
+        Some(ModelSelector::Id("from-the-file".to_string()))
+    );
+}
+
+#[test]
+fn a_builder_that_was_told_keeps_what_it_was_told() {
+    // The precedence rule this knob exists to obey: a file layers *under* the
+    // host's own calls, never over them. Order must not matter either — what
+    // `with_config` reads is emptiness, not who spoke last.
+    let (_dir, config) = config_saying(EVERY_KEY);
+
+    for told in [
+        RuntimeBuilder::default()
+            .with_provider(BuiltinProvider::Anthropic)
+            .with_base_url("http://from-the-host/v1")
+            .with_model(ModelSelector::Id("from-the-host".to_string()))
+            .with_config(&config),
+        RuntimeBuilder::default()
+            .with_config(&config)
+            .with_provider(BuiltinProvider::Anthropic)
+            .with_base_url("http://from-the-host/v1")
+            .with_model(ModelSelector::Id("from-the-host".to_string())),
+    ] {
+        assert_eq!(told.provider, Some(BuiltinProvider::Anthropic));
+        assert_eq!(told.base_url.as_deref(), Some("http://from-the-host/v1"));
+        assert_eq!(
+            told.model,
+            Some(ModelSelector::Id("from-the-host".to_string()))
+        );
+    }
+}
+
+#[test]
+fn a_config_that_says_nothing_changes_nothing() {
+    let untouched = RuntimeBuilder::default().with_config(&crate::Config::default());
+
+    assert_eq!(untouched.provider, None);
+    assert_eq!(untouched.base_url, None);
+    assert_eq!(
+        untouched.model, None,
+        "unsaid, which `build` resolves to the newest available"
+    );
+}
+
+#[test]
+fn a_config_beats_the_environment_by_being_asked_for() {
+    // The layer below a file is the environment, and this is the whole
+    // mechanism: a provider a file named arrives at `provider::resolve_with`
+    // as a *requested* one, and a requested provider reads its own variable
+    // instead of auto-detecting whichever key happens to be exported — which
+    // `provider`'s own tests pin, against an injected environment. Nothing
+    // here reads the real one.
+    let (_dir, config) = config_saying(r#"{"schema": 1, "provider": "gemini"}"#);
+
+    let asked = RuntimeBuilder::default().with_config(&config);
+
+    assert_eq!(
+        asked.provider,
+        Some(BuiltinProvider::Gemini),
+        "auto-detection is skipped exactly when a provider is requested"
+    );
+}

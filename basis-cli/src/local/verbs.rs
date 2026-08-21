@@ -372,6 +372,8 @@ fn run_options(args: &RunArgs) -> RunOptions {
         base_url: args.base_url.clone(),
         model: args.model.clone(),
         no_shell: args.no_shell,
+        system_prompt: args.system_prompt.clone(),
+        append_system_prompt: args.append_system_prompt.clone(),
         effort: args.effort.map(effort_name).map(str::to_string),
         approve: approval_name(args.approve).to_string(),
         // An unattended owner has no human watching it. Give it a finite

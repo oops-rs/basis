@@ -447,6 +447,26 @@ send `previous_response_id`. That optional extension is not part of basis's
 compatibility assumption; native provider presets retain Mentra's Hybrid state
 chaining.
 
+A repository can state its own answer instead of relying on the flag or the
+variable. `.basis/config.json` — `provider`, `model`, `effort`, and in the
+global `config.json` only, `base_url` — layers under everything an invocation
+says and over everything the environment does:
+
+```
+CLI flag / explicit builder call
+  → <workspace>/.basis/config.json
+    → <global config dir>/config.json
+      → environment (BASIS_BASE_URL, ANTHROPIC_API_KEY, …)
+        → basis's default (the provider's newest available model)
+```
+
+A flag wins because it describes this invocation; a file beats a variable
+because the variable describes whoever started the shell and the file describes
+the repository the work is in. `base_url` in a *workspace* file is refused by
+name rather than ignored — a file a repository ships must not be able to
+redirect the traffic carrying the credential basis read out of the environment.
+[conventions.md](conventions.md) has the keys and the rest of the map.
+
 ### The two meanings of stdin, and `session/list`
 
 An editor spawning basis and a shell pipe look identical from inside the process — both are a

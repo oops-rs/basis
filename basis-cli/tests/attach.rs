@@ -649,6 +649,56 @@ fn resumable_is_how_a_shell_asks_for_a_handle_instead_of_an_answer() {
     );
 }
 
+/// The host's say over the system prompt has to survive the gap ADR-0019
+/// opens: `spawn` records the request and exits, and some *other* process
+/// attaches later and builds the workspace. A flag that only reached the
+/// spawning process would be a prompt that changed the moment a run was
+/// resumed.
+#[test]
+fn an_appended_system_prompt_survives_the_spawn_and_reaches_the_model() {
+    let fixture = Fixture::new();
+    let endpoint = ScriptedEndpoint::start(vec![Reply::Text]);
+
+    let mut command = fixture.basis(&["spawn", "say something", "--resumable", "-C"]);
+    command.arg(&fixture.workspace).args([
+        "--base-url",
+        &endpoint.base_url,
+        "--model",
+        "test-model",
+        "--deadline",
+        "5m",
+        "--append-system-prompt",
+        "answer in Latin",
+    ]);
+    let output = run_bounded(command);
+    assert!(output.status.success(), "{}", stderr(&output));
+    let stdout = String::from_utf8(output.stdout).expect("utf8");
+    let task = stdout
+        .lines()
+        .find_map(|line| line.strip_prefix("task "))
+        .and_then(|line| line.split_once(':').map(|(task, _)| task.to_string()))
+        .unwrap_or_else(|| panic!("no task handle in: {stdout}"));
+
+    let meta: Value = serde_json::from_str(
+        &fs::read_to_string(fixture.agent_dir(&task).join("meta.json")).expect("meta"),
+    )
+    .expect("meta is json");
+    assert_eq!(
+        meta["options"]["append_system_prompt"], "answer in Latin",
+        "the flag has to be in the durable record, or the attacher cannot honor it"
+    );
+
+    let waited = run_bounded(fixture.basis(&["wait", &task, "--json"]));
+    assert!(waited.status.success(), "{}", stderr(&waited));
+
+    let requests = endpoint.requests();
+    let first = requests.first().expect("the model was asked something");
+    assert!(
+        first.contains("answer in Latin"),
+        "the appended line never reached the request: {first}"
+    );
+}
+
 /// Writes an agent directory in the post-kill-window shape: completion
 /// recorded in `meta.json`, terminal record absent.
 fn write_agent(fixture: &Fixture, task: &str, parent: Option<&str>, result: &str) {

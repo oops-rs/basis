@@ -30,6 +30,7 @@ use mentra::ModelSelector;
 use crate::mcp::{self, McpConfig, connections::McpConnections};
 use crate::{
     compaction::Compaction,
+    config::{self, Config},
     context::{ContextConfig, SystemPrompt, WorkspaceContext},
     event::ContextFile,
     hooks::{self, HookRunner, HooksConfig},
@@ -61,6 +62,9 @@ pub struct WorkspaceBuilder {
     /// An override; `None` defers to the runtime's model policy.
     model: Option<ModelSelector>,
     context: ContextConfig,
+    /// What `config.json` said; `None` means discover it at
+    /// [`open`](WorkspaceBuilder::open).
+    config: Option<Config>,
     /// The host's own say over the system prompt; `None` is discovery alone.
     system_prompt: Option<SystemPrompt>,
     skills: SkillsConfig,
@@ -101,6 +105,7 @@ impl std::fmt::Debug for WorkspaceBuilder {
             )
             .field("model", &self.model)
             .field("context", &self.context)
+            .field("config", &self.config)
             .field("system_prompt", &self.system_prompt)
             .field("skills", &self.skills)
             .field("templates", &self.templates)
@@ -122,6 +127,9 @@ impl WorkspaceBuilder {
             runtime: RuntimeSource::Private(Box::default()),
             model: None,
             context: ContextConfig::default(),
+            // Unset, so `open` reads the convention where convention says it
+            // is — the same default every other discovery on this builder has.
+            config: None,
             // Unset, so the prompt is what the workspace says and nothing else.
             // basis ships no system prompt of its own (PROPOSAL.md Bet 4) and
             // a seam is not a default.
@@ -187,6 +195,30 @@ impl WorkspaceBuilder {
 
     pub fn with_context(self, context: ContextConfig) -> Self {
         Self { context, ..self }
+    }
+
+    /// Supplies the `config.json` answers instead of discovering them.
+    ///
+    /// Unset, [`open`](Self::open) reads `.basis/config.json` and the global
+    /// `config.json` itself, because opening a path is what reads a
+    /// repository's conventions — the same reason it reads `AGENTS.md` and
+    /// `.mcp.json` without being asked to.
+    ///
+    /// Two callers want to say otherwise. A host that already discovered a
+    /// [`Config`] — to report it, or to apply its process half to a shared
+    /// [`Runtime`](crate::Runtime) with
+    /// [`RuntimeBuilder::with_config`](crate::RuntimeBuilder::with_config) —
+    /// hands the same value here rather than paying for the read twice. And
+    /// `Config::default()` says *nothing*, which is how a host that wants its
+    /// own configuration to be the only configuration turns the file off.
+    ///
+    /// Whatever arrives still loses to every explicit call on this builder and
+    /// on the runtime's: this is the layer below them, never above.
+    pub fn with_config(self, config: Config) -> Self {
+        Self {
+            config: Some(config),
+            ..self
+        }
     }
 
     /// Gives the host a say over the system prompt, for this workspace's runs.
@@ -325,6 +357,16 @@ impl WorkspaceBuilder {
     pub async fn open(self) -> Result<Workspace, RunError> {
         let context = WorkspaceContext::discover_with(&self.path, &self.context)?;
 
+        // Read before the runtime is acquired, for the reason the hooks file
+        // below is: a config that does not parse must fail the open rather
+        // than let a run reach a model nobody in this repository chose. The
+        // global directory is the context config's, so one process cannot read
+        // two different global directories.
+        let config = match self.config {
+            Some(config) => config,
+            None => config::Config::discover(&self.path, self.context.global_dir.as_deref())?,
+        };
+
         // Loaded before the runtime is acquired so a hooks file that does not
         // parse fails the open loudly, rather than at the first tool call —
         // or worse, never.
@@ -338,11 +380,27 @@ impl WorkspaceBuilder {
 
         let shared = matches!(self.runtime, RuntimeSource::Shared(_));
         let runtime = match self.runtime {
+            // A shared runtime's provider, credential and endpoint are the
+            // host's process facts and were settled before this workspace
+            // existed, so a file's `provider` and `base_url` have nothing to
+            // reach here — the host that shares a runtime is the one that
+            // decided the connection, and applies `RuntimeBuilder::with_config`
+            // itself if it wants a file to speak for it. What still applies is
+            // `model`, below, which ADR-0018 already makes a workspace override.
             RuntimeSource::Shared(runtime) => runtime,
-            RuntimeSource::Private(recipe) => Arc::new(recipe.build_for(&self.path, self.shell)?),
+            RuntimeSource::Private(recipe) => Arc::new(
+                recipe
+                    .with_config(&config)
+                    .build_for(&self.path, self.shell)?,
+            ),
         };
 
-        let model = runtime.resolve_model(self.model).await?;
+        // The workspace's own override first, then the file, then the runtime's
+        // policy — which on the private path is already the file's answer, so
+        // the two agree by construction rather than by luck.
+        let model = runtime
+            .resolve_model(self.model.or_else(|| config.model_selector()))
+            .await?;
 
         // Skills must be registered on the runtime before any session spawns,
         // so every agent's tool roster includes `load_skill`.
@@ -426,6 +484,11 @@ impl WorkspaceBuilder {
             provider: runtime.provider().to_string(),
             runtime,
             model,
+            // The last thing the file still has to say, and the one this
+            // builder cannot say for it: an effort is a per-turn request, so
+            // it waits here until a `RunSpec` that asked for none is minted.
+            effort: config.effort.as_ref().map(|effort| effort.value),
+            config,
             context,
             skills_dirs,
             skills,

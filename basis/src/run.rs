@@ -32,7 +32,7 @@ use thiserror::Error;
 use crate::mcp::{McpConfig, McpError};
 use crate::{
     approval::Approver,
-    context::{ContextConfig, ContextError, WorkspaceContext},
+    context::{ContextConfig, ContextError, SystemPrompt, WorkspaceContext},
     event::RunOutcome,
     hooks::HooksConfig,
     provider::ProviderError,
@@ -126,6 +126,10 @@ pub struct RunConfig {
     pub base_url: Option<String>,
     pub model: ModelSelector,
     pub context: ContextConfig,
+    /// What the *host* says on top of what the workspace's context files say.
+    /// `None` — the default — is discovery alone, which is what basis has
+    /// always sent.
+    pub system_prompt: Option<SystemPrompt>,
     pub skills: SkillsConfig,
     /// Which MCP servers this run connects, and where to look for more.
     #[cfg(feature = "mcp")]
@@ -172,6 +176,7 @@ impl RunConfig {
             base_url: None,
             model: ModelSelector::NewestAvailable,
             context: ContextConfig::default(),
+            system_prompt: None,
             skills: SkillsConfig::default(),
             #[cfg(feature = "mcp")]
             mcp: McpConfig::default(),
@@ -214,6 +219,20 @@ impl RunConfig {
 
     pub fn with_context(self, context: ContextConfig) -> Self {
         Self { context, ..self }
+    }
+
+    /// Gives the host a say over the system prompt for this run's workspace.
+    ///
+    /// The one-prompt spelling of
+    /// [`WorkspaceBuilder::with_system_prompt`](crate::WorkspaceBuilder::with_system_prompt),
+    /// carried through [`split`](Self::split) to exactly that call — so the
+    /// CLI, the ACP server, and a host holding a `RunConfig` all reach the
+    /// same seam, and basis still ships no system prompt of its own.
+    pub fn with_system_prompt(self, system_prompt: SystemPrompt) -> Self {
+        Self {
+            system_prompt: Some(system_prompt),
+            ..self
+        }
     }
 
     pub fn with_skills(self, skills: SkillsConfig) -> Self {
@@ -342,16 +361,29 @@ impl RunConfig {
             runtime = runtime.with_base_url(base_url.clone());
         }
 
-        #[allow(unused_mut, reason = "mutated only when the mcp feature is on")]
         let mut builder = Workspace::builder(&self.workspace)
             .with_runtime_builder(runtime)
-            .with_model(self.model.clone())
             .with_context(self.context.clone())
             .with_skills(self.skills.clone())
             .with_templates(self.templates.clone())
             .with_hooks(self.hooks.clone())
             .with_tools(self.tools.clone())
             .with_shell(self.shell);
+
+        // Restated as a workspace override only when it is a choice.
+        // `RunConfig::new` seeds `NewestAvailable` as the *absence* of one —
+        // the field is not an `Option`, so that value is how a caller who
+        // named no model is spelled — and passing it on would make every
+        // config that never mentioned a model outrank a `.basis/config.json`
+        // that did. Asking for the newest explicitly and saying nothing are
+        // the same request, so nothing is lost by treating them alike.
+        if !matches!(self.model, ModelSelector::NewestAvailable) {
+            builder = builder.with_model(self.model.clone());
+        }
+
+        if let Some(system_prompt) = &self.system_prompt {
+            builder = builder.with_system_prompt(system_prompt.clone());
+        }
 
         #[cfg(feature = "mcp")]
         {
@@ -473,6 +505,9 @@ pub enum RunError {
 
     #[error("no session to resume")]
     NoSuchSession,
+
+    #[error(transparent)]
+    Config(#[from] crate::config::ConfigError),
 
     #[error(transparent)]
     Context(#[from] ContextError),

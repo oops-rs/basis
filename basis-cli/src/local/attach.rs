@@ -30,7 +30,7 @@ use basis::{
 use serde_json::Value;
 use tokio::time::{self, Instant};
 
-use crate::approver::TerminalApprover;
+use crate::{approver::TerminalApprover, cli};
 
 use super::{
     data_dir::{AgentPaths, DataDir, valid_task_handle},
@@ -528,6 +528,15 @@ fn run_config(meta: &TaskMeta) -> Result<RunConfig, String> {
         .with_shell(ShellAccess::from_flag(!options.no_shell));
     if let Some(model) = &options.model {
         config = config.with_model(ModelSelector::Id(model.clone()));
+    }
+    // Reconstructed from the two recorded halves rather than one field: the
+    // pair is how `spawn` spelled it, and clap refused both at once before
+    // either was written, so `Replace` first is the whole rule.
+    if let Some(system_prompt) = cli::system_prompt(
+        options.system_prompt.clone(),
+        options.append_system_prompt.clone(),
+    ) {
+        config = config.with_system_prompt(system_prompt);
     }
     if let Some(effort) = options.effort.as_deref() {
         config = config.with_effort(parse_effort(effort)?);

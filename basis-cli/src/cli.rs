@@ -13,15 +13,15 @@
 //! sees them. The rewrite that turns a bare prompt into a `spawn` happens before
 //! any of this, in [`shorthand`](crate::shorthand).
 //!
-//! The two enums are the exception to "only the shape". [`EffortArg`] and
-//! [`ApproveMode`] each convert into a type in the layer below, and both are
-//! named by two commands — keeping the conversion next to the spelling is what
-//! stops `spawn` and `serve` drifting into meaning different things by the same
-//! word.
+//! The conversions are the exception to "only the shape". [`EffortArg`],
+//! [`ApproveMode`] and [`system_prompt`] each turn a spelling into a type in
+//! the layer below, and each is named by two commands — keeping the conversion
+//! next to the spelling is what stops `spawn` and `serve` drifting into meaning
+//! different things by the same word.
 
 use std::{net::SocketAddr, path::PathBuf};
 
-use basis::{AllowAll, Approver, DenyAll};
+use basis::{AllowAll, Approver, DenyAll, SystemPrompt};
 
 use crate::approver::TerminalApprover;
 use crate::duration_arg::DurationArg;
@@ -253,6 +253,15 @@ pub(crate) struct AcpArgs {
     #[arg(long)]
     pub(crate) no_shell: bool,
 
+    /// Replace the system prompt with TEXT. The workspace's context files stay
+    /// out of it entirely; they are still reported in the run header.
+    #[arg(long, value_name = "TEXT")]
+    pub(crate) system_prompt: Option<String>,
+
+    /// Add TEXT after the workspace's own context, as the most specific block.
+    #[arg(long, value_name = "TEXT", conflicts_with = "system_prompt")]
+    pub(crate) append_system_prompt: Option<String>,
+
     /// How hard the model should think: low, medium, high, xhigh, or max.
     /// Unsupported provider/model levels fail instead of being downgraded.
     #[arg(long, value_name = "LEVEL")]
@@ -335,6 +344,15 @@ pub(crate) struct RunArgs {
     #[arg(long)]
     pub(crate) no_shell: bool,
 
+    /// Replace the system prompt with TEXT. The workspace's context files stay
+    /// out of it entirely; they are still reported in the run header.
+    #[arg(long, value_name = "TEXT")]
+    pub(crate) system_prompt: Option<String>,
+
+    /// Add TEXT after the workspace's own context, as the most specific block.
+    #[arg(long, value_name = "TEXT", conflicts_with = "system_prompt")]
+    pub(crate) append_system_prompt: Option<String>,
+
     /// How hard the model should think: low, medium, high, xhigh, or max.
     /// Unsupported provider/model levels fail instead of being downgraded.
     #[arg(long, value_name = "LEVEL")]
@@ -365,6 +383,22 @@ pub(crate) struct RunArgs {
     /// gracefully and keeps what it has. This is the bound that maps to money.
     #[arg(long, value_name = "N")]
     pub(crate) token_budget: Option<u64>,
+}
+
+/// What the two system-prompt flags mean, in one place.
+///
+/// Named by both `spawn` and `serve`, so it lives beside the spelling for
+/// [`EffortArg`]'s reason: two commands that share a word must not drift into
+/// meaning different things by it. clap has already refused both at once
+/// (`conflicts_with`), so the `Replace` arm is checked first and the second
+/// arm can only be reached when the first was absent.
+pub(crate) fn system_prompt(
+    replace: Option<String>,
+    append: Option<String>,
+) -> Option<SystemPrompt> {
+    replace
+        .map(SystemPrompt::Replace)
+        .or_else(|| append.map(SystemPrompt::Append))
 }
 
 /// Knobs for the fingerprint, which is only ever asked about one directory.
@@ -451,6 +485,58 @@ mod tests {
             assert!(args.acp);
             assert_eq!(args.acp_args.effort, Some(expected));
         }
+    }
+
+    #[test]
+    fn the_two_system_prompt_flags_are_alternatives_on_both_commands() {
+        // One enum below, so *both at once* is unspellable in the layer this
+        // parses into — which makes it clap's job to say so rather than a
+        // silent precedence rule nobody wrote down.
+        for argv in [
+            vec![
+                "basis",
+                "spawn",
+                "prompt",
+                "--system-prompt",
+                "a",
+                "--append-system-prompt",
+                "b",
+            ],
+            vec![
+                "basis",
+                "serve",
+                "--acp",
+                "--system-prompt",
+                "a",
+                "--append-system-prompt",
+                "b",
+            ],
+        ] {
+            let error = Cli::try_parse_from(argv).expect_err("a host says one or the other");
+            assert_eq!(error.exit_code(), i32::from(EXIT_USAGE));
+        }
+    }
+
+    #[test]
+    fn each_system_prompt_flag_becomes_the_variant_it_names() {
+        let replaced = run_args(&["--system-prompt", "you are Acme's reviewer"]);
+        assert_eq!(
+            system_prompt(replaced.system_prompt, replaced.append_system_prompt),
+            Some(SystemPrompt::Replace("you are Acme's reviewer".to_string()))
+        );
+
+        let appended = run_args(&["--append-system-prompt", "answer in Latin"]);
+        assert_eq!(
+            system_prompt(appended.system_prompt, appended.append_system_prompt),
+            Some(SystemPrompt::Append("answer in Latin".to_string()))
+        );
+
+        let neither = run_args(&[]);
+        assert_eq!(
+            system_prompt(neither.system_prompt, neither.append_system_prompt),
+            None,
+            "unsaid must leave the discovery-only prompt exactly as it was"
+        );
     }
 
     fn run_args(args: &[&str]) -> RunArgs {
