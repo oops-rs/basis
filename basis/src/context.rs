@@ -8,6 +8,11 @@
 //! ancestor directory from the outermost inward, then the workspace root. The
 //! rendered output preserves that order, so a more specific document is read
 //! last and reads as an override.
+//!
+//! Each of those directories is asked for `AGENTS.md` and then, only if it has
+//! none, for `CLAUDE.md` — one document per directory, the first name that is
+//! there. Both files are the same convention under two names, and a repository
+//! that carries only the older one is not a repository with no instructions.
 
 mod discovery;
 mod render;
@@ -19,6 +24,15 @@ use thiserror::Error;
 /// The default file name basis looks for. Chosen by convention, not by basis —
 /// `AGENTS.md` is a cross-agent standard.
 pub const DEFAULT_CONTEXT_FILE: &str = "AGENTS.md";
+
+/// What basis reads in a directory that has no [`DEFAULT_CONTEXT_FILE`].
+///
+/// The same convention under its older name: the repositories that carry a
+/// `CLAUDE.md` and no `AGENTS.md` wrote it to instruct an agent, and reading
+/// only the newer spelling means handing the model an empty system prompt for a
+/// repository that took the trouble to write one. pi reads the pair in this
+/// order for the same reason.
+pub const DEFAULT_CONTEXT_FALLBACK_FILE: &str = "CLAUDE.md";
 
 /// Where a context document was found. Ordering is precedence: `Global` is the
 /// weakest, `Workspace` the strongest.
@@ -59,6 +73,10 @@ pub struct ContextDocument {
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct ContextConfig {
     /// File name to look for in each candidate directory.
+    ///
+    /// Left at [`DEFAULT_CONTEXT_FILE`] this is the *first* of two names —
+    /// see [`file_names`](Self::file_names) for the fallback and for why
+    /// renaming opts out of it.
     pub file_name: String,
     /// Directory holding the user-global context file, if any.
     pub global_dir: Option<PathBuf>,
@@ -72,6 +90,24 @@ impl Default for ContextConfig {
             file_name: DEFAULT_CONTEXT_FILE.to_string(),
             global_dir: default_global_dir(),
             walk_parents: true,
+        }
+    }
+}
+
+impl ContextConfig {
+    /// The names to try in one directory, strongest first. The first that is
+    /// there is the document that directory contributes; the rest are not read.
+    ///
+    /// The fallback belongs to the *default* name rather than to any name. A
+    /// host that renamed the convention has said which file it wants, and
+    /// reading `CLAUDE.md` behind that name would be basis loading instructions
+    /// from a file the host never named — the one thing a discovery knob exists
+    /// to prevent.
+    pub fn file_names(&self) -> Vec<&str> {
+        if self.file_name == DEFAULT_CONTEXT_FILE {
+            vec![DEFAULT_CONTEXT_FILE, DEFAULT_CONTEXT_FALLBACK_FILE]
+        } else {
+            vec![self.file_name.as_str()]
         }
     }
 }
@@ -207,6 +243,101 @@ mod tests {
                 .path
                 .ends_with(path.file_name().unwrap())
         );
+    }
+
+    #[test]
+    fn the_default_config_names_the_pair_strongest_first() {
+        assert_eq!(
+            ContextConfig::default().file_names(),
+            vec![DEFAULT_CONTEXT_FILE, DEFAULT_CONTEXT_FALLBACK_FILE]
+        );
+    }
+
+    #[test]
+    fn a_directory_with_only_the_older_name_still_contributes() {
+        // The failure this removes: a repository carrying only `CLAUDE.md`
+        // handed basis an empty system prompt.
+        let tmp = tempfile::tempdir().expect("tempdir");
+        let workspace = tmp.path().join("repo");
+        write(&workspace, DEFAULT_CONTEXT_FALLBACK_FILE, "older name");
+
+        let context =
+            WorkspaceContext::discover_with(&workspace, &config(None)).expect("discovery succeeds");
+
+        assert_eq!(context.documents().len(), 1);
+        assert_eq!(context.documents()[0].content, "older name");
+        assert_eq!(context.documents()[0].scope, ContextScope::Workspace);
+    }
+
+    #[test]
+    fn the_standard_name_wins_where_a_directory_holds_both() {
+        // One document per directory. Reading both would give the same
+        // instructions twice to any repository that keeps the two in sync,
+        // which is most of them.
+        let tmp = tempfile::tempdir().expect("tempdir");
+        let workspace = tmp.path().join("repo");
+        write(&workspace, DEFAULT_CONTEXT_FILE, "standard");
+        write(&workspace, DEFAULT_CONTEXT_FALLBACK_FILE, "older");
+
+        let context =
+            WorkspaceContext::discover_with(&workspace, &config(None)).expect("discovery succeeds");
+
+        assert_eq!(context.documents().len(), 1);
+        assert_eq!(context.documents()[0].content, "standard");
+    }
+
+    #[test]
+    fn the_global_directory_honors_the_same_pair() {
+        let tmp = tempfile::tempdir().expect("tempdir");
+        let global = tmp.path().join("global");
+        let workspace = tmp.path().join("repo");
+
+        write(&global, DEFAULT_CONTEXT_FALLBACK_FILE, "personal");
+        write(&workspace, DEFAULT_CONTEXT_FILE, "workspace");
+
+        let context = WorkspaceContext::discover_with(&workspace, &config(Some(global)))
+            .expect("discovery succeeds");
+
+        let bodies: Vec<&str> = context
+            .documents()
+            .iter()
+            .map(|doc| doc.content.as_str())
+            .collect();
+        assert_eq!(bodies, vec!["personal", "workspace"]);
+    }
+
+    #[test]
+    fn a_renamed_convention_reads_only_the_name_it_was_given() {
+        // The fallback is part of the default pair, not a modifier on whatever
+        // a host names: a host that said `HOUSE.md` did not ask for CLAUDE.md.
+        let tmp = tempfile::tempdir().expect("tempdir");
+        let workspace = tmp.path().join("repo");
+        write(&workspace, DEFAULT_CONTEXT_FALLBACK_FILE, "not asked for");
+
+        let config = ContextConfig {
+            file_name: "HOUSE.md".to_string(),
+            ..config(None)
+        };
+        let context =
+            WorkspaceContext::discover_with(&workspace, &config).expect("discovery succeeds");
+
+        assert!(context.is_empty());
+    }
+
+    #[test]
+    fn an_unreadable_standard_file_is_an_error_rather_than_a_fallback() {
+        // Falling through would run the older file while the user believes the
+        // one they edited is in effect — the failure the read error exists for.
+        let tmp = tempfile::tempdir().expect("tempdir");
+        let workspace = tmp.path().join("repo");
+        std::fs::create_dir_all(&workspace).expect("create workspace");
+        std::fs::write(workspace.join(DEFAULT_CONTEXT_FILE), [0xff, 0xfe, 0x00]).expect("write");
+        write(&workspace, DEFAULT_CONTEXT_FALLBACK_FILE, "older");
+
+        let error = WorkspaceContext::discover_with(&workspace, &config(None))
+            .expect_err("unreadable file is an error");
+
+        assert!(matches!(error, ContextError::Read { .. }));
     }
 
     #[test]
