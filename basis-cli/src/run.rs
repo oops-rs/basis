@@ -1,24 +1,24 @@
-//! The headless one-shot: `basis spawn "<prompt>"` (`basis run` is an alias).
+//! The attended one-shot: the JSONL stream, and the prompt `-` reads from
+//! stdin.
 //!
-//! Everything between a parsed [`RunArgs`] and an exit code — the config the
-//! flags build, the prompt `-` reads from stdin, and the prose the event stream
-//! is rendered as.
+//! This is [`Route::Attended`](crate::route::Route::Attended) and nothing
+//! else. That route is granted for `--json` alone (ADR-0020), so the stream
+//! *is* the rendering here: a `run_started` line, whatever happened, and a
+//! `run_finished` line, on stdout, for a consumer that reads the bookends.
+//! Every other spelling mints a checkpoint and goes through
+//! [`local`](crate::local) instead, which is where a person's terminal is
+//! rendered to.
 //!
-//! The renderer lives here rather than next to [`basis`]'s events because it
-//! is a decision about *this command's* output, not about the stream: `--json`
-//! swaps it for a [`JsonlWriter`] and nothing else about the run changes. That
-//! is also why both branches end at the same [`exit_code`] call — the code a
-//! script reads must not depend on which renderer was asked for.
+//! Nothing is minted here, so there is no handle and nothing to `send` to —
+//! the price of a run that leaves no trace, paid deliberately for the one
+//! contract that predates checkpoints.
 
 use std::{
-    io::{self, IsTerminal, Read, Write},
+    io::{self, Read},
     process::ExitCode,
 };
 
-use basis::{
-    Bound, Event, JsonlWriter, RunConfig, RunOutcome, ShellAccess, provider,
-    run::{EventSink, FnSink},
-};
+use basis::{JsonlWriter, RunConfig, ShellAccess, provider};
 use mentra::ModelSelector;
 
 use crate::{cli::RunArgs, exit::exit_code};
@@ -66,50 +66,13 @@ pub(crate) async fn execute_run(args: RunArgs) -> Result<ExitCode, String> {
     // `always` allows, `never` refuses, `prompt` asks the person.
     let approver = args.approve.approver();
 
-    if args.json {
-        let report = basis::run_with_approver(config, JsonlWriter::new(io::stdout()), approver)
-            .await
-            .map_err(|error| error.to_string())?;
-        return Ok(ExitCode::from(exit_code(&report)));
-    }
-
-    // Without --json the run is still driven by the same event stream; only
-    // the rendering differs. Streaming the assistant's text as it arrives is
-    // what makes an interactive invocation feel live.
-    let report = basis::run_with_approver(config, prose_sink(), approver)
+    // The stream is the whole output: every fact a caller could want — the
+    // outcome, the bound that tripped, the failure's words — is a line on it,
+    // so there is nothing left for this function to say afterwards.
+    let report = basis::run_with_approver(config, JsonlWriter::new(io::stdout()), approver)
         .await
         .map_err(|error| error.to_string())?;
-
-    if let RunOutcome::Error { message } = &report.outcome {
-        // A tripped bound is not a failure, and calling it one would send
-        // someone looking for a broken model when the answer is a smaller
-        // task or a larger allowance.
-        let what = match report.stopped_by {
-            Some(_) => "run stopped",
-            None => "run failed",
-        };
-        eprintln!("basis: {what}: {message}");
-    }
-    eprintln!("{}", next_hint(&report.outcome, report.stopped_by));
-
     Ok(ExitCode::from(exit_code(&report)))
-}
-
-/// One actionable line after a human-readable result. JSONL does not use this
-/// renderer, so its event contract remains a stream of JSON objects only.
-fn next_hint(outcome: &RunOutcome, stopped_by: Option<Bound>) -> &'static str {
-    if stopped_by.is_some() {
-        return "next: retry with `basis spawn <PROMPT>` using a narrower prompt or a larger bound";
-    }
-
-    match outcome {
-        RunOutcome::Ok => {
-            "next: use `basis fingerprint` to inspect workspace changes or `basis spawn <PROMPT>` for another task"
-        }
-        RunOutcome::Error { .. } => {
-            "next: retry with `basis spawn <PROMPT>` after addressing the reported failure"
-        }
-    }
 }
 
 /// The prompt as `spawn` (or its `run` alias) was given it, reading stdin when
@@ -146,57 +109,6 @@ fn read_prompt(mut source: impl Read) -> Result<String, String> {
     Ok(prompt)
 }
 
-/// Renders events as prose on stdout: assistant text streams through, tool
-/// calls and failures are announced on stderr so piping stdout still yields
-/// just the answer.
-fn prose_sink() -> impl EventSink {
-    let quiet = !io::stderr().is_terminal();
-
-    FnSink::new(move |event| {
-        match event {
-            Event::RunStarted {
-                model,
-                context_files,
-                ..
-            } => {
-                if !quiet {
-                    eprintln!("basis: {model}, {} context file(s)", context_files.len());
-                }
-            }
-            Event::AssistantDelta { text } => {
-                print!("{text}");
-                io::stdout().flush()?;
-            }
-            Event::ToolStarted { tool_name, .. } => {
-                if !quiet {
-                    eprintln!("  · {tool_name}");
-                }
-            }
-            Event::ToolCompleted {
-                tool_call_id,
-                tool_name,
-                summary,
-                is_error,
-            } if is_error => {
-                // The name normally arrives; it is empty only for a result
-                // whose call this session never saw. Fall back to the id
-                // rather than printing a blank label.
-                let label = if tool_name.is_empty() {
-                    &tool_call_id
-                } else {
-                    &tool_name
-                };
-                eprintln!("  ! {label}: {summary}");
-            }
-            Event::Notice { message, .. } => eprintln!("basis: {message}"),
-            Event::Error { message, .. } => eprintln!("basis: {message}"),
-            Event::RunFinished { .. } => println!(),
-            _ => {}
-        }
-        Ok(())
-    })
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -230,37 +142,38 @@ mod tests {
         );
     }
 
+    /// The route table is what keeps this module's contract true: reaching
+    /// [`execute_run`] without `--json` would put a JSONL stream where a
+    /// person expected an answer.
     #[test]
-    fn a_success_hint_names_two_commands_that_exist() {
-        assert_eq!(
-            next_hint(&RunOutcome::Ok, None),
-            "next: use `basis fingerprint` to inspect workspace changes or `basis spawn <PROMPT>` for another task"
-        );
-    }
+    fn the_attended_route_is_reached_only_for_the_stream_it_renders() {
+        use clap::Parser;
 
-    #[test]
-    fn a_bound_hint_suggests_changing_the_bound_or_the_work() {
-        assert_eq!(
-            next_hint(
-                &RunOutcome::Error {
-                    message: "deadline exceeded".to_string(),
-                },
-                Some(Bound::Deadline),
-            ),
-            "next: retry with `basis spawn <PROMPT>` using a narrower prompt or a larger bound"
-        );
-    }
+        use crate::{
+            cli::{Cli, Command},
+            route::{Route, route},
+        };
 
-    #[test]
-    fn a_failure_hint_does_not_guess_the_remedy() {
-        assert_eq!(
-            next_hint(
-                &RunOutcome::Error {
-                    message: "provider failed".to_string(),
-                },
-                None,
-            ),
-            "next: retry with `basis spawn <PROMPT>` after addressing the reported failure"
-        );
+        for flags in [
+            vec![],
+            vec!["--json"],
+            vec!["--await"],
+            vec!["--json", "--await"],
+            vec!["--resumable"],
+            vec!["--detached"],
+        ] {
+            let mut argv = vec!["basis", "spawn", "a prompt"];
+            argv.extend_from_slice(&flags);
+            let Some(Command::Spawn(args)) = Cli::try_parse_from(argv).expect("parses").command
+            else {
+                panic!("spawn parses");
+            };
+
+            for in_task in [false, true] {
+                if route(&args, in_task) == Route::Attended {
+                    assert!(args.json, "attended without --json: {flags:?}");
+                }
+            }
+        }
     }
 }

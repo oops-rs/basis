@@ -37,16 +37,17 @@ use crate::cli::RunArgs;
 /// Which of the three spawn paths an invocation takes.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(crate) enum Route {
-    /// Run in this process and render the stream as it arrives. Mints no
-    /// checkpoint, so there is no handle and nothing to `send` to later — this
-    /// is the path that owns the `run_started`/`run_finished` JSONL contract.
+    /// Run in this process and put the JSONL stream on stdout as it arrives.
+    /// Mints no checkpoint, so there is no handle and nothing to `send` to
+    /// later — this is the path that owns the `run_started`/`run_finished`
+    /// contract, and the only one whose rendering is the stream itself.
     Attended,
     /// Mint the checkpoint, print its handle, drive nothing. Progress happens
     /// when something attaches.
     Resumable,
     /// Mint the checkpoint and drive it here until it settles. The handle is
-    /// durable, so the work survives this process; the answer is printed
-    /// because this process stayed for it.
+    /// durable, so the work survives this process; the answer streams to this
+    /// terminal as it is produced, because this process stayed for it.
     Attach,
 }
 
