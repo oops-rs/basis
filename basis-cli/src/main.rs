@@ -71,13 +71,14 @@ mod route;
 mod run;
 mod serve;
 mod shorthand;
+mod templates;
 
 use std::process::ExitCode;
 
 use clap::{CommandFactory, Parser};
 
 use crate::{
-    cli::{Cli, Command},
+    cli::{Cli, Command, RunArgs},
     exit::{EXIT_FAILED, EXIT_USAGE},
     fingerprint::execute_fingerprint,
     local::ClientError,
@@ -104,34 +105,16 @@ async fn main() -> ExitCode {
     };
 
     match cli.command {
-        Some(Command::Spawn(args)) => match route(&args, local::has_current_task()) {
-            // A continued conversation lives in the workspace-keyed store
-            // beside the checkpoint that names it; the attended route mints
-            // neither and would silently run the prompt as if it opened the
-            // dialogue. Say so instead of answering the wrong question.
-            Route::Attended if args.continues_a_conversation() => {
-                eprintln!(
-                    "basis: `--continue` and `--session` need a durable task, and the attended `--json` run mints none"
-                );
-                eprintln!("next: use `basis spawn --json --await --continue <PROMPT>`");
-                ExitCode::from(EXIT_USAGE)
+        Some(Command::Spawn(args)) => {
+            // A `/name` prompt is resolved once, before the route is chosen:
+            // every route takes a prompt, and the rendered text is what the
+            // task records, so what `watch` and `list` show is what was asked.
+            let structured = args.json;
+            match templates::expand(args) {
+                Ok(args) => spawn_command(args).await,
+                Err(error) => error.render(structured, "basis spawn <PROMPT>"),
             }
-            Route::Attended => match execute_run(args).await {
-                Ok(code) => code,
-                Err(message) => {
-                    eprintln!("basis: {message}");
-                    eprintln!("next: retry with `basis spawn <PROMPT>` or use `basis --help`");
-                    ExitCode::from(EXIT_FAILED)
-                }
-            },
-            route => {
-                let structured = args.json;
-                match local::spawn(args, route == Route::Attach).await {
-                    Ok(code) => code,
-                    Err(error) => error.render(structured, "basis spawn <PROMPT>"),
-                }
-            }
-        },
+        }
         Some(Command::Send(args)) => {
             let structured = args.json;
             lifecycle_result(
@@ -186,6 +169,39 @@ async fn main() -> ExitCode {
         Some(Command::Serve(args)) if args.acp => serve_acp(args.acp_args).await,
         Some(Command::Serve(args)) => serve_bridge(args.acp_args, args.bridge_args).await,
         None => usage(),
+    }
+}
+
+/// One prompt, down whichever of ADR-0020's three routes the environment and
+/// the flags select.
+async fn spawn_command(args: RunArgs) -> ExitCode {
+    match route(&args, local::has_current_task()) {
+        // A continued conversation lives in the workspace-keyed store beside
+        // the checkpoint that names it; the attended route mints neither and
+        // would silently run the prompt as if it opened the dialogue. Say so
+        // rather than answering a question nobody asked.
+        Route::Attended if args.continues_a_conversation() => {
+            eprintln!(
+                "basis: `--continue` and `--session` need a durable task, and the attended `--json` run mints none"
+            );
+            eprintln!("next: use `basis spawn --json --await --continue <PROMPT>`");
+            ExitCode::from(EXIT_USAGE)
+        }
+        Route::Attended => match execute_run(args).await {
+            Ok(code) => code,
+            Err(message) => {
+                eprintln!("basis: {message}");
+                eprintln!("next: retry with `basis spawn <PROMPT>` or use `basis --help`");
+                ExitCode::from(EXIT_FAILED)
+            }
+        },
+        route => {
+            let structured = args.json;
+            match local::spawn(args, route == Route::Attach).await {
+                Ok(code) => code,
+                Err(error) => error.render(structured, "basis spawn <PROMPT>"),
+            }
+        }
     }
 }
 

@@ -252,7 +252,19 @@ async fn send_message(
 ) -> Result<ExitCode, ClientError> {
     let data = discover()?;
     let paths = resolve(&data, &task)?;
+    // A follow-up is a prompt, so `/name` means here what it means at spawn.
+    // The workspace is the one the task recorded rather than the one this
+    // shell happens to be standing in: the templates a conversation can be
+    // sent are the templates it ran with. `-` is stdin, and stdin is the
+    // escape for a message that begins with a literal `/`.
+    let from_stdin = raw_message == "-";
     let message = prompt_from(raw_message)?;
+    let message = if from_stdin {
+        message
+    } else {
+        let workspace = load_meta(&paths)?.workspace;
+        crate::templates::resolve(&message, Path::new(&workspace))?.unwrap_or(message)
+    };
     if message.len() > MAX_MESSAGE {
         return Err(format!(
             "message is {} bytes; the limit is {MAX_MESSAGE}",
