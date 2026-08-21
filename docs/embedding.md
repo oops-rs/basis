@@ -116,13 +116,81 @@ The knobs ADR-0018 moved are `RuntimeBuilder`'s now — `with_provider`, `with_b
 through `spawn` and declared tools' programs alike) — joined by `with_command_target`, which
 registers an executor a
 command can name with `!@<target> <command>`
-([ADR-0021](adr/0021-a-command-names-where-it-runs.md), [targets.md](targets.md)). A
+([ADR-0021](adr/0021-a-command-names-where-it-runs.md), [targets.md](targets.md)), and by the
+two below that describe the provider connection itself. A
 single-workspace host that wants one of them hands the recipe
 to `WorkspaceBuilder::with_runtime_builder`, which configures the private runtime
 `Workspace::open` would have built rather than switching to a shared one. Mentra's own
 surface is still unhidden, under a name that now says whose it is:
 `Runtime::mentra_runtime()`, and `Workspace::mentra_runtime()` for a host that has only the
 workspace in hand.
+
+## How patiently a failing provider is waited out
+
+mentra retries a transient provider error on a doubling backoff and gives up when the budget
+runs out. Its default — five attempts, from 500ms, capped at 5s — spends about **twelve and
+a half seconds**, which is shaped for a blip: a connection reset, a tunnel restart, a 502
+from a proxy already coming back. A rate limit is a different failure. It lasts as long as
+the window it belongs to, routinely a minute, so the whole default schedule elapses inside a
+limit that was never going to lift and the caller reads a provider failure where the honest
+answer was *wait*.
+
+```rust
+use std::time::Duration;
+use basis::runtime::ProviderRetry;
+
+let runtime = basis::Runtime::builder()
+    .with_provider_retry(ProviderRetry {
+        base_delay: Duration::from_secs(1),
+        max_delay: Duration::from_secs(30),
+        ..ProviderRetry::default()
+    })
+    .with_provider_retry_budget(8)
+    .build()?;
+```
+
+Two knobs because mentra keeps the two questions apart, and both are usually needed: widening
+the schedule without raising the count still gives up after five tries, and raising the count
+against the default 5s ceiling reaches only about 27 seconds in total, short of the minute a
+rate-limit window wants. Do the arithmetic before choosing.
+
+What a host knows that basis cannot is how long its own caller will hold still. An editor
+session should fail fast, because somebody is watching a cursor blink; a chat bot whose turn
+already takes eight minutes can afford one of them waiting, and would far rather do that than
+hand back an error the user has to re-ask. That judgement is why the number is the host's.
+
+The scope is the runtime's (ADR-0018): this describes the connection to the provider, the
+same kind of fact as the credential beside it, not something one prompt decides. Every run
+minted on the runtime carries it, and so does every subagent a run delegates to through
+`spawn` — a delegated run that reset to the default would be quietly less patient than the
+run that delegated it, against the same gateway. `ProviderRetry` is mentra's own type,
+re-exported as `basis::runtime::ProviderRetry`, and `retry_after_cap` on it bounds how long a
+server's own `Retry-After` may make this process wait. None of it is a deadline:
+`TurnOptions::with_deadline` still bounds the whole turn, and a generous schedule inside a
+short deadline is bounded by the deadline.
+
+## Which wire the model's requests go over
+
+mentra streams the Responses wire format over HTTP+SSE or over a websocket. Unset, it picks,
+and what it picks is HTTP+SSE — what every basis run has ever used. A host driving basis
+against an endpoint where the websocket transport is the point says so:
+
+```rust
+use basis::runtime::ResponsesTransport;
+
+let runtime = basis::Runtime::builder()
+    .with_responses_transport(ResponsesTransport::WebSocket)
+    .build()?;
+```
+
+**This needs the `responses-websocket` feature**, which is off by default so that an embedder
+streaming over HTTP+SSE does not carry a websocket stack for it. Without the feature the
+choice is accepted and then **fails at request time** rather than falling back to HTTP+SSE:
+a host that asked for a transport should learn it did not get one, not discover later that
+its traffic went the other way. A provider that does not serve websockets — Anthropic and
+Gemini report that they do not — refuses an explicit choice at its first request, naming
+itself, for the same reason. `Runtime::mentra_runtime().responses_transport()` reads back
+what a runtime chose.
 
 ## Answers you can branch on
 

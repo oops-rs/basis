@@ -287,9 +287,9 @@ impl RuntimeBuilder {
     ///
     /// Worth doing the arithmetic before choosing: with the default schedule
     /// the waits double from 500ms to a 5s ceiling, so raising the count from
-    /// five to eight buys about 27 seconds rather than the minute a rate-limit
-    /// window usually wants. Widening the schedule is what makes a larger
-    /// count worth having.
+    /// five to eight reaches about 27 seconds in total — still short of the
+    /// minute a rate-limit window usually wants. Widening the schedule is what
+    /// makes a larger count worth having.
     ///
     /// Runtime-scoped and inherited by delegated runs, exactly as the schedule
     /// is; see [`with_provider_retry`](Self::with_provider_retry) for why that
