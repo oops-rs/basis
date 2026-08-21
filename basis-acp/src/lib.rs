@@ -26,6 +26,11 @@
 //!   approver so the answer can still change mid-session. The three modes are
 //!   [`ApprovalMode`], which is basis-acp's own because an enumerable mode list
 //!   is a protocol concept — the core has the trait and nothing else.
+//! - `options` is the other switch a client holds: `session/set_config_option`
+//!   over [`PreparedRun::set_model`](basis::PreparedRun::set_model) and
+//!   [`set_effort`](basis::PreparedRun::set_effort), advertised per session
+//!   because ACP carries these on the session responses rather than on
+//!   `initialize`.
 //! - `history` replays a resumed conversation, which is what separates
 //!   `session/load` from `session/resume`.
 //! - [`SessionRegistry`] holds the open conversations, keyed by mentra's
@@ -46,6 +51,7 @@ mod commands;
 mod history;
 mod mcp;
 mod mode;
+mod options;
 mod server;
 mod session;
 mod stdio;
@@ -55,6 +61,7 @@ pub use approver::AcpApprover;
 pub use commands::available_commands;
 pub use mcp::from_acp;
 pub use mode::{ApprovalMode, ModeError, ModedApprover, SessionModes};
+pub use options::{Change, ConfigError};
 pub use server::{ServeConfig, SessionSource, serve};
 pub use session::{AcpSession, SessionRegistry};
 pub use stdio::{StdioError, serve_stdio};

@@ -19,7 +19,7 @@ use tokio::sync::oneshot;
 
 use self::forward::forward_events;
 use super::{
-    Bound, EventSink, OutputReport, OutputSpec, RunError, RunReport, RunUsage, TurnOptions,
+    Bound, Effort, EventSink, OutputReport, OutputSpec, RunError, RunReport, RunUsage, TurnOptions,
     turn::{bounded, drawable},
 };
 use crate::{
@@ -98,6 +98,10 @@ pub struct PreparedRun {
     /// for the same reason. mentra splits the count from the waits; basis
     /// keeps them together, because a host set them as one policy.
     retry_budget: usize,
+    /// What [`set_effort`](PreparedRun::set_effort) last asked for, and only
+    /// that — see [`effort`](PreparedRun::effort) for why it is not the same
+    /// question as "what level is the session at".
+    effort: Option<Effort>,
 }
 
 /// Hand-written because mentra's `Session` is not `Debug`, and because the
@@ -128,6 +132,7 @@ impl PreparedRun {
             levels: SideEffectLevels::new(),
             provider_retry: ProviderRetry::default(),
             retry_budget: RunOptions::default().retry_budget,
+            effort: None,
         }
     }
 
@@ -285,6 +290,70 @@ impl PreparedRun {
     /// What this run is about, minus the session.
     pub fn context(&self) -> &RunContext {
         &self.run
+    }
+
+    /// Switches the model this conversation's later turns run on, keeping the
+    /// provider it was opened with.
+    ///
+    /// Takes effect from the next turn: mentra threads the model into each
+    /// model request as it builds it, so a turn already in flight finishes on
+    /// the model it started with. It also persists — mentra rewrites the agent
+    /// record — so a session resumed in another process comes back on the model
+    /// it was last set to.
+    ///
+    /// `model` is not checked against the provider's catalogue, and
+    /// deliberately: mentra does not check either, listing models is a network
+    /// round trip, and a caller naming a model basis has never heard of is the
+    /// ordinary case for a self-hosted endpoint. An id the provider rejects
+    /// fails on the next turn, where the provider can say why.
+    ///
+    /// The provider is *not* switchable here. mentra resolves a provider from
+    /// the runtime's registry, and a run built on one provider's credential and
+    /// endpoint (ADR-0018) has no second connection to move to.
+    pub fn set_model(&mut self, model: impl Into<String>) -> Result<(), RunError> {
+        let model = model.into();
+
+        self.session
+            .set_model(mentra::ModelInfo::new(model.clone(), &self.run.provider))?;
+        // The context is what `header()` and every report read the model from.
+        // Leaving it stale would have the stream describe a run that is no
+        // longer happening.
+        self.run.model = model;
+
+        Ok(())
+    }
+
+    /// Asks the model to think harder, or less hard, from the next turn on.
+    ///
+    /// `None` clears the request and restores the provider's own default.
+    /// Persisted and deferred exactly as [`set_model`](Self::set_model) is, and
+    /// for the same reason: mentra reads the level live when it builds each
+    /// model request.
+    ///
+    /// A provider or model that does not offer the requested level fails the
+    /// turn rather than quietly running at a lower one — see [`Effort`].
+    pub fn set_effort(&mut self, effort: Option<Effort>) -> Result<(), RunError> {
+        self.session
+            .set_reasoning(effort.map(|effort| mentra::provider::ReasoningOptions {
+                effort: Some(effort.into()),
+                summary: None,
+            }))?;
+        self.effort = effort;
+
+        Ok(())
+    }
+
+    /// The effort [`set_effort`](Self::set_effort) last asked this run for.
+    ///
+    /// `None` means nothing has asked, *not* that the session is at the
+    /// provider's default: a run whose [`RunSpec`](crate::RunSpec) named an
+    /// effort at mint had it applied to the session before this run existed,
+    /// and mentra offers no way to read the level back off a session. So this
+    /// answers "what has this run been set to", which is what a picker showing
+    /// the user their own last choice needs, and not "what will the next
+    /// request carry".
+    pub const fn effort(&self) -> Option<Effort> {
+        self.effort
     }
 
     /// Sends the configured prompt and streams the turn into `sink`.

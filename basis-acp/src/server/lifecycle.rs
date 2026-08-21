@@ -20,10 +20,11 @@ use std::path::{Path, PathBuf};
 use agent_client_protocol::{
     Client, ConnectionTo,
     schema::v1::{
-        AvailableCommand, CloseSessionRequest, CloseSessionResponse, CurrentModeUpdate, Error,
-        ListSessionsRequest, ListSessionsResponse, NewSessionRequest, NewSessionResponse,
-        SessionId, SessionInfo, SessionModeState, SessionUpdate, SetSessionModeRequest,
-        SetSessionModeResponse,
+        AvailableCommand, CloseSessionRequest, CloseSessionResponse, ConfigOptionUpdate,
+        CurrentModeUpdate, Error, ListSessionsRequest, ListSessionsResponse, NewSessionRequest,
+        NewSessionResponse, SessionConfigOption, SessionId, SessionInfo, SessionModeState,
+        SessionUpdate, SetSessionConfigOptionRequest, SetSessionConfigOptionResponse,
+        SetSessionModeRequest, SetSessionModeResponse,
     },
 };
 
@@ -31,6 +32,7 @@ use super::{ServeConfig, announce_commands, notify};
 use crate::{
     history,
     mode::ModeError,
+    options,
     session::{AcpSession, SessionRegistry},
 };
 use basis::{PersistedSession, RunError, provider::ProviderError};
@@ -121,12 +123,18 @@ pub(super) async fn new_session(
     // lock a turn can hold.
     let commands = crate::available_commands(&run.context().templates);
 
+    // Read here, while the run is still in hand: once it is inside the session
+    // it is behind a lock a turn can hold, and `session/new` answers inline.
+    let settings = options::options(&run.context().model, run.effort());
+
     let session = AcpSession::new(run, config.initial_mode);
     let modes = session.modes().state();
     let id = sessions.insert(session);
 
     Ok(Opened {
-        response: NewSessionResponse::new(id).modes(modes),
+        response: NewSessionResponse::new(id)
+            .modes(modes)
+            .config_options(settings),
         commands,
     })
 }
@@ -140,7 +148,19 @@ pub(super) enum Replay {
     No,
 }
 
-/// Picks a persisted conversation back up, and reports the mode it is in.
+/// The state a picked-up conversation reports: what it will and will not do
+/// without asking, and what it is set to.
+///
+/// One struct because `session/load` and `session/resume` answer with the same
+/// two, and reading them out of one turn lock is what keeps them describing the
+/// same instant.
+pub(super) struct Picked {
+    pub(super) modes: SessionModeState,
+    pub(super) options: Vec<SessionConfigOption>,
+}
+
+/// Picks a persisted conversation back up, and reports the mode and the
+/// settings it is in.
 ///
 /// Always called from a spawned task: it takes the turn lock, which a running
 /// turn holds while waiting for the client.
@@ -153,7 +173,7 @@ pub(super) async fn open_persisted(
     cwd: PathBuf,
     mcp_servers: Vec<agent_client_protocol::schema::v1::McpServer>,
     replay: Replay,
-) -> Result<SessionModeState, Error> {
+) -> Result<Picked, Error> {
     let session = match sessions.get(&session_id) {
         // Already open on this connection. Reconnecting a client that lost its
         // view is exactly when a replay is wanted, so this is not a shortcut
@@ -175,9 +195,10 @@ pub(super) async fn open_persisted(
         }
     };
 
-    {
+    let settings = {
         let run = session.lock_turn().await;
         let commands = crate::available_commands(&run.context().templates);
+        let settings = options::options(&run.context().model, run.effort());
         let updates = match replay {
             Replay::Yes => history::replay(run.history()),
             Replay::No => Vec::new(),
@@ -197,9 +218,67 @@ pub(super) async fn open_persisted(
         // A client picking a conversation back up needs its commands as much
         // as a new one does; they came from the workspace, not the session.
         let _ = announce_commands(connection, &session_id, commands);
-    }
 
-    Ok(session.modes().state())
+        settings
+    };
+
+    Ok(Picked {
+        modes: session.modes().state(),
+        options: settings,
+    })
+}
+
+/// Changes one of the session's settings, and tells the client it happened.
+///
+/// Spawned rather than answered inline, unlike `session/set_mode` next door.
+/// The reason is the turn lock: the model and the effort live on the
+/// [`PreparedRun`](basis::PreparedRun) — where mentra persists them, so they
+/// survive `session/load` — and reaching them means taking the lock a running
+/// turn holds while it waits for the client to answer a permission request.
+/// Taking that from the dispatch loop is ADR-0007's deadlock by its second
+/// route.
+///
+/// Waiting for the turn costs nothing a client can observe. Both settings take
+/// effect from the *next* turn either way: mentra reads them when it builds
+/// each model request, so a turn already in flight was never going to change
+/// under this.
+pub(super) async fn set_config_option(
+    sessions: &SessionRegistry,
+    connection: &ConnectionTo<Client>,
+    request: SetSessionConfigOptionRequest,
+) -> Result<SetSessionConfigOptionResponse, Error> {
+    let session = sessions
+        .get(&request.session_id)
+        .ok_or_else(|| Error::invalid_params().data("unknown session"))?;
+
+    // Read before the lock: an id basis never advertised is a client error, and
+    // making it queue behind a running turn to hear so would be a slow no.
+    let change = options::change(&request.config_id, &request.value)
+        .map_err(|error| Error::invalid_params().data(error.to_string()))?;
+
+    let settings = {
+        let mut run = session.lock_turn().await;
+
+        match change {
+            options::Change::Effort(effort) => run.set_effort(effort),
+            options::Change::Model(model) => run.set_model(model),
+        }
+        .map_err(|error: RunError| Error::internal_error().data(error.to_string()))?;
+
+        options::options(&run.context().model, run.effort())
+    };
+
+    // The client that asked already knows, but a second view of the same
+    // session does not — ACP models these as agent state, not as one client's
+    // setting. The change has happened either way, so a failed notification
+    // must not be reported as a failed change.
+    let _ = notify(
+        connection,
+        &request.session_id,
+        SessionUpdate::ConfigOptionUpdate(ConfigOptionUpdate::new(settings.clone())),
+    );
+
+    Ok(SetSessionConfigOptionResponse::new(settings))
 }
 
 /// Switches a session's mode and tells the client it happened.
