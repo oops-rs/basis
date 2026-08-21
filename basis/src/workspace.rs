@@ -298,7 +298,7 @@ impl Workspace {
     /// The answers here are already *in force* — the model below is what they
     /// resolved to — so this is for the host that reports its own
     /// configuration, or that wants to hand the same value to a shared
-    /// [`Runtime`](crate::Runtime)'s builder rather than read the files twice.
+    /// [`Runtime`]'s builder rather than read the files twice.
     pub fn config(&self) -> &Config {
         &self.config
     }

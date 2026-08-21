@@ -260,7 +260,7 @@ impl RuntimeBuilder {
     /// as the default for a [`RunSpec`](crate::workspace::RunSpec) that asked
     /// for none.
     ///
-    /// **A workspace file cannot reach `base_url`.** [`Config`] refuses to
+    /// **A workspace file cannot reach `base_url`.** [`Config`](crate::Config) refuses to
     /// carry one from a repository at all (see [`crate::config`]), so what
     /// arrives here is always the user's own — this method needs no rule of
     /// its own to keep that true.

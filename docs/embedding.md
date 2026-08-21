@@ -125,6 +125,44 @@ surface is still unhidden, under a name that now says whose it is:
 `Runtime::mentra_runtime()`, and `Workspace::mentra_runtime()` for a host that has only the
 workspace in hand.
 
+## What the repository says about its model
+
+`Workspace::open("/repo")` reads `.basis/config.json` and the global
+`config.json` itself, because opening a path is what reads a repository's
+conventions — the same reason it reads `AGENTS.md` and `.mcp.json` without
+being asked to. Everything a host states explicitly still wins:
+`WorkspaceBuilder::with_model` and every `RuntimeBuilder` knob layer *above*
+the file, and the file layers above the environment.
+
+A host building a `Runtime` of its own gets nothing automatically, and that is
+deliberate: a shared runtime's provider, credential and endpoint were settled
+before any workspace existed, so a repository's file has nothing to reach
+there. Apply it yourself if you want one to speak for the process:
+
+```rust
+use std::path::Path;
+use basis::{Config, Runtime};
+
+// `None` reads no global file; `Config::discover_default` finds the user's.
+let config = Config::discover(Path::new("/repo"), None)?;
+let runtime = Runtime::builder().with_config(&config).build()?;
+```
+
+`with_config` fills the provider, the endpoint and the model policy **only
+where the builder was told nothing** — order does not matter, because what it
+reads is emptiness rather than who spoke last. On a shared runtime the file's
+`model` still applies per workspace (ADR-0018 already makes that an override)
+and its `effort` becomes the default for a `RunSpec` that asked for none, so
+one server over many repositories gives each the model it chose.
+
+`Config::default()` says nothing, which is how
+`WorkspaceBuilder::with_config(Config::default())` turns discovery off for a
+host whose own configuration is the only configuration. `Workspace::config()`
+and `Workspace::config_files()` report what took effect and which file said so.
+There is no `api_key` key and there will not be one: a credential belongs to
+the environment, which is the same ruling `RunConfig` makes.
+[conventions.md](conventions.md) has the keys.
+
 ## What the host says on top of the workspace
 
 basis ships no system prompt: unset, the prompt is the discovered context files and nothing
@@ -164,6 +202,11 @@ hands it.
 One enum rather than two methods, because the two are alternatives and not layers: one
 field, last call wins, and *both at once* is unspellable. And it is a **workspace** knob, so
 a host serving many repositories off one shared `Runtime` can give each its own voice.
+
+`RunConfig::with_system_prompt` is the same seam for a one-prompt caller, carried through
+`split` to exactly that call — which is how `basis spawn --system-prompt` /
+`--append-system-prompt`, `basis serve --acp --append-system-prompt`, and `ServeConfig`'s
+template all reach it without a second implementation.
 
 ## How patiently a failing provider is waited out
 
