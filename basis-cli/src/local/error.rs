@@ -9,7 +9,7 @@ use std::{process::ExitCode, time::Duration};
 
 use serde_json::Value;
 
-use crate::exit::{EXIT_BOUNDED, EXIT_FAILED};
+use crate::exit::{EXIT_BOUNDED, EXIT_FAILED, EXIT_USAGE};
 
 /// An error returned by a local lifecycle command.
 #[derive(Debug)]
@@ -25,6 +25,34 @@ impl ClientError {
             message: message.into(),
             payload: None,
             code: EXIT_FAILED,
+        }
+    }
+
+    /// A command line basis will not run whatever the world does.
+    ///
+    /// Exit 2 is clap's, and the distinction it draws is worth keeping by
+    /// hand: a task that is *running* is a state, and the same command works
+    /// once it settles; a handle from another workspace, or a template nobody
+    /// wrote, is an argument, and no amount of waiting makes it right.
+    pub(crate) fn usage(message: impl Into<String>) -> Self {
+        Self {
+            message: message.into(),
+            payload: None,
+            code: EXIT_USAGE,
+        }
+    }
+
+    /// The one follow-up this error admits, for the `next:` line and for the
+    /// `--json` payload that carries the same fact.
+    #[must_use]
+    pub(crate) fn pointing_at(self, next: impl Into<String>) -> Self {
+        let mut payload = self
+            .payload
+            .unwrap_or_else(|| serde_json::json!({"error": self.message}));
+        payload["next"] = Value::String(next.into());
+        Self {
+            payload: Some(payload),
+            ..self
         }
     }
 

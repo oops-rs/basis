@@ -7,7 +7,11 @@
 //! progress happens when `basis wait` (or any attacher, backgrounded however
 //! the OS backgrounds things) picks it up.
 
-use std::{path::PathBuf, process::ExitCode, time::Duration};
+use std::{
+    path::{Path, PathBuf},
+    process::ExitCode,
+    time::Duration,
+};
 
 use serde_json::json;
 use tokio::time::{self, Instant};
@@ -37,6 +41,7 @@ use super::{
         MAX_MESSAGE, MAX_PROMPT, MAX_TASKS, RunOptions, TaskMeta, cancel_requested, load_meta,
         now_ms, read_terminal, save_meta,
     },
+    tasks,
 };
 
 const DEFAULT_WAIT: Duration = Duration::from_secs(30 * 60);
@@ -86,6 +91,9 @@ pub(crate) async fn spawn(args: RunArgs, attach: bool) -> Result<ExitCode, Clien
         .into());
     }
     let parent = if args.detached { None } else { caller };
+    // Resolved before the directory is claimed, so a refusal leaves nothing
+    // behind: a task that never mints is a task nobody has to clean up.
+    let continues = continuation(&data, &canonical, &key, &args)?;
 
     let deadline_after = options.deadline_ms.unwrap_or(DEFAULT_TASK_DEADLINE_MS);
     let requested_deadline = Some(
@@ -146,7 +154,8 @@ pub(crate) async fn spawn(args: RunArgs, attach: bool) -> Result<ExitCode, Clien
         prompt,
         options,
         deadline_at,
-    );
+    )
+    .continuing(continues);
     save_meta(&paths, &meta)?;
 
     if !attach {
@@ -169,6 +178,54 @@ pub(crate) async fn spawn(args: RunArgs, attach: bool) -> Result<ExitCode, Clien
 
 pub(crate) fn has_current_task() -> bool {
     current_task().is_some()
+}
+
+/// The conversation this spawn continues, when it was told to continue one.
+///
+/// Continuing is a *new task on an old conversation*, never a message to the
+/// old one: `inbox::enqueue` refuses the moment a terminal record exists, so
+/// a settled dialogue has no inbox left to reach (ADR-0019). The new task
+/// therefore carries this invocation's bounds, model, and approval mode —
+/// they belong to a run, and this is a new run.
+///
+/// Two things are refused rather than resolved. A task something is currently
+/// driving keeps its conversation to itself: one executor at a time is the
+/// whole point of the attach lock, and a second one resuming the same agent
+/// would interleave two dialogues into one transcript. And a handle from
+/// another workspace is refused by [`tasks::named`], because a conversation
+/// belongs to the workspace whose context and tools produced it.
+fn continuation(
+    data: &DataDir,
+    workspace: &Path,
+    key: &str,
+    args: &RunArgs,
+) -> Result<Option<String>, ClientError> {
+    if !args.continues_a_conversation() {
+        return Ok(None);
+    }
+    let summaries = tasks::workspace_tasks(data, workspace)?.unwrap_or_default();
+    let chosen = match args.session.as_deref() {
+        Some(handle) => tasks::named(&summaries, key, handle)?,
+        None => tasks::latest_conversation(&summaries).ok_or_else(|| {
+            ClientError::new("no task in this workspace has a conversation to continue")
+                .pointing_at("basis spawn <PROMPT>")
+        })?,
+    };
+    if chosen.state == "running" {
+        return Err(ClientError::new(format!(
+            "task {} is running; its attach lock is what keeps one conversation to one executor",
+            chosen.task
+        ))
+        .pointing_at(format!("basis wait {}", chosen.task)));
+    }
+    if chosen.agent_id.is_empty() {
+        return Err(ClientError::new(format!(
+            "task {} has no conversation yet: nothing has attached to it",
+            chosen.task
+        ))
+        .pointing_at(format!("basis wait {}", chosen.task)));
+    }
+    Ok(Some(chosen.agent_id.clone()))
 }
 
 pub(crate) async fn send(args: SendArgs) -> Result<ExitCode, ClientError> {

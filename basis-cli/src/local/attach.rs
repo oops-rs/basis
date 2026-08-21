@@ -269,35 +269,50 @@ async fn run_model(
     // just the mint: the workspace's hook registration and MCP connections
     // end when it drops, and a task's `.basis/hooks.json` must keep its say over
     // every turn (see `PreparedRun::with_workspace`).
-    let resumed = !meta.agent_id.is_empty();
-    let prepared = if resumed {
-        workspace.resume(&meta.agent_id, spec)
+    //
+    // Three ways to open the conversation, and only the first is a *re*-open:
+    // a task that has attached before picks its own agent back up, a task
+    // minted with `--continue`/`--session` picks up the one it was told to
+    // continue, and everything else starts a new one. The middle case is a
+    // resume to mentra and a first attach to basis — its prompt has not been
+    // asked yet, which is exactly what `answered_before` below preserves.
+    let reattached = !meta.agent_id.is_empty();
+    let existing = if reattached {
+        Some(meta.agent_id.clone())
     } else {
-        workspace.prepare(spec)
+        meta.continues.clone()
+    };
+    let prepared = match existing.as_deref() {
+        Some(agent_id) => workspace.resume(agent_id, spec),
+        None => workspace.prepare(spec),
     };
     let mut run = match prepared {
         Ok(run) => run.with_workspace(workspace),
         Err(error) => return record_failure(paths, meta, error.to_string(), None),
     };
-    if !resumed {
+    if !reattached {
         meta.agent_id = run.agent_id().to_string();
+        meta.answered_before = answered(run.history());
         meta.updated_ms = now_ms();
         save_meta(paths, meta)?;
     }
 
-    // Resume recovery: a committed assistant turn means the recorded prompt
-    // was already answered; re-executing it would duplicate the conversation.
-    // The last committed assistant text stands in for the crashed process's
-    // unrecorded result.
+    // Resume recovery: an assistant turn committed *past what this task
+    // inherited* means the recorded prompt was already answered, and
+    // re-executing it would duplicate the conversation. The last committed
+    // assistant text stands in for the crashed process's unrecorded result.
     let mut initial_done = false;
     let mut last_result = String::new();
     let mut last_stopped_by: Option<String> = None;
-    if resumed {
-        for message in run.history() {
-            if matches!(message.role, mentra::Role::Assistant) {
-                initial_done = true;
-                last_result = message.text();
-            }
+    if reattached {
+        initial_done = answered(run.history()) > meta.answered_before;
+        if let Some(message) = run
+            .history()
+            .iter()
+            .rev()
+            .find(|message| matches!(message.role, mentra::Role::Assistant))
+        {
+            last_result = message.text();
         }
     }
 
@@ -413,6 +428,18 @@ async fn run_model(
             }
         }
     }
+}
+
+/// How many assistant turns a transcript has committed.
+///
+/// The count, not the presence: a continued conversation arrives with answers
+/// already on it, and "has this task answered yet" is only a question the
+/// count can settle.
+fn answered(history: &[mentra::Message]) -> usize {
+    history
+        .iter()
+        .filter(|message| matches!(message.role, mentra::Role::Assistant))
+        .count()
 }
 
 fn record_pending(

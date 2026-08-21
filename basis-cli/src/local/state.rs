@@ -99,6 +99,23 @@ pub(crate) struct TaskMeta {
     pub workspace: String,
     /// The mentra resume key; empty until the first attach prepares the run.
     pub agent_id: String,
+    /// The conversation this task was told to pick up, when `spawn` was given
+    /// `--continue` or `--session`. The first attach resumes it instead of
+    /// minting one, which is what lets a new handle carry an old dialogue —
+    /// and why continuing a settled task is a new task rather than a message
+    /// to a closed inbox (ADR-0019).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub continues: Option<String>,
+    /// How many assistant turns the conversation already held when this task
+    /// first attached to it.
+    ///
+    /// Zero for a task that opened its own conversation. Nonzero only for a
+    /// continued one, where the previous answers are on the transcript from
+    /// the very first turn — and where the resume recovery in `attach` would
+    /// otherwise read one of them as this task's own answer and settle
+    /// `succeeded` without ever asking its prompt.
+    #[serde(default)]
+    pub answered_before: usize,
     pub prompt: String,
     pub options: RunOptions,
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -137,6 +154,8 @@ impl TaskMeta {
             detached,
             workspace,
             agent_id: String::new(),
+            continues: None,
+            answered_before: 0,
             prompt,
             options,
             pending_terminal: None,
@@ -146,6 +165,20 @@ impl TaskMeta {
             deadline_at_ms,
             created_ms: now,
             updated_ms: now,
+        }
+    }
+
+    /// Records the conversation this task continues, when it continues one.
+    ///
+    /// A field rather than a pre-set `agent_id`, because the two mean
+    /// different things to the executor: `agent_id` says *this task has
+    /// attached before*, and taking a continued conversation for a resumed
+    /// one is how a task settles on someone else's answer.
+    #[must_use]
+    pub(crate) fn continuing(self, agent_id: Option<String>) -> Self {
+        Self {
+            continues: agent_id,
+            ..self
         }
     }
 

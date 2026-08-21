@@ -39,6 +39,9 @@ Shorthand:
   basis -- run                    a prompt that collides with a subcommand name
   basis spawn -                   read the prompt from stdin
   basis spawn \"task\" --await     wait for the task's terminal result
+  basis list                      this workspace's tasks, newest first
+  basis --continue \"and now …\"    continue the newest conversation here
+  basis --session <TASK> \"…\"      continue the one that handle names
   basis wait <ID>                 wait again using the durable task handle
   basis wait <ID> --message <MID> retry a specific message reply
   basis send <ID> \"message\"      enqueue a follow-up turn
@@ -62,6 +65,8 @@ pub(crate) enum Command {
     /// Submit one prompt and return its durable task handle.
     #[command(name = "spawn", alias = "run")]
     Spawn(RunArgs),
+    /// List this workspace's tasks, newest first.
+    List(ListArgs),
     /// Print a hash of everything in the workspace a run could see.
     Fingerprint(FingerprintArgs),
     /// Enqueue a message for a running task.
@@ -78,6 +83,22 @@ pub(crate) enum Command {
     Inbox(InboxArgs),
     /// Serve one explicit protocol transport.
     Serve(ServeArgs),
+}
+
+/// Knobs for `list`, which only ever reads one workspace's directories.
+#[derive(Debug, clap::Args)]
+pub(crate) struct ListArgs {
+    /// Workspace root. Defaults to the current directory.
+    #[arg(short = 'C', long, value_name = "DIR")]
+    pub(crate) workspace: Option<PathBuf>,
+
+    /// List every task, not only the most recent ones.
+    #[arg(long)]
+    pub(crate) all: bool,
+
+    /// Emit one JSON object per task, one per line.
+    #[arg(long)]
+    pub(crate) json: bool,
 }
 
 #[derive(Debug, clap::Args)]
@@ -278,6 +299,23 @@ pub(crate) struct RunArgs {
     #[arg(long)]
     pub(crate) detached: bool,
 
+    /// Continue the newest conversation in this workspace.
+    ///
+    /// A *new* task on the same conversation, not a message to the old one: a
+    /// task that holds a terminal record accepts no further messages
+    /// (ADR-0019), so continuing a settled dialogue is a new handle over the
+    /// same history. Bounds and options come from this invocation, because a
+    /// bound belongs to a run.
+    #[arg(long = "continue", conflicts_with = "session")]
+    pub(crate) continue_latest: bool,
+
+    /// Continue the conversation of one task, as `basis list` prints it.
+    ///
+    /// Refused for a task something is currently driving: one executor per
+    /// conversation is what the attach lock exists to guarantee.
+    #[arg(long, value_name = "TASK")]
+    pub(crate) session: Option<String>,
+
     /// Wait for the task's terminal result instead of returning its handle.
     ///
     /// Implied at a shell, where this process is what drives the agent
@@ -365,6 +403,17 @@ pub(crate) struct RunArgs {
     /// gracefully and keeps what it has. This is the bound that maps to money.
     #[arg(long, value_name = "N")]
     pub(crate) token_budget: Option<u64>,
+}
+
+impl RunArgs {
+    /// Whether this run picks up a conversation that already exists.
+    ///
+    /// Named once because two routes have to agree about it: the attended
+    /// route mints no checkpoint and reads no workspace store, so it is the
+    /// one route that cannot honour either spelling (ADR-0020).
+    pub(crate) fn continues_a_conversation(&self) -> bool {
+        self.continue_latest || self.session.is_some()
+    }
 }
 
 /// Knobs for the fingerprint, which is only ever asked about one directory.
@@ -564,6 +613,63 @@ mod tests {
                 .command,
             Some(Command::Inbox(_))
         ));
+    }
+
+    /// `--continue` and `--session` answer the same question — *which
+    /// conversation* — so naming both is an invocation with two answers, and
+    /// clap refuses it rather than picking one.
+    ///
+    /// `--resumable` is not in that pair: minting a task on an old
+    /// conversation and driving nothing is coherent, and it is how a caller
+    /// queues a follow-up for something else to attach to.
+    #[test]
+    fn a_run_names_at_most_one_conversation_to_continue() {
+        let plain = run_args(&[]);
+        assert!(!plain.continue_latest && plain.session.is_none());
+        assert!(!plain.continues_a_conversation());
+
+        let latest = run_args(&["--continue"]);
+        assert!(latest.continue_latest);
+        assert!(latest.continues_a_conversation());
+
+        let named = run_args(&["--session", "0123456789abcdef/beef"]);
+        assert_eq!(named.session.as_deref(), Some("0123456789abcdef/beef"));
+        assert!(named.continues_a_conversation());
+
+        assert!(run_args(&["--continue", "--resumable"]).resumable);
+
+        let both = Cli::try_parse_from([
+            "basis",
+            "spawn",
+            "prompt",
+            "--continue",
+            "--session",
+            "0123456789abcdef/beef",
+        ])
+        .expect_err("two answers to one question");
+        assert_eq!(both.exit_code(), i32::from(EXIT_USAGE));
+    }
+
+    #[test]
+    fn list_reads_one_workspace_and_writes_nothing_to_ask_about() {
+        let Some(Command::List(args)) = Cli::try_parse_from(["basis", "list"])
+            .expect("parses")
+            .command
+        else {
+            panic!("list command should parse");
+        };
+        assert_eq!(args.workspace, None);
+        assert!(!args.all && !args.json);
+
+        let Some(Command::List(args)) =
+            Cli::try_parse_from(["basis", "list", "-C", "/repo", "--all", "--json"])
+                .expect("parses")
+                .command
+        else {
+            panic!("list command should parse");
+        };
+        assert_eq!(args.workspace, Some(PathBuf::from("/repo")));
+        assert!(args.all && args.json);
     }
 
     #[test]

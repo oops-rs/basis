@@ -15,6 +15,7 @@
 //! basis cancel <ID>            -> request downward cancellation
 //! basis watch <ID>             -> follow progress without owning completion
 //! basis inbox [ID]             -> inspect accepted messages
+//! basis list                   -> this workspace's tasks, newest first
 //! basis serve --acp           -> ACP server on stdio, for an editor to spawn
 //! basis serve --bridge        -> the same ACP server on a websocket, for a browser
 //! basis fingerprint           -> the workspace's hash, for a caller's own loop
@@ -104,6 +105,17 @@ async fn main() -> ExitCode {
 
     match cli.command {
         Some(Command::Spawn(args)) => match route(&args, local::has_current_task()) {
+            // A continued conversation lives in the workspace-keyed store
+            // beside the checkpoint that names it; the attended route mints
+            // neither and would silently run the prompt as if it opened the
+            // dialogue. Say so instead of answering the wrong question.
+            Route::Attended if args.continues_a_conversation() => {
+                eprintln!(
+                    "basis: `--continue` and `--session` need a durable task, and the attended `--json` run mints none"
+                );
+                eprintln!("next: use `basis spawn --json --await --continue <PROMPT>`");
+                ExitCode::from(EXIT_USAGE)
+            }
             Route::Attended => match execute_run(args).await {
                 Ok(code) => code,
                 Err(message) => {
@@ -151,6 +163,10 @@ async fn main() -> ExitCode {
         Some(Command::Inbox(args)) => {
             let structured = args.json;
             lifecycle_result(local::inbox(args).await, "basis inbox <ID>", structured)
+        }
+        Some(Command::List(args)) => {
+            let structured = args.json;
+            lifecycle_result(local::list(args), "basis list", structured)
         }
         Some(Command::Fingerprint(args)) => match execute_fingerprint(args) {
             Ok(code) => code,

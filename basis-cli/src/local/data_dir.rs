@@ -76,6 +76,21 @@ impl DataDir {
         })
     }
 
+    /// The workspace a key's directory says it describes, or `None` when no
+    /// task has ever run there.
+    ///
+    /// The read-only half of [`ensure_workspace`](Self::ensure_workspace), for
+    /// a verb that observes rather than mints: `basis list` must be able to
+    /// report that a workspace has no tasks without creating the directory
+    /// that would prove it wrong. A marker that cannot be read is treated as
+    /// absent — the collision check it exists for is the caller's to make
+    /// against the path it returns.
+    pub(crate) fn described_workspace(&self, key: &str) -> Option<PathBuf> {
+        let marker = self.workspace_dir(key).join(WORKSPACE_MARKER);
+        let described = fs::read_to_string(marker).ok()?;
+        Some(PathBuf::from(described.trim_end()))
+    }
+
     /// Ensures the workspace's directory tree exists and that the digest still
     /// describes this workspace, which guards against an FNV collision
     /// silently merging two workspaces' agents.
