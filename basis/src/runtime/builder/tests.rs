@@ -189,6 +189,61 @@ fn the_last_word_about_history_is_the_one_that_counts() {
 }
 
 #[test]
+fn a_relocated_store_takes_the_compaction_snapshots_with_it() {
+    // The hazard `with_store_dir` exists for, applied to the other file mentra
+    // writes: a snapshot is a verbatim copy of a conversation, and left at
+    // mentra's default it lands under a directory keyed by the *process's* cwd
+    // — so `basis -C /other/repo` would file this workspace's transcript under
+    // whichever one the process happened to start in.
+    let store = tempfile::tempdir().expect("tempdir");
+    let runtime = offline()
+        .with_store_dir(store.path())
+        .build()
+        .expect("builds offline");
+
+    assert_eq!(
+        runtime.transcripts_dir(),
+        store.path().join("transcripts"),
+        "snapshots belong beside the database of the same conversations"
+    );
+}
+
+#[test]
+fn the_default_snapshot_directory_is_the_one_mentra_would_have_used() {
+    // Relocation, not a second scheme: a runtime that said nothing must land
+    // where it always did, or an upgrade would strand every transcript already
+    // written.
+    let runtime = RuntimeBuilder::default()
+        .with_base_url("http://127.0.0.1:1/v1")
+        .with_api_key("test-key")
+        .build()
+        .expect("builds offline");
+
+    assert_eq!(
+        runtime.transcripts_dir(),
+        store::default_directory().join("transcripts")
+    );
+}
+
+#[test]
+fn an_ephemeral_runtime_keeps_its_snapshots_out_of_the_users_data() {
+    // mentra writes the snapshot before it summarizes and does not ask the
+    // store first — `allows_disk_artifacts` gates tool-output spill, not this —
+    // so "nowhere" is not on offer. The temp directory is: never the user's
+    // data directory, never the workspace, and never shared between two
+    // runtimes that were each promised their own disposable history.
+    let one = offline().build().expect("builds offline");
+    let two = offline().build().expect("builds offline");
+
+    assert!(
+        one.transcripts_dir().starts_with(std::env::temp_dir()),
+        "{}",
+        one.transcripts_dir().display()
+    );
+    assert_ne!(one.transcripts_dir(), two.transcripts_dir());
+}
+
+#[test]
 fn a_supplied_credential_is_not_printed() {
     let printed = format!(
         "{:?}",

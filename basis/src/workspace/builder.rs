@@ -381,11 +381,15 @@ impl WorkspaceBuilder {
 
         Ok(Workspace {
             root: resolved_workspace(&self.path, &context),
+            // Compaction is two statements from two owners, joined here: the
+            // numbers are this workspace's, the directory the snapshots land in
+            // is the runtime's, because it is the one that knows where this
+            // workspace's history lives (ADR-0018).
             agent: agent_config(
                 &self.path,
                 &context,
                 self.compaction,
-                store::default_transcripts(),
+                runtime.transcripts_dir().to_path_buf(),
             ),
             identifier: store::runtime_identifier(&self.path),
             path: self.path,

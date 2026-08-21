@@ -391,9 +391,15 @@ impl RuntimeBuilder {
     ///
     /// The sibling of [`with_store_dir`](Self::with_store_dir), for the caller
     /// whose answer to *where* is *nowhere*. mentra's in-memory store backs it:
-    /// no database file is opened, no transcript snapshot is written, no
-    /// directory is created, and dropping the [`Runtime`] takes the history
-    /// with it.
+    /// no database file is opened, no tool output is spilled, no directory is
+    /// created, and dropping the [`Runtime`] takes the history with it.
+    ///
+    /// One file is still written, and only if a conversation gets long enough
+    /// to be summarized: mentra persists a compaction snapshot before it
+    /// replaces a prefix of the transcript, and does that without consulting
+    /// the store. basis files those under the operating system's temp
+    /// directory, unique per runtime — never the user's data directory and
+    /// never the workspace (see [`store::volatile_transcripts`]).
     ///
     /// **Nothing survives the process.** While the runtime lives a conversation
     /// behaves as it always does — [`Workspace::resume`](crate::Workspace::resume)
@@ -729,6 +735,18 @@ impl RuntimeBuilder {
             None => builder,
         };
 
+        // The same answer applied to the other file mentra writes about a
+        // conversation. Compaction persists a verbatim snapshot before it
+        // summarizes, and mentra takes the directory for it on the *agent*
+        // config — where a workspace would otherwise inherit a default keyed by
+        // the process's cwd, which is the hazard `with_store_dir` was added for.
+        // Derived here, once, so `with_store_dir` moves both files or neither.
+        let transcripts = match &self.history {
+            Some(History::Directory(dir)) => store::transcripts_in(dir),
+            Some(History::Ephemeral) => store::volatile_transcripts(),
+            None => store::default_transcripts(),
+        };
+
         // `build`, not `build_async`: no MCP server is ever registered at the
         // runtime level, so there is nothing for the async constructor to
         // connect. Workspace-owned connections arrive post-build (ADR-0018).
@@ -748,6 +766,7 @@ impl RuntimeBuilder {
             model: self.model,
             provider_retry: self.provider_retry,
             provider_retry_budget: self.provider_retry_budget,
+            transcripts,
             dispatch,
             levels,
             #[cfg(feature = "mcp")]
