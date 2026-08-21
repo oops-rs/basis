@@ -78,7 +78,9 @@ credential basis just read out of the environment, and a leaked secret is
 bounded by nothing.
 
 Precedence, strongest first: **CLI flag or explicit builder call → workspace
-file → global file → environment → basis's default.**
+file → global file → environment → basis's default.** An ACP client's
+`session/set_config_option` sits above all of it, because it changes a live
+session after this ladder has already settled what it opened with.
 
 ### `.basis/skills/`, `.agents/skills/`
 
