@@ -70,6 +70,8 @@ impl Live {
     /// that the work should stop — it is durable either way.
     pub(crate) fn show(&self, event: &Value) -> io::Result<()> {
         if !self.shown {
+            // Answered here rather than left to `show_to`, so a run nobody is
+            // watching does not lock two streams per event to write nothing.
             return Ok(());
         }
         self.show_to(event, &mut io::stdout().lock(), &mut io::stderr().lock())
