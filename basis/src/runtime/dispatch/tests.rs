@@ -339,6 +339,18 @@ async fn a_private_runtimes_workspace_leaves_the_guards_to_its_policy() {
             "files",
             json!({"operations": [{"op": "create", "path": ".git/hooks/pre-commit", "content": "x"}]}),
         ),
+        // Both profiles, because the policy the dispatcher stands down for
+        // binds at the workspace *engine* — `WorkspaceEditor::authorize_write`,
+        // which the batched ops and the split writers both call — so it needs
+        // no name list and covers whichever roster the runtime offers.
+        (
+            "write",
+            json!({"path": ".git/hooks/pre-commit", "content": "x"}),
+        ),
+        (
+            "edit",
+            json!({"path": ".git/config", "edits": [{"old_string": "a", "new_string": "b"}]}),
+        ),
     ] {
         assert!(
             matches!(
@@ -346,6 +358,81 @@ async fn a_private_runtimes_workspace_leaves_the_guards_to_its_policy() {
                 HookDecision::Allow
             ),
             "{tool}: policy, not the dispatcher, refuses on the private path: {input}"
+        );
+    }
+}
+
+#[tokio::test]
+async fn the_split_writers_reach_the_same_protected_git_paths() {
+    // The guard keyed on `files` alone, and the split profile renames the act
+    // rather than changing it: `write` and `edit` reach the same
+    // `WorkspaceEditor` the batched `create`/`replace` ops do, so a guard that
+    // knew only one name was a guard the other walked past on every shared
+    // runtime. Each spelling of the path field is here because mentra accepts
+    // three — `path`, `file_path` and `filePath` are serde aliases on one
+    // field — and a guard reading only the first would be bypassed by asking
+    // for the second.
+    let dir = tempfile::tempdir().expect("tempdir");
+    std::fs::create_dir_all(dir.path().join(".git/hooks")).expect("hooks dir");
+    let dispatch = Arc::new(HookDispatch::new(Vec::new()));
+    let _registration = dispatch.register(permissive_entry(dir.path(), ShellAccess::Granted));
+
+    let denied = [
+        (
+            "write",
+            json!({"path": ".git/hooks/pre-commit", "content": "x"}),
+        ),
+        (
+            "write",
+            json!({"file_path": ".git/hooks/pre-commit", "content": "x"}),
+        ),
+        (
+            "write",
+            json!({"filePath": ".git/hooks/pre-commit", "content": "x"}),
+        ),
+        (
+            "write",
+            json!({"path": ".git/hooks/../hooks/pre-commit", "content": "x"}),
+        ),
+        ("write", json!({"path": ".git/config", "content": "x"})),
+        (
+            "edit",
+            json!({"path": ".git/config", "edits": [{"old_string": "a", "new_string": "b"}]}),
+        ),
+        (
+            "edit",
+            json!({"file_path": ".git/hooks/pre-push", "edits": [{"old_string": "a", "new_string": "b"}]}),
+        ),
+    ];
+    for (tool, input) in denied {
+        let decision = decide(&dispatch, &context(dir.path(), tool, input.clone())).await;
+        assert!(
+            matches!(&decision, HookDecision::Deny(reason) if reason.contains("protected git paths")),
+            "{tool} {input} -> {decision:?}"
+        );
+    }
+
+    // The carve-out is still exactly two paths, and a reader is not a writer:
+    // `read`, `ls`, `grep` and `glob` never reach `authorize_write`, so
+    // refusing them here would deny what the policy version allows.
+    let allowed = [
+        ("write", json!({"path": "src/main.rs", "content": "x"})),
+        (
+            "write",
+            json!({"path": ".git/info/exclude", "content": "x"}),
+        ),
+        ("read", json!({"path": ".git/hooks/pre-commit"})),
+        ("ls", json!({"path": ".git/hooks"})),
+        ("grep", json!({"pattern": "curl", "path": ".git/hooks"})),
+        ("glob", json!({"pattern": ".git/hooks/*"})),
+    ];
+    for (tool, input) in allowed {
+        assert!(
+            matches!(
+                decide(&dispatch, &context(dir.path(), tool, input.clone())).await,
+                HookDecision::Allow
+            ),
+            "{tool} {input}"
         );
     }
 }
