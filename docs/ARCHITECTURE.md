@@ -1,6 +1,6 @@
 # basis — Architecture
 
-> rev 11 · 2026-08-11 · **basis** — **L**ightweight **A**gent **N**ucleus
+> rev 12 · 2026-08-22 · **basis** — the minimal set everything else is built from
 > The *how*. For the *why* — problem, idea, bets — see [`PROPOSAL.md`](PROPOSAL.md);
 > locked decisions live in [`adr/`](adr/); deferred ideas in [`proposals/`](proposals/);
 > research grounding in [`p0-groundwork.md`](p0-groundwork.md).
@@ -12,13 +12,17 @@
 > `Workspace` opened once that mints runs, typed output, cancellation, a shared
 > budget, and tagged event fan-in; and the bindings — interception as one
 > contract with two bindings, and the workspace's history put where the caller
-> says. §2, §3 and §4 below describe the state after them. One Phase D item is
-> held rather than built (declared subprocess tools, for want of a concrete use
-> case); where this document still describes the P0–P4 shape it says so.
-> A later wave belonging to no phase closed the last five upstream candidates,
-> which is what rev 11 records: a typed turn can now keep its tools, a run
-> names the bound that ended it, and `basis`'s graph carries no websocket
-> stack. The ledger and phases are in [`REDESIGN.md`](REDESIGN.md).
+> says. §2, §3 and §4 below describe the state after them. Phase D's last item,
+> declared subprocess tools, was held for seven revs and shipped in rev 12
+> against the first concrete use case; where this document still describes the
+> P0–P4 shape it says so. A later wave belonging to no phase closed the last
+> five upstream candidates — a typed turn can now keep its tools, a run names
+> the bound that ended it, and `basis`'s graph carries no websocket stack — and
+> the wave after it measured basis against pi capability by capability and
+> closed what that found: the split file-tool roster, compaction configured by
+> basis, the shared skill roots and `CLAUDE.md`, a system-prompt seam, a shell
+> that streams, and per-session model and effort over ACP. The ledger and
+> phases are in [`REDESIGN.md`](REDESIGN.md).
 > Reference bar: [pi](https://github.com/earendil-works/pi) (earendil-works) — minimal core, complete harness.
 > General-purpose: no domain assumptions. Periodic bug-checking is one use case, never a design input.
 
@@ -349,8 +353,8 @@ SDK-first transition of ADR-0010…0015, phased in [`REDESIGN.md`](REDESIGN.md) 
 (posture and pruning), Phase B (structure — the crate split, the `mcp` feature, approval
 as a trait), Phase C (the SDK — the `Workspace` / run split, typed output, cancellation,
 the shared budget, event fan-in) and Phase D (bindings — interception's second binding,
-the history knobs, `session/list`, credential redaction) have landed, with Phase D's
-declared-subprocess-tools item held for want of a concrete use case.
+the history knobs, `session/list`, credential redaction, and — once a use case arrived —
+declared subprocess tools) have landed.
 
 Validation stays deliberately varied — a refactor, a doc task, a test-writing task, *and* a
 periodic check — so no single use case bends the API toward itself.
@@ -427,8 +431,10 @@ adaptive thinking only on models that support it. Provider/model combinations
 without a requested tier fail explicitly instead of silently lowering it;
 omitting the flag leaves the provider default unchanged.
 
-Any OpenAI-compatible endpoint works too — a gateway, a proxy, or a local
-server. Paste the URL as published; the trailing `/v1` is handled:
+Any endpoint serving the OpenAI **Responses** API works too — a gateway, a proxy, or a
+local server. Paste the URL as published; the trailing `/v1` is handled. An endpoint
+that serves only `chat/completions` does not: mentra-provider's wires are Responses,
+Anthropic Messages and Gemini, and a fourth is an upstream ask, not a basis shim.
 
 ```sh
 export BASIS_BASE_URL=http://127.0.0.1:3455/v1

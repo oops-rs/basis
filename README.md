@@ -17,8 +17,10 @@ let report = run.execute(basis::CollectingSink::default()).await?;
 
 To try it as a command, set a provider key — `ANTHROPIC_API_KEY`, `OPENAI_API_KEY`, `GEMINI_API_KEY`,
 or `OPENROUTER_API_KEY` — and point it at a repository. At a shell a prompt runs and answers, while
-leaving a durable handle behind it; any OpenAI-compatible endpoint works, URL as published, `/v1`
-handled.
+leaving a durable handle behind it; any endpoint serving the OpenAI **Responses** API works — a
+gateway, a proxy, a local server — URL as published, `/v1` handled. (`chat/completions`-only
+endpoints do not: mentra speaks three wires, Responses, Anthropic Messages and Gemini, and that is
+not one of them yet.)
 
 ```sh
 cargo install basis-cli          # the binary is `basis`
@@ -353,7 +355,7 @@ model's window is, so the summarizing trigger is a fixed token count rather than
 the packages convention, and provider
 OAuth; the delegation bound-vs-tally gap above; and **nobody has driven this from Zed or JetBrains
 yet** — it is verified against the protocol and its official client library, not against the
-ecosystem. basis's crates are not published yet; mentra, the runtime, is. CI runs fmt, clippy at
+ecosystem. The three crates are on crates.io at one version, as is mentra. CI runs fmt, clippy at
 `-D warnings`, and the full suite on Linux, macOS and Windows, plus MSRV (1.88, edition 2024).
 
 Every addition faces one check: does it make embedding cheaper for a Rust host, is it a convention
