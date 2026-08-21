@@ -87,6 +87,16 @@ pub use mentra::runtime::ProviderRetry;
 /// without it.
 pub use mentra::provider::ResponsesTransport;
 
+/// Which builtin file tools the model is offered, as
+/// [`RuntimeBuilder::with_file_tools`] takes it.
+///
+/// Mentra's own enum, re-exported beside the two above and for their reason:
+/// the method makes a host *name* it, and a parallel type here would be a
+/// second spelling of a set mentra is the one registering. basis's default is
+/// [`FileToolProfile::Split`] rather than mentra's `Batched` — see the method
+/// for why, and for who would want the other.
+pub use mentra::FileToolProfile;
+
 use crate::{approval::SideEffectLevels, run::RunError};
 
 use dispatch::{HookDispatch, HookRegistration, WorkspaceGuardEntry};

@@ -747,3 +747,81 @@ fn a_chosen_transport_is_named_in_the_debug_view() {
     assert!(printed.contains("responses_transport"), "{printed}");
     assert!(printed.contains("WebSocket"), "{printed}");
 }
+
+/// The names of every tool registered on a runtime, sorted by mentra.
+fn registered(runtime: &Runtime) -> Vec<String> {
+    runtime
+        .mentra_runtime()
+        .tools()
+        .into_iter()
+        .map(|tool| tool.provider.name)
+        .collect()
+}
+
+#[test]
+fn the_model_is_offered_the_split_file_tools_by_default() {
+    // basis's opinion, not mentra's default. The six names are what models in
+    // this class are trained on; the `files` they replace was one tool with a
+    // nine-variant `oneOf` for its `operations` array, and no `glob` at all.
+    let names = registered(&offline().build().expect("builds offline"));
+
+    for split in ["read", "ls", "grep", "glob", "write", "edit"] {
+        assert!(
+            names.iter().any(|name| name == split),
+            "{split} must be registered: {names:?}"
+        );
+    }
+    assert!(
+        !names.iter().any(|name| name == "files"),
+        "the batched tool must be gone rather than sitting beside its own replacement: {names:?}"
+    );
+}
+
+#[test]
+fn a_host_whose_rules_name_files_can_keep_the_batched_tool() {
+    // The migration path the default costs: `hooks.json` matchers and
+    // remembered rules key on the exact tool name, so a host that has written
+    // some against `files` needs the old roster until it has rewritten them.
+    let names = registered(
+        &offline()
+            .with_file_tools(FileToolProfile::Batched)
+            .build()
+            .expect("builds offline"),
+    );
+
+    assert!(names.iter().any(|name| name == "files"), "{names:?}");
+    for split in ["read", "ls", "grep", "glob", "write", "edit"] {
+        assert!(
+            !names.iter().any(|name| name == split),
+            "{split} must not survive a host's choice of Batched: {names:?}"
+        );
+    }
+}
+
+#[test]
+fn the_last_word_about_the_file_tools_is_the_one_that_counts() {
+    // The rule every single-valued knob here follows, and the reason this
+    // field is a plain value: there is no *unsaid*, because basis's default
+    // is not mentra's, so the field always states an answer.
+    let builder = RuntimeBuilder::default()
+        .with_file_tools(FileToolProfile::Batched)
+        .with_file_tools(FileToolProfile::Both);
+
+    assert_eq!(builder.file_tools, FileToolProfile::Both);
+    assert_eq!(
+        RuntimeBuilder::default().file_tools,
+        FileToolProfile::Split,
+        "a fresh builder offers the split tools"
+    );
+}
+
+#[test]
+fn a_chosen_file_tool_profile_is_named_in_the_debug_view() {
+    let printed = format!(
+        "{:?}",
+        RuntimeBuilder::default().with_file_tools(FileToolProfile::Batched)
+    );
+
+    assert!(printed.contains("file_tools"), "{printed}");
+    assert!(printed.contains("Batched"), "{printed}");
+}

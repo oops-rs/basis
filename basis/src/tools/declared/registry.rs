@@ -234,8 +234,13 @@ mod tests {
 
     #[test]
     fn a_manifest_cannot_take_over_a_mentra_builtin_either() {
+        // Any registered name, not only basis's own. `edit` rather than the
+        // `files` this used to name, because a basis runtime now offers
+        // mentra's split file tools — the rule is unchanged, the roster it
+        // reads is the thing that moved
+        // (`RuntimeBuilder::with_file_tools`).
         let runtime = runtime();
-        let sources = [source("/repo/.basis/tools.json", &["files"])];
+        let sources = [source("/repo/.basis/tools.json", &["edit"])];
 
         let error =
             DeclaredTools::register(runtime, Path::new("/repo"), &sources).expect_err("refused");

@@ -33,7 +33,7 @@ use crate::{
 };
 
 use super::{
-    ProviderRetry, ResponsesTransport, Runtime, RuntimeExecutor,
+    FileToolProfile, ProviderRetry, ResponsesTransport, Runtime, RuntimeExecutor,
     dispatch::{DispatchHook, HookDispatch},
     executor::{CommandTargets, TargetedExecutor},
 };
@@ -86,6 +86,16 @@ pub struct RuntimeBuilder {
     /// default is mentra's to state, basis has no business restating it, and
     /// `None` here means the builder chain never mentions transport at all.
     responses_transport: Option<ResponsesTransport>,
+    /// Which builtin file tools the model is offered
+    /// ([`with_file_tools`](Self::with_file_tools)).
+    ///
+    /// A plain value rather than an `Option` — the opposite ruling to
+    /// [`responses_transport`](Self::responses_transport) above, because basis
+    /// has an opinion here that it does not have there: the default is
+    /// [`FileToolProfile::Split`], not mentra's `Batched`, so *unsaid* and
+    /// *mentra's default* are different answers and there is nothing for a
+    /// `None` to mean. The chain states it unconditionally.
+    file_tools: FileToolProfile,
     /// The executors this runtime routes `!@<name>` commands to (ADR-0021).
     /// Names are validated at [`build`](Self::build) rather than here, which
     /// is where this builder answers every other piece of bad input.
@@ -138,6 +148,7 @@ impl std::fmt::Debug for RuntimeBuilder {
             .field("provider_retry", &self.provider_retry)
             .field("provider_retry_budget", &self.provider_retry_budget)
             .field("responses_transport", &self.responses_transport)
+            .field("file_tools", &self.file_tools)
             .field(
                 "command_environment",
                 &self.command_environment.keys().collect::<Vec<_>>(),
@@ -166,6 +177,7 @@ impl Default for RuntimeBuilder {
             provider_retry: ProviderRetry::default(),
             provider_retry_budget: mentra::runtime::RunOptions::default().retry_budget,
             responses_transport: None,
+            file_tools: FileToolProfile::Split,
             command_environment: BTreeMap::new(),
             command_targets: CommandTargets::new(),
             host_tools: Vec::new(),
@@ -337,6 +349,48 @@ impl RuntimeBuilder {
             responses_transport: Some(transport),
             ..self
         }
+    }
+
+    /// Which builtin file tools this runtime offers the model.
+    /// [`FileToolProfile::Split`] by default, which is not mentra's default.
+    ///
+    /// **The roster is the model's API, and this is the one place basis writes
+    /// it.** mentra's `Batched` profile registers a single `files` tool whose
+    /// input is an `operations` array over nine variants —
+    /// `read`/`list`/`search`/`create`/`set`/`replace`/`insert`/`move`/`delete`
+    /// — so reading one file means picking a branch out of a nine-way `oneOf`
+    /// and nesting the path inside an array of objects. `Split` registers the
+    /// six names every model in this class was trained on: `read`, `ls`,
+    /// `grep`, `glob`, `write`, `edit`. Same workspace engine underneath, same
+    /// policy, same hook points — a different surface presented to the one
+    /// consumer that cannot be given a migration note.
+    ///
+    /// Two of the differences are capability rather than shape.
+    /// mentra's `grep` carries `glob`, `ignore_case`, `literal`, `context` and
+    /// `multiline`; the batched `search` op hardcodes all five to their
+    /// defaults, so a case-insensitive search scoped to `*.rs` is not
+    /// expressible through `files` at all. And `glob` — find files whose path
+    /// matches a pattern — has **no** batched equivalent, so under `Batched` a
+    /// model that wants one reaches for a shell command instead, which is a
+    /// tool call that goes to the approver in place of a read that would not
+    /// have.
+    ///
+    /// **Who wants `Batched` back.** A host whose `.basis/hooks.json` matchers
+    /// or whose operators' remembered rules name `files`: both key on the
+    /// exact tool name, so under `Split` a `"tools": ["files"]` entry stops
+    /// matching and nothing errors — the same silent-stop ADR-0016's
+    /// `shell` → `spawn` note describes. Choosing `Batched` keeps the roster
+    /// those were written against, unchanged, for as long as the host needs to
+    /// rewrite them. That is a migration path rather than an opinion; the
+    /// opinion is the default. `Both` exists too, and costs the model both
+    /// surfaces in its context for one engine.
+    ///
+    /// Runtime-scoped (ADR-0018) because the roster is a property of the
+    /// mentra runtime's registry, which is fixed at build: every workspace on
+    /// this runtime, and every subagent, is offered the same set.
+    #[must_use]
+    pub fn with_file_tools(self, file_tools: FileToolProfile) -> Self {
+        Self { file_tools, ..self }
     }
 
     /// Keeps this runtime's conversations in `dir` rather than in the
@@ -668,6 +722,13 @@ impl RuntimeBuilder {
             // which filters on this — finds nothing, whatever was persisted.
             .with_runtime_identifier(identifier)
             .with_policy(policy)
+            // Which file tools the model is offered. Stated unconditionally
+            // because basis's default differs from mentra's: `Split` puts the
+            // six names models are trained on where a nine-variant `oneOf`
+            // used to be, and is the only profile carrying `glob` and `grep`'s
+            // own knobs (see `with_file_tools`). A host that needs the old
+            // roster back says so and gets it here.
+            .with_file_tools(self.file_tools)
             // Without an authorizer mentra allows every call unconditionally,
             // and no permission request can ever be raised — so the gate goes
             // on even for a runtime whose runs approve everything (see

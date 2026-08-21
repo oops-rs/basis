@@ -437,9 +437,9 @@ async fn a_workspaces_hooks_guard_its_runs_on_a_shared_runtime() {
 
     // Connections alternate per run: a tool call, then the wrap-up text.
     let endpoint = ScriptedEndpoint::start(vec![
-        Reply::files_create("made.txt"),
+        Reply::write_file("made.txt"),
         Reply::Text,
-        Reply::files_create("made.txt"),
+        Reply::write_file("made.txt"),
         Reply::Text,
     ]);
     let runtime = shared_runtime(&endpoint);
@@ -506,11 +506,15 @@ enum Reply {
 }
 
 impl Reply {
-    fn files_create(path: &str) -> Self {
+    /// The write a basis runtime's roster actually offers: `write`, not the
+    /// batched `files` this used to script. A runtime built through
+    /// [`basis::RuntimeBuilder`] registers mentra's split file tools by
+    /// default, so a scripted `files` call would name a tool that is not
+    /// there and the run would prove nothing about hooks.
+    fn write_file(path: &str) -> Self {
         Self::ToolCall {
-            name: "files".to_string(),
-            arguments: json!({"operations": [{"op": "create", "path": path, "content": "hi"}]})
-                .to_string(),
+            name: "write".to_string(),
+            arguments: json!({"path": path, "content": "hi"}).to_string(),
         }
     }
 }
