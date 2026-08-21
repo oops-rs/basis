@@ -29,6 +29,7 @@ use mentra::ModelSelector;
 #[cfg(feature = "mcp")]
 use crate::mcp::{self, McpConfig, connections::McpConnections};
 use crate::{
+    compaction::Compaction,
     context::{ContextConfig, WorkspaceContext},
     event::ContextFile,
     hooks::{self, HookRunner, HooksConfig},
@@ -67,6 +68,7 @@ pub struct WorkspaceBuilder {
     hooks: HooksConfig,
     tools: ToolsConfig,
     shell: ShellAccess,
+    compaction: Compaction,
 }
 
 /// Where this workspace's runtime comes from: borrowed from the host, or
@@ -102,6 +104,7 @@ impl std::fmt::Debug for WorkspaceBuilder {
             .field("hooks", &self.hooks)
             .field("tools", &self.tools)
             .field("shell", &self.shell)
+            .field("compaction", &self.compaction)
             .finish_non_exhaustive()
     }
 }
@@ -126,6 +129,10 @@ impl WorkspaceBuilder {
             // than from anything ambient: what a run may do is stated here, in
             // configuration, not read out of the environment behind the caller.
             shell: ShellAccess::default(),
+            // Keeps every tool result the model was shown, and leaves mentra's
+            // summarizing numbers where mentra put them (see
+            // [`crate::compaction`]).
+            compaction: Compaction::default(),
         }
     }
 
@@ -232,6 +239,27 @@ impl WorkspaceBuilder {
     /// workspace's agents (see [`crate::runtime`]).
     pub fn with_shell(self, shell: ShellAccess) -> Self {
         Self { shell, ..self }
+    }
+
+    /// Sets how much of a conversation reaches the model, for every run this
+    /// workspace mints.
+    ///
+    /// Unset, [`Compaction::default`] applies: every tool result the model was
+    /// shown stays in front of it, and mentra's summarizing trigger is
+    /// untouched. See [`crate::compaction`] for the two mechanisms and for why
+    /// the default is what it is.
+    ///
+    /// Workspace-level, not runtime-level, and the reason is mechanical rather
+    /// than aesthetic. These numbers live on mentra's `AgentConfig`, one is
+    /// built per workspace by [`open`](Self::open)'s `agent_config`, and every
+    /// session this workspace mints — and every subagent that clones its
+    /// config — carries that one. A runtime-level knob would have to be read
+    /// back out at the same moment anyway, and could not then be varied per
+    /// repository, which ADR-0018's split is precisely about: the runtime owns
+    /// what changes when the host changes, and how much history a repository's
+    /// runs keep is not that.
+    pub fn with_compaction(self, compaction: Compaction) -> Self {
+        Self { compaction, ..self }
     }
 
     /// Does all of it: discovery, runtime acquisition, model, skills,
@@ -353,7 +381,12 @@ impl WorkspaceBuilder {
 
         Ok(Workspace {
             root: resolved_workspace(&self.path, &context),
-            agent: agent_config(&self.path, &context),
+            agent: agent_config(
+                &self.path,
+                &context,
+                self.compaction,
+                store::default_transcripts(),
+            ),
             identifier: store::runtime_identifier(&self.path),
             path: self.path,
             provider: runtime.provider().to_string(),
@@ -468,9 +501,17 @@ pub(crate) fn resolved_workspace(requested: &Path, context: &WorkspaceContext) -
 }
 
 /// Turns discovered context into the agent's system prompt, scopes the agent to
-/// the workspace, and settles which tools the model is offered. Everything else
-/// stays at mentra's defaults — opinions belong in the prompt and the
-/// workspace, not here.
+/// the workspace, settles which tools the model is offered, and says how much
+/// of the conversation reaches the model. Everything else stays at mentra's
+/// defaults — opinions belong in the prompt and the workspace, not here.
+///
+/// # Why compaction is not left at mentra's default
+///
+/// Because that default is an opinion, and a costly one: mentra blanks every
+/// tool result but the three most recent on the way to *every* provider
+/// request, at any context size. See [`crate::compaction`]. The other eight
+/// fields of its `CompactionConfig` are still inherited — only what basis has
+/// a reason to state is stated.
 ///
 /// # Why three tools leave the roster
 ///
@@ -494,7 +535,12 @@ pub(crate) fn resolved_workspace(requested: &Path, context: &WorkspaceContext) -
 /// the per-mint extension (hiding other workspaces' MCP tools) happens in
 /// [`Workspace::prepare`](super::Workspace::prepare)'s path, where the shared
 /// registry's current contents are known.
-fn agent_config(workspace: &Path, context: &WorkspaceContext) -> mentra::agent::AgentConfig {
+fn agent_config(
+    workspace: &Path,
+    context: &WorkspaceContext,
+    compaction: Compaction,
+    transcripts: PathBuf,
+) -> mentra::agent::AgentConfig {
     mentra::agent::AgentConfig {
         system: context.render(),
         tool_profile: mentra::agent::ToolProfile::hide(REPLACED_TOOLS),
@@ -502,6 +548,7 @@ fn agent_config(workspace: &Path, context: &WorkspaceContext) -> mentra::agent::
             base_dir: workspace.to_path_buf(),
             ..Default::default()
         },
+        compaction: compaction.into_mentra(transcripts),
         ..Default::default()
     }
 }

@@ -81,6 +81,15 @@ const IDENTIFIER_PREFIX: &str = "basis:";
 /// nobody said anything.
 const STORE_FILENAME: &str = "runtime.sqlite";
 
+/// What basis calls the directory of compaction snapshots inside whichever
+/// directory holds the store.
+///
+/// mentra's own name for it, for the reason [`STORE_FILENAME`] is mentra's:
+/// the pair `runtime.sqlite` + `transcripts/` is the layout mentra lays down
+/// under its default root, so a workspace pointed at [`default_directory`]
+/// lands on exactly the paths it would have used had nobody said anything.
+const TRANSCRIPTS_DIRNAME: &str = "transcripts";
+
 /// The runtime identifier for conversations in `workspace`.
 ///
 /// Every caller that creates or enumerates a conversation must derive it from
@@ -201,6 +210,19 @@ pub(crate) fn store_in(dir: &Path) -> SqliteRuntimeStore {
 /// basis can open are chosen in one file.
 pub(crate) fn volatile() -> VolatileRuntimeStore {
     VolatileRuntimeStore::new()
+}
+
+/// Where a compaction snapshot goes when nobody said where the history lives.
+///
+/// mentra writes the whole transcript to a file before it replaces a prefix
+/// of it with a summary, so *somewhere* is not optional; what is optional is
+/// whether basis chooses it. Left unchosen, mentra's default is keyed by the
+/// **process's** current directory rather than by the workspace basis opened —
+/// the hazard [`RuntimeBuilder::with_store_dir`](crate::RuntimeBuilder::with_store_dir)
+/// already exists to answer for the database. Naming it here is what lets it
+/// move with the store.
+pub(crate) fn default_transcripts() -> PathBuf {
+    default_directory().join(TRANSCRIPTS_DIRNAME)
 }
 
 /// The directory mentra keeps basis's conversations in, for a caller that wants

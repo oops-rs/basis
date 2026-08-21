@@ -60,6 +60,7 @@
 pub mod approval;
 pub mod branch;
 pub mod budget;
+pub mod compaction;
 pub mod context;
 pub mod event;
 mod expand;
@@ -92,6 +93,10 @@ pub use approval::{
 };
 pub use branch::{BranchError, EntryKind, TranscriptEntry};
 pub use budget::BudgetPool;
+// Beside the other things a workspace is built *with*: what a run's history
+// keeps is set on `WorkspaceBuilder`, so the type naming it belongs where a
+// host already looks for `ShellAccess` and `ContextConfig`.
+pub use compaction::Compaction;
 pub use context::{
     ContextConfig, ContextDocument, ContextError, ContextScope, DEFAULT_CONTEXT_FILE,
     WorkspaceContext,
