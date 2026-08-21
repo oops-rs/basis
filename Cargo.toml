@@ -19,15 +19,16 @@ homepage = "https://github.com/oops-rs/basis"
 basis = { version = "0.4", path = "basis" }
 basis-acp = { version = "0.4", path = "basis-acp" }
 
-# Mentra 0.18 is published and is the runtime contract basis targets. Keeping
-# this registry-only makes a standalone checkout and a package resolve alike.
+# Mentra 0.18 is the runtime contract basis targets. 0.18.2 is the floor since
+# ADR-0021: a command target rides on `CommandRequest::target`, and
+# `ToolContext::execute_shell_command_on` is how `spawn` names one.
 #
 # `default-features = false` drops exactly one thing: mentra's Responses
 # websocket transport, which nothing in basis can select — every run streams over
 # HTTP+SSE. `basis` re-offers it as a feature for an embedder who wants it
 # (see its manifest); the binary and `basis-acp` do not, because neither has a
 # surface that would ask for it.
-mentra = { version = "0.18.1", default-features = false }
+mentra = { version = "0.18.2", default-features = false }
 
 async-trait = "0.1"
 # Moves a blocking reader onto its own thread, which is how stdin becomes an
@@ -85,3 +86,12 @@ strip = true
 opt-level = "s"
 lto = true
 codegen-units = 1
+
+# **Temporary, and it stays until mentra 0.18.2 is published.** ADR-0021 needs
+# the target field on `CommandRequest` and `execute_shell_command_on` on the
+# tool context, which landed in mentra after 0.18.1 went to crates.io. Until
+# the release is out, a standalone checkout of basis does not resolve without
+# this line and the sibling checkout it names — which is exactly the state this
+# comment exists to make impossible to forget.
+[patch.crates-io]
+mentra = { path = "/Users/wendell/developer/oops-rs/mentra/mentra" }
