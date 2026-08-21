@@ -135,6 +135,8 @@ ledger).
 | Structured agent concurrency | 0017 | **Built** (`9d2179b`, `89ee68a`) — `spawn` returns a durable per-workspace task handle; the hidden local service persists bounded state, accepts `send`/`ask`, and provides repeatable `wait` (including `--message`), `cancel`, `watch`, and bounded `inbox` reply summaries; attached deadlines/cancellation flow downward, a parent publishes terminal state only after attached children settle, detached roots are independent, static ownership rules reject self/ancestor/same-tree-peer waits, the live wait graph rejects cycles across ownership trees, and terminal state is separate from advisory progress. `send --await` waits for the correlated reply for its own message rather than unrelated task termination. **Substrate superseded by the row below** (E2/ADR-0019): every semantic here survives on files except the live wait graph, which is deleted — cycles across ownership trees are no longer rejected, they end at each observer's own finite deadline. **CLI routing narrowed by [ADR-0020](adr/0020-spawn-routing-is-decided-by-the-environment.md)**: handle-first is what a caller *inside a task* gets, because that is whose turn must not block; at a shell `spawn` drives the agent it minted and prints the answer, with `--resumable` as the opt-out |
 | Files as the coordination surface (E2) | 0019 | **Built** (E2, the commit that carries these lines; `cargo fmt --all`, `cargo clippy -p basis --all-targets -- -D warnings` and `cargo test --workspace` — 775 passed, 0 failed — all green) — the per-workspace daemon is retired and an agent is a directory under one global, workspace-keyed data root (`BASIS_DATA_DIR`, else an absolute `XDG_DATA_HOME`, else the platform data home; `0700`), holding `meta.json`, `inbox.json`, `events.jsonl` and — as the executor's last act — `terminal.json`, whose existence *is* the completion signal, so an agent is resumable iff it has none and every crash before that write resolves toward resumable. Attach is the primitive: take the agent's `fs2` lock, resume from mentra's last committed turn, checkpoint at turn boundaries; `spawn --await`, `wait`, `ask` and `send --await` all attach, and a contended lock means someone else is executing, so the caller observes. Deleted whole: `registry.rs` (693), `protocol.rs` (233), `service.rs` (585), `service/task.rs` (617), `service/lifecycle/*` (1,505 across eight files), `client.rs` (659), `store.rs` (532) — with the old 12-line `mod.rs` that is all 4,836 lines of `basis/src/local`, replaced by 3,337 across eleven modules (2,453 implementation, 884 tests), every file under the ceiling. Outside it, `cli.rs` loses `Daemon`/`DaemonArgs` and `main.rs` its `__daemon` arm, while `shorthand.rs` keeps `__daemon` reserved so a pre-E2 script gets "unrecognized subcommand" rather than a task whose prompt is `__daemon`. What it costs, stated where the gain is: no progress without an attached process, cancellation granular to the turn boundary rather than instant, and no rollback of a re-driven turn's tool side effects — a checkpoint restores state, never effects. What it does not cost: mentra's store moves from beside the daemon's registry (under `XDG_RUNTIME_DIR`, which the platform may erase) to `<root>/workspaces/<key>/store`, so conversations are durable for the first time, at the price of not migrating the ones that were not. Three deviations from the plan, each forced by removing the daemon's mutex: the terminal record is written under the inbox lock, so an enqueue racing a settle is either accepted before the unanswered sweep or refused by the record it would have missed; the settle pass drives free-locked unfinished children on the success path too, without which a child spawned and never waited on would hold its parent open until the deadline; and `meta.json` carries no `next_seq`, since deriving it from the journal's last line cannot drift from the file after a crash |
 
+| Compaction configured by basis | — | **Built** (the commit that carries these lines) — `Compaction` on `WorkspaceBuilder`: three knobs over mentra's nine-field `CompactionConfig`, and the first default basis sets *against* upstream's rather than beside it. **The evidence**: micro-compaction is not budget-driven. mentra rewrites the history before *every* provider request (`micro_compact_history`), blanking the content of each tool result over 100 bytes past the three most recent, with no event and no relation to the context window — so an agent that reads five files and edits the first is editing from a transcript where that file reads `[Previous: used files]`. Before this, `basis/src` referenced compaction in one comment and ARCHITECTURE §1 promised "mentra + glue" with no glue. `keep_recent_tool_results` therefore defaults to `usize::MAX` — mentra's own off switch, so this is a configuration of upstream and not a fork of it — and elision stays available by number for a host that knows its results are large and cheaply re-derived. The two summarizing numbers are *read off* `CompactionConfig::default()` rather than restated, so a number basis has no basis to choose cannot drift from upstream's, and the other six fields are untouched. `transcript_dir` is deliberately not a knob: it follows the store (`<store_dir>/transcripts`, mentra's own layout, so pointing `with_store_dir` at the default directory stays a no-op), which closes for snapshots the same process-cwd hole `397ca13` closed for the database. **What it costs**: tokens, and it is the trade the row exists to state — every turn now carries every tool result, so requests are larger and a long file-reading session reaches the summarizing threshold sooner than it did. Taken deliberately, because those tokens are visible and priced while a blanked result is neither. And `with_ephemeral_history`'s *nowhere* becomes honestly "the OS temp directory, per runtime": mentra persists a snapshot before it summarizes without consulting the store, and `max_persisted_transcripts: None` disables cleanup rather than writing, so basis moved the file instead of documenting a promise it cannot keep — the two doc comments that claimed otherwise are corrected. **What it newly exposes**: nothing. Every knob narrows what mentra was already doing, and nothing here reaches a new file, program or network. **What it does not do**: know the model's context window. The trigger is a fixed 50,000 tokens whatever the model, which is right for a small one and wasteful on a large one — two new candidates, below |
+
 Footnotes on the Phase B, C and D rows, because a ledger that records only
 the wins is not a ledger:
 
@@ -606,8 +608,8 @@ downstream code can name it (mentra `c04986a`, footnotes 3 and 7). **The
 ninth was basis's own** rather than mentra's — a store knob on `WorkspaceBuilder`
 — and `397ca13` plus `71cc59d` built it (footnote 6). **Zero were open, for one
 day.** ADR-0016's first wave then found three more, all upstream-shaped and all
-open, and rev 12's declared tools found two more after them. All five are named
-further down.
+open, rev 12's declared tools found two more after them, and wiring compaction
+found two more again. All seven are named further down.
 
 That is still the first time this ledger has been clean, and it is worth being
 precise about what it measures. Not that mentra is finished, and not that basis
@@ -733,6 +735,37 @@ unwritable rather than merely awkward.
   carry; `SideEffectLevels`, `ApprovalGate::levels`,
   `PreparedRun::with_side_effect_levels` and the `Runtime` field between them
   are deleted with the file the day mentra#21 lands.
+
+**And wiring compaction put two more in it**, found the way the last five were:
+by being the first caller that needed the thing. Neither is filed, and neither
+blocks the row above — basis's defaults work today, and both of these are about
+doing better than a fixed number rather than about doing it at all.
+
+- **`keep_recent_tool_results: 3` is the wrong default for a coding agent.**
+  basis now overrides it, which is a downstream fix to an upstream default, and
+  a default is the one thing that should not need overriding by everyone who
+  hits it. The number is defensible for an assistant whose tool results are
+  weather lookups; it is hostile to a harness whose tool results *are* the work,
+  because the elision is unconditional — no budget, no window, no event — so the
+  fourth read of a five-file session already blanks the first. Upstream has the
+  better view of both sides of that trade, including whether the default should
+  be a count at all rather than a share of a budget. basis's override is one
+  line, so calling it a workaround overstates it; but if every serious harness
+  has to write that line, the default is the bug.
+- **A window-relative trigger and overflow recovery cannot be built
+  downstream.** Three facts, each closing a route on its own. `ModelInfo`
+  carries no context window — id, provider, display name, description,
+  created-at — so neither basis nor mentra knows how large the thing it is
+  filling is. `compaction::estimated_request_tokens`, which is how mentra
+  itself decides whether to compact, is `pub(crate)`, so a host cannot even ask
+  *how full is it now* and judge for itself. And no `ProviderError` variant
+  means "context overflow" — that arrives as `Http { status, body }`, prose a
+  provider wrote — so nothing can recognize the one failure whose correct
+  answer is *compact and retry* rather than *fail the turn*. Together they mean
+  the trigger can only ever be a number a host guessed, and that guessing high
+  is unrecoverable rather than merely late. One candidate rather than three,
+  because a window on `ModelInfo` without a classified overflow still leaves a
+  run failing on the turn it should have survived.
 
 ## 3. Phases
 
