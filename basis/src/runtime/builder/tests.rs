@@ -689,3 +689,61 @@ async fn a_run_on_an_untouched_runtime_is_left_exactly_as_it_was() {
     assert_eq!(options.provider_retry, untouched.provider_retry);
     assert_eq!(options.retry_budget, untouched.retry_budget);
 }
+
+#[test]
+fn a_chosen_transport_reaches_mentras_own_runtime() {
+    // The far side of the seam, which is the half that matters: not that basis
+    // held the choice, but that mentra's runtime came out of `build` holding
+    // it. mentra reads it back through `Runtime::responses_transport`, the
+    // same kind of window `tools()` is for a host tool.
+    let chosen = offline()
+        .with_responses_transport(ResponsesTransport::WebSocket)
+        .build()
+        .expect("builds offline");
+
+    assert_eq!(
+        chosen.mentra_runtime().responses_transport(),
+        Some(ResponsesTransport::WebSocket)
+    );
+    assert_eq!(
+        offline()
+            .build()
+            .expect("builds offline")
+            .mentra_runtime()
+            .responses_transport(),
+        None,
+        "unset must leave the choice to mentra rather than restating its default"
+    );
+}
+
+#[test]
+fn the_last_word_about_the_transport_is_the_one_that_counts() {
+    // The rule every single-valued knob here follows: a helper that hands out
+    // websocket builders has to be overridable by a caller that wants HTTP.
+    let builder = RuntimeBuilder::default()
+        .with_responses_transport(ResponsesTransport::WebSocket)
+        .with_responses_transport(ResponsesTransport::HttpSse);
+
+    assert_eq!(
+        builder.responses_transport,
+        Some(ResponsesTransport::HttpSse)
+    );
+    assert_eq!(
+        RuntimeBuilder::default().responses_transport,
+        None,
+        "a fresh builder states no transport at all"
+    );
+}
+
+#[test]
+fn a_chosen_transport_is_named_in_the_debug_view() {
+    // The Debug impl is hand-written to keep a credential out of a log, so
+    // each new field has to be added to it deliberately.
+    let printed = format!(
+        "{:?}",
+        RuntimeBuilder::default().with_responses_transport(ResponsesTransport::WebSocket)
+    );
+
+    assert!(printed.contains("responses_transport"), "{printed}");
+    assert!(printed.contains("WebSocket"), "{printed}");
+}

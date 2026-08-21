@@ -30,15 +30,16 @@ mcp = []
 # and the second transport is the only reason tokio-tungstenite was ever in
 # this crate's tree.
 #
-# Off by default, which is a statement about reachability rather than a
-# preference: the transport is chosen per request through mentra's
-# `ProviderRequestOptions`, basis never sets that field, and the `AgentConfig`
-# that would carry it is private to workspace construction. No CLI invocation
-# can select it, so the default build linked a websocket client for a code path it
-# cannot enter. Kept nameable rather than cut outright, for an embedder driving
-# basis against an endpoint where that transport is the point; enabling it
-# forwards to mentra, which forwards to mentra-provider, which compiles the
-# transport back in.
+# Off by default, and the reason has changed. It used to be reachability: no
+# code path in basis could select the websocket transport at all, so the default
+# build linked a websocket client it could never enter. `RuntimeBuilder::with_responses_transport`
+# is now that path, so what keeps this off by default is the dependency weight
+# — an embedder that streams over HTTP+SSE, which is every one that does not ask
+# otherwise, should not carry a websocket stack for it. Enabling it forwards to
+# mentra, which forwards to mentra-provider, which compiles the transport back
+# in. Selecting `ResponsesTransport::WebSocket` without it is not a silent
+# fallback to HTTP+SSE: mentra fails the request instead, which is why the
+# builder method says so.
 responses-websocket = ["mentra/responses-websocket"]
 
 [dependencies]

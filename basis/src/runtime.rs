@@ -77,6 +77,16 @@ pub use mentra::runtime::{
 /// spellings of one policy, and mentra is the half that does the sleeping.
 pub use mentra::runtime::ProviderRetry;
 
+/// Which wire transport mentra streams the Responses format over, as
+/// [`RuntimeBuilder::with_responses_transport`] takes it.
+///
+/// Re-exported for the same reason and beside the executor types above, in the
+/// module that owns the builder asking for it. Mind the feature: selecting
+/// [`ResponsesTransport::WebSocket`] needs basis's `responses-websocket`
+/// feature, which forwards to mentra's — see the method for what happens
+/// without it.
+pub use mentra::provider::ResponsesTransport;
+
 use crate::{approval::SideEffectLevels, run::RunError};
 
 use dispatch::{HookDispatch, HookRegistration, WorkspaceGuardEntry};

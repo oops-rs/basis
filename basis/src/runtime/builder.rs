@@ -33,7 +33,7 @@ use crate::{
 };
 
 use super::{
-    ProviderRetry, Runtime, RuntimeExecutor,
+    ProviderRetry, ResponsesTransport, Runtime, RuntimeExecutor,
     dispatch::{DispatchHook, HookDispatch},
     executor::{CommandTargets, TargetedExecutor},
 };
@@ -79,6 +79,13 @@ pub struct RuntimeBuilder {
     /// `RunOptions::retry_budget` is a bare count beside the typed schedule —
     /// and seeded from mentra's own default for the same reason that one is.
     provider_retry_budget: usize,
+    /// Which transport mentra streams the Responses wire format over
+    /// ([`with_responses_transport`](Self::with_responses_transport)).
+    ///
+    /// An `Option` precisely because the reasoning above does not apply: the
+    /// default is mentra's to state, basis has no business restating it, and
+    /// `None` here means the builder chain never mentions transport at all.
+    responses_transport: Option<ResponsesTransport>,
     /// The executors this runtime routes `!@<name>` commands to (ADR-0021).
     /// Names are validated at [`build`](Self::build) rather than here, which
     /// is where this builder answers every other piece of bad input.
@@ -130,6 +137,7 @@ impl std::fmt::Debug for RuntimeBuilder {
             )
             .field("provider_retry", &self.provider_retry)
             .field("provider_retry_budget", &self.provider_retry_budget)
+            .field("responses_transport", &self.responses_transport)
             .field(
                 "command_environment",
                 &self.command_environment.keys().collect::<Vec<_>>(),
@@ -157,6 +165,7 @@ impl Default for RuntimeBuilder {
             interceptors: Vec::new(),
             provider_retry: ProviderRetry::default(),
             provider_retry_budget: mentra::runtime::RunOptions::default().retry_budget,
+            responses_transport: None,
             command_environment: BTreeMap::new(),
             command_targets: CommandTargets::new(),
             host_tools: Vec::new(),
@@ -289,6 +298,43 @@ impl RuntimeBuilder {
     pub fn with_provider_retry_budget(self, budget: usize) -> Self {
         Self {
             provider_retry_budget: budget,
+            ..self
+        }
+    }
+
+    /// Which transport mentra streams the Responses wire format over.
+    ///
+    /// Passed straight through to mentra, which owns both transports and the
+    /// choice between them. Unset, mentra picks, and what it picks is HTTP+SSE
+    /// — the transport every basis run has ever used.
+    ///
+    /// Who asks for it: a host driving basis against an endpoint where the
+    /// websocket transport is the point rather than an option — lower
+    /// per-turn setup on a long conversation, or a gateway that only offers
+    /// it. Nothing else in basis selects a transport, so before this method a
+    /// host that wanted one had to build the mentra runtime itself and give up
+    /// basis's own surface to get it.
+    ///
+    /// **Two ways this can disappoint, and neither is basis's to soften.**
+    /// Selecting [`ResponsesTransport::WebSocket`] needs basis's
+    /// `responses-websocket` feature, which forwards to mentra's, which
+    /// forwards to mentra-provider's and compiles the websocket client back
+    /// in. It is off by default — the default build links no websocket stack
+    /// — and without it the choice is accepted here and **fails at request
+    /// time**, loudly, which is mentra's stance rather than a silent fallback
+    /// to HTTP+SSE: a host that asked for a transport should learn it did not
+    /// get one, not discover later that its traffic went the other way. The
+    /// second is the provider: not every one serves websockets — Anthropic and
+    /// Gemini report that they do not — and such a provider refuses an
+    /// explicit `WebSocket` at its first request, naming itself, for the same
+    /// reason and with the same loudness.
+    ///
+    /// Read back through `Runtime::mentra_runtime().responses_transport()`,
+    /// for a host that reports its own configuration.
+    #[must_use]
+    pub fn with_responses_transport(self, transport: ResponsesTransport) -> Self {
+        Self {
+            responses_transport: Some(transport),
             ..self
         }
     }
@@ -663,6 +709,14 @@ impl RuntimeBuilder {
                 Arc::clone(&command_environment),
                 self.command_targets,
             ))
+        };
+
+        // Only when the host named one. mentra owns both transports and the
+        // default between them, and restating that default here would be a
+        // second opinion to keep in step with upstream's first.
+        let builder = match self.responses_transport {
+            Some(transport) => builder.with_responses_transport(transport),
+            None => builder,
         };
 
         // Left alone unless the caller said something, because mentra's default
