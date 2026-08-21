@@ -18,12 +18,13 @@
 //! every test needs both, so a second `tests/*.rs` would be a second crate
 //! compiling and linking its own copy of them. The tests divide instead by
 //! what a client is doing — prompting in `turns`, deciding a consequential
-//! call in `permission`, keeping a session in `sessions`, and asking what is
-//! there in `discovery`.
+//! call in `permission`, keeping a session in `sessions`, running out of an
+//! allowance in `bounds`, and asking what is there in `discovery`.
 
 mod client;
 mod source;
 
+mod bounds;
 mod discovery;
 mod permission;
 mod sessions;

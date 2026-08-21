@@ -15,14 +15,14 @@ use agent_client_protocol::schema::{
     ProtocolVersion,
     v1::{
         ContentBlock, ErrorCode, InitializeRequest, ListSessionsRequest, ResourceLink,
-        SessionCapabilities, TextContent,
+        SessionCapabilities, StopReason, TextContent,
     },
 };
 
 use super::config::{ServeConfig, SessionSource};
 use super::initialize;
 use super::lifecycle::{list_sessions, session_info, setup_failed};
-use super::turn::prompt_text;
+use super::turn::{prompt_text, stop_reason};
 use super::workspaces::{ConfiguredSource, WorkspaceKey};
 use crate::mode::ApprovalMode;
 use basis::{
@@ -178,6 +178,40 @@ fn a_resource_link_is_named_rather_than_dropped() {
 #[test]
 fn an_empty_prompt_produces_no_text() {
     assert!(prompt_text(&[]).is_empty());
+}
+
+#[test]
+fn every_bound_names_a_stop_reason_a_client_can_act_on() {
+    // The two that map exactly, and the one that does not. What matters for
+    // all three is what they are *not*: `Cancelled` is reserved for
+    // `session/cancel`, and `Refusal` promises the client that the prompt is
+    // being dropped from the conversation — which a bound never does, because
+    // committed work is kept (ADR-0014).
+    assert_eq!(
+        stop_reason(basis::Bound::TokenBudget),
+        StopReason::MaxTokens
+    );
+    assert_eq!(
+        stop_reason(basis::Bound::ToolBudget),
+        StopReason::MaxTurnRequests
+    );
+    assert_eq!(
+        stop_reason(basis::Bound::Deadline),
+        StopReason::MaxTurnRequests,
+        "ACP has no time bound; the nearest true statement is that the allowance ran out"
+    );
+
+    for bound in [
+        basis::Bound::Deadline,
+        basis::Bound::ToolBudget,
+        basis::Bound::TokenBudget,
+    ] {
+        assert_ne!(
+            stop_reason(bound),
+            StopReason::EndTurn,
+            "{bound:?} ended the turn early, and `EndTurn` says it ended successfully"
+        );
+    }
 }
 
 #[test]

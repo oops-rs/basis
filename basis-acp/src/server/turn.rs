@@ -65,12 +65,58 @@ pub(super) async fn prompt(
     }
 
     match report {
-        Ok(report) if report.succeeded() => Ok(PromptResponse::new(StopReason::EndTurn)),
-        Ok(report) => Err(Error::internal_error().data(match report.outcome {
-            basis::RunOutcome::Error { message } => message,
-            basis::RunOutcome::Ok => "the turn failed".to_string(),
-        })),
+        // The bound is read before the outcome, because a bound that ended a
+        // turn is the answer whichever way the turn came back. `TokenBudget`
+        // is graceful and can arrive on a run that answered (see
+        // `Bound::TokenBudget`), and reporting that as `EndTurn` would drop
+        // the one fact the client needs to know: there would have been more.
+        Ok(report) => match report.stopped_by {
+            Some(bound) => Ok(PromptResponse::new(stop_reason(bound))),
+            None if report.succeeded() => Ok(PromptResponse::new(StopReason::EndTurn)),
+            None => Err(Error::internal_error().data(match report.outcome {
+                basis::RunOutcome::Error { message } => message,
+                basis::RunOutcome::Ok => "the turn failed".to_string(),
+            })),
+        },
         Err(error) => Err(Error::internal_error().data(error.to_string())),
+    }
+}
+
+/// Which of ACP's stop reasons a tripped bound is.
+///
+/// A bound is not a failure — committed work is kept, and the CLI has an exit
+/// code of its own for exactly this (ADR-0014, ADR-0015). Reporting it as
+/// `-32603` told a client that set a budget that basis had broken, which is the
+/// one reading that is certainly wrong.
+///
+/// Two of the three land on a name ACP already has. The third does not, and the
+/// choice is between four wrong answers:
+///
+/// - `Refusal` carries a documented consequence — "the user prompt and
+///   everything that comes after it won't be included in the next prompt" —
+///   which is false here. A deadline keeps what the turn committed.
+/// - `Cancelled` is reserved: ACP says it MUST be returned when the client
+///   sends `session/cancel`, so using it would tell a client its own stop
+///   button was pressed when nobody touched it.
+/// - `EndTurn` means the turn ended successfully, which hides the bound
+///   entirely — the failure this mapping exists to fix, wearing a nicer code.
+/// - `MaxTurnRequests` means the agent reached the allowance it had for
+///   requests between user turns. It names the wrong unit and the right event:
+///   an allowance the operator set ran out, and the agent was refused another
+///   round. Everything a client does with it — say so, offer to continue — is
+///   what a deadline calls for too.
+///
+/// So `MaxTurnRequests`, and the unit is the only thing lost. The exact bound
+/// is still on the event stream as [`Event::RunFinished`](basis::Event::RunFinished)'s
+/// `stopped_by`, for a client that wants it.
+pub(super) fn stop_reason(bound: basis::Bound) -> StopReason {
+    match bound {
+        basis::Bound::TokenBudget => StopReason::MaxTokens,
+        basis::Bound::ToolBudget | basis::Bound::Deadline => StopReason::MaxTurnRequests,
+        // `Bound` is `#[non_exhaustive]`. A bound basis-acp has not been taught
+        // still ended the turn, and every remaining variant is wrong in a way
+        // this one is not: it is at least an allowance that ran out.
+        _ => StopReason::MaxTurnRequests,
     }
 }
 
