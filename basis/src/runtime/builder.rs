@@ -399,7 +399,7 @@ impl RuntimeBuilder {
     /// replaces a prefix of the transcript, and does that without consulting
     /// the store. basis files those under the operating system's temp
     /// directory, unique per runtime — never the user's data directory and
-    /// never the workspace (see [`store::volatile_transcripts`]).
+    /// never the workspace.
     ///
     /// **Nothing survives the process.** While the runtime lives a conversation
     /// behaves as it always does — [`Workspace::resume`](crate::Workspace::resume)

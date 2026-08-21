@@ -43,8 +43,9 @@
 //! `transcript_dir` is deliberately not a knob at all: where a workspace's
 //! files go is settled by
 //! [`RuntimeBuilder::with_store_dir`](crate::RuntimeBuilder::with_store_dir),
-//! and a second answer here could disagree with it. See
-//! [`into_mentra`](Compaction::into_mentra).
+//! and a second answer here could disagree with it — so the conversion to
+//! mentra's config takes the directory as a parameter rather than reading a
+//! field.
 
 use std::path::PathBuf;
 

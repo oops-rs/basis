@@ -62,8 +62,9 @@
 //! for [`list_in`] to read and no row for [`list`] to filter, whichever
 //! directory either is pointed at. One file still gets written even then — a
 //! compaction snapshot, which mentra persists without consulting the store —
-//! and [`volatile_transcripts`] is the answer to where. Everything else below
-//! is about the durable case.
+//! and it goes to a per-runtime directory under the OS temp directory, which
+//! is as close to *nowhere* as that file gets. Everything else below is about
+//! the durable case.
 
 use std::{
     path::{Path, PathBuf},
