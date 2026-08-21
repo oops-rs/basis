@@ -60,9 +60,16 @@
 //! answers *where* with *nowhere*, and opens mentra's in-memory store instead.
 //! Nothing in this module can see one of those conversations: there is no file
 //! for [`list_in`] to read and no row for [`list`] to filter, whichever
-//! directory either is pointed at. Everything below is about the durable case.
+//! directory either is pointed at. One file still gets written even then — a
+//! compaction snapshot, which mentra persists without consulting the store —
+//! and it goes to a per-runtime directory under the OS temp directory, which
+//! is as close to *nowhere* as that file gets. Everything else below is about
+//! the durable case.
 
-use std::path::{Path, PathBuf};
+use std::{
+    path::{Path, PathBuf},
+    sync::atomic::{AtomicU64, Ordering},
+};
 
 use mentra::{
     BuiltinProvider, Runtime,
@@ -80,6 +87,15 @@ const IDENTIFIER_PREFIX: &str = "basis:";
 /// [`default_directory`] lands on precisely the file it would have used had
 /// nobody said anything.
 const STORE_FILENAME: &str = "runtime.sqlite";
+
+/// What basis calls the directory of compaction snapshots inside whichever
+/// directory holds the store.
+///
+/// mentra's own name for it, for the reason [`STORE_FILENAME`] is mentra's:
+/// the pair `runtime.sqlite` + `transcripts/` is the layout mentra lays down
+/// under its default root, so a workspace pointed at [`default_directory`]
+/// lands on exactly the paths it would have used had nobody said anything.
+const TRANSCRIPTS_DIRNAME: &str = "transcripts";
 
 /// The runtime identifier for conversations in `workspace`.
 ///
@@ -188,9 +204,12 @@ pub(crate) fn store_in(dir: &Path) -> SqliteRuntimeStore {
 
 /// The store that keeps a workspace's conversations nowhere.
 ///
-/// mentra's in-memory `RuntimeStore`: no file is opened, no transcript snapshot
-/// is written, no directory is created, and dropping the runtime that holds it
-/// takes every conversation with it. Constructed fresh per workspace, which is
+/// mentra's in-memory `RuntimeStore`: no database file is opened, no directory
+/// is created, no tool output is spilled to disk, and dropping the runtime that
+/// holds it takes every conversation with it. The one thing it does not stop is
+/// a compaction snapshot, which mentra writes without asking the store —
+/// [`volatile_transcripts`] is where those go instead. Constructed fresh per
+/// workspace, which is
 /// what makes two ephemeral workspaces two histories rather than one — the type
 /// is `Clone` and clones share state, so a shared instance would be a shared
 /// database with none of the durability.
@@ -201,6 +220,56 @@ pub(crate) fn store_in(dir: &Path) -> SqliteRuntimeStore {
 /// basis can open are chosen in one file.
 pub(crate) fn volatile() -> VolatileRuntimeStore {
     VolatileRuntimeStore::new()
+}
+
+/// Where a workspace's compaction snapshots go, under `dir`.
+///
+/// mentra writes the whole transcript to a file before it replaces a prefix of
+/// it with a summary, so *somewhere* is not optional; what is optional is
+/// whether basis chooses it. It should: a snapshot is a verbatim copy of the
+/// same conversation the database holds, and mentra's own default puts the two
+/// in one directory. Keeping that relationship is what makes
+/// [`RuntimeBuilder::with_store_dir`](crate::RuntimeBuilder::with_store_dir)
+/// move both — and pointing it at [`default_directory`] a no-op, exactly as it
+/// is for [`store_in`].
+pub(crate) fn transcripts_in(dir: &Path) -> PathBuf {
+    dir.join(TRANSCRIPTS_DIRNAME)
+}
+
+/// Where they go when nobody said where the history lives.
+///
+/// Keyed by the process's current directory, like the database beside it — the
+/// hazard `with_store_dir` exists to answer, left in place for the caller that
+/// has not asked.
+pub(crate) fn default_transcripts() -> PathBuf {
+    transcripts_in(&default_directory())
+}
+
+/// Where they go for a runtime whose history is kept nowhere.
+///
+/// *Nowhere* is not on offer for these. mentra's `persist_transcript` writes
+/// the snapshot before it summarizes and does not consult the store first —
+/// `allows_disk_artifacts`, which the volatile store answers `false` to, gates
+/// tool-output spill and nothing else — and `max_persisted_transcripts: None`
+/// disables the *cleanup* of old snapshots rather than the writing of new ones.
+/// So the only lever basis holds is *where*, and the honest answer is the
+/// directory the operating system already treats as disposable: never the
+/// user's data directory, never the workspace.
+///
+/// Unique per call, because two runtimes each promised their own disposable
+/// history must not read each other's transcripts out of one directory. A
+/// counter and not the clock: two runtimes built in one tick would otherwise
+/// share a directory, which is the bug mentra's own mock runtime had.
+pub(crate) fn volatile_transcripts() -> PathBuf {
+    static NEXT: AtomicU64 = AtomicU64::new(0);
+
+    std::env::temp_dir()
+        .join("basis-ephemeral-transcripts")
+        .join(format!(
+            "process-{}-{}",
+            std::process::id(),
+            NEXT.fetch_add(1, Ordering::Relaxed)
+        ))
 }
 
 /// The directory mentra keeps basis's conversations in, for a caller that wants

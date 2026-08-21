@@ -47,7 +47,7 @@ hot-reloadable extensions. Two pi decisions independently validate ours:
 | Agent loop + tool calling | Mentra runtime, async tool traits | mentra |
 | Multi-provider LLM API | mentra-provider: OpenAI, Anthropic, Gemini, OpenRouter, Ollama, LM Studio | mentra |
 | Session persistence + resume | SQLite-backed sessions, snapshots | mentra |
-| Compaction | Memory compaction exists in mentra; wire to session lifecycle | mentra + glue |
+| Compaction | mentra's compaction, configured by basis (`Compaction`) ✅ — every tool result the model was shown is kept, elision is opt-in by number, snapshots follow the store | built |
 | Session branching / tree | mentra's transcript tree, exposed on `PreparedRun` ✅ | built |
 | Builtin tools (files, shell, background exec, tasks) | Mentra builtins, with the roster basis's: `read`, `ls`, `grep`, `glob`, `write`, `edit` (mentra's split file tools, `RuntimeBuilder::with_file_tools`), `compact`, `memory_pin`/`memory_forget`/`memory_search`, `load_skill`, and `spawn` for commands and delegation. `shell`, `background_run`, `check_background`, `task`, `task_*`, `team_*` and `idle` are registered but not offered ✅ | mentra + built |
 | Context files (AGENTS.md) | Loader: workspace + global, parent-dir walk | build |
@@ -342,7 +342,7 @@ flowchart LR
 | **P2 ACP server** ✅ | `agent-client-protocol` crate; session mapping, permission surfacing, modes, listing, history replay. Sessions survive turns, so conversation and resume work independent of protocol | done |
 | **P3 Extension points** ✅ | MCP client honoring `.mcp.json` *and* the servers an ACP client sends; subprocess hooks (allow/deny/modify); prompt templates surfaced as ACP commands; ws↔stdio bridge for acp-ui | done |
 | **P4 Loop + Docker** ✅ | `watch` scheduler with skip-if-unchanged — retired by ADR-0014, its bounds and fingerprint kept; Dockerfile, state volume, shell grant — withdrawn by ADR-0013 for [`containerization.md`](containerization.md) | done |
-| P5 Depth | Branching ✅ — two-way since mentra 0.16, so an abandoned line of work can be returned to; compaction tuning, packages convention, provider OAuth remain | ongoing |
+| P5 Depth | Branching ✅ — two-way since mentra 0.16, so an abandoned line of work can be returned to; compaction tuning ✅ — `Compaction` on `WorkspaceBuilder`, with context-window awareness still open; packages convention, provider OAuth remain | ongoing |
 
 This table is the record of how basis was built, not the current plan. What follows P5 is the
 SDK-first transition of ADR-0010…0015, phased in [`REDESIGN.md`](REDESIGN.md) §3: Phase A
@@ -376,8 +376,11 @@ periodic check — so no single use case bends the API toward itself.
   where it belonged. That is the first clean tally the ledger has had, and it measures the
   discipline rather than mentra's completeness: three further candidates were named on the
   way through and none is built, and footnote 8 remains open.
-- **Compaction quality.** Mentra has the primitive; behavior under long sessions is unproven.
-  pi's compaction doc is the reference to study in P0.
+- **Compaction quality.** Mentra has the primitive and basis now configures it (`Compaction`),
+  which settled the one behavior that was actively wrong — tool results being blanked on every
+  request regardless of budget. What stays unproven is the summarizing pass under genuinely long
+  sessions, and the trigger for it is a fixed token count because nothing here knows a model's
+  context window.
 - **Name.** `basis` is a common word, so searches will pull in linear algebra before they
   pull in this. Accepted, and preferred to the alternative: the name states the property the
   crate is held to — minimal, and nothing in it reducible to anything else — which is a claim

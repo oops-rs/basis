@@ -143,6 +143,16 @@ pub struct Runtime {
     /// count from the waits, and a runtime that widened one without the other
     /// would be half a statement.
     provider_retry_budget: usize,
+    /// Where a compaction snapshot goes, derived once from the history posture
+    /// this runtime was built with.
+    ///
+    /// Runtime-scoped because the history posture is: a snapshot is a verbatim
+    /// copy of the conversation the store holds, so the two belong in one
+    /// directory and only one caller knows which. Every workspace opened here
+    /// reads it at open and writes it into its agent config — the numbers
+    /// beside it in that config are the workspace's
+    /// ([`Compaction`](crate::Compaction)), the directory is this.
+    transcripts: PathBuf,
     /// The one pre-hook basis registered, and the registry workspaces join.
     dispatch: Arc<HookDispatch>,
     /// The reading end of the approval gate's side channel, handed to every run
@@ -208,6 +218,17 @@ impl Runtime {
     /// string — what every run from every workspace on it reports.
     pub fn provider(&self) -> &str {
         &self.provider_label
+    }
+
+    /// Where compaction files this runtime's transcript snapshots.
+    ///
+    /// Read by [`WorkspaceBuilder::open`](crate::WorkspaceBuilder::open) into
+    /// the agent config, which is the only place mentra takes it. `pub(crate)`
+    /// because a host that wants to say where it goes says it once, with
+    /// [`with_store_dir`](RuntimeBuilder::with_store_dir), and a reader here
+    /// would invite a second answer.
+    pub(crate) fn transcripts_dir(&self) -> &Path {
+        &self.transcripts
     }
 
     /// The retry schedule and attempt count every run minted on this runtime

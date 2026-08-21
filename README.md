@@ -334,7 +334,11 @@ This README describes only what is built, and all of the above is: P0–P4 and t
 through Phase E — the ACP server with modes, session listing and history replay; conversation and
 resume; durable `spawn`/`send`/`ask`/`wait`/`cancel`/`watch`/`inbox` over the filesystem; MCP from
 `.mcp.json` and from the client; templates as commands; hooks and interceptors; the websocket
-bridge; branching; and the SDK proper. Named honestly, still open: compaction tuning, the packages convention, and provider
+bridge; branching; compaction, whose defaults are basis's own — every tool result the model was
+shown stays in front of it — and whose knobs are `WorkspaceBuilder::with_compaction`; and the SDK
+proper. Named honestly, still open: context-window awareness — nothing here knows how large a
+model's window is, so the summarizing trigger is a fixed token count rather than a fraction of it —
+the packages convention, and provider
 OAuth; the delegation bound-vs-tally gap above; and **nobody has driven this from Zed or JetBrains
 yet** — it is verified against the protocol and its official client library, not against the
 ecosystem. basis's crates are not published yet; mentra, the runtime, is. CI runs fmt, clippy at

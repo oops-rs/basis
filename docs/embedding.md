@@ -391,6 +391,46 @@ in-memory store: resume works for as long as the `Runtime` holding it lives, and
 survives the process — no file, no export, no way to make one durable afterwards, so a host
 that might want that later wants `with_store_dir` now.
 
+Compaction snapshots follow the same answer: `<store_dir>/transcripts`, which is mentra's
+own layout, so relocating the store relocates them. An ephemeral runtime files them under
+the OS temp directory instead — mentra writes a snapshot before it summarizes without
+asking the store, so *nowhere* is not available for that one file.
+
+## Compaction
+
+Two unrelated things shorten a history, and only one of them is the one you would guess.
+
+**Every provider request** passes through micro-compaction, which blanks the content of
+older tool results — no token budget in the decision, no event when it fires, on the fourth
+tool call as readily as the four-hundredth. mentra keeps the three most recent. basis keeps
+them all: a harness that silently blanks the file the model just read is worse at the job,
+and the tokens are ones you can already see and price.
+
+**A long conversation** crosses `auto_threshold_tokens` and gets summarized: the transcript
+is snapshotted to disk, an older prefix is replaced by a model-written summary, and the
+recent tail is preserved. That one announces itself.
+
+```rust
+let workspace = basis::Workspace::builder("/repo")
+    .with_compaction(
+        basis::Compaction::default()
+            .with_keep_recent_tool_results(Some(5))  // elide older ones; default None keeps all
+            .with_auto_threshold_tokens(Some(400_000))  // default Some(50_000); None never summarizes
+            .with_preserve_recent_user_tokens(20_000),
+    )
+    .open()
+    .await?;
+```
+
+The knob is the workspace's, not the runtime's: these numbers live on mentra's agent
+config, one is built per workspace, and every session and subagent that workspace mints
+carries it.
+
+The threshold stays at mentra's number because **basis does not know your model's context
+window** — nothing in basis or mentra does. If you know it, this is where to say so; 50,000
+tokens is a floor that is right for a small model and wasteful on a large one. Where the
+snapshots go is not a knob here: it follows the store (above).
+
 ## The fingerprint, in process
 
 In-process a recurring-run loop is nine lines of host code against one long-lived
