@@ -59,7 +59,12 @@ pub struct RuntimeBuilder {
     provider: Option<BuiltinProvider>,
     base_url: Option<String>,
     api_key: Option<String>,
-    model: ModelSelector,
+    /// The model *policy*; `None` is unsaid, which is what lets
+    /// [`with_config`](Self::with_config) fill it from a file without
+    /// outranking a host that named one. Resolved to
+    /// [`ModelSelector::NewestAvailable`] at [`build`](Self::build), which is
+    /// what an unsaid policy has always meant.
+    model: Option<ModelSelector>,
     history: Option<History>,
     interceptors: Vec<Arc<dyn Interceptor>>,
     command_environment: BTreeMap<String, String>,
@@ -171,7 +176,7 @@ impl Default for RuntimeBuilder {
             provider: None,
             base_url: None,
             api_key: None,
-            model: ModelSelector::NewestAvailable,
+            model: None,
             history: None,
             interceptors: Vec::new(),
             provider_retry: ProviderRetry::default(),
@@ -232,7 +237,50 @@ impl RuntimeBuilder {
     /// provider and may need the network, and both are workspace-open facts:
     /// the resolved id stays a [`Workspace`](crate::Workspace) fact (ADR-0018).
     pub fn with_model(self, model: ModelSelector) -> Self {
-        Self { model, ..self }
+        Self {
+            model: Some(model),
+            ..self
+        }
+    }
+
+    /// Fills in what a `config.json` said, wherever this builder has not been
+    /// told otherwise.
+    ///
+    /// The provider, the endpoint and the model policy are this builder's
+    /// three answers that a [`Config`](crate::Config) can also give, and it
+    /// gives them from a file rather than from the process's arguments — so
+    /// they go *below* every `with_*` call above and *above* the environment,
+    /// which [`build`](Self::build) consults only for what nothing has
+    /// answered. A host calling `with_provider` and then this keeps its
+    /// provider; a host calling them the other way round keeps it too, because
+    /// what this reads is emptiness rather than order.
+    ///
+    /// `effort` is not here because a runtime has no effort: it is a per-turn
+    /// request, and [`Workspace`](crate::Workspace) applies the file's answer
+    /// as the default for a [`RunSpec`](crate::workspace::RunSpec) that asked
+    /// for none.
+    ///
+    /// **A workspace file cannot reach `base_url`.** [`Config`] refuses to
+    /// carry one from a repository at all (see [`crate::config`]), so what
+    /// arrives here is always the user's own — this method needs no rule of
+    /// its own to keep that true.
+    ///
+    /// [`Workspace::open`](crate::Workspace::open) calls this for the private
+    /// runtime it builds, so the one-repository host gets it without asking. A
+    /// host building a shared [`Runtime`] states its own process facts and
+    /// calls this itself if it wants a file to speak for them.
+    #[must_use]
+    pub fn with_config(self, config: &crate::Config) -> Self {
+        Self {
+            provider: self
+                .provider
+                .or_else(|| config.provider.as_ref().map(|provider| provider.value)),
+            base_url: self
+                .base_url
+                .or_else(|| config.base_url.as_ref().map(|url| url.value.clone())),
+            model: self.model.or_else(|| config.model_selector()),
+            ..self
+        }
     }
 
     /// How patiently every run minted on this runtime waits out a provider
@@ -824,7 +872,9 @@ impl RuntimeBuilder {
             command_environment,
             provider: choice.provider,
             provider_label: ProviderId::from(choice.provider).to_string(),
-            model: self.model,
+            // Unsaid is the newest the provider offers, which is what this
+            // builder has always resolved for a caller that named no model.
+            model: self.model.unwrap_or(ModelSelector::NewestAvailable),
             provider_retry: self.provider_retry,
             provider_retry_budget: self.provider_retry_budget,
             transcripts,

@@ -62,6 +62,7 @@ pub(crate) use spec::DEFAULT_SESSION_NAME;
 #[cfg(feature = "mcp")]
 use crate::mcp::connections::McpConnections;
 use crate::{
+    config::Config,
     context::WorkspaceContext,
     event::ContextFile,
     fingerprint::{self, Snapshot},
@@ -93,6 +94,15 @@ pub struct Workspace {
     root: PathBuf,
     runtime: Arc<Runtime>,
     model: ModelInfo,
+    /// The reasoning effort a [`RunSpec`] gets when it asked for none, as
+    /// `config.json` set it. `None` leaves the provider's own default, which
+    /// is what every run had before there was a file to say otherwise.
+    effort: Option<Effort>,
+    /// What `config.json` said, kept so a host can report which file decided
+    /// the model it is looking at.
+    config: Config,
+    /// The config files that took effect, most specific first.
+    config_files: Vec<ContextFile>,
     provider: String,
     /// [`store::runtime_identifier`](crate::store::runtime_identifier) for
     /// `path`, computed once: what this workspace's conversations are (or, on
@@ -131,6 +141,7 @@ impl std::fmt::Debug for Workspace {
             .field("root", &self.root)
             .field("provider", &self.provider)
             .field("model", &self.model.id)
+            .field("config_files", &self.config_files)
             .field("context_files", &self.context.documents().len())
             .field("skills", &self.skills.len())
             .field("templates", &self.templates.len())
@@ -178,7 +189,7 @@ impl Workspace {
             self.minted_agent(),
             &self.identifier,
         )?;
-        apply_effort(&mut session, spec.effort)?;
+        apply_effort(&mut session, spec.effort.or(self.effort))?;
 
         Ok(self.minted(session, spec))
     }
@@ -201,7 +212,7 @@ impl Workspace {
     ) -> Result<PreparedRun, RunError> {
         let spec = spec.into();
         let mut session = self.runtime.resume_minted(agent_id)?;
-        apply_effort(&mut session, spec.effort)?;
+        apply_effort(&mut session, spec.effort.or(self.effort))?;
 
         Ok(self.minted(session, spec))
     }
@@ -280,6 +291,28 @@ impl Workspace {
     /// here echoes a command or a credential.
     pub fn declared_tools(&self) -> &[String] {
         &self.declared_tools
+    }
+
+    /// What `config.json` said about this workspace, and which file said it.
+    ///
+    /// The answers here are already *in force* — the model below is what they
+    /// resolved to — so this is for the host that reports its own
+    /// configuration, or that wants to hand the same value to a shared
+    /// [`Runtime`](crate::Runtime)'s builder rather than read the files twice.
+    pub fn config(&self) -> &Config {
+        &self.config
+    }
+
+    /// The config files that took effect, most specific first.
+    ///
+    /// Reported the way `.mcp.json`'s and `.basis/tools.json`'s sources are,
+    /// and for a milder version of their reason: what this file decides —
+    /// which model, which provider — a run already names in its own header, so
+    /// the question left is *which file said so*, and a repository that
+    /// resolved a model nobody expected should be able to find out in one
+    /// place.
+    pub fn config_files(&self) -> &[ContextFile] {
+        &self.config_files
     }
 
     /// The tool manifests that took effect, most specific first.
@@ -377,8 +410,13 @@ impl Workspace {
 
 /// Asks the model for a reasoning effort, when one was requested.
 ///
-/// `None` leaves the session untouched instead of sending a default nobody
-/// asked for. Mentra's provider adapter validates the requested level and maps
+/// The spec's own answer first, then whatever `config.json` set for this
+/// workspace: a flag or a `RunSpec` describes this invocation and the file
+/// describes the repository, so the more specific one holds — the same
+/// ordering every other key in that file follows.
+///
+/// `None` on both leaves the session untouched instead of sending a default
+/// nobody asked for. Mentra's provider adapter validates the requested level and maps
 /// it to that API's wire format.
 fn apply_effort(session: &mut Session, effort: Option<Effort>) -> Result<(), RunError> {
     let Some(effort) = effort else {
