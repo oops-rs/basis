@@ -460,7 +460,25 @@ An entry scoped `"tools": ["shell"]` no longer fires. Nothing errors — the nam
 calls is now `spawn`, and a `tools` list matches on the exact name, so the hook simply stops
 running. Match `spawn` instead; a hook that wants commands and not delegations reads the
 call's own input, where `input` is the string the model wrote and a single leading `!`
-(never `!!`) is what makes it a command (ADR-0016).
+(never `!!`) is what makes it a command (ADR-0016). A command may also name *where* it runs
+— `!@<target> <command>` — and a hook that cares which destination a command was headed for
+reads the same string ([ADR-0021](adr/0021-a-command-names-where-it-runs.md)).
+
+### Command targets
+
+`!@<target> <command>` runs a command on an executor the host registered by name, rather
+than where basis is running — the container-on-a-Mac case, where `cargo test` belongs in the
+container and `xcodebuild` is not in it at all. `spawn` stays the one door: *where* became a
+dimension of the call, because a second tool would have been a second name at the approval
+gate and a second namespace of remembered rules for one question. Targets are registered on
+the runtime (`RuntimeBuilder::with_command_target`), a name nothing registered is refused
+before the approver is asked, and the parsed call an approver reads gains a fourth key —
+`{mode, body, cwd, target}`, reading `"local"` when no target was named, so every rule
+already written keeps matching. **basis ships no executors**: what a target reaches is
+whatever the host's own code reaches, and none of it is confinement
+([ADR-0013](adr/0013-the-host-owns-the-boundary.md)). [docs/targets.md](targets.md) has the
+worked SSH forced-command pattern, what the executor receives, and what the arrangement does
+and does not protect.
 
 ### The recurring-run loop, written out
 

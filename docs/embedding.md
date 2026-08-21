@@ -112,7 +112,10 @@ private path is unaffected: every `Workspace::open` tags exactly as it always di
 
 The knobs ADR-0018 moved are `RuntimeBuilder`'s now — `with_provider`, `with_base_url`,
 `with_api_key`, `with_store_dir`, `with_ephemeral_history`, `with_interceptor`,
-`with_command_environment`. A single-workspace host that wants one of them hands the recipe
+`with_command_environment` — joined by `with_command_target`, which registers an executor a
+command can name with `!@<target> <command>`
+([ADR-0021](adr/0021-a-command-names-where-it-runs.md), [targets.md](targets.md)). A
+single-workspace host that wants one of them hands the recipe
 to `WorkspaceBuilder::with_runtime_builder`, which configures the private runtime
 `Workspace::open` would have built rather than switching to a shared one. Mentra's own
 surface is still unhidden, under a name that now says whose it is:

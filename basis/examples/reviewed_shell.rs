@@ -115,9 +115,15 @@ struct Verdict {
 
 /// One `spawn` call in command mode, as the approver receives it.
 ///
-/// Read out of `structured_input` — the parsed `{mode, body, cwd}` ADR-0016
-/// makes the wire contract — and never out of the string the model wrote. The
-/// `!` was read once, at the boundary, and this is downstream of that reading.
+/// Read out of `structured_input` — the parsed `{mode, body, cwd, target}`
+/// ADR-0016 makes the wire contract and ADR-0021 widened — and never out of
+/// the string the model wrote. The `!` was read once, at the boundary, and
+/// this is downstream of that reading.
+///
+/// `target` is deliberately ignored here: this runtime registers none, so
+/// every call reads `"local"`. A reviewer on a runtime that *does* register
+/// one wants the key, because "may this run" and "may this run on the build
+/// machine" are different questions.
 struct Command {
     body: String,
     cwd: String,

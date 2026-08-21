@@ -187,6 +187,12 @@ config — never through code in `basis`:
 - **Hooks** — `.basis/hooks.json`: commands that take JSON on stdin and answer `allow`, `deny` with a
   reason the model sees, or `modify` with a replacement input. Any language; one that breaks denies.
 
+- **Command targets** — a host can register executors by name, and a command can say which one
+  it wants: `!@mac xcodebuild -list` where `!cargo test` runs where basis is running. For the
+  container-on-a-Mac case. basis routes; the host writes the executor; nothing about it is
+  confinement ([ADR-0021](docs/adr/0021-a-command-names-where-it-runs.md),
+  [docs/targets.md](docs/targets.md)).
+
 Details of each, and of the one `spawn` tool carrying both commands and delegation
 ([ADR-0016](docs/adr/0016-one-delegation-surface.md)), are in [docs/ARCHITECTURE.md](docs/ARCHITECTURE.md).
 
@@ -307,7 +313,10 @@ directory and never records a credential — an agent's executor is whichever pr
 it, holding that shell's environment, so there is nothing on disk to leak and no daemon holding a
 key on your behalf; the bridge's `Origin` allowlist starts empty. The boundary, where you want
 one, is the OS's — [docs/containerization.md](docs/containerization.md) has the read-only-root
-pattern, what it protects, and what it does not.
+pattern, what it protects, and what it does not. A command routed to a registered target
+(`!@mac …`) is no different: it runs with whatever authority the executor the *host* wrote
+holds, basis never calls a target "the host", and [docs/targets.md](docs/targets.md) says so
+in its own words.
 
 ## Examples
 
@@ -337,8 +346,9 @@ client's UI, or the OS's job — hence no TUI, no scheduler, no container, no wo
 
 Docs: [PROPOSAL.md](docs/PROPOSAL.md) (why) · [ARCHITECTURE.md](docs/ARCHITECTURE.md) (how, with §8
 for `--effort`, custom endpoints, and the hooks `shell`→`spawn` migration) ·
-[embedding.md](docs/embedding.md) (the SDK in detail) · [REDESIGN.md](docs/REDESIGN.md) (ledger) ·
-[adr/](docs/adr/) (19 locked decisions) · [proposals/](docs/proposals/) (deferred ideas).
+[embedding.md](docs/embedding.md) (the SDK in detail) · [targets.md](docs/targets.md) (running a
+command somewhere else) · [REDESIGN.md](docs/REDESIGN.md) (ledger) ·
+[adr/](docs/adr/) (21 locked decisions) · [proposals/](docs/proposals/) (deferred ideas).
 
 ## License
 
