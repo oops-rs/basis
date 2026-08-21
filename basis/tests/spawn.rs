@@ -10,7 +10,9 @@
 //! - the model is offered one door, at every depth;
 //! - a command reaches the approver *before* it runs, carrying the parsed call;
 //! - a remembered rule answers ahead of the approver, so an allowlist is data;
-//! - `--no-shell` still refuses, on the path `spawn` now uses.
+//! - `--no-shell` still refuses, on the path `spawn` now uses;
+//! - a command that named a target arrives at the executor still naming it,
+//!   and one that named none arrives naming none (ADR-0021).
 //!
 //! Nothing here reaches a network or a model. The one thing that does leave the
 //! process is `echo`, which is how a command proves it ran.
@@ -35,7 +37,7 @@ use mentra::{
         Provider, ProviderDescriptor, ProviderError, ProviderEventStream, Request, Response,
         provider_event_stream_from_response,
     },
-    runtime::VolatileRuntimeStore,
+    runtime::{CommandOutput, CommandRequest, RuntimeExecutor, VolatileRuntimeStore},
     session::{PermissionRuleScope, RememberedRule, RuleKey},
 };
 use serde_json::{Value, json};
@@ -159,16 +161,61 @@ impl Provider for ScriptedProvider {
     }
 }
 
-/// What a test asks of one run: the rounds, whether commands are on, what an
-/// operator had already remembered, and the turn's own bounds.
+/// Remembers every command request the runtime routed to it, and runs none of
+/// them.
 ///
-/// A struct rather than five positional arguments, and every method returns a
+/// Installed only by the tests that are about routing: with one in place no
+/// command actually executes, and the rest of this file needs `echo` to really
+/// run.
+#[derive(Clone, Default)]
+struct RecordingExecutor(Arc<Mutex<Vec<CommandRequest>>>);
+
+impl RecordingExecutor {
+    /// The target each routed command named, in order.
+    fn targets(&self) -> Vec<Option<String>> {
+        self.0
+            .lock()
+            .expect("not poisoned")
+            .iter()
+            .map(|request| request.target.clone())
+            .collect()
+    }
+}
+
+#[async_trait]
+impl RuntimeExecutor for RecordingExecutor {
+    async fn run(&self, request: CommandRequest) -> Result<CommandOutput, String> {
+        let where_it_went = request
+            .target
+            .clone()
+            .unwrap_or_else(|| "local".to_string());
+        self.0.lock().expect("not poisoned").push(request);
+
+        Ok(CommandOutput {
+            stdout: format!("ran on {where_it_went}"),
+            stderr: String::new(),
+            success: true,
+            status_code: Some(0),
+            timed_out: false,
+            stdout_truncated: false,
+            stderr_truncated: false,
+        })
+    }
+}
+
+/// What a test asks of one run: the rounds, whether commands are on, what an
+/// operator had already remembered, the turn's own bounds, and — for the tests
+/// about routing — which targets exist and who serves them.
+///
+/// A struct rather than six positional arguments, and every method returns a
 /// new value, so a test reads as the one thing it varies.
 struct Script {
     turns: Vec<Turn>,
     commands: bool,
     rules: Vec<RememberedRule>,
     options: TurnOptions,
+    targets: Vec<String>,
+    executor: Option<RecordingExecutor>,
 }
 
 impl Script {
@@ -178,6 +225,19 @@ impl Script {
             commands: true,
             rules: Vec::new(),
             options: TurnOptions::default(),
+            targets: Vec::new(),
+            executor: None,
+        }
+    }
+
+    /// Registers `names` as this runtime's command targets and routes every
+    /// command through `executor`, which runs nothing and remembers
+    /// everything.
+    fn routing(self, names: &[&str], executor: &RecordingExecutor) -> Self {
+        Self {
+            targets: names.iter().map(|name| (*name).to_string()).collect(),
+            executor: Some(executor.clone()),
+            ..self
         }
     }
 
@@ -205,11 +265,17 @@ impl Script {
 /// A runtime built the way [`basis::WorkspaceBuilder::open`] builds one:
 /// `spawn` registered, the approval gate installed, and commands allowed or
 /// not exactly as [`basis::ShellAccess`] would have set them.
-fn runtime(workspace: &Path, turns: Vec<Turn>, commands: bool) -> (Runtime, ModelInfo, Requests) {
+fn runtime(
+    workspace: &Path,
+    turns: Vec<Turn>,
+    commands: bool,
+    targets: Vec<String>,
+    executor: Option<RecordingExecutor>,
+) -> (Runtime, ModelInfo, Requests) {
     let model = ModelInfo::new("scripted-model", BuiltinProvider::OpenAI);
     let (provider, asked) = ScriptedProvider::new(model.clone(), turns);
 
-    let runtime = Runtime::builder()
+    let builder = Runtime::builder()
         .with_provider_instance(provider)
         .with_store(VolatileRuntimeStore::new())
         .with_policy(
@@ -218,11 +284,21 @@ fn runtime(workspace: &Path, turns: Vec<Turn>, commands: bool) -> (Runtime, Mode
                 .allow_background_commands(commands),
         )
         .with_tool_authorizer(ApprovalGate::new())
-        .with_tool(SpawnTool::new())
-        .build()
-        .expect("runtime builds");
+        // The names basis's own `RuntimeBuilder` would have collected; this
+        // file drives mentra directly, because a scripted provider is not
+        // something basis's builder can be handed.
+        .with_tool(SpawnTool::with_targets(targets));
 
-    (runtime, model, Requests(asked))
+    let builder = match executor {
+        Some(executor) => builder.with_executor(executor),
+        None => builder,
+    };
+
+    (
+        builder.build().expect("runtime builds"),
+        model,
+        Requests(asked),
+    )
 }
 
 /// The roster `agent_config` produces. That basis's own builder produces exactly
@@ -346,7 +422,13 @@ impl Run {
 /// which is how a test stands in for an operator who has already answered this
 /// question once.
 async fn drive<A: Approver>(workspace: &Path, script: Script, approver: A) -> Run {
-    let (runtime, model, requests) = runtime(workspace, script.turns, script.commands);
+    let (runtime, model, requests) = runtime(
+        workspace,
+        script.turns,
+        script.commands,
+        script.targets,
+        script.executor,
+    );
     let session = session(&runtime, workspace, model);
     for rule in script.rules {
         session.rule_store().add_rule(rule);
@@ -749,4 +831,235 @@ async fn delegation_stops_at_the_floor() {
             .map(|request| request.input.clone())
             .collect::<Vec<_>>()
     );
+}
+
+#[tokio::test]
+async fn a_targeted_command_arrives_at_the_executor_still_naming_its_target() {
+    // ADR-0021 end to end: the `!@mac` prefix is read once at the boundary and
+    // the name it leaves behind survives the preview, the approver, and
+    // mentra's policy, arriving on the `CommandRequest` the installed executor
+    // reads. Nothing between those two points re-reads the model's string.
+    let workspace = tempfile::tempdir().expect("tempdir");
+    let executor = RecordingExecutor::default();
+
+    let run = drive(
+        workspace.path(),
+        Script::new(vec![
+            Turn::calling("call-0", "!@mac xcodebuild -list"),
+            Turn::calling("call-1", "!cargo test -q"),
+        ])
+        .routing(&["mac"], &executor),
+        AllowAll,
+    )
+    .await;
+
+    assert_eq!(
+        executor.targets(),
+        vec![Some("mac".to_string()), None],
+        "the targeted command names its target and the untargeted one names none"
+    );
+
+    let results = run.results();
+    assert_eq!(
+        results,
+        vec![
+            (false, "ran on mac".to_string()),
+            (false, "ran on local".to_string()),
+        ]
+    );
+}
+
+#[tokio::test]
+async fn the_approver_is_told_where_a_command_was_going() {
+    // The routing decision is data, on the same wire contract the mode and the
+    // body ride: an approver can answer differently per destination, and a
+    // remembered rule can glob the same key.
+    let workspace = tempfile::tempdir().expect("tempdir");
+    let executor = RecordingExecutor::default();
+
+    let run = drive(
+        workspace.path(),
+        Script::new(vec![
+            Turn::calling("call-0", "!@mac xcodebuild -list"),
+            Turn::calling("call-1", "!cargo test -q"),
+        ])
+        .routing(&["mac"], &executor),
+        AllowAll,
+    )
+    .await;
+
+    assert_eq!(run.asked[0].input["target"], "mac");
+    assert_eq!(
+        run.asked[1].input["target"], "local",
+        "*here* has a spelling, so a rule can be written about it"
+    );
+}
+
+#[tokio::test]
+async fn a_target_nothing_registered_never_reaches_the_approver_or_the_executor() {
+    // Refused in the preview, ahead of the approver and ahead of the rule
+    // store, exactly as the delegation depth floor is: a destination that does
+    // not exist is not a judgement call, so it is not a question for a person.
+    let workspace = tempfile::tempdir().expect("tempdir");
+    let executor = RecordingExecutor::default();
+
+    let run = drive(
+        workspace.path(),
+        Script::new(vec![Turn::calling("call-0", "!@linux uname -a")]).routing(&["mac"], &executor),
+        AllowAll,
+    )
+    .await;
+
+    assert!(
+        run.asked.is_empty(),
+        "an unroutable name must never become a question: {:?}",
+        run.asked
+    );
+    assert!(
+        executor.targets().is_empty(),
+        "and nothing may have run: {:?}",
+        executor.targets()
+    );
+
+    let (failed, output) = run.first_result();
+    assert!(failed, "{output}");
+    assert!(output.contains("`linux`"), "the model reads why: {output}");
+    assert!(output.contains("`mac`"), "and what does exist: {output}");
+}
+
+#[tokio::test]
+async fn no_shell_refuses_a_targeted_command_too() {
+    // A targeted command is still `Mode::Command`, so every shell-off guard
+    // applies unchanged. Routing a command elsewhere is not a route around the
+    // policy that guards running one at all (ADR-0021, ADR-0013).
+    let workspace = tempfile::tempdir().expect("tempdir");
+    let executor = RecordingExecutor::default();
+
+    let run = drive(
+        workspace.path(),
+        Script::new(vec![Turn::calling("call-0", "!@mac xcodebuild -list")])
+            .routing(&["mac"], &executor)
+            .without_commands(),
+        AllowAll,
+    )
+    .await;
+
+    let (failed, output) = run.first_result();
+    assert!(
+        failed,
+        "a targeted command must not succeed with commands off"
+    );
+    assert!(
+        executor.targets().is_empty(),
+        "and it must never have reached the executor"
+    );
+    assert!(
+        output.contains("Shell command execution is disabled"),
+        "the refusal has to say what refused it: {output}"
+    );
+}
+
+#[tokio::test]
+async fn a_pattern_rule_can_allow_a_command_on_one_target_and_not_another() {
+    // The consequence ADR-0021 names: the target is in the same serialized
+    // object every other key is, so an operator who wants the line drawn per
+    // destination can draw it — deliberately, in the pattern, rather than for
+    // free.
+    //
+    // And the trap it names beside it, which this test is written around
+    // rather than past. mentra globs with `glob-match`, where **no wildcard
+    // crosses `/`** — `**` included, unless it is a whole path segment. The
+    // serialized input is `{body, cwd, mode, target}` in key order, so a
+    // pattern reaching `target` has to get past `cwd`, which is an absolute
+    // path. `**"target":"mac"**` therefore matches *nothing*, and the operator
+    // sees a reviewer they thought they had bypassed rather than an error. The
+    // working spelling names the directory, which for a rule that grants a
+    // whole machine is the stricter thing to write anyway.
+    let workspace = tempfile::tempdir().expect("tempdir");
+    let executor = RecordingExecutor::default();
+    let on_mac_here = format!(
+        "**\"cwd\":\"{}\",\"mode\":\"command\",\"target\":\"mac\"}}",
+        workspace.path().display()
+    );
+
+    let run = drive(
+        workspace.path(),
+        Script::new(vec![
+            Turn::calling("call-0", "!@mac xcodebuild -list"),
+            Turn::calling("call-1", "!xcodebuild -list"),
+        ])
+        .routing(&["mac"], &executor)
+        .remembering(RememberedRule {
+            key: RuleKey {
+                tool_name: SPAWN.to_string(),
+                pattern: Some(on_mac_here),
+            },
+            allow: true,
+            scope: PermissionRuleScope::Session,
+            reason: None,
+        }),
+        // Anything the rule does not cover is refused, so this catches a
+        // pattern that matched too much as well as one that matched nothing.
+        RefusesForGood,
+    )
+    .await;
+
+    assert_eq!(
+        run.asked.len(),
+        1,
+        "only the untargeted call should have reached the reviewer: {:?}",
+        run.asked
+            .iter()
+            .map(|request| request.input.clone())
+            .collect::<Vec<_>>()
+    );
+    assert_eq!(run.asked[0].input["target"], "local");
+
+    let results = run.results();
+    assert_eq!(results[0], (false, "ran on mac".to_string()));
+    assert!(
+        results[1].0 && results[1].1.contains(REFUSAL),
+        "{:?}",
+        results[1]
+    );
+}
+
+#[tokio::test]
+async fn a_target_pattern_that_does_not_name_the_directory_matches_nothing() {
+    // Pinned deliberately, because it is a trap and not a feature, and because
+    // an operator hits it as a *silent* miss: the rule is stored, matches
+    // nothing, and the reviewer they thought they had bypassed answers every
+    // call. mentra globs with `glob-match`, where no wildcard crosses `/`, and
+    // the serialized input carries `cwd` ahead of `target` in key order.
+    //
+    // If mentra ever globs this as data rather than as a path, this test fails
+    // loudly — which is the point: the docs claiming the short spelling works
+    // must not be written before it does.
+    let workspace = tempfile::tempdir().expect("tempdir");
+    let executor = RecordingExecutor::default();
+
+    let run = drive(
+        workspace.path(),
+        Script::new(vec![Turn::calling("call-0", "!@mac xcodebuild -list")])
+            .routing(&["mac"], &executor)
+            .remembering(RememberedRule {
+                key: RuleKey {
+                    tool_name: SPAWN.to_string(),
+                    pattern: Some("**\"target\":\"mac\"**".to_string()),
+                },
+                allow: true,
+                scope: PermissionRuleScope::Session,
+                reason: None,
+            }),
+        RefusesForGood,
+    )
+    .await;
+
+    assert_eq!(
+        run.asked.len(),
+        1,
+        "the short spelling cannot cross the slashes in `cwd`, so the rule \
+         answered nothing and the approver was asked after all"
+    );
+    assert!(executor.targets().is_empty(), "and the refusal held");
 }

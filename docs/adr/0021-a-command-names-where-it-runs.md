@@ -65,12 +65,13 @@ host supplies the executor; basis claims nothing about what is on the far side.*
    where no target was named. Additive, in that word's strict sense: the three
    existing keys keep their spellings, their values and their order, so every
    remembered rule an operator has already written keeps matching exactly what
-   it matched before. What is new is that a rule can now say
-   `**"target":"mac"**` — the routing decision is data an allowlist can be
-   written against, on the machinery ADR-0016 already tiered. `"local"` rather
-   than `null` or an absent key, because *local* is a value an operator will
-   want to write a rule about, and a glob against a JSON `null` is a spelling
-   that invites a mismatch nobody sees.
+   it matched before. What is new is that the routing decision is *data* — the
+   approver renders it, the audit trail keeps it, and a remembered rule can be
+   written against it, with the caveat the Consequences make explicit and this
+   ADR will not bury: reaching it in a glob means naming the `cwd` too.
+   `"local"` rather than `null` or an absent key, because *local* is a value an
+   operator will want to write a rule about, and a glob against a JSON `null`
+   is a spelling that invites a mismatch nobody sees.
 
 3. **Targets are registered on the runtime, by name.**
    `RuntimeBuilder::with_command_target(name, executor)`. Runtime scope is
@@ -154,6 +155,28 @@ host supplies the executor; basis claims nothing about what is on the far side.*
   matches the same command on the Mac. The mitigation is that the target is in
   the same serialized object and can be pinned in the same pattern; the cost is
   that it has to be, deliberately.
+- **And pinning it costs more than it should, because of a trap that predates
+  this ADR.** mentra globs a rule pattern against the serialized input with
+  `glob-match`, which is a *path* matcher: **no wildcard crosses `/`**, `**`
+  included unless it stands as a whole path segment. Keys serialize in order,
+  so `cwd` — an absolute path, full of slashes — sits between the start of the
+  string and both `mode` and `target`. `**"target":"mac"**` therefore matches
+  nothing at all, silently, and the operator sees a reviewer they believed they
+  had bypassed rather than an error. The spelling that works names the
+  directory:
+
+  ```
+  **"cwd":"/work/repo","mode":"command","target":"mac"}
+  ```
+
+  which for a rule that grants a whole machine is the stricter thing to write
+  anyway. This is not new — ADR-0016 already claimed a pattern could match the
+  parsed `mode`, and for the same reason it cannot — but ADR-0021 is the first
+  decision to *depend* on the claim, so it is recorded here and pinned by a
+  test rather than left as folklore. It is mentra-shaped under
+  [ADR-0005](0005-mentra-coevolution-discipline.md): a matcher meant for paths
+  is being run over JSON, any harness storing structured rules would hit it,
+  and the fix belongs upstream.
 - **The docs churn is real and load-bearing.** The `!` convention is documented
   in the README, in `ARCHITECTURE.md`'s hooks migration section, and in the
   tool's own description, and a hook that wants to distinguish commands by

@@ -305,7 +305,7 @@ impl ToolExecutor for SpawnTool {
                 // an authorizer is installed, and a guard that a missing
                 // authorizer removes is not a guard.
                 self.authorize_target(&spawn)?;
-                execute::command(&ctx, spawn.body()).await
+                execute::command(&ctx, spawn.body(), spawn.target()).await
             }
             Mode::Agent => {
                 // Asked again rather than trusted from the preview: the preview

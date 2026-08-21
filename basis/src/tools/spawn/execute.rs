@@ -3,8 +3,8 @@
 //! Both halves reach mentra through nothing but its public tool context, which
 //! is the point: `spawn` is a host-registered tool, so whatever it can do here
 //! is what ADR-0012's contract already offered. Neither half re-reads the
-//! model's string — they are handed a body that [`parse`](super::parse) already
-//! decided the meaning of.
+//! model's string — they are handed a body, and a destination, that
+//! [`parse`](super::parse) already decided the meaning of.
 
 use mentra::{
     ContentBlock, SpawnedAgentStatus,
@@ -14,22 +14,41 @@ use mentra::{
 
 use super::depth::Depth;
 
-/// Runs a command on mentra's own execution path.
+/// Runs a command on mentra's own execution path, at the place it named.
 ///
 /// Authorization has already happened — the orchestrator put this call's
 /// preview to the authorizer before calling the executor — and mentra's policy
-/// check happens *inside* this call: `RuntimeHandle::execute_shell_command`
+/// check happens *inside* this call: `RuntimeHandle::execute_shell_command_on`
 /// asks `RuntimePolicy::authorize_command_execution` before it builds a
 /// request, which is how `--no-shell` (`allow_shell_commands(false)`) refuses
 /// with a reason the model can read rather than by the command quietly not
-/// happening.
-pub(super) async fn command(ctx: &ToolContext<'_>, command: &str) -> ToolResult {
+/// happening. Naming a target changes none of that ordering: `target` is
+/// execution data on the request, read only by the installed executor, so
+/// routing a command elsewhere is never a route around the policy that guards
+/// running it here (ADR-0021).
+///
+/// The `cwd` is resolved here as it always was and is **advisory** for a
+/// target: it is a path in this process's filesystem, and what it means on the
+/// far side is the host executor's to decide. basis sends it because an
+/// approver cannot judge a command without knowing where it was meant to run,
+/// and translates nothing.
+pub(super) async fn command(
+    ctx: &ToolContext<'_>,
+    command: &str,
+    target: Option<&str>,
+) -> ToolResult {
     let cwd = ctx.resolve_working_directory(None)?;
     // No justification field: the tool takes one string, and inventing a
     // second one for mentra's optional argument would be a field the model has
     // to decide about on every call.
     let output = ctx
-        .execute_shell_command(command.to_string(), None, None, cwd)
+        .execute_shell_command_on(
+            target.map(str::to_string),
+            command.to_string(),
+            None,
+            None,
+            cwd,
+        )
         .await?;
 
     narrate(ctx, &output);
