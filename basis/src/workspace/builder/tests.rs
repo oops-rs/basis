@@ -99,7 +99,7 @@ async fn the_default_roster_is_exactly_this() {
         .with_ephemeral_history()
         .build()
         .expect("builds offline");
-    let agent = agent_config(Path::new("/repo"), &WorkspaceContext::default());
+    let agent = defaults(Path::new("/repo"), &WorkspaceContext::default());
 
     let offered = runtime
         .mentra_runtime()
@@ -143,7 +143,7 @@ fn the_doors_basis_does_not_surface_stay_shut() {
     // test that reads the constant it is checking asserts nothing. Each of
     // these fails a different way and none of the failures is visible to the
     // person running the agent — see the constant for which is which.
-    let agent = agent_config(Path::new("/repo"), &WorkspaceContext::default());
+    let agent = defaults(Path::new("/repo"), &WorkspaceContext::default());
 
     for shut in [
         // A second delegation door beside `spawn`, which is what ADR-0016
