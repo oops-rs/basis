@@ -204,6 +204,43 @@ async fn a_shell_denied_workspace_loses_spawns_command_mode_and_keeps_the_rest()
 }
 
 #[tokio::test]
+async fn a_shell_denied_workspace_refuses_a_targeted_command_too() {
+    // ADR-0021's seventh point, pinned where it could silently stop being
+    // true. A targeted command is still `Mode::Command`, and this guard reads
+    // the prefix through spawn's own parser — so naming a destination can
+    // never be a way past the posture that decides whether this workspace runs
+    // commands at all. The guard needs no code change to hold; it needs a test
+    // that says so, because "no change needed" is a claim and not a fact.
+    let dir = tempfile::tempdir().expect("tempdir");
+    let dispatch = Arc::new(HookDispatch::new(Vec::new()));
+    let _registration = dispatch.register(permissive_entry(dir.path(), ShellAccess::Denied));
+
+    for input in [
+        json!({"input": "!@mac ls"}),
+        json!({"input": "!@build-box rm -rf /"}),
+    ] {
+        let decision = decide(&dispatch, &context(dir.path(), SPAWN, input.clone())).await;
+        assert!(
+            matches!(&decision, HookDecision::Deny(reason) if reason.contains("commands off")),
+            "{input}: {decision:?}"
+        );
+    }
+
+    // And a workspace that allows commands still allows a targeted one: the
+    // guard is the posture's, not the routing's.
+    let granted = tempfile::tempdir().expect("tempdir");
+    let _second = dispatch.register(permissive_entry(granted.path(), ShellAccess::Granted));
+    assert!(matches!(
+        decide(
+            &dispatch,
+            &context(granted.path(), SPAWN, json!({"input": "!@mac ls"}))
+        )
+        .await,
+        HookDecision::Allow
+    ));
+}
+
+#[tokio::test]
 async fn writes_into_the_protected_git_paths_are_refused() {
     let dir = tempfile::tempdir().expect("tempdir");
     std::fs::create_dir_all(dir.path().join(".git/hooks")).expect("hooks dir");
