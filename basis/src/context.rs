@@ -205,6 +205,82 @@ impl WorkspaceContext {
     pub fn render(&self) -> Option<String> {
         render::render(&self.documents)
     }
+
+    /// [`render`](Self::render) with the host's own say folded in, or `None`
+    /// when neither the workspace nor the host has anything to say.
+    ///
+    /// `None` for `host` is the discovery-only prompt, byte for byte.
+    pub fn render_with(&self, host: Option<&SystemPrompt>) -> Option<String> {
+        match host {
+            None => self.render(),
+            Some(SystemPrompt::Replace(text)) => spoken(text),
+            Some(SystemPrompt::Append(text)) => match (self.render(), spoken(text)) {
+                // The host's text goes last, where the rendered block's own
+                // preamble says the most specific statement goes.
+                (Some(context), Some(host)) => Some(format!("{context}\n\n{host}")),
+                (Some(context), None) => Some(context),
+                (None, host) => host,
+            },
+        }
+    }
+}
+
+/// What a host says on top of what the workspace says.
+///
+/// basis ships no system prompt of its own and this does not give it one: the
+/// text is the *host's*, and a build that never names this type behaves exactly
+/// as it did. What it removes is the workaround — an embedding host that wanted
+/// its product to have a voice, or to say *for my runs, answer in Chinese*, had
+/// to write into the user's repository's `AGENTS.md`, which is the one file
+/// that is not the host's to edit.
+///
+/// One enum rather than two builder methods, because the two are alternatives
+/// and not layers: a host either replaces what the workspace said or adds to
+/// it, and asking the type system to hold that is cheaper than documenting what
+/// happens when both are set.
+///
+/// Both scopes already had their weakest end covered — the global `AGENTS.md`
+/// is a personal append below every workspace file. Neither variant touches
+/// the skills block: mentra appends that itself, after whatever basis hands it.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum SystemPrompt {
+    /// The host's text alone. Discovered context files stay out of the prompt
+    /// entirely — including the global one — which is what makes this usable
+    /// for a host whose product is not "an agent that reads your repository".
+    ///
+    /// They are still *reported*: `run_started` names what discovery found,
+    /// because that question — which files does this workspace have — has one
+    /// true answer regardless of what the host did with them, and the host that
+    /// replaced the prompt is the one party that already knows it did.
+    ///
+    /// Replacing with nothing is not an error. It is the way to say *no system
+    /// prompt at all*, and it renders as `None` for the same reason an empty
+    /// workspace does.
+    Replace(String),
+    /// The host's text after the rendered context, as the strongest block.
+    ///
+    /// Last because the rendered block tells the model that later blocks are
+    /// more specific and take precedence, and the host's text is more specific
+    /// than any file on disk: it is the statement of the program actually
+    /// running this agent, about this deployment, which no repository can know
+    /// about — and a knob that a repository could override by writing a file is
+    /// not a knob. It is appended verbatim, outside the `<context>` framing,
+    /// because it did not come from a file and giving it a path would say it
+    /// did.
+    ///
+    /// Appending nothing is a no-op rather than an error: there is one obvious
+    /// meaning and it is the one the workspace already had.
+    Append(String),
+}
+
+/// The text, unless there is none to speak of.
+///
+/// Whitespace-only counts as none, which is the rule
+/// [`render`](WorkspaceContext::render) already applies to a document on disk:
+/// a prompt section that says nothing costs context and reads as an omission
+/// the model has to explain to itself.
+fn spoken(text: &str) -> Option<String> {
+    (!text.trim().is_empty()).then(|| text.to_string())
 }
 
 #[cfg(test)]

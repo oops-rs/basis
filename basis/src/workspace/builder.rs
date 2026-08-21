@@ -29,7 +29,7 @@ use mentra::ModelSelector;
 #[cfg(feature = "mcp")]
 use crate::mcp::{self, McpConfig, connections::McpConnections};
 use crate::{
-    context::{ContextConfig, WorkspaceContext},
+    context::{ContextConfig, SystemPrompt, WorkspaceContext},
     event::ContextFile,
     hooks::{self, HookRunner, HooksConfig},
     run::{LoadedSkill, RunError},
@@ -60,6 +60,8 @@ pub struct WorkspaceBuilder {
     /// An override; `None` defers to the runtime's model policy.
     model: Option<ModelSelector>,
     context: ContextConfig,
+    /// The host's own say over the system prompt; `None` is discovery alone.
+    system_prompt: Option<SystemPrompt>,
     skills: SkillsConfig,
     #[cfg(feature = "mcp")]
     mcp: McpConfig,
@@ -97,6 +99,7 @@ impl std::fmt::Debug for WorkspaceBuilder {
             )
             .field("model", &self.model)
             .field("context", &self.context)
+            .field("system_prompt", &self.system_prompt)
             .field("skills", &self.skills)
             .field("templates", &self.templates)
             .field("hooks", &self.hooks)
@@ -116,6 +119,10 @@ impl WorkspaceBuilder {
             runtime: RuntimeSource::Private(Box::default()),
             model: None,
             context: ContextConfig::default(),
+            // Unset, so the prompt is what the workspace says and nothing else.
+            // basis ships no system prompt of its own (PROPOSAL.md Bet 4) and
+            // a seam is not a default.
+            system_prompt: None,
             skills: SkillsConfig::default(),
             #[cfg(feature = "mcp")]
             mcp: McpConfig::default(),
@@ -173,6 +180,28 @@ impl WorkspaceBuilder {
 
     pub fn with_context(self, context: ContextConfig) -> Self {
         Self { context, ..self }
+    }
+
+    /// Gives the host a say over the system prompt, for this workspace's runs.
+    ///
+    /// [`SystemPrompt::Append`] puts the host's text after the discovered
+    /// context, as the most specific block; [`SystemPrompt::Replace`] makes it
+    /// the whole prompt and leaves discovery out of it. Unset — the default —
+    /// the prompt is the rendered context and nothing else.
+    ///
+    /// Workspace-level and not runtime-level, deliberately: a host serving
+    /// several repositories off one shared [`Runtime`] (ADR-0018) can give each
+    /// its own voice, and the prompt is settled at
+    /// [`open`](Self::open) into the workspace's own `AgentConfig`, so runs
+    /// minted from different workspaces cannot pick up each other's.
+    ///
+    /// One field, so the last call wins — and the enum makes *both at once*
+    /// unspellable rather than undefined.
+    pub fn with_system_prompt(self, system_prompt: SystemPrompt) -> Self {
+        Self {
+            system_prompt: Some(system_prompt),
+            ..self
+        }
     }
 
     pub fn with_skills(self, skills: SkillsConfig) -> Self {
@@ -353,7 +382,7 @@ impl WorkspaceBuilder {
 
         Ok(Workspace {
             root: resolved_workspace(&self.path, &context),
-            agent: agent_config(&self.path, &context),
+            agent: agent_config(&self.path, &context, self.system_prompt.as_ref()),
             identifier: store::runtime_identifier(&self.path),
             path: self.path,
             provider: runtime.provider().to_string(),
@@ -473,6 +502,10 @@ pub(crate) fn resolved_workspace(requested: &Path, context: &WorkspaceContext) -
 /// stays at mentra's defaults — opinions belong in the prompt and the
 /// workspace, not here.
 ///
+/// `system_prompt` is the host's say over the first of those, and `None` — the
+/// default and what every caller before it did — is discovery alone. basis
+/// still ships no prompt of its own: the text in either variant is the host's.
+///
 /// # Why three tools leave the roster
 ///
 /// ADR-0016 gives the model one door for *do something I cannot do by
@@ -495,9 +528,13 @@ pub(crate) fn resolved_workspace(requested: &Path, context: &WorkspaceContext) -
 /// the per-mint extension (hiding other workspaces' MCP tools) happens in
 /// [`Workspace::prepare`](super::Workspace::prepare)'s path, where the shared
 /// registry's current contents are known.
-fn agent_config(workspace: &Path, context: &WorkspaceContext) -> mentra::agent::AgentConfig {
+fn agent_config(
+    workspace: &Path,
+    context: &WorkspaceContext,
+    system_prompt: Option<&SystemPrompt>,
+) -> mentra::agent::AgentConfig {
     mentra::agent::AgentConfig {
-        system: context.render(),
+        system: context.render_with(system_prompt),
         tool_profile: mentra::agent::ToolProfile::hide(REPLACED_TOOLS),
         workspace: mentra::agent::WorkspaceConfig {
             base_dir: workspace.to_path_buf(),

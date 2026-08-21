@@ -94,7 +94,7 @@ pub use branch::{BranchError, EntryKind, TranscriptEntry};
 pub use budget::BudgetPool;
 pub use context::{
     ContextConfig, ContextDocument, ContextError, ContextScope, DEFAULT_CONTEXT_FALLBACK_FILE,
-    DEFAULT_CONTEXT_FILE, WorkspaceContext,
+    DEFAULT_CONTEXT_FILE, SystemPrompt, WorkspaceContext,
 };
 pub use event::{
     EVENT_SCHEMA_VERSION, Event, EventLine, JsonlWriter, Mutability, RunOutcome, SkillSummary,
