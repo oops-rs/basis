@@ -325,6 +325,90 @@ fn the_description_teaches_the_convention_it_is_the_only_source_of() {
 }
 
 #[test]
+fn the_routing_prefix_is_taught_only_when_there_is_somewhere_to_route() {
+    // ADR-0021: a model must not be told about a door that is not there. The
+    // best case for mentioning an unregistered prefix is a wasted call; the
+    // worse case is a model that reads the refusal as an invitation to guess.
+    let bare = SpawnTool::new().descriptor();
+    let bare_description = bare.provider.description.clone().expect("described");
+    assert!(!bare_description.contains("!@"), "{bare_description}");
+    assert!(
+        !bare.provider.input_schema["properties"][INPUT_FIELD]["description"]
+            .as_str()
+            .expect("a described field")
+            .contains("!@")
+    );
+
+    let routed = SpawnTool::with_targets(["mac".to_string(), "builder".to_string()]).descriptor();
+    let routed_description = routed.provider.description.clone().expect("described");
+    for taught in ["!@<target> <command>", "`mac`", "`builder`"] {
+        assert!(routed_description.contains(taught), "{routed_description}");
+    }
+    assert!(
+        routed.provider.input_schema["properties"][INPUT_FIELD]["description"]
+            .as_str()
+            .expect("a described field")
+            .contains("!@<target> <command>")
+    );
+}
+
+#[test]
+fn the_taught_target_names_are_sorted_and_deduplicated() {
+    // One string on every build: a description that reordered itself between
+    // processes would change the prompt cache and the model's reading of it
+    // for no reason anyone chose.
+    let descriptor =
+        SpawnTool::with_targets(["mac".to_string(), "builder".to_string(), "mac".to_string()])
+            .descriptor();
+    let description = descriptor.provider.description.expect("described");
+
+    assert!(
+        description.contains("`builder`, `mac`"),
+        "sorted and deduplicated: {description}"
+    );
+}
+
+#[test]
+fn a_target_nothing_registered_is_refused_and_the_refusal_names_the_set() {
+    // Refused in the preview, so it never becomes a question for a person, and
+    // the words have to leave the model able to write a call that works.
+    let routed = SpawnTool::with_targets(["mac".to_string(), "builder".to_string()]);
+    let refused = routed
+        .authorize_target(&parsed("!@linux uname -a"))
+        .expect_err("linux is not registered");
+
+    assert!(refused.contains("`linux`"), "{refused}");
+    assert!(refused.contains("`builder`, `mac`"), "{refused}");
+    assert!(refused.contains("runs where basis is running"), "{refused}");
+
+    assert_eq!(
+        routed.authorize_target(&parsed("!@mac xcodebuild -list")),
+        Ok(()),
+        "a registered name routes"
+    );
+    assert_eq!(
+        routed.authorize_target(&parsed("!cargo test")),
+        Ok(()),
+        "and an untargeted command is not a routing question at all"
+    );
+}
+
+#[test]
+fn a_runtime_with_no_targets_says_so_rather_than_listing_nothing() {
+    // The empty set is the ordinary case, and "the registered targets are "
+    // followed by nothing is a sentence that teaches a model to try again.
+    let refused = SpawnTool::new()
+        .authorize_target(&parsed("!@mac xcodebuild -list"))
+        .expect_err("nothing is registered");
+
+    assert!(
+        refused.contains("no command targets registered"),
+        "{refused}"
+    );
+    assert!(refused.contains("`!@mac`"), "{refused}");
+}
+
+#[test]
 fn the_schema_asks_for_one_string_and_no_decisions() {
     let descriptor = SpawnTool::new().descriptor();
     let schema = descriptor.provider.input_schema;

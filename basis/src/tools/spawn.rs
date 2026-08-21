@@ -68,6 +68,8 @@ use serde_json::{Value, json};
 
 use parse::{INPUT_FIELD, LOCAL_TARGET, Mode, Spawn, parse};
 
+use std::collections::BTreeSet;
+
 // The runtime's hook dispatcher must know whether a `spawn` call is a command
 // before denying it for a shell-off workspace, and the module docs above make
 // the rule: the `!` prefix is read exactly once, here. Re-exported crate-wide
@@ -99,6 +101,33 @@ To delegate a task whose own text starts with `!`, double it: `!!important, …`
 Commands are put to the operator before they run, so ask for one command that \
 does the job rather than several that each need answering.";
 
+/// The `!@<target>` paragraph, added to the description and to the schema only
+/// when this runtime has somewhere to route to (ADR-0021).
+///
+/// A model must not be taught a door that does not exist. The best case for
+/// mentioning an unregistered prefix is a wasted call; the worse case is a
+/// model reading an unexplained refusal as an invitation to guess names.
+fn targets_paragraph(targets: &[String]) -> String {
+    format!(
+        "A command can also say where it runs: `!@<target> <command>` runs it on that target \
+         rather than here — `!@{first} <command>`. Registered targets: {names}. A command with \
+         no `@` runs where basis itself is running, which is what you want unless the work \
+         needs one of those targets.",
+        first = targets[0],
+        names = listed(targets),
+    )
+}
+
+/// Target names as prose, in one spelling, so the description, the schema and
+/// every refusal name the same set the same way.
+fn listed(targets: &[String]) -> String {
+    targets
+        .iter()
+        .map(|name| format!("`{name}`"))
+        .collect::<Vec<_>>()
+        .join(", ")
+}
+
 /// basis's own tool, and the first tool basis registers on a runtime it builds.
 ///
 /// One instance serves a whole runtime: mentra's registry holds it behind an
@@ -107,11 +136,72 @@ does the job rather than several that each need answering.";
 #[derive(Debug, Default)]
 pub struct SpawnTool {
     depth: depth::Depth,
+    /// The command targets this runtime can route to, sorted and deduplicated
+    /// so the description a model reads is the same string on every build.
+    /// Empty is the ordinary case, and the one in which the model is never
+    /// told the routing prefix exists.
+    targets: Vec<String>,
 }
 
 impl SpawnTool {
+    /// The tool as every runtime had it before ADR-0021: commands run where
+    /// basis runs, and the model is told nothing about targets.
     pub fn new() -> Self {
         Self::default()
+    }
+
+    /// The same tool, told which command targets its runtime registered.
+    ///
+    /// The names are all this needs: `spawn` routes by putting the parsed
+    /// target on the request, and *which executor* that name resolves to is
+    /// the runtime's business, not the tool's (ADR-0018). What the names buy
+    /// is the two things only the tool can do with them — teach the prefix in
+    /// the description, and refuse a name nothing registered before the
+    /// approver is asked about it.
+    ///
+    /// Called by [`RuntimeBuilder`](crate::RuntimeBuilder) with the set it
+    /// collected; a host driving mentra directly calls it with whatever it
+    /// registered on its own executor. Names it does not recognise are refused
+    /// at the boundary, so passing a name here that no executor answers to
+    /// turns a working call into a refusal rather than into a silent local
+    /// run — which is the direction this has to fail in.
+    pub fn with_targets(targets: impl IntoIterator<Item = String>) -> Self {
+        Self {
+            depth: depth::Depth::default(),
+            targets: targets
+                .into_iter()
+                .collect::<BTreeSet<_>>()
+                .into_iter()
+                .collect(),
+        }
+    }
+
+    /// `Ok` when this call names a target this runtime can reach, and the
+    /// refusal the model should read instead when it does not.
+    ///
+    /// Asked only of a command: [`Mode::Agent`] never carries a target, by
+    /// construction in the parser.
+    fn authorize_target(&self, spawn: &Spawn) -> Result<(), String> {
+        let Some(target) = spawn.target() else {
+            return Ok(());
+        };
+
+        if self.targets.iter().any(|name| name == target) {
+            return Ok(());
+        }
+
+        Err(if self.targets.is_empty() {
+            format!(
+                "spawn has no command targets registered, so `!@{target}` has nowhere to run; \
+                 write the command with no `@` to run it where basis is running"
+            )
+        } else {
+            format!(
+                "spawn has no command target named `{target}`; the registered targets are {}, \
+                 and a command with no `@` runs where basis is running",
+                listed(&self.targets)
+            )
+        })
     }
 }
 
@@ -123,8 +213,8 @@ impl ToolDefinition for SpawnTool {
     /// [`ToolExecutor::authorization_preview`]'s job.
     fn descriptor(&self) -> RuntimeToolDescriptor {
         RuntimeToolDescriptor::builder(SPAWN)
-            .description(DESCRIPTION)
-            .input_schema(input_schema())
+            .description(description(&self.targets))
+            .input_schema(input_schema(&self.targets))
             .capabilities(vec![
                 ToolCapability::ProcessExec,
                 ToolCapability::FilesystemWrite,
@@ -138,15 +228,36 @@ impl ToolDefinition for SpawnTool {
     }
 }
 
-/// One required string, and no second field to decide about on every call.
-fn input_schema() -> Value {
+/// What the model reads, with the routing prefix included only when this
+/// runtime has somewhere to route to.
+fn description(targets: &[String]) -> String {
+    if targets.is_empty() {
+        return DESCRIPTION.to_string();
+    }
+
+    format!("{DESCRIPTION}\n\n{}", targets_paragraph(targets))
+}
+
+/// One required string, and no second field to decide about on every call —
+/// which is why the target rides in the same string rather than beside it.
+fn input_schema(targets: &[String]) -> Value {
+    let mut description = "A shell command when it starts with `!`, otherwise a task to \
+                           delegate. Write `!!` to begin a task with a literal `!`."
+        .to_string();
+    if !targets.is_empty() {
+        description.push_str(&format!(
+            " Write `!@<target> <command>` to run a command on one of this runtime's targets \
+             ({}).",
+            listed(targets)
+        ));
+    }
+
     json!({
         "type": "object",
         "properties": {
             INPUT_FIELD: {
                 "type": "string",
-                "description": "A shell command when it starts with `!`, otherwise a task to \
-                                delegate. Write `!!` to begin a task with a literal `!`.",
+                "description": description,
             }
         },
         "required": [INPUT_FIELD],
@@ -162,7 +273,11 @@ impl ToolExecutor for SpawnTool {
     ) -> Result<ToolAuthorizationPreview, String> {
         let spawn = parse(input)?;
         // Refused here, ahead of the approver and ahead of the rule store, so
-        // the floor cannot be lifted by an answer or by a remembered rule.
+        // the floor cannot be lifted by an answer or by a remembered rule. A
+        // routing destination nothing registered is the same kind of fact as
+        // the depth floor: not a judgement call, so not a question for a
+        // person (ADR-0021).
+        self.authorize_target(&spawn)?;
         if spawn.mode() == Mode::Agent {
             self.depth.authorize_delegation(&ctx.agent_id)?;
         }
@@ -184,7 +299,14 @@ impl ToolExecutor for SpawnTool {
         let spawn = parse(&input)?;
 
         match spawn.mode() {
-            Mode::Command => execute::command(&ctx, spawn.body()).await,
+            Mode::Command => {
+                // Asked again rather than trusted from the preview, for the
+                // reason the depth floor is: the preview is only reached when
+                // an authorizer is installed, and a guard that a missing
+                // authorizer removes is not a guard.
+                self.authorize_target(&spawn)?;
+                execute::command(&ctx, spawn.body()).await
+            }
             Mode::Agent => {
                 // Asked again rather than trusted from the preview: the preview
                 // is only reached when an authorizer is installed, and a floor
