@@ -190,10 +190,61 @@ fn write_event(
             "basis: {}",
             label(text(event, "message"), "task event")
         )?,
-        "run_finished" if answered => writeln!(out)?,
+        // Two things at the finish line, on the two streams they belong to:
+        // the newline that closes a streamed answer, and what the run spent.
+        "run_finished" => {
+            if answered {
+                writeln!(out)?;
+            }
+            if let Some(spent) = spent(event) {
+                writeln!(err, "basis: {spent}")?;
+            }
+        }
         _ => {}
     }
     Ok(false)
+}
+
+/// What the run reported spending, in one line, or `None` when it reported
+/// nothing.
+///
+/// Input and output only — the two `total_tokens` counts and the two a bound
+/// is enforced against. Cache reads and writes are priced differently
+/// everywhere, so a line that added them in would answer no question exactly;
+/// they are on the event for anyone who wants them.
+///
+/// Nothing reported prints nothing. A provider that says nothing about usage
+/// leaves these at zero, and `0 in · 0 out` reads as a measurement of a free
+/// run rather than as the absence of a report.
+fn spent(event: &Value) -> Option<String> {
+    let count = |field| event["usage"][field].as_u64().unwrap_or_default();
+    let (input, output) = (count("input_tokens"), count("output_tokens"));
+    (input > 0 || output > 0).then(|| {
+        format!(
+            "{} in · {} out",
+            compact_count(input),
+            compact_count(output)
+        )
+    })
+}
+
+/// A token count as a person reads it: `980`, `12.3k`, `1.2M`.
+///
+/// Exact digits past the first few are noise in a progress line — the JSON
+/// payload carries the whole number for anything that needs to add it up.
+fn compact_count(count: u64) -> String {
+    for (unit, scale) in [("M", 1_000_000_u64), ("k", 1_000)] {
+        if count >= scale {
+            let whole = count / scale;
+            let tenth = (count % scale) * 10 / scale;
+            return if tenth == 0 {
+                format!("{whole}{unit}")
+            } else {
+                format!("{whole}.{tenth}{unit}")
+            };
+        }
+    }
+    count.to_string()
 }
 
 /// One string field of an event, empty when it is absent or not a string.
@@ -429,6 +480,70 @@ mod tests {
             "the answer must never be duplicated onto stderr: {err}"
         );
         assert!(live.answered(), "the answer reached the terminal");
+    }
+
+    /// What the run cost, once, at the end, on stderr.
+    ///
+    /// basis ships no price table — prices are the host's and they move — but
+    /// the counts are basis's, and a person who never sees them cannot notice
+    /// the run that cost ten times the last one. stderr for the same reason
+    /// every other progress line is there: `basis "…" > answer.md` has to
+    /// leave a file holding the answer, not a receipt stapled to it.
+    #[test]
+    fn a_finished_run_says_what_it_spent_beside_the_answer_rather_than_in_it() {
+        let live = Live::when(true);
+        let (mut out, mut err) = (Vec::new(), Vec::new());
+
+        for event in [
+            json!({"type": "assistant_delta", "text": "done"}),
+            json!({"type": "run_finished", "status": "ok",
+                   "usage": {"input_tokens": 12_300, "output_tokens": 1_200,
+                             "cache_read_tokens": 40, "cache_creation_tokens": 5}}),
+        ] {
+            live.show_to(&event, &mut out, &mut err)
+                .expect("writing to a vector");
+        }
+
+        assert_eq!(
+            String::from_utf8(out).expect("utf8"),
+            "done\n",
+            "stdout is the answer, and a token count is not part of it"
+        );
+        assert_eq!(
+            String::from_utf8(err).expect("utf8"),
+            "basis: 12.3k in · 1.2k out\n"
+        );
+    }
+
+    /// A run whose provider reported nothing has nothing to say, and a line
+    /// reading `0 in · 0 out` would say it anyway — which is how a tally
+    /// starts being read as a measurement.
+    #[test]
+    fn a_run_that_reported_no_usage_prints_no_usage_line() {
+        let live = Live::when(true);
+        let (mut out, mut err) = (Vec::new(), Vec::new());
+
+        for event in [
+            json!({"type": "run_finished", "status": "ok"}),
+            json!({"type": "run_finished", "status": "ok",
+                   "usage": {"input_tokens": 0, "output_tokens": 0,
+                             "cache_read_tokens": 0, "cache_creation_tokens": 0}}),
+        ] {
+            live.show_to(&event, &mut out, &mut err)
+                .expect("writing to a vector");
+        }
+
+        assert!(out.is_empty(), "and no answer was streamed to close");
+        assert!(err.is_empty(), "{}", String::from_utf8_lossy(&err));
+    }
+
+    #[test]
+    fn counts_are_written_the_way_a_person_reads_them() {
+        assert_eq!(compact_count(0), "0");
+        assert_eq!(compact_count(980), "980");
+        assert_eq!(compact_count(1_200), "1.2k");
+        assert_eq!(compact_count(12_000), "12k", "a bare thousand keeps no .0");
+        assert_eq!(compact_count(1_250_000), "1.2M");
     }
 
     /// A failing tool call is the one completion worth its summary: it is

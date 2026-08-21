@@ -377,6 +377,13 @@ async fn run_model(
             Ok(report) => report,
             Err(error) => return record_failure(paths, meta, error.to_string(), None),
         };
+        // Banked per turn, not per attach: a task settles under one terminal
+        // record but its turns may be driven by several processes, and a
+        // crash between two of them must not un-spend what the first one did.
+        meta.usage = meta.usage.plus(report.usage);
+        meta.updated_ms = now_ms();
+        save_meta(paths, meta)?;
+
         let stopped_by = report.stopped_by.map(bound_name);
         match report.outcome {
             RunOutcome::Error { message } => {
