@@ -416,7 +416,8 @@ fn discovered_mcp(
 /// Registers every skills directory that exists, most specific first.
 ///
 /// Roots layer rather than replace, so a workspace skill shadows a personal one
-/// of the same name and everything else from the global root still loads.
+/// of the same name and everything else from the weaker roots still loads. Which
+/// four roots those are, and why they are in that order, is [`crate::skills`].
 fn register_skills(
     runtime: &mentra::Runtime,
     workspace: &Path,
