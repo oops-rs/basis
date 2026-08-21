@@ -141,6 +141,16 @@ fn json_stdout(output: &Output) -> Value {
     })
 }
 
+/// The durable handle a settled run's hint names, which is the only place a
+/// shell invocation prints it: stdout is the answer.
+fn task_in_hint(hints: &str) -> String {
+    hints
+        .lines()
+        .find_map(|line| line.strip_prefix("next: use `basis watch "))
+        .map(|rest| rest.trim_end_matches('`').to_string())
+        .unwrap_or_else(|| panic!("no durable handle in: {hints}"))
+}
+
 fn wait_until(what: &str, mut condition: impl FnMut() -> bool) {
     let deadline = Instant::now() + NOT_STUCK;
     while !condition() {
@@ -522,11 +532,7 @@ fn a_bare_prompt_at_a_shell_answers_and_keeps_its_handle() {
 
     // The hint names the agent, so the run that just answered is still a task
     // that `watch`, `inbox`, and `wait` can reach.
-    let task = hints
-        .lines()
-        .find_map(|line| line.strip_prefix("next: use `basis watch "))
-        .map(|rest| rest.trim_end_matches('`').to_string())
-        .unwrap_or_else(|| panic!("no durable handle in: {hints}"));
+    let task = task_in_hint(&hints);
     assert!(
         fixture.agent_dir(&task).join("meta.json").is_file(),
         "the attended run still minted a durable agent directory"
@@ -537,6 +543,92 @@ fn a_bare_prompt_at_a_shell_answers_and_keeps_its_handle() {
     let again = run_bounded(fixture.basis(&["wait", &task, "--json"]));
     assert!(again.status.success(), "{}", stderr(&again));
     assert_eq!(json_stdout(&again)["state"], "succeeded");
+}
+
+/// ADR-0020's attach route with a shell on the other end: the answer arrives
+/// while the run is happening, the work that produced it goes to stderr, and
+/// the settled record does not say the answer a second time underneath it.
+///
+/// The regression this guards is a terminal that showed *nothing* until the
+/// run settled — indistinguishable, from the seat of whoever typed the
+/// prompt, from a process that has hung.
+#[test]
+fn an_attached_shell_is_shown_the_run_as_it_happens() {
+    let fixture = Fixture::new();
+    let endpoint = ScriptedEndpoint::start(vec![Reply::files_create("made.txt"), Reply::Streamed]);
+
+    let mut command = fixture.basis(&["spawn", "make a file and say so", "-C"]);
+    command.arg(&fixture.workspace).args([
+        "--base-url",
+        &endpoint.base_url,
+        "--model",
+        "test-model",
+        "--deadline",
+        "5m",
+    ]);
+    let output = run_bounded(command);
+    assert!(output.status.success(), "{}", stderr(&output));
+
+    let progress = stderr(&output);
+    let stdout = String::from_utf8(output.stdout).expect("utf8");
+    assert_eq!(
+        stdout, "streamed reply-2\n",
+        "stdout is the answer, streamed once and closed: {stdout}"
+    );
+    assert!(
+        progress.contains("files"),
+        "the tool call is announced while it runs, on stderr: {progress}"
+    );
+    assert!(
+        progress.contains("test-model"),
+        "and so is what the run started as: {progress}"
+    );
+    assert!(
+        !progress.contains("streamed reply"),
+        "the answer is never duplicated onto stderr: {progress}"
+    );
+
+    // The journal is unchanged by any of this: it is what `basis watch` and
+    // the next attach read, and it holds the same events the terminal saw.
+    let task = task_in_hint(&progress);
+    let events =
+        fs::read_to_string(fixture.agent_dir(&task).join("events.jsonl")).expect("event journal");
+    assert!(
+        events.contains("\"assistant_delta\""),
+        "the durable record keeps every event: {events}"
+    );
+}
+
+/// `--json --await` is the machine's spelling of the same route. It asks for
+/// one settled object, so nothing may be rendered in front of it — on either
+/// stream.
+#[test]
+fn json_await_answers_with_one_object_and_streams_nothing() {
+    let fixture = Fixture::new();
+    let endpoint = ScriptedEndpoint::start(vec![Reply::Streamed]);
+
+    let mut command = fixture.basis(&["spawn", "say something", "--json", "--await", "-C"]);
+    command.arg(&fixture.workspace).args([
+        "--base-url",
+        &endpoint.base_url,
+        "--model",
+        "test-model",
+        "--deadline",
+        "5m",
+    ]);
+    let output = run_bounded(command);
+    assert!(output.status.success(), "{}", stderr(&output));
+
+    // Parsing the whole of stdout as one object is the assertion: a streamed
+    // delta or a progress line in front of it would make this fail.
+    let payload = json_stdout(&output);
+    assert_eq!(payload["state"], "succeeded");
+    assert_eq!(payload["result"], "streamed reply-1");
+    assert_eq!(
+        stderr(&output),
+        "",
+        "a parser asked for an object, not for a progress log"
+    );
 }
 
 /// `--resumable` is the opt-out, and it is the one spelling that still returns
@@ -613,6 +705,10 @@ fn write_resumable_agent(fixture: &Fixture, task: &str, parent: Option<&str>) {
 enum Reply {
     /// A finished assistant message, numbered by connection.
     Text,
+    /// The same message, arriving a token at a time — what a provider that
+    /// streams looks like, and the only shape that can be rendered *during* a
+    /// run rather than after it.
+    Streamed,
     /// A single tool call; the next connection is expected to wrap up.
     ToolCall { name: String, arguments: String },
     /// Reads the request and then holds the connection open, answering
@@ -705,6 +801,26 @@ fn sse_body(index: usize, reply: &Reply) -> String {
                 "type": "response.output_item.done",
                 "output_index": 0,
                 "item": {"type": "message", "content": [{"type": "output_text", "text": format!("reply-{index}")}]}
+            }));
+        }
+        Reply::Streamed => {
+            events.push(json!({
+                "type": "response.output_item.added",
+                "output_index": 0,
+                "item": {"type": "message", "content": []}
+            }));
+            for delta in ["streamed ", &format!("reply-{index}")] {
+                events.push(json!({
+                    "type": "response.output_text.delta",
+                    "output_index": 0,
+                    "content_index": 0,
+                    "delta": delta
+                }));
+            }
+            events.push(json!({
+                "type": "response.output_item.done",
+                "output_index": 0,
+                "item": {"type": "message", "content": [{"type": "output_text", "text": format!("streamed reply-{index}")}]}
             }));
         }
         Reply::ToolCall { name, arguments } => {

@@ -32,7 +32,7 @@ use super::{
     error::{ClientError, message_timeout, wait_timeout, watch_timeout},
     events::EventTail,
     inbox as inbox_file, lock, policy,
-    render::{decorate_terminal, print_hint, render_event, render_result, result_code},
+    render::{Live, decorate_terminal, print_hint, render_result},
     state::{
         MAX_MESSAGE, MAX_PROMPT, MAX_TASKS, RunOptions, TaskMeta, cancel_requested, load_meta,
         now_ms, read_terminal, save_meta,
@@ -47,6 +47,11 @@ const CURRENT_TASK: &str = "BASIS_TASK_ID";
 /// `attach` is [`Route::Attach`](crate::route::Route::Attach): this process
 /// drives the agent it just minted and prints its terminal result. Without it
 /// the handle comes straight back and the agent waits for an attacher.
+///
+/// An attached run is shown as it happens unless `--json` asked for the
+/// settled object instead. Nothing else decides it: the person who typed a
+/// prompt at a shell is blocked on this process either way, and a run that
+/// renders nothing until it ends is indistinguishable from one that hung.
 pub(crate) async fn spawn(args: RunArgs, attach: bool) -> Result<ExitCode, ClientError> {
     let workspace = workspace_or_current(args.workspace.clone())?;
     let prompt = prompt_from(args.prompt.clone())?;
@@ -153,9 +158,10 @@ pub(crate) async fn spawn(args: RunArgs, attach: bool) -> Result<ExitCode, Clien
         return render_result(&payload, args.json);
     }
     let timeout = bounded_wait(args.timeout);
-    match wait_for_terminal(&data, &task, timeout).await? {
+    let live = Live::when(!args.json);
+    match wait_for_terminal(&data, &task, timeout, &live).await? {
         WaitOutcome::Terminal(terminal) => {
-            render_result(&decorate_terminal(&task, terminal), args.json)
+            live.settled(&decorate_terminal(&task, terminal), args.json)
         }
         WaitOutcome::TimedOut { attached } => Err(wait_timeout(&task, timeout, attached)),
     }
@@ -250,9 +256,13 @@ pub(crate) async fn wait(args: WaitArgs) -> Result<ExitCode, ClientError> {
         return render_result(&decorate_terminal(&args.task, terminal), args.json);
     }
     policy::validate_wait_edge(&data, caller.as_deref(), &args.task)?;
-    match wait_for_terminal(&data, &args.task, timeout).await? {
+    // Waiting on an unattached agent means driving it, which puts this
+    // process in exactly the seat `spawn` is in: the run is happening here,
+    // so it is shown here.
+    let live = Live::when(!args.json);
+    match wait_for_terminal(&data, &args.task, timeout, &live).await? {
         WaitOutcome::Terminal(terminal) => {
-            render_result(&decorate_terminal(&args.task, terminal), args.json)
+            live.settled(&decorate_terminal(&args.task, terminal), args.json)
         }
         WaitOutcome::TimedOut { attached } => Err(wait_timeout(&args.task, timeout, attached)),
     }
@@ -288,7 +298,10 @@ pub(crate) async fn watch(args: WatchArgs) -> Result<ExitCode, ClientError> {
     let deadline = Instant::now() + timeout;
     // Replay from the start is the default: the journal is the whole story.
     let mut tail = EventTail::new(&paths, 0);
-    let mut streamed_answer = false;
+    // The same renderer the executor uses, over the same events: watching a
+    // run from outside it should not look different from being the process
+    // that ran it.
+    let live = Live::when(!args.json);
     loop {
         let terminal = read_terminal(&paths)?;
         for record in tail
@@ -297,16 +310,15 @@ pub(crate) async fn watch(args: WatchArgs) -> Result<ExitCode, ClientError> {
         {
             let record = serde_json::to_value(&record)
                 .map_err(|error| format!("encode task event: {error}"))?;
-            streamed_answer |= record["event"]["type"] == "assistant_delta";
-            render_event(&record, args.json)?;
+            if args.json {
+                println!("{record}");
+            } else {
+                live.show(&record["event"])
+                    .map_err(|error| format!("render task progress: {error}"))?;
+            }
         }
         if let Some(terminal) = terminal {
-            let result = decorate_terminal(&args.task, terminal);
-            if streamed_answer && !args.json && result["state"] == "succeeded" {
-                print_hint(&result);
-                return Ok(ExitCode::from(result_code(&result)));
-            }
-            return render_result(&result, args.json);
+            return live.settled(&decorate_terminal(&args.task, terminal), args.json);
         }
         if Instant::now() >= deadline {
             return Err(watch_timeout(

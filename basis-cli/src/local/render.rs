@@ -3,10 +3,21 @@
 //! The JSON shapes and the exit-code mapping are contract (ADR-0015/0017);
 //! `--json` prints payloads verbatim and the prose is derived from the same
 //! fields, so the code a script reads cannot depend on the renderer.
+//!
+//! One event renderer serves both processes that can be showing a run: the
+//! executor holding the attach lock, and a `basis watch` tailing the journal
+//! that executor writes. They differ in where an event comes from — a typed
+//! [`Event`](basis::Event) serialized on its way to `events.jsonl`, or a
+//! record read back out of it — and in nothing a person should see, so they
+//! meet at [`Live`] on the JSON shape both already have.
 
 use std::{
     io::{self, Write},
     process::ExitCode,
+    sync::{
+        Arc,
+        atomic::{AtomicBool, Ordering},
+    },
 };
 
 use serde_json::Value;
@@ -14,6 +25,194 @@ use serde_json::Value;
 use crate::exit::{EXIT_BOUNDED, EXIT_FAILED, EXIT_OK};
 
 use super::error::ClientError;
+
+/// How much of a tool's own words a progress line is worth. Enough to name a
+/// failure, short enough to stay one line.
+const SUMMARY_BUDGET: usize = 120;
+
+/// The terminal a run is being shown on while it runs.
+///
+/// Whether anything is shown is a property of the *caller*, not of the run: a
+/// shell blocked on this process wants to watch, and `--json` wants the
+/// settled object it asked for and nothing in front of it. So the choice is
+/// made once where the command is understood and carried down to the sink,
+/// which then feeds the journal and the terminal from the same event.
+///
+/// [`answered`](Self::answered) is the one fact that has to come back up:
+/// text that already arrived a delta at a time must not be printed a second
+/// time under the settled record.
+#[derive(Clone)]
+pub(crate) struct Live {
+    shown: bool,
+    answered: Arc<AtomicBool>,
+}
+
+impl Live {
+    /// Shown when the caller is a person's terminal rather than a parser.
+    pub(crate) fn when(shown: bool) -> Self {
+        Self {
+            shown,
+            answered: Arc::new(AtomicBool::new(false)),
+        }
+    }
+
+    /// A run this process drives without showing: nobody asked this process
+    /// for it, which is the case for a child driven by its parent's settle
+    /// pass.
+    pub(crate) fn hidden() -> Self {
+        Self::when(false)
+    }
+
+    /// Renders one event on this process's streams.
+    ///
+    /// Errors are the caller's to ignore, the way journal errors are: a
+    /// closed stdout (`basis "…" | head -1`) means nobody is reading, not
+    /// that the work should stop — it is durable either way.
+    pub(crate) fn show(&self, event: &Value) -> io::Result<()> {
+        if !self.shown {
+            return Ok(());
+        }
+        self.show_to(event, &mut io::stdout().lock(), &mut io::stderr().lock())
+    }
+
+    fn show_to(&self, event: &Value, out: &mut impl Write, err: &mut impl Write) -> io::Result<()> {
+        if !self.shown {
+            return Ok(());
+        }
+        if write_event(event, self.answered(), out, err)? {
+            self.answered.store(true, Ordering::Relaxed);
+        }
+        Ok(())
+    }
+
+    /// Whether any of the assistant's answer has already reached the terminal.
+    pub(crate) fn answered(&self) -> bool {
+        self.answered.load(Ordering::Relaxed)
+    }
+
+    /// The settled record, for a process that was showing the run as it ran.
+    ///
+    /// A `succeeded` record's `result` is the text the deltas already spelled
+    /// out, so printing it again would say the answer twice. Everything else
+    /// still prints: a failure, a cancellation, and the hint were never on the
+    /// stream, and neither was a result this process only read off disk.
+    pub(crate) fn settled(
+        &self,
+        payload: &Value,
+        structured: bool,
+    ) -> Result<ExitCode, ClientError> {
+        if !self.repeats(payload, structured) {
+            return render_result(payload, structured);
+        }
+        print_hint(payload);
+        flush_stdout()?;
+        Ok(ExitCode::from(result_code(payload)))
+    }
+
+    /// Whether rendering `payload` would say the answer a second time.
+    fn repeats(&self, payload: &Value, structured: bool) -> bool {
+        !structured && self.answered() && payload["state"] == "succeeded"
+    }
+}
+
+/// Writes one event the way a terminal wants it: the assistant's answer on
+/// `out`, everything about producing it on `err`.
+///
+/// The split is the whole rule, and it is what makes the shorthand composable
+/// — `basis "summarize this" > notes.md` has to leave a file holding the
+/// summary, not a transcript of the run that wrote it. Progress is for
+/// whoever is waiting, so it goes where waiting is watched.
+///
+/// `answered` is whether the answer has already begun; the finish line closes
+/// a streamed answer rather than opening a blank one under a run that never
+/// spoke. Returns whether this event put answer text on `out`.
+fn write_event(
+    event: &Value,
+    answered: bool,
+    out: &mut impl Write,
+    err: &mut impl Write,
+) -> io::Result<bool> {
+    match text(event, "type") {
+        "assistant_delta" => {
+            let delta = text(event, "text");
+            write!(out, "{delta}")?;
+            out.flush()?;
+            return Ok(!delta.is_empty());
+        }
+        "run_started" => writeln!(
+            err,
+            "basis: {}, {} context file(s)",
+            label(text(event, "model"), "unknown model"),
+            event["context_files"].as_array().map_or(0, Vec::len)
+        )?,
+        // The queue event, not the start: it is the one that carries what the
+        // call is *for*, and a person reading progress wants the command, not
+        // the second announcement of the same call.
+        "tool_queued" => writeln!(
+            err,
+            "  · {}",
+            one_line(
+                label(text(event, "summary"), text(event, "tool_name")),
+                SUMMARY_BUDGET
+            )
+        )?,
+        // Completions are what separate "the tool is still running" from "the
+        // model is thinking again", which is the question a silent terminal
+        // raises. A failing one is usually why the run went as it did, so it
+        // keeps its words.
+        //
+        // The name normally arrives; it is empty only for a result whose call
+        // this session never saw. Fall back to the id rather than printing a
+        // blank label.
+        "tool_completed" => {
+            let name = label(text(event, "tool_name"), text(event, "tool_call_id"));
+            if event["is_error"] == Value::Bool(true) {
+                let summary = one_line(text(event, "summary"), SUMMARY_BUDGET);
+                writeln!(err, "  ! {name}: {summary}")?;
+            } else {
+                writeln!(err, "  ✓ {name}")?;
+            }
+        }
+        // Both are pauses with a reason, and a terminal that does not name
+        // them looks stuck for as long as they last.
+        "compaction_started" => writeln!(err, "basis: compacting the conversation")?,
+        "retry" => writeln!(
+            err,
+            "basis: {} (retry {}/{})",
+            one_line(text(event, "error"), SUMMARY_BUDGET),
+            event["attempt"].as_u64().unwrap_or_default(),
+            event["max_attempts"].as_u64().unwrap_or_default()
+        )?,
+        "notice" | "error" => writeln!(
+            err,
+            "basis: {}",
+            label(text(event, "message"), "task event")
+        )?,
+        "run_finished" if answered => writeln!(out)?,
+        _ => {}
+    }
+    Ok(false)
+}
+
+/// One string field of an event, empty when it is absent or not a string.
+fn text<'a>(event: &'a Value, field: &str) -> &'a str {
+    event[field].as_str().unwrap_or_default()
+}
+
+/// `value`, or `fallback` when the field it came from was empty.
+fn label<'a>(value: &'a str, fallback: &'a str) -> &'a str {
+    if value.is_empty() { fallback } else { value }
+}
+
+/// One line of at most `budget` characters: a tool's own output is arbitrary
+/// text, and a progress line that spans paragraphs stops being progress.
+fn one_line(text: &str, budget: usize) -> String {
+    let line = text.lines().next().unwrap_or_default();
+    match line.char_indices().nth(budget) {
+        Some((end, _)) => format!("{}…", &line[..end]),
+        None => line.to_string(),
+    }
+}
 
 /// Decorates a raw terminal record with its handle and the follow-up its
 /// state admits.
@@ -96,36 +295,16 @@ pub(crate) fn render_result(payload: &Value, structured: bool) -> Result<ExitCod
         state => println!("task state: {state}"),
     }
     print_hint(payload);
-    io::stdout()
-        .flush()
-        .map_err(|error| ClientError::new(format!("flush task output: {error}")))?;
+    flush_stdout()?;
     Ok(ExitCode::from(result_code(payload)))
 }
 
-pub(crate) fn render_event(record: &Value, structured: bool) -> Result<(), ClientError> {
-    if structured {
-        println!("{record}");
-        return Ok(());
-    }
-    let event = &record["event"];
-    match event["type"].as_str().unwrap_or_default() {
-        "assistant_delta" => {
-            print!("{}", event["text"].as_str().unwrap_or_default());
-            io::stdout()
-                .flush()
-                .map_err(|error| ClientError::new(format!("flush task progress: {error}")))?;
-        }
-        "tool_started" => eprintln!("  · {}", event["tool_name"].as_str().unwrap_or("tool")),
-        "notice" | "error" => {
-            eprintln!(
-                "basis: {}",
-                event["message"].as_str().unwrap_or("task event")
-            )
-        }
-        "run_finished" => println!(),
-        _ => {}
-    }
-    Ok(())
+/// stdout is block-buffered whenever it is not a terminal, so a redirected
+/// answer is not on disk until this runs.
+fn flush_stdout() -> Result<(), ClientError> {
+    io::stdout()
+        .flush()
+        .map_err(|error| ClientError::new(format!("flush task output: {error}")))
 }
 
 pub(crate) fn result_code(payload: &Value) -> u8 {
@@ -202,6 +381,123 @@ mod tests {
                 "the follow-up offered for {state}"
             );
         }
+    }
+
+    /// The rendering rule, in one run's worth of events: stdout carries the
+    /// assistant's answer and nothing else, stderr carries the work that
+    /// produced it. `basis "…" > answer.md 2> progress.log` is the invocation
+    /// that has to leave two files, each holding one of those things.
+    #[test]
+    fn the_answer_streams_to_stdout_and_the_work_to_stderr() {
+        let live = Live::when(true);
+        let (mut out, mut err) = (Vec::new(), Vec::new());
+
+        for event in [
+            json!({"type": "run_started", "model": "test-model",
+                   "context_files": [{"path": "/repo/AGENTS.md", "scope": "workspace"}]}),
+            json!({"type": "tool_queued", "tool_call_id": "c1", "tool_name": "shell",
+                   "summary": "shell: cargo test"}),
+            json!({"type": "tool_started", "tool_call_id": "c1", "tool_name": "shell"}),
+            json!({"type": "tool_completed", "tool_call_id": "c1", "tool_name": "shell",
+                   "summary": "0 failed", "is_error": false}),
+            json!({"type": "assistant_delta", "text": "the tests "}),
+            json!({"type": "assistant_delta", "text": "pass"}),
+            json!({"type": "run_finished", "status": "ok"}),
+        ] {
+            live.show_to(&event, &mut out, &mut err)
+                .expect("writing to a vector");
+        }
+
+        let (out, err) = (
+            String::from_utf8(out).expect("utf8"),
+            String::from_utf8(err).expect("utf8"),
+        );
+        assert_eq!(
+            out, "the tests pass\n",
+            "stdout is the answer, closed by the finish line"
+        );
+        assert!(err.contains("test-model"), "{err}");
+        assert!(
+            err.contains("shell: cargo test"),
+            "a tool call names itself while it runs: {err}"
+        );
+        assert!(err.contains("shell"), "and reports finishing: {err}");
+        assert!(
+            !err.contains("the tests"),
+            "the answer must never be duplicated onto stderr: {err}"
+        );
+        assert!(live.answered(), "the answer reached the terminal");
+    }
+
+    /// A failing tool call is the one completion worth its summary: it is
+    /// usually why the run went the way it did.
+    #[test]
+    fn a_failing_tool_call_says_what_it_said() {
+        let live = Live::when(true);
+        let (mut out, mut err) = (Vec::new(), Vec::new());
+
+        live.show_to(
+            &json!({"type": "tool_completed", "tool_call_id": "c1", "tool_name": "shell",
+                    "summary": "no such file\nand a second line", "is_error": true}),
+            &mut out,
+            &mut err,
+        )
+        .expect("writing to a vector");
+
+        let err = String::from_utf8(err).expect("utf8");
+        assert_eq!(err, "  ! shell: no such file\n", "{err}");
+        assert!(out.is_empty(), "a tool failure is not an answer");
+        assert!(!live.answered());
+    }
+
+    /// `--json --await` asks for one settled object and nothing else. The
+    /// events still reach the journal — the executor writes it either way —
+    /// but no renderer stands between them and a parser.
+    #[test]
+    fn a_run_nobody_is_watching_renders_nothing() {
+        let live = Live::hidden();
+        let (mut out, mut err) = (Vec::new(), Vec::new());
+
+        for event in [
+            json!({"type": "assistant_delta", "text": "an answer"}),
+            json!({"type": "tool_started", "tool_call_id": "c1", "tool_name": "shell"}),
+            json!({"type": "run_finished", "status": "ok"}),
+        ] {
+            live.show_to(&event, &mut out, &mut err)
+                .expect("writing to a vector");
+        }
+
+        assert!(out.is_empty() && err.is_empty());
+        assert!(
+            !live.answered(),
+            "and the settled record is still the only place the answer comes from"
+        );
+    }
+
+    /// The streamed answer and the settled record are the same text. Printing
+    /// the record under text that already arrived would double it.
+    #[test]
+    fn a_streamed_answer_is_not_printed_again_underneath_itself() {
+        let live = Live::when(true);
+        let succeeded = json!({"state": "succeeded", "result": "done"});
+        assert!(!live.repeats(&succeeded, false), "nothing streamed yet");
+
+        live.show_to(
+            &json!({"type": "assistant_delta", "text": "done"}),
+            &mut Vec::new(),
+            &mut Vec::new(),
+        )
+        .expect("writing to a vector");
+
+        assert!(live.repeats(&succeeded, false));
+        assert!(
+            !live.repeats(&succeeded, true),
+            "`--json` prints the object it was asked for, whatever a terminal saw"
+        );
+        assert!(
+            !live.repeats(&json!({"state": "failed", "error": "boom"}), false),
+            "a failure was never on the stream, so it still has to be said"
+        );
     }
 
     /// stdout is the answer; the hint is not part of it. `basis "…" > out.md`
