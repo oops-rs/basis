@@ -17,23 +17,36 @@ use super::*;
 /// The agent config a workspace that said nothing produces, with the snapshot
 /// directory pinned so no test can name a real one.
 fn defaults(workspace: &Path, context: &WorkspaceContext) -> mentra::agent::AgentConfig {
+    configured(workspace, context, None)
+}
+
+/// `defaults`, with the host's say over the prompt.
+fn configured(
+    workspace: &Path,
+    context: &WorkspaceContext,
+    system_prompt: Option<&SystemPrompt>,
+) -> mentra::agent::AgentConfig {
     agent_config(
         workspace,
         context,
+        system_prompt,
         Compaction::default(),
         PathBuf::from("/transcripts"),
     )
 }
 
-#[test]
-fn context_becomes_the_system_prompt_and_the_workspace_is_scoped() {
-    let context = WorkspaceContext::from_documents(vec![ContextDocument {
+/// One workspace document, for the prompt tests below.
+fn house_rules() -> WorkspaceContext {
+    WorkspaceContext::from_documents(vec![ContextDocument {
         path: PathBuf::from("/repo/AGENTS.md"),
         scope: ContextScope::Workspace,
         content: "house rules".to_string(),
-    }]);
+    }])
+}
 
-    let agent = defaults(Path::new("/repo"), &context);
+#[test]
+fn context_becomes_the_system_prompt_and_the_workspace_is_scoped() {
+    let agent = defaults(Path::new("/repo"), &house_rules());
 
     assert!(
         agent
@@ -49,6 +62,97 @@ fn an_empty_workspace_context_leaves_the_system_prompt_unset() {
     let agent = defaults(Path::new("/repo"), &WorkspaceContext::default());
 
     assert_eq!(agent.system, None);
+}
+
+#[test]
+fn a_fresh_builder_says_nothing_about_the_system_prompt() {
+    // The seam is not a default: basis ships no system prompt of its own, and
+    // an unset knob has to leave the discovery-only prompt byte-identical.
+    assert_eq!(WorkspaceBuilder::new("/repo").system_prompt, None);
+    assert_eq!(
+        configured(Path::new("/repo"), &house_rules(), None).system,
+        house_rules().render()
+    );
+}
+
+#[test]
+fn an_appended_prompt_comes_after_the_workspace_because_it_is_more_specific() {
+    // The rendered block tells the model later blocks take precedence, and the
+    // host's text is the statement of the program running this agent — which no
+    // repository can know about, and none should be able to overrule.
+    let agent = configured(
+        Path::new("/repo"),
+        &house_rules(),
+        Some(&SystemPrompt::Append("answer in Chinese".to_string())),
+    );
+
+    let system = agent.system.expect("a system prompt");
+    let context = system.find("house rules").expect("the workspace's say");
+    let host = system.find("answer in Chinese").expect("the host's say");
+    assert!(context < host, "{system}");
+}
+
+#[test]
+fn an_appended_prompt_stands_alone_when_the_workspace_says_nothing() {
+    let agent = configured(
+        Path::new("/repo"),
+        &WorkspaceContext::default(),
+        Some(&SystemPrompt::Append("answer in Chinese".to_string())),
+    );
+
+    assert_eq!(agent.system.as_deref(), Some("answer in Chinese"));
+}
+
+#[test]
+fn a_replaced_prompt_drops_the_context_block_entirely() {
+    let agent = configured(
+        Path::new("/repo"),
+        &house_rules(),
+        Some(&SystemPrompt::Replace(
+            "you are Acme's reviewer".to_string(),
+        )),
+    );
+
+    assert_eq!(agent.system.as_deref(), Some("you are Acme's reviewer"));
+}
+
+#[test]
+fn appending_nothing_leaves_the_workspaces_prompt_as_it_was() {
+    // One obvious meaning, and it is the one the workspace already had.
+    let agent = configured(
+        Path::new("/repo"),
+        &house_rules(),
+        Some(&SystemPrompt::Append("   \n".to_string())),
+    );
+
+    assert_eq!(agent.system, house_rules().render());
+}
+
+#[test]
+fn replacing_with_nothing_is_how_a_host_asks_for_no_system_prompt() {
+    // Not an error: "the prompt is nothing" is a thing a host can mean, and it
+    // renders as `None` for the same reason an empty workspace does.
+    let agent = configured(
+        Path::new("/repo"),
+        &house_rules(),
+        Some(&SystemPrompt::Replace(String::new())),
+    );
+
+    assert_eq!(agent.system, None);
+}
+
+#[test]
+fn the_last_system_prompt_said_is_the_one_that_holds() {
+    // One field, so replace-then-append is append rather than both — and the
+    // enum is what makes "both" unspellable instead of undefined.
+    let builder = WorkspaceBuilder::new("/repo")
+        .with_system_prompt(SystemPrompt::Replace("first".to_string()))
+        .with_system_prompt(SystemPrompt::Append("second".to_string()));
+
+    assert_eq!(
+        builder.system_prompt,
+        Some(SystemPrompt::Append("second".to_string()))
+    );
 }
 
 #[test]
@@ -263,6 +367,7 @@ fn what_a_host_says_about_compaction_is_what_the_agent_carries() {
     let agent = agent_config(
         Path::new("/repo"),
         &WorkspaceContext::default(),
+        None,
         compaction,
         PathBuf::from("/transcripts"),
     );

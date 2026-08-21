@@ -100,12 +100,19 @@ fn ancestors(workspace: &Path) -> Vec<PathBuf> {
     ancestors
 }
 
-/// Reads `dir/<file_name>` if it is there, appending it to `documents`.
+/// Reads the first of [`ContextConfig::file_names`] that `dir` holds,
+/// appending it to `documents`.
 ///
-/// A directory that does not hold the file is skipped silently — that is the
+/// A directory that holds none of them is skipped silently — that is the
 /// normal case. A file that is present but unreadable is an error: staying
 /// quiet about it would mean running with instructions the user believes are
 /// in effect.
+///
+/// One document per directory, and *present* is what decides which — not
+/// *non-empty*. A directory carrying both names has already answered the
+/// question with the stronger one, and an `AGENTS.md` that says nothing says
+/// nothing deliberately; falling through to `CLAUDE.md` behind it would make
+/// which file is in effect depend on its contents.
 fn collect(
     dir: &Path,
     scope: ContextScope,
@@ -113,10 +120,14 @@ fn collect(
     seen: &mut HashSet<PathBuf>,
     documents: &mut Vec<ContextDocument>,
 ) -> Result<(), ContextError> {
-    let path = dir.join(&config.file_name);
-    if !path.is_file() {
+    let candidate = config
+        .file_names()
+        .into_iter()
+        .map(|name| dir.join(name))
+        .find(|path| path.is_file());
+    let Some(path) = candidate else {
         return Ok(());
-    }
+    };
 
     // Two candidate directories can name the same file — a global dir that
     // also sits in the parent chain, or a symlinked path. Identity is the
