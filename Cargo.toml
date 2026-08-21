@@ -5,7 +5,7 @@ resolver = "3"
 [workspace.package]
 # One version across the three: they are one product split by dependency
 # weight (ADR-0011), not three things that release on their own schedules.
-version = "0.4.2"
+version = "0.4.3"
 edition = "2024"
 rust-version = "1.88"
 license = "MIT"
@@ -19,9 +19,11 @@ homepage = "https://github.com/oops-rs/basis"
 basis = { version = "0.4", path = "basis" }
 basis-acp = { version = "0.4", path = "basis-acp" }
 
-# Mentra 0.18 is the runtime contract basis targets. 0.18.2 is the floor since
-# ADR-0021: a command target rides on `CommandRequest::target`, and
-# `ToolContext::execute_shell_command_on` is how `spawn` names one.
+# Mentra 0.18 is the runtime contract basis targets. 0.18.2 is the floor for two
+# reasons, both ADR-0021's: a command target rides on `CommandRequest::target`
+# and `ToolContext::execute_shell_command_on` is how `spawn` names one; and
+# 0.18.2 matches a remembered rule's pattern as data rather than as a path,
+# without which no rule could match `target` or `mode` at all.
 #
 # `default-features = false` drops exactly one thing: mentra's Responses
 # websocket transport, which nothing in basis can select — every run streams over
