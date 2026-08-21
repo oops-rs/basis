@@ -58,6 +58,8 @@ mod depth;
 mod execute;
 mod parse;
 
+use std::collections::BTreeSet;
+
 use async_trait::async_trait;
 use mentra::tool::{
     ParallelToolContext, RuntimeToolDescriptor, ToolApprovalCategory, ToolAuthorizationPreview,
@@ -67,8 +69,6 @@ use mentra::tool::{
 use serde_json::{Value, json};
 
 use parse::{INPUT_FIELD, Mode, Spawn, parse};
-
-use std::collections::BTreeSet;
 
 // The runtime's hook dispatcher must know whether a `spawn` call is a command
 // before denying it for a shell-off workspace, and the module docs above make
