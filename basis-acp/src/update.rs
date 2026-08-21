@@ -320,7 +320,8 @@ mod tests {
         assert_eq!(
             session_update(&Event::RunFinished {
                 outcome: RunOutcome::Ok,
-                stopped_by: None
+                stopped_by: None,
+                usage: None
             }),
             None
         );

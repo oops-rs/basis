@@ -326,6 +326,7 @@ mod tests {
             sink.emit(Event::RunFinished {
                 outcome: RunOutcome::Ok,
                 stopped_by: None,
+                usage: None,
             })
             .expect("emits");
         });

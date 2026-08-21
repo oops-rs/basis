@@ -5,6 +5,8 @@
 //! `BudgetPool` will draw from one — but both need somewhere honest to read
 //! *what a turn actually cost*, and this is it.
 
+use serde::{Deserialize, Serialize};
+
 /// What a run reported spending, summed over the rounds it took.
 ///
 /// mentra emits one usage report per completed model response, carrying *that
@@ -44,7 +46,12 @@
 ///
 /// And cache tokens are counted but never mixed in — see
 /// [`total_tokens`](Self::total_tokens).
-#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+///
+/// It is serializable because the same four numbers are what
+/// [`Event::RunFinished`](crate::Event) puts on the wire and what basis's CLI
+/// records beside a finished task: one shape, so a host reading the stream and
+/// a host holding the report cannot disagree about what a run cost.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
 pub struct RunUsage {
     pub input_tokens: u64,
     pub output_tokens: u64,

@@ -134,7 +134,8 @@ mod tests {
         assert!(
             sink.emit(Event::RunFinished {
                 outcome: RunOutcome::Ok,
-                stopped_by: None
+                stopped_by: None,
+                usage: None
             })
             .is_ok()
         );
