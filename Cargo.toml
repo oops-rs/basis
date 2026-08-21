@@ -88,12 +88,3 @@ strip = true
 opt-level = "s"
 lto = true
 codegen-units = 1
-
-# **Temporary, and it stays until mentra 0.18.2 is published.** ADR-0021 needs
-# the target field on `CommandRequest` and `execute_shell_command_on` on the
-# tool context, which landed in mentra after 0.18.1 went to crates.io. Until
-# the release is out, a standalone checkout of basis does not resolve without
-# this line and the sibling checkout it names — which is exactly the state this
-# comment exists to make impossible to forget.
-[patch.crates-io]
-mentra = { path = "/Users/wendell/developer/oops-rs/mentra/mentra" }
