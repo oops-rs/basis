@@ -1,12 +1,17 @@
 //! The workspace's tasks, read straight off its directories.
 //!
 //! ADR-0019 made the filesystem the coordination surface, and this is the verb
-//! that says so out loud: `basis list` takes no lock, writes nothing, and
-//! derives every state from the two facts an executor already publishes —
-//! whether `terminal.json` exists, and whether anyone holds `attach.lock`. It
-//! is the same derivation `wait` and `watch` use, reached through the same
+//! that says so out loud: `basis list` takes no lock and derives every state
+//! from the two facts an executor already publishes — whether `terminal.json`
+//! exists, and whether anyone holds `attach.lock`. It is the same derivation
+//! `wait` and `watch` use, reached through the same
 //! [`probe_state`](super::error::probe_state), so the three verbs cannot
 //! disagree about what a task is doing.
+//!
+//! It mints nothing. A workspace that has never run anything is reported as
+//! having no tasks, through [`DataDir::described_workspace`] rather than
+//! `ensure_workspace`, because a listing that created the directory proving
+//! its own answer wrong is not an observation.
 //!
 //! The scan answers a second question too. "The conversation I was just
 //! having" is the newest row here that has one, which is what
