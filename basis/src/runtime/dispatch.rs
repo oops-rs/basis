@@ -227,37 +227,64 @@ fn guard(context: &PreExecutionContext, shell: ShellAccess, root: &Path) -> Opti
         return None;
     }
 
-    if context.tool_name == "files" {
-        // The builtin file tools are the route this guard closes, mirroring
-        // the `with_denied_write_root` entries the private path bakes into
-        // policy (see `git_protected` in `runtime::builder`).
-        let input: serde_json::Value = serde_json::from_str(&context.input_json).ok()?;
-        let operations = input.get("operations")?.as_array()?;
-        let denied =
-            [root.join(".git/hooks"), root.join(".git/config")].map(|p| resolved(root, &p));
+    // The builtin file tools are the route this guard closes, mirroring the
+    // `with_denied_write_root` entries the private path bakes into policy (see
+    // `git_protected` in `runtime::builder`). *Both* rosters, because the
+    // policy this stands in for binds at the workspace engine — mentra's
+    // `WorkspaceEditor::authorize_write`, which the batched ops and the split
+    // `write`/`edit` both call — so a guard that knew one profile's names
+    // would be narrower on a shared runtime than the policy it mirrors.
+    let input: serde_json::Value = serde_json::from_str(&context.input_json).ok()?;
+    let targets = write_targets(&context.tool_name, &input);
+    if targets.is_empty() {
+        return None;
+    }
 
-        for operation in operations {
-            for raw in write_targets(operation) {
-                let candidate = resolved(root, Path::new(raw));
-                if denied.iter().any(|root| candidate.starts_with(root)) {
-                    return Some(format!(
-                        "path '{}' is under this workspace's protected git paths \
-                         (.git/hooks, .git/config decide what runs)",
-                        candidate.display()
-                    ));
-                }
-            }
+    let denied = [root.join(".git/hooks"), root.join(".git/config")].map(|p| resolved(root, &p));
+    for raw in targets {
+        let candidate = resolved(root, Path::new(raw));
+        if denied.iter().any(|root| candidate.starts_with(root)) {
+            return Some(format!(
+                "path '{}' is under this workspace's protected git paths \
+                 (.git/hooks, .git/config decide what runs)",
+                candidate.display()
+            ));
         }
     }
 
     None
 }
 
-/// The paths a `files` operation writes, by the ops mentra's tool defines.
+/// The paths one file-tool call writes, whichever profile the runtime offers.
+///
+/// A tool that writes nothing is absent by name rather than by inspection: the
+/// readers (`read`, `ls`, `grep`, `glob`, and the batched read ops) never reach
+/// `authorize_write`, so answering for them would refuse what the policy this
+/// mirrors allows.
+fn write_targets<'a>(tool_name: &str, input: &'a serde_json::Value) -> Vec<&'a str> {
+    match tool_name {
+        "files" => input
+            .get("operations")
+            .and_then(serde_json::Value::as_array)
+            .map(|operations| operations.iter().flat_map(batched_targets).collect())
+            .unwrap_or_default(),
+        // mentra's split writers take one path each, under any of three
+        // spellings: `path`, `file_path` and `filePath` are serde aliases for
+        // one field (`tool/coding/input.rs`). Reading only the first would be
+        // a guard bypassed by asking for the second.
+        "write" | "edit" => ["path", "file_path", "filePath"]
+            .iter()
+            .filter_map(|name| input.get(*name).and_then(serde_json::Value::as_str))
+            .collect(),
+        _ => Vec::new(),
+    }
+}
+
+/// The paths a batched `files` operation writes, by the ops mentra's tool defines.
 ///
 /// `move` touches both ends: writing into a protected path plants a program,
 /// and moving one out from under git's feet changes what runs just as surely.
-fn write_targets(operation: &serde_json::Value) -> Vec<&str> {
+fn batched_targets(operation: &serde_json::Value) -> Vec<&str> {
     let field = |name: &str| operation.get(name).and_then(serde_json::Value::as_str);
 
     match field("op") {
