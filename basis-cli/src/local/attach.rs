@@ -36,6 +36,7 @@ use super::{
     data_dir::{AgentPaths, DataDir, valid_task_handle},
     events::EventLog,
     inbox, lock,
+    render::Live,
     state::{
         MAX_RESULT_BYTES, MAX_TASKS, MessageReply, PendingTerminal, TaskMeta, bounded_text,
         cancel_requested, load_meta, now_ms, read_terminal, request_cancel, save_meta,
@@ -57,10 +58,15 @@ pub(crate) enum WaitOutcome {
 
 /// Waits for a task's terminal record, attaching to produce it whenever the
 /// lock is free. A contended lock means a live executor exists: observe.
+///
+/// `live` is the caller's terminal, shown to while this process is the one
+/// executing. It stays silent for a record that was merely read off disk:
+/// there is nothing live about a run that finished before this process asked.
 pub(crate) async fn wait_for_terminal(
     data: &DataDir,
     task: &str,
     timeout: Duration,
+    live: &Live,
 ) -> Result<WaitOutcome, String> {
     let paths = resolve(data, task)?;
     let deadline = Instant::now() + timeout;
@@ -69,7 +75,7 @@ pub(crate) async fn wait_for_terminal(
             return Ok(WaitOutcome::Terminal(terminal));
         }
         if let Some(guard) = try_attach(&paths)? {
-            return Ok(WaitOutcome::Terminal(drive(data, task, guard).await?));
+            return Ok(WaitOutcome::Terminal(drive(data, task, guard, live).await?));
         }
         if Instant::now() >= deadline {
             return Ok(WaitOutcome::TimedOut {
@@ -83,6 +89,11 @@ pub(crate) async fn wait_for_terminal(
 /// Waits for one correlated message reply, attaching to produce it whenever
 /// the lock is free. Returns the dispatch payload (reply, or terminal tagged
 /// with the message id).
+///
+/// Nothing is shown while it drives. The caller asked for *one message's*
+/// reply, and the turns this process may have to run to reach it can belong
+/// to other messages entirely — streaming them would answer a question nobody
+/// asked, on the stream the answer is supposed to arrive on.
 pub(crate) async fn wait_for_message(
     data: &DataDir,
     task: &str,
@@ -102,7 +113,7 @@ pub(crate) async fn wait_for_message(
         if terminal.is_none()
             && let Some(guard) = try_attach(&paths)?
         {
-            drive(data, task, guard).await?;
+            drive(data, task, guard, &Live::hidden()).await?;
             continue;
         }
         if Instant::now() >= deadline {
@@ -185,6 +196,7 @@ pub(crate) async fn drive(
     data: &DataDir,
     task: &str,
     mut guard: lock::Lock,
+    live: &Live,
 ) -> Result<Value, String> {
     let paths = resolve(data, task)?;
     // Someone may have finished the task between our probe and our lock.
@@ -194,7 +206,7 @@ pub(crate) async fn drive(
     guard.write_fingerprint();
     let mut meta = load_meta(&paths)?;
     if meta.pending_terminal.is_none() {
-        run_model(data, task, &paths, &mut meta).await?;
+        run_model(data, task, &paths, &mut meta, live).await?;
     }
     settle(data, &paths, &mut meta).await
 }
@@ -207,6 +219,7 @@ async fn run_model(
     task: &str,
     paths: &AgentPaths,
     meta: &mut TaskMeta,
+    live: &Live,
 ) -> Result<(), String> {
     if meta.deadline_passed() {
         return record_pending(
@@ -331,6 +344,7 @@ async fn run_model(
         };
         let sink = FileSink {
             log: Arc::clone(&events),
+            live: live.clone(),
         };
         let completed_message = message.as_ref().map(|(id, _)| id.clone());
         let execution = async {
@@ -487,7 +501,10 @@ async fn settle_children(
             }
             match try_attach(&paths)? {
                 Some(guard) => {
-                    Box::pin(drive(data, &child, guard)).await?;
+                    // A child driven here is somebody else's run: this
+                    // process is finishing it to keep the scope rule, not
+                    // showing it to whoever asked about the parent.
+                    Box::pin(drive(data, &child, guard, &Live::hidden())).await?;
                 }
                 None => remaining = true,
             }
@@ -624,18 +641,26 @@ fn bound_name(bound: Bound) -> String {
     .to_string()
 }
 
-/// The executor's event sink: every event lands in `events.jsonl`. Append
-/// failures are swallowed — observability never fails the run.
+/// The executor's event sink: every event lands in `events.jsonl`, and — when
+/// a shell is waiting on this process — on that terminal as it happens.
+///
+/// One serialization feeds both, because the journal's shape is already the
+/// shape the renderer reads — the terminal borrows it and the journal takes
+/// it, so an event is never copied to be shown. Both kinds of failure are
+/// swallowed: observability never fails the run, and a closed stdout says
+/// nobody is reading, not that the work should stop.
 struct FileSink {
     log: Arc<Mutex<EventLog>>,
+    live: Live,
 }
 
 impl EventSink for FileSink {
     fn emit(&mut self, event: Event) -> io::Result<()> {
-        if let Ok(value) = serde_json::to_value(event)
-            && let Ok(mut log) = self.log.lock()
-        {
-            let _ = log.append(value);
+        if let Ok(value) = serde_json::to_value(event) {
+            let _ = self.live.show(&value);
+            if let Ok(mut log) = self.log.lock() {
+                let _ = log.append(value);
+            }
         }
         Ok(())
     }

@@ -46,7 +46,9 @@ fn data() -> (tempfile::TempDir, DataDir) {
 async fn drive_attached(data: &DataDir, task: &str) -> Value {
     let paths = data.agent_dir(task).unwrap();
     let guard = try_attach(&paths).unwrap().expect("lock is free");
-    drive(data, task, guard).await.expect("drives to terminal")
+    drive(data, task, guard, &Live::hidden())
+        .await
+        .expect("drives to terminal")
 }
 
 #[tokio::test]

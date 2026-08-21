@@ -73,8 +73,9 @@ The three routes:
   `--json` alone still selects it.
 - **resumable** — mint the checkpoint, print the handle, drive nothing.
 - **attach** — mint the checkpoint and drive it here until it settles. The
-  handle is durable, so the work outlives this process; the answer is printed
-  because this process stayed for it.
+  handle is durable, so the work outlives this process; the answer streams to
+  this terminal as it is produced — stdout — with the tool calls behind it on
+  stderr, because this process stayed for it.
 
 Consequent rules:
 
@@ -116,8 +117,11 @@ attach included — records the finite default that `attach::drive` enforces.
   fire-and-forget add `--resumable`; the flag exists for exactly that, and the
   in-repo test fixtures were the first two users of it.
 - An attended run at a shell now mints a durable agent directory where the
-  older attended path minted nothing, so `send`, `inbox`, `watch`, and `wait`
-  reach a run that already answered.
+  older attended path minted nothing, so `watch`, `inbox`, and `wait` reach a
+  run that already answered. **Corrected:** this list said `send` as well, and
+  that was never true. A terminal record closes the inbox — `enqueue` refuses
+  a message the moment one exists (ADR-0019) — so a settled run is observable,
+  not continuable, and the hint it prints says so.
 - The matrix is a table in `basis/src/route.rs` asserted cell by cell. A grammar
   change that is not also a change there is a change nobody decided — which is
   the failure this ADR exists to close.

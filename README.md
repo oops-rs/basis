@@ -241,7 +241,11 @@ still answer after the submitting process exits — there is no resident process
 plain: **an agent advances only while a process is attached to it.** Which process that is follows
 from where the command ran ([ADR-0020](docs/adr/0020-spawn-routing-is-decided-by-the-environment.md)):
 at a shell, `basis spawn` is that process, so it drives the agent and prints the answer, and the
-handle stays durable behind it. Inside another task (`BASIS_TASK_ID` set) it prints the handle of a
+handle stays durable behind it. What that terminal sees is split by stream: **stdout is the
+assistant's answer, streamed as it is produced; stderr is the work behind it** — the model, each
+tool call and how it ended, and the one `next:` line at the end. So `basis "summarize this" >
+notes.md` leaves a file holding the summary, and `2> progress.log` keeps the rest of it.
+Inside another task (`BASIS_TASK_ID` set) it prints the handle of a
 *resumable* agent instead, because a parent turn that blocks on its child is how a wait-for cycle
 starts — `--await` is the parent's explicit opt-in, and `--resumable` is the shell's opt-out.
 `basis wait <ID>` attaches to a resumable agent and produces the result, and

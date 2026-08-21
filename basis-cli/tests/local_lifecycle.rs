@@ -53,14 +53,21 @@ fn task_handles_survive_clients_and_terminal_waits_are_repeatable() {
             ]),
     );
     assert!(spawned.status.success(), "{}", stderr(&spawned));
+    let hints = stderr(&spawned);
     let output = String::from_utf8(spawned.stdout).expect("utf8 spawn output");
     assert!(
         output.contains("resumable"),
         "spawn --resumable reports the honest unattached state: {output}"
     );
+    // On stderr, where every hint belongs: stdout carries the handle a script
+    // reads, and nothing addressed to the person reading the terminal.
     assert!(
-        output.contains("next: use `basis wait "),
-        "spawn should teach the next lifecycle action: {output}"
+        hints.contains("next: use `basis wait "),
+        "spawn should teach the next lifecycle action: {hints}"
+    );
+    assert!(
+        !output.contains("next:"),
+        "the hint must not land in the output a script parses: {output}"
     );
     let task = output
         .lines()
@@ -74,9 +81,8 @@ fn task_handles_survive_clients_and_terminal_waits_are_repeatable() {
     assert_eq!(first["state"], "failed");
     assert_eq!(first["task"], task);
     assert_eq!(
-        first["next"],
-        format!("basis watch {task} or basis inbox {task}"),
-        "a durable terminal result should name concrete follow-up commands"
+        first["next"], "basis spawn <PROMPT>",
+        "a failure names the retry, not a watch and an inbox that hold nothing"
     );
 
     let second = wait(&data, &task);
