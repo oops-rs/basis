@@ -217,8 +217,9 @@ const DELEGATION: ToolKind = ToolKind::Other;
 /// second reading of the convention `basis::tools::spawn` parses exactly
 /// once. It is not free: if the two ever disagree — a new escape, a different
 /// trim — a client renders the wrong icon and nothing says so. What keeps it
-/// tolerable is that this path decides nothing. The typed `{mode, body, cwd}`
-/// is what reaches the approver, the rule store, the hooks and the audit trail;
+/// tolerable is that this path decides nothing. The typed
+/// `{mode, body, cwd, target}` is what reaches the approver, the rule store,
+/// the hooks and the audit trail;
 /// what reaches ACP is a `ToolQueued` event carrying the string the model
 /// wrote, and basis exports no reader for it. The fix is that reader,
 /// exported from the crate that owns the convention — not a second copy that
@@ -237,6 +238,9 @@ fn spawn_kind(input: &Value) -> ToolKind {
         // `!!` is the escape a task whose own text starts with `!` is written
         // with, so it is a delegation and not a command.
         Some(rest) if rest.starts_with('!') => DELEGATION,
+        // Everything else after a single `!` is a command, `!@<target> …`
+        // included: ADR-0021 made *where* a dimension of a command rather than
+        // a third mode, so there is no third kind for a client to render.
         Some(_) => ToolKind::Execute,
         None => DELEGATION,
     }
@@ -479,6 +483,16 @@ mod tests {
             ),
             ToolKind::Other,
             "`!!` escapes a task whose own text starts with `!`; it is not a command"
+        );
+        assert_eq!(
+            tool_kind(
+                SPAWN,
+                Mutability::Unknown,
+                &json!({"input": "!@mac xcodebuild -list"})
+            ),
+            ToolKind::Execute,
+            "ADR-0021 made *where* a dimension of a command, not a third mode: \
+             a routed command still renders as an execution"
         );
     }
 
