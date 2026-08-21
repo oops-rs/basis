@@ -35,6 +35,7 @@ should read before you decide that sentence is a formality.
 ```rust
 use basis::Runtime;
 
+// `MacExecutor` implements `basis::runtime::RuntimeExecutor` — see §3.
 let runtime = Runtime::builder()
     .with_command_target("mac", MacExecutor::new(/* … */))
     .build()?;
@@ -59,13 +60,19 @@ model must not be taught a door that is not there.
 
 ## 3. What the executor receives
 
+Everything an executor is written against comes from `basis` itself — the
+trait, the request, the output, the `async_trait` attribute, and mentra's local
+executor for a wrapper that delegates the ordinary case. A host implementing one
+does **not** need mentra in its own manifest, and should not add it: basis
+re-exports these precisely so a version skew between the two cannot happen.
+
 ```rust
-#[async_trait::async_trait]
-impl mentra::runtime::RuntimeExecutor for MacExecutor {
-    async fn run(
-        &self,
-        request: mentra::runtime::CommandRequest,
-    ) -> Result<mentra::runtime::CommandOutput, String> {
+use basis::async_trait;
+use basis::runtime::{CommandOutput, CommandRequest, CommandSpec, RuntimeExecutor};
+
+#[async_trait]
+impl RuntimeExecutor for MacExecutor {
+    async fn run(&self, request: CommandRequest) -> Result<CommandOutput, String> {
         // request.spec    — CommandSpec::Shell { command }
         // request.cwd     — advisory; see below
         // request.timeout — already clamped by the runtime's policy
@@ -76,7 +83,11 @@ impl mentra::runtime::RuntimeExecutor for MacExecutor {
 }
 ```
 
-Four of those are worth saying out loud.
+`basis::runtime::LocalRuntimeExecutor` is there too, for an executor that wants
+to handle its own target and hand everything else to the ordinary local path
+rather than reimplementing it.
+
+Four things about the request are worth saying out loud.
 
 **The timeout is already clamped.** basis does not ask the executor to enforce
 a policy; mentra resolved the request's timeout against the runtime's default
@@ -150,8 +161,8 @@ arbitrary scripts), and about where it puts the checkout.
 **The executor, inside the container**, is then a thin thing:
 
 ```rust
-use async_trait::async_trait;
-use mentra::runtime::{CommandOutput, CommandRequest, CommandSpec, RuntimeExecutor};
+use basis::async_trait;
+use basis::runtime::{CommandOutput, CommandRequest, CommandSpec, RuntimeExecutor};
 
 struct SshTarget {
     user_at_host: String,
@@ -193,7 +204,11 @@ impl RuntimeExecutor for SshTarget {
 }
 ```
 
-Two things it does not do, which a production one must: enforce
+`tokio` is the only thing here that is not `basis::…`, and it is the host's own
+choice of transport rather than something basis's API asks for — an executor
+built on `ssh2`, a connection pool, or a queue names none of it.
+
+Two things this does not do, which a production one must: enforce
 `request.timeout` (wrap the `output()` in `tokio::time::timeout` and report
 `timed_out`), and cap output at `request.max_output_bytes_per_stream`. The
 local executor does both, and a target that skips them is the one place a run's

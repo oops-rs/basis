@@ -11,6 +11,11 @@ use std::net::{TcpListener, TcpStream};
 use std::thread;
 
 use super::*;
+// Spelled the way a downstream that depends only on `basis` has to spell it,
+// which is what makes the stubs below a real check on the re-exports.
+use crate::runtime::{
+    CommandOutput, CommandRequest, CommandSpec, LocalRuntimeExecutor, RuntimeExecutor,
+};
 use crate::tools::SPAWN;
 
 fn read_http_request(stream: &mut TcpStream) -> String {
@@ -369,16 +374,57 @@ fn a_shared_runtime_resolves_its_provider_without_the_network() {
 
 /// An executor that reaches nothing, standing in for whatever a host actually
 /// writes: what is under test is the routing table, not the transport.
+///
+/// Written against `crate::…` paths and nothing else, deliberately. That is
+/// exactly what a downstream depending only on `basis` can write, so if a
+/// mentra type ever stops being re-exported this stops compiling — which is
+/// the whole point of the rule on [`crate::CancellationToken`], enforced here
+/// rather than promised in a doc comment.
 struct Nowhere;
 
-#[async_trait::async_trait]
-impl mentra::runtime::RuntimeExecutor for Nowhere {
-    async fn run(
-        &self,
-        _request: mentra::runtime::CommandRequest,
-    ) -> Result<mentra::runtime::CommandOutput, String> {
+#[crate::async_trait]
+impl RuntimeExecutor for Nowhere {
+    async fn run(&self, _request: CommandRequest) -> Result<CommandOutput, String> {
         Err("this executor reaches nothing".to_string())
     }
+}
+
+/// The same, using every re-exported type an executor's body actually touches:
+/// the request, the spec inside it, the output it answers with, and the local
+/// executor a wrapper delegates the ordinary case to.
+struct Echoes;
+
+#[crate::async_trait]
+impl RuntimeExecutor for Echoes {
+    async fn run(&self, request: CommandRequest) -> Result<CommandOutput, String> {
+        if request.target.is_none() {
+            return LocalRuntimeExecutor.run(request).await;
+        }
+        let CommandSpec::Shell { command } = &request.spec;
+
+        Ok(CommandOutput {
+            stdout: command.clone(),
+            stderr: String::new(),
+            success: true,
+            status_code: Some(0),
+            timed_out: false,
+            stdout_truncated: false,
+            stderr_truncated: false,
+        })
+    }
+}
+
+#[test]
+fn an_executor_can_be_written_against_basis_alone() {
+    // A host that depends only on `basis` must be able to satisfy the bound
+    // `with_command_target` asks for. This compiles and registers, which is
+    // the assertion; `Echoes` above is where the type coverage lives.
+    let runtime = offline()
+        .with_command_target("echo", Echoes)
+        .build()
+        .expect("builds offline");
+
+    assert_eq!(runtime.provider(), "openai");
 }
 
 fn offline() -> RuntimeBuilder {

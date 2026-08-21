@@ -33,7 +33,7 @@ use crate::{
 };
 
 use super::{
-    Runtime,
+    Runtime, RuntimeExecutor,
     dispatch::{DispatchHook, HookDispatch},
     executor::{CommandTargets, TargetedExecutor},
 };
@@ -422,6 +422,10 @@ impl RuntimeBuilder {
     /// **advisory**: it is a path in *this* process's filesystem, and what it
     /// means on the far side is the executor's to decide.
     ///
+    /// The trait and everything an implementation of it names are re-exported
+    /// as [`crate::runtime`]'s executor types, so a host writes one against
+    /// `basis` alone and never adds mentra to its own manifest.
+    ///
     /// A later call with the same name replaces the earlier one, the same rule
     /// [`with_command_environment`](Self::with_command_environment) follows.
     /// Names are `[A-Za-z0-9_-]+` and may not be `local`, which is the wire
@@ -437,7 +441,7 @@ impl RuntimeBuilder {
     pub fn with_command_target(
         mut self,
         name: impl Into<String>,
-        executor: impl mentra::runtime::RuntimeExecutor + 'static,
+        executor: impl RuntimeExecutor + 'static,
     ) -> Self {
         self.command_targets.insert(name.into(), Arc::new(executor));
         self

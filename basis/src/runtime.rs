@@ -44,6 +44,28 @@ use mentra::{BuiltinProvider, ModelInfo, ModelSelector, Session, agent::AgentCon
 
 pub use builder::RuntimeBuilder;
 
+/// The types a **command target's executor** is written against.
+///
+/// Re-exported for the reason [`CancellationToken`](crate::CancellationToken)
+/// is, and under the same rule: every mentra type basis's surface makes a
+/// caller *name*, basis re-exports. [`RuntimeBuilder::with_command_target`]
+/// asks for an `impl RuntimeExecutor`, so without these a host could not write
+/// one without adding mentra to its own manifest and pinning the same version —
+/// a skew there fails to compile with no hint that two crates disagree about
+/// one trait. The sibling of [`crate::tools`]'s tool-authoring re-exports, in
+/// the module that owns this seam.
+///
+/// The set is what an executor's `run` signature and body actually touch:
+/// [`RuntimeExecutor`] to implement, [`CommandRequest`] to read,
+/// [`CommandSpec`] to match the command out of it, [`CommandOutput`] to answer
+/// with, and [`LocalRuntimeExecutor`] for a wrapper that delegates the ordinary
+/// case rather than reimplementing it. Writing the `async fn` also needs
+/// [`async_trait`](crate::async_trait), which the crate root already re-exports.
+/// See `docs/targets.md` for a worked example.
+pub use mentra::runtime::{
+    CommandOutput, CommandRequest, CommandSpec, LocalRuntimeExecutor, RuntimeExecutor,
+};
+
 use crate::{approval::SideEffectLevels, run::RunError};
 
 use dispatch::{HookDispatch, HookRegistration, WorkspaceGuardEntry};
