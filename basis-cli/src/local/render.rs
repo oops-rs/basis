@@ -15,18 +15,48 @@ use crate::exit::{EXIT_BOUNDED, EXIT_FAILED, EXIT_OK};
 
 use super::error::ClientError;
 
-/// Decorates a raw terminal record with its handle and follow-up commands,
-/// exactly as the daemon's payloads carried them.
+/// Decorates a raw terminal record with its handle and the follow-up its
+/// state admits.
 pub(crate) fn decorate_terminal(task: &str, mut payload: Value) -> Value {
     let object = payload
         .as_object_mut()
         .expect("terminal payload is an object");
+    let state = object
+        .get("state")
+        .and_then(Value::as_str)
+        .unwrap_or_default()
+        .to_string();
     object.insert("task".to_string(), serde_json::json!(task));
     object.insert(
         "next".to_string(),
-        serde_json::json!(format!("basis watch {task} or basis inbox {task}")),
+        serde_json::json!(next_step(&state, task)),
     );
     payload
+}
+
+/// The one follow-up a record's state actually admits.
+///
+/// A hint is a promise, and the state is what decides which promises basis can
+/// keep. An agent that holds a terminal record accepts no further messages —
+/// `inbox::enqueue` refuses one the moment `terminal.json` exists — so a
+/// settled task is never told to continue a conversation it has closed, and a
+/// settled *failure* is not told to read an inbox that will be empty when the
+/// reason is already on stderr.
+fn next_step(state: &str, task: &str) -> String {
+    match state {
+        // Answered. The journal is the one thing this handle still holds that
+        // the terminal does not — and the one thing a redirected stdout, or a
+        // scrollback that has moved on, did not keep.
+        "succeeded" => format!("basis watch {task}"),
+        // No answer was produced and none will be: this handle is spent, and
+        // the work continues as a new task rather than as a message to a
+        // closed one.
+        "failed" | "cancelled" => "basis spawn <PROMPT>".to_string(),
+        // Minted and unstarted. It advances exactly when something attaches.
+        "resumable" => format!("basis wait {task}"),
+        // Still moving: follow it, or read what it has already been sent.
+        _ => format!("basis watch {task} or basis inbox {task}"),
+    }
 }
 
 pub(crate) fn render_result(payload: &Value, structured: bool) -> Result<ExitCode, ClientError> {
@@ -108,9 +138,20 @@ pub(crate) fn result_code(payload: &Value) -> u8 {
     }
 }
 
+/// One actionable line after a result, on stderr.
+///
+/// stderr because stdout is the answer and nothing else: `basis "…" > out.md`
+/// has to leave a file holding what was asked for, and a hint addressed to
+/// whoever is watching the terminal is not that. The `--json` payload carries
+/// the same fact as its `next` field, so a script loses nothing.
 pub(crate) fn print_hint(payload: &Value) {
-    if let Some(next) = payload["next"].as_str() {
-        println!("next: use `{next}`");
+    let _ = write_hint(payload, &mut io::stderr());
+}
+
+fn write_hint(payload: &Value, err: &mut impl Write) -> io::Result<()> {
+    match payload["next"].as_str() {
+        Some(next) => writeln!(err, "next: use `{next}`"),
+        None => Ok(()),
     }
 }
 
@@ -131,9 +172,54 @@ mod tests {
     }
 
     #[test]
-    fn a_terminal_payload_names_concrete_follow_up_commands() {
+    fn a_terminal_payload_carries_the_handle_it_settled_under() {
         let payload = decorate_terminal("w/t", json!({"state": "succeeded", "result": "done"}));
         assert_eq!(payload["task"], "w/t");
-        assert_eq!(payload["next"], "basis watch w/t or basis inbox w/t");
+    }
+
+    /// A hint is a promise: the command it names has to work on the task it
+    /// names. Two of these were promises basis could not keep — a settled
+    /// agent accepts no messages at all (`inbox::enqueue` refuses one the
+    /// moment `terminal.json` exists), and pointing a failed run at `watch`
+    /// and an empty `inbox` sends someone looking anywhere but at the
+    /// failure, which is already on stderr.
+    #[test]
+    fn each_state_is_told_the_follow_up_that_works_on_it() {
+        let hints = [
+            ("succeeded", "basis watch w/t"),
+            ("failed", "basis spawn <PROMPT>"),
+            ("cancelled", "basis spawn <PROMPT>"),
+            ("resumable", "basis wait w/t"),
+            ("running", "basis watch w/t or basis inbox w/t"),
+            ("accepted", "basis watch w/t or basis inbox w/t"),
+            ("cancel_requested", "basis watch w/t or basis inbox w/t"),
+        ];
+
+        for (state, expected) in hints {
+            assert_eq!(
+                decorate_terminal("w/t", json!({"state": state}))["next"],
+                expected,
+                "the follow-up offered for {state}"
+            );
+        }
+    }
+
+    /// stdout is the answer; the hint is not part of it. `basis "…" > out.md`
+    /// is the invocation that proves it.
+    #[test]
+    fn the_hint_goes_to_the_terminal_and_never_into_the_answer() {
+        let (mut out, mut err) = (Vec::new(), Vec::new());
+        write_hint(
+            &json!({"state": "succeeded", "next": "basis watch w/t"}),
+            &mut err,
+        )
+        .expect("writing to a vector");
+        write_hint(&json!({"state": "succeeded"}), &mut out).expect("writing to a vector");
+
+        assert_eq!(
+            String::from_utf8(err).unwrap(),
+            "next: use `basis watch w/t`\n"
+        );
+        assert!(out.is_empty(), "a payload without a next step says nothing");
     }
 }

@@ -505,6 +505,7 @@ fn a_bare_prompt_at_a_shell_answers_and_keeps_its_handle() {
     let output = run_bounded(command);
     assert!(output.status.success(), "{}", stderr(&output));
 
+    let hints = stderr(&output);
     let stdout = String::from_utf8(output.stdout).expect("utf8");
     assert!(
         stdout.contains("reply-1"),
@@ -514,14 +515,18 @@ fn a_bare_prompt_at_a_shell_answers_and_keeps_its_handle() {
         !stdout.contains(": resumable"),
         "a shell invocation must not hand back an undriven handle: {stdout}"
     );
+    assert!(
+        !stdout.contains("next:"),
+        "and nothing but the answer reaches it: {stdout}"
+    );
 
     // The hint names the agent, so the run that just answered is still a task
-    // that `send`, `inbox`, and `wait` can reach.
-    let task = stdout
+    // that `watch`, `inbox`, and `wait` can reach.
+    let task = hints
         .lines()
         .find_map(|line| line.strip_prefix("next: use `basis watch "))
-        .and_then(|rest| rest.split_once(' ').map(|(task, _)| task.to_string()))
-        .unwrap_or_else(|| panic!("no durable handle in: {stdout}"));
+        .map(|rest| rest.trim_end_matches('`').to_string())
+        .unwrap_or_else(|| panic!("no durable handle in: {hints}"));
     assert!(
         fixture.agent_dir(&task).join("meta.json").is_file(),
         "the attended run still minted a durable agent directory"
