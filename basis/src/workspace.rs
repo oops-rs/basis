@@ -101,8 +101,6 @@ pub struct Workspace {
     /// What `config.json` said, kept so a host can report which file decided
     /// the model it is looking at.
     config: Config,
-    /// The config files that took effect, most specific first.
-    config_files: Vec<ContextFile>,
     provider: String,
     /// [`store::runtime_identifier`](crate::store::runtime_identifier) for
     /// `path`, computed once: what this workspace's conversations are (or, on
@@ -141,7 +139,7 @@ impl std::fmt::Debug for Workspace {
             .field("root", &self.root)
             .field("provider", &self.provider)
             .field("model", &self.model.id)
-            .field("config_files", &self.config_files)
+            .field("config_files", &self.config.files)
             .field("context_files", &self.context.documents().len())
             .field("skills", &self.skills.len())
             .field("templates", &self.templates.len())
@@ -312,7 +310,7 @@ impl Workspace {
     /// resolved a model nobody expected should be able to find out in one
     /// place.
     pub fn config_files(&self) -> &[ContextFile] {
-        &self.config_files
+        &self.config.files
     }
 
     /// The tool manifests that took effect, most specific first.

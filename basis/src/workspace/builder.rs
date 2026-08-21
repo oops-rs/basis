@@ -488,7 +488,6 @@ impl WorkspaceBuilder {
             // builder cannot say for it: an effort is a per-turn request, so
             // it waits here until a `RunSpec` that asked for none is minted.
             effort: config.effort.as_ref().map(|effort| effort.value),
-            config_files: config.files.clone(),
             config,
             context,
             skills_dirs,
