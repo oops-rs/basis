@@ -10,7 +10,7 @@
 use std::{path::PathBuf, sync::Arc};
 
 use mentra::{
-    ContentBlock, Session,
+    Session,
     runtime::{EarlyEnd, ProviderRetry, RunOptions},
 };
 use serde::de::DeserializeOwned;
@@ -32,6 +32,9 @@ use crate::{
 };
 
 mod forward;
+mod prompt;
+
+pub use prompt::PromptPart;
 
 /// What a run is about, once the runtime questions are settled.
 #[derive(Debug, Clone)]
@@ -414,7 +417,8 @@ impl PreparedRun {
         options: TurnOptions,
     ) -> Result<RunReport<S>, RunError> {
         let prompt = self.run.prompt.clone();
-        self.turn(prompt, sink, approver, options).await
+        self.turn(vec![PromptPart::Text(prompt)], sink, approver, options)
+            .await
     }
 
     /// Starts this one-shot run under a lifecycle [`Supervisor`].
@@ -472,8 +476,60 @@ impl PreparedRun {
         sink: S,
         approver: A,
     ) -> Result<RunReport<S>, RunError> {
-        self.turn(prompt.into(), sink, approver, TurnOptions::default())
-            .await
+        self.turn(
+            vec![PromptPart::Text(prompt.into())],
+            sink,
+            approver,
+            TurnOptions::default(),
+        )
+        .await
+    }
+
+    /// Sends a prompt that is not only text — a screenshot, a diagram, a photo
+    /// of a whiteboard — on the same conversation.
+    ///
+    /// Additive to [`send`](Self::send) rather than replacing it, because the
+    /// overwhelming majority of turns are a line of text and should not have to
+    /// build a vector to say so. `send` is this with one
+    /// [`PromptPart::Text`].
+    ///
+    /// The parts reach the model in the order they are given, which is
+    /// load-bearing: "look at this, and tell me what changed" reads differently
+    /// depending on which side of the image the question is on.
+    ///
+    /// Every provider mentra serves carries inline image bytes — the Responses
+    /// transport as a `data:` URL, Anthropic as a base64 source, Gemini as
+    /// `inlineData` — so this is portable in a way an image *URL* is not; see
+    /// [`PromptPart`] for why basis offers only the bytes. A media type a
+    /// particular model does not accept fails the turn, with the provider's own
+    /// reason on the stream.
+    ///
+    /// ```no_run
+    /// use basis::PromptPart;
+    ///
+    /// # async fn example(run: &mut basis::PreparedRun, png: Vec<u8>) -> Result<(), basis::RunError> {
+    /// run.send_parts(
+    ///     vec![
+    ///         PromptPart::text("this is what the page renders as"),
+    ///         PromptPart::image("image/png", png),
+    ///         PromptPart::text("the footer overlaps the last row — why?"),
+    ///     ],
+    ///     basis::NullSink,
+    ///     basis::AllowAll,
+    ///     basis::TurnOptions::default(),
+    /// )
+    /// .await?;
+    /// # Ok(())
+    /// # }
+    /// ```
+    pub async fn send_parts<S: EventSink, A: Approver>(
+        &mut self,
+        parts: Vec<PromptPart>,
+        sink: S,
+        approver: A,
+        options: TurnOptions,
+    ) -> Result<RunReport<S>, RunError> {
+        self.turn(parts, sink, approver, options).await
     }
 
     /// Sends a prompt with explicit run options — a cancellation token, a
@@ -494,7 +550,13 @@ impl PreparedRun {
         approver: A,
         options: TurnOptions,
     ) -> Result<RunReport<S>, RunError> {
-        self.turn(prompt.into(), sink, approver, options).await
+        self.turn(
+            vec![PromptPart::Text(prompt.into())],
+            sink,
+            approver,
+            options,
+        )
+        .await
     }
 
     /// Sends a prompt whose answer must be a value of type `T` rather than
@@ -627,14 +689,14 @@ impl PreparedRun {
     /// One turn, start to finish: header, forwarded events, outcome.
     async fn turn<S: EventSink, A: Approver>(
         &mut self,
-        prompt: String,
+        parts: Vec<PromptPart>,
         sink: S,
         approver: A,
         options: TurnOptions,
     ) -> Result<RunReport<S>, RunError> {
         let options = bounded(options, &self.bounds);
         drawable(&options)?;
-        let turn = self.begin(&prompt, sink, approver)?;
+        let turn = self.begin(&parts, sink, approver)?;
 
         // Kept rather than passed straight in: mentra takes the options by
         // value, and the clone is how the run's own account of why it ended
@@ -644,7 +706,7 @@ impl PreparedRun {
 
         let result = self
             .session
-            .append_turn_with_options(vec![ContentBlock::text(prompt)], run_options)
+            .append_turn_with_options(prompt::into_blocks(parts), run_options)
             .await;
 
         let ended = match &result {
@@ -675,7 +737,8 @@ impl PreparedRun {
     ) -> Result<OutputReport<T, S>, RunError> {
         let options = bounded(options, &self.bounds);
         drawable(&options)?;
-        let turn = self.begin(&prompt, sink, approver)?;
+        let parts = vec![PromptPart::Text(prompt)];
+        let turn = self.begin(&parts, sink, approver)?;
 
         // The same clone the untyped turn keeps, for the same reason: a typed
         // turn is boundable like any other and owes the same account of why it
@@ -686,7 +749,7 @@ impl PreparedRun {
         let result = self
             .session
             .append_turn_to_output::<Value>(
-                vec![ContentBlock::text(prompt)],
+                prompt::into_blocks(parts),
                 run_options,
                 spec.into_terminal_spec(),
             )
@@ -719,11 +782,14 @@ impl PreparedRun {
     /// mentra makes internally, and for the same reason.
     fn begin<S: EventSink, A: Approver>(
         &self,
-        prompt: &str,
+        parts: &[PromptPart],
         sink: S,
         approver: A,
     ) -> Result<Turn<S>, RunError> {
-        if prompt.trim().is_empty() {
+        // Emptiness is asked of the whole prompt rather than of its text: a
+        // client that attached a screenshot and typed no caption sent
+        // something, and refusing that would be refusing the attachment.
+        if prompt::says_nothing(parts) {
             return Err(RunError::EmptyPrompt);
         }
 

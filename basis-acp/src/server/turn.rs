@@ -12,14 +12,17 @@
 
 use agent_client_protocol::{
     Client, ConnectionTo,
-    schema::v1::{ContentBlock, Error, PromptRequest, PromptResponse, SessionId, StopReason},
+    schema::v1::{
+        ContentBlock, Error, ImageContent, PromptRequest, PromptResponse, SessionId, StopReason,
+    },
 };
+use base64::Engine;
 
 use super::notify;
 use crate::{
     approver::AcpApprover, mode::ModedApprover, session::SessionRegistry, update::session_update,
 };
-use basis::{Event, run::EventSink};
+use basis::{Event, PromptPart, run::EventSink};
 
 /// Runs one turn, streaming its events to the client as `session/update`.
 ///
@@ -33,9 +36,9 @@ pub(super) async fn prompt(
         .get(&request.session_id)
         .ok_or_else(|| Error::invalid_params().data("unknown session"))?;
 
-    let text = prompt_text(&request.prompt);
-    if text.trim().is_empty() {
-        return Err(Error::invalid_params().data("prompt has no text content"));
+    let parts = prompt_parts(&request.prompt)?;
+    if parts.is_empty() {
+        return Err(Error::invalid_params().data("prompt has nothing basis can send"));
     }
 
     // The session's mode decides which of these requests the client actually
@@ -53,7 +56,7 @@ pub(super) async fn prompt(
     let options = session.begin_turn();
     let cancelled = options.cancel.clone();
 
-    let report = run.send_with_options(text, sink, approver, options).await;
+    let report = run.send_parts(parts, sink, approver, options).await;
     session.end_turn();
     drop(run);
 
@@ -120,27 +123,94 @@ pub(super) fn stop_reason(bound: basis::Bound) -> StopReason {
     }
 }
 
-/// The text of a prompt, concatenating its text blocks.
+/// A client's prompt, as the pieces basis sends.
+///
+/// Order is preserved, and consecutive text-ish blocks are joined into one
+/// part rather than sent as several. Both halves matter: a client that put a
+/// question after a screenshot means something different from one that put it
+/// before, and a run of text blocks that arrived split is one thing the user
+/// typed, not three.
+///
+/// Blocks basis cannot carry are dropped, not refused. `audio` is the only
+/// one left, and `initialize` never claimed it — a client that sends one
+/// anyway gets the rest of its prompt rather than an error about a capability
+/// it was told basis does not have.
+pub(super) fn prompt_parts(blocks: &[ContentBlock]) -> Result<Vec<PromptPart>, Error> {
+    let mut parts = Vec::new();
+    let mut text: Vec<String> = Vec::new();
+
+    for block in blocks {
+        match block {
+            ContentBlock::Image(image) => {
+                flush(&mut text, &mut parts);
+                parts.push(image_part(image)?);
+            }
+            other => {
+                if let Some(line) = block_text(other) {
+                    text.push(line);
+                }
+            }
+        }
+    }
+    flush(&mut text, &mut parts);
+
+    Ok(parts)
+}
+
+/// Turns whatever text has accumulated into one part, and starts a new run.
+fn flush(text: &mut Vec<String>, parts: &mut Vec<PromptPart>) {
+    if !text.is_empty() {
+        parts.push(PromptPart::text(std::mem::take(text).join("\n")));
+    }
+}
+
+/// One ACP image, as bytes.
+///
+/// ACP carries the payload base64-encoded and mentra takes the bytes, so this
+/// is where the two meet. Undecodable data is refused rather than dropped: a
+/// prompt that quietly lost the screenshot it was about is worse than one that
+/// says why it could not be sent, and `uri` — which ACP allows alongside the
+/// data — is not a fallback basis can use, because Gemini rejects a URL image
+/// outright.
+fn image_part(image: &ImageContent) -> Result<PromptPart, Error> {
+    let data = base64::engine::general_purpose::STANDARD
+        .decode(&image.data)
+        .map_err(|error| {
+            Error::invalid_params().data(format!("image data is not valid base64: {error}"))
+        })?;
+
+    Ok(PromptPart::image(image.mime_type.clone(), data))
+}
+
+/// The text of one block, for the blocks that have some.
 ///
 /// Resource links and embedded resources are named rather than inlined: basis
 /// does not fetch on the client's behalf, and dropping them silently would
 /// lose what the user attached.
+fn block_text(block: &ContentBlock) -> Option<String> {
+    match block {
+        ContentBlock::Text(text) => Some(text.text.clone()),
+        ContentBlock::ResourceLink(link) => Some(format!("[{}]({})", link.name, link.uri)),
+        ContentBlock::Resource(resource) => match &resource.resource {
+            agent_client_protocol::schema::v1::EmbeddedResourceResource::TextResourceContents(
+                contents,
+            ) => Some(contents.text.clone()),
+            _ => None,
+        },
+        _ => None,
+    }
+}
+
+/// The text of a prompt, concatenating its text blocks.
+///
+/// What [`prompt_parts`] produces for a prompt with no images, which is nearly
+/// all of them. Kept as its own function because that equivalence is worth
+/// being able to assert.
+#[cfg(test)]
 pub(super) fn prompt_text(blocks: &[ContentBlock]) -> String {
     blocks
         .iter()
-        .filter_map(|block| {
-            match block {
-            ContentBlock::Text(text) => Some(text.text.clone()),
-            ContentBlock::ResourceLink(link) => Some(format!("[{}]({})", link.name, link.uri)),
-            ContentBlock::Resource(resource) => match &resource.resource {
-                agent_client_protocol::schema::v1::EmbeddedResourceResource::TextResourceContents(
-                    contents,
-                ) => Some(contents.text.clone()),
-                _ => None,
-            },
-            _ => None,
-        }
-        })
+        .filter_map(block_text)
         .collect::<Vec<_>>()
         .join("\n")
 }

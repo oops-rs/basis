@@ -14,21 +14,21 @@ use std::{
 use agent_client_protocol::schema::{
     ProtocolVersion,
     v1::{
-        ContentBlock, ErrorCode, InitializeRequest, ListSessionsRequest, ResourceLink,
-        SessionCapabilities, StopReason, TextContent,
+        ContentBlock, ErrorCode, ImageContent, InitializeRequest, ListSessionsRequest,
+        ResourceLink, SessionCapabilities, StopReason, TextContent,
     },
 };
 
 use super::config::{ServeConfig, SessionSource};
 use super::initialize;
 use super::lifecycle::{list_sessions, session_info, setup_failed};
-use super::turn::{prompt_text, stop_reason};
+use super::turn::{prompt_parts, prompt_text, stop_reason};
 use super::workspaces::{ConfiguredSource, WorkspaceKey};
 use crate::mode::ApprovalMode;
 use basis::{
-    ContextConfig, McpServer, PersistedSession, PreparedRun, RunConfig, RunError, Runtime,
-    ToolsConfig, hooks::HooksConfig, mcp::McpConfig, provider::ProviderError, skills::SkillsConfig,
-    templates::TemplatesConfig,
+    ContextConfig, McpServer, PersistedSession, PreparedRun, PromptPart, RunConfig, RunError,
+    Runtime, ToolsConfig, hooks::HooksConfig, mcp::McpConfig, provider::ProviderError,
+    skills::SkillsConfig, templates::TemplatesConfig,
 };
 use mentra::ModelSelector;
 
@@ -178,6 +178,78 @@ fn a_resource_link_is_named_rather_than_dropped() {
 #[test]
 fn an_empty_prompt_produces_no_text() {
     assert!(prompt_text(&[]).is_empty());
+    assert!(
+        prompt_parts(&[]).expect("nothing to refuse").is_empty(),
+        "and nothing to send"
+    );
+}
+
+#[test]
+fn a_prompt_of_only_text_is_one_part_holding_all_of_it() {
+    // The equivalence that keeps images from changing what every other prompt
+    // looks like: a run of text blocks is one thing the user typed, not three.
+    let blocks = [
+        ContentBlock::Text(TextContent::new("first".to_string())),
+        ContentBlock::Text(TextContent::new("second".to_string())),
+    ];
+
+    assert_eq!(
+        prompt_parts(&blocks).expect("text needs no decoding"),
+        vec![PromptPart::text(prompt_text(&blocks))]
+    );
+}
+
+#[test]
+fn an_image_arrives_as_bytes_in_the_place_the_client_put_it() {
+    // Order is the assertion. "Look at this, and tell me what changed" reads
+    // differently depending on which side of the image the question is on,
+    // and a mapping that hoisted all the text would silently rewrite it.
+    let parts = prompt_parts(&[
+        ContentBlock::Text(TextContent::new("before".to_string())),
+        // "AQID" is base64 for the three bytes below.
+        ContentBlock::Image(ImageContent::new("AQID", "image/png")),
+        ContentBlock::Text(TextContent::new("after".to_string())),
+    ])
+    .expect("valid base64 decodes");
+
+    assert_eq!(
+        parts,
+        vec![
+            PromptPart::text("before"),
+            PromptPart::image("image/png", vec![1, 2, 3]),
+            PromptPart::text("after"),
+        ]
+    );
+}
+
+#[test]
+fn an_image_that_cannot_be_decoded_is_refused_rather_than_dropped() {
+    // A prompt that quietly lost the screenshot it was about would have the
+    // model answer confidently about something it never saw.
+    let error = prompt_parts(&[ContentBlock::Image(ImageContent::new(
+        "not base64 at all!",
+        "image/png",
+    ))])
+    .expect_err("undecodable data is not a prompt");
+
+    assert_eq!(error.code, ErrorCode::InvalidParams);
+}
+
+#[test]
+fn initialize_claims_images_and_not_audio() {
+    // Every provider mentra serves carries inline image bytes. None of them
+    // has a block for audio, so claiming it would be offering a client
+    // something to drop.
+    let prompts = initialize(
+        &InitializeRequest::new(ProtocolVersion::V1),
+        &ServeConfig::default(),
+    )
+    .agent_capabilities
+    .prompt_capabilities;
+
+    assert!(prompts.image);
+    assert!(prompts.embedded_context);
+    assert!(!prompts.audio);
 }
 
 #[test]

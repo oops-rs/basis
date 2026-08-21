@@ -118,8 +118,8 @@ pub use mcp::{
 };
 pub use run::{
     Bound, CancellationToken, CollectingSink, Effort, EventFanIn, EventSink, FnSink, MergedEvents,
-    NullSink, OutputReport, OutputSpec, PreparedRun, RunConfig, RunContext, RunError, RunReport,
-    RunUsage, TaggedEvent, TaggedSink, TurnOptions, resume, run, run_with_approver,
+    NullSink, OutputReport, OutputSpec, PreparedRun, PromptPart, RunConfig, RunContext, RunError,
+    RunReport, RunUsage, TaggedEvent, TaggedSink, TurnOptions, resume, run, run_with_approver,
 };
 pub use runtime::{Runtime, RuntimeBuilder};
 pub use shell::ShellAccess;

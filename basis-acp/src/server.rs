@@ -309,7 +309,12 @@ fn initialize(request: &InitializeRequest, config: &ServeConfig) -> InitializeRe
                 // a client that is not told basis speaks it will never offer an
                 // SSE server, and mentra has a client for that transport.
                 .mcp_capabilities(McpCapabilities::new().sse(true))
-                .prompt_capabilities(PromptCapabilities::new().embedded_context(true))
+                // Images, because every provider mentra serves carries inline
+                // image bytes and basis stopped being the layer that narrowed
+                // a prompt to text. Audio is still not claimed: mentra has no
+                // block for it, so a client offering one would be offering
+                // basis something to drop.
+                .prompt_capabilities(PromptCapabilities::new().embedded_context(true).image(true))
                 .session_capabilities(
                     SessionCapabilities::new()
                         // The same resume as `session/load`, minus the
