@@ -8,7 +8,10 @@
 
 use std::{path::PathBuf, sync::Arc};
 
-use basis::{PreparedRun, RunConfig, RunError, approval::ApprovalGate, run::prepare_with_session};
+use basis::{
+    PreparedRun, RunConfig, RunError, TurnOptions, approval::ApprovalGate,
+    run::prepare_with_session,
+};
 use basis_acp::SessionSource;
 use mentra::{
     RuntimePolicy,
@@ -25,6 +28,10 @@ pub(crate) const MOCK_RUNTIME: &str = "basis-acp-tests";
 pub(crate) struct MockSource {
     mock: Arc<MockRuntime>,
     workspace: PathBuf,
+    /// What every turn on a session from this source may spend. Unset for all
+    /// but the bound tests, which are the only ones with an allowance to run
+    /// out of.
+    bounds: TurnOptions,
 }
 
 impl MockSource {
@@ -32,7 +39,16 @@ impl MockSource {
         Self {
             mock: Arc::clone(mock),
             workspace: workspace.path().to_path_buf(),
+            bounds: TurnOptions::default(),
         }
+    }
+
+    /// Bounds every session this source hands out, which is how a test reaches
+    /// the bound: `session/prompt` builds its own [`TurnOptions`] for the
+    /// cancellation token, and a run's configured bounds are what fill in the
+    /// rest.
+    pub(crate) fn with_bounds(self, bounds: TurnOptions) -> Self {
+        Self { bounds, ..self }
     }
 
     /// The workspace is the temp dir rather than the client's cwd: the
@@ -69,7 +85,10 @@ impl SessionSource for MockSource {
             )
             .expect("session");
 
-        prepare_with_session(session, &self.config(), "openai", "mock-model")
+        Ok(
+            prepare_with_session(session, &self.config(), "openai", "mock-model")?
+                .with_bounds(self.bounds.clone()),
+        )
     }
 
     async fn resume(
@@ -82,7 +101,10 @@ impl SessionSource for MockSource {
         // second process would perform — which is what `session/load` is for.
         let session = self.mock.runtime().resume_session(agent_id)?;
 
-        prepare_with_session(session, &self.config(), "openai", "mock-model")
+        Ok(
+            prepare_with_session(session, &self.config(), "openai", "mock-model")?
+                .with_bounds(self.bounds.clone()),
+        )
     }
 
     fn lists_sessions(&self) -> bool {

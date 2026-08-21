@@ -19,14 +19,19 @@
 //! `Responder` into the spawned task. Awaiting inline deadlocks: the client's
 //! answer arrives on a loop that is still blocked waiting for it.
 //!
-//! `session/load` and `session/resume` spawn for the second half of the same
-//! rule: they take a session's turn lock to read its transcript, and a turn
-//! holds that lock while it waits for the client to answer. Taking it from the
-//! loop would be the same deadlock wearing a different hat.
+//! `session/load`, `session/resume` and `session/set_config_option` spawn for
+//! the second half of the same rule: they take a session's turn lock — to read
+//! its transcript, or to reach the model and the effort that live on the run —
+//! and a turn holds that lock while it waits for the client to answer. Taking
+//! it from the loop would be the same deadlock wearing a different hat.
 //!
 //! `initialize`, `session/new`, `session/set_mode` and `session/close` answer
 //! inline. They touch the disk, the provider's model list, and a sync mutex,
-//! but never the client and never a lock a turn can be holding.
+//! but never the client and never a lock a turn can be holding. `set_mode` is
+//! the near miss worth naming: it looks like `set_config_option` and is not,
+//! because the permission mode is deliberately kept *outside* the turn lock —
+//! ACP says a mode may arrive mid-generation, and a model cannot change
+//! mid-generation anyway.
 //!
 //! # What is not registered, and why
 //!
@@ -65,7 +70,8 @@ use agent_client_protocol::{
         LoadSessionRequest, LoadSessionResponse, McpCapabilities, NewSessionRequest,
         PromptCapabilities, PromptRequest, ResumeSessionRequest, ResumeSessionResponse,
         SessionCapabilities, SessionCloseCapabilities, SessionId, SessionListCapabilities,
-        SessionNotification, SessionResumeCapabilities, SessionUpdate, SetSessionModeRequest,
+        SessionNotification, SessionResumeCapabilities, SessionUpdate,
+        SetSessionConfigOptionRequest, SetSessionModeRequest,
     },
 };
 
@@ -147,7 +153,7 @@ where
                     // Spawn: loading replays the transcript, which needs the
                     // turn lock a running turn may be holding.
                     connection.spawn(async move {
-                        let modes = lifecycle::open_persisted(
+                        let picked = lifecycle::open_persisted(
                             &config,
                             &sessions,
                             &spawned,
@@ -158,9 +164,11 @@ where
                         )
                         .await;
 
-                        responder.respond_with_result(
-                            modes.map(|modes| LoadSessionResponse::new().modes(modes)),
-                        )
+                        responder.respond_with_result(picked.map(|picked| {
+                            LoadSessionResponse::new()
+                                .modes(picked.modes)
+                                .config_options(picked.options)
+                        }))
                     })?;
 
                     Ok(Handled::Yes)
@@ -180,7 +188,7 @@ where
                     let spawned = connection.clone();
 
                     connection.spawn(async move {
-                        let modes = lifecycle::open_persisted(
+                        let picked = lifecycle::open_persisted(
                             &config,
                             &sessions,
                             &spawned,
@@ -191,9 +199,11 @@ where
                         )
                         .await;
 
-                        responder.respond_with_result(
-                            modes.map(|modes| ResumeSessionResponse::new().modes(modes)),
-                        )
+                        responder.respond_with_result(picked.map(|picked| {
+                            ResumeSessionResponse::new()
+                                .modes(picked.modes)
+                                .config_options(picked.options)
+                        }))
                     })?;
 
                     Ok(Handled::Yes)
@@ -212,6 +222,29 @@ where
                         &connection,
                         &request,
                     ))
+                }
+            },
+            agent_client_protocol::on_receive_request!(),
+        )
+        .on_receive_request(
+            {
+                let sessions = sessions.clone();
+                async move |request: SetSessionConfigOptionRequest,
+                            responder,
+                            connection: ConnectionTo<Client>| {
+                    let sessions = sessions.clone();
+                    let spawned = connection.clone();
+
+                    // Spawn: the model and the effort live on the run, behind
+                    // the turn lock. See `lifecycle::set_config_option`.
+                    connection.spawn(async move {
+                        let settings =
+                            lifecycle::set_config_option(&sessions, &spawned, request).await;
+
+                        responder.respond_with_result(settings)
+                    })?;
+
+                    Ok(Handled::Yes)
                 }
             },
             agent_client_protocol::on_receive_request!(),
@@ -276,7 +309,12 @@ fn initialize(request: &InitializeRequest, config: &ServeConfig) -> InitializeRe
                 // a client that is not told basis speaks it will never offer an
                 // SSE server, and mentra has a client for that transport.
                 .mcp_capabilities(McpCapabilities::new().sse(true))
-                .prompt_capabilities(PromptCapabilities::new().embedded_context(true))
+                // Images, because every provider mentra serves carries inline
+                // image bytes and basis stopped being the layer that narrowed
+                // a prompt to text. Audio is still not claimed: mentra has no
+                // block for it, so a client offering one would be offering
+                // basis something to drop.
+                .prompt_capabilities(PromptCapabilities::new().embedded_context(true).image(true))
                 .session_capabilities(
                     SessionCapabilities::new()
                         // The same resume as `session/load`, minus the

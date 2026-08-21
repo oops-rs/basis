@@ -21,8 +21,8 @@ use agent_client_protocol::{
         v1::{
             ContentBlock, InitializeRequest, NewSessionRequest, PromptRequest,
             RequestPermissionOutcome, RequestPermissionRequest, RequestPermissionResponse,
-            SelectedPermissionOutcome, SessionId, SessionNotification, SessionUpdate, StopReason,
-            TextContent,
+            SelectedPermissionOutcome, SessionConfigKind, SessionConfigOption, SessionId,
+            SessionNotification, SessionUpdate, StopReason, TextContent,
         },
     },
 };
@@ -81,11 +81,43 @@ impl Observed {
             .collect()
     }
 
+    /// Every `ConfigOptionUpdate` the agent broadcast, as `(option id, current
+    /// value)` pairs — one vector per update, so a test can tell "the second
+    /// change" from "both changes".
+    pub(crate) fn config_updates(&self) -> Vec<Vec<(String, String)>> {
+        self.updates
+            .iter()
+            .filter_map(|update| match update {
+                SessionUpdate::ConfigOptionUpdate(config) => Some(
+                    config
+                        .config_options
+                        .iter()
+                        .map(|option| (option.id.0.to_string(), current_value(option)))
+                        .collect(),
+                ),
+                _ => None,
+            })
+            .collect()
+    }
+
     pub(crate) fn tool_calls(&self) -> usize {
         self.updates
             .iter()
             .filter(|update| matches!(update, SessionUpdate::ToolCall(_)))
             .count()
+    }
+}
+
+/// The value a session config option is currently on.
+///
+/// Shared by the notification reader above and by the tests reading a
+/// `session/new` or `session/set_config_option` response, so all three agree
+/// on what "current" means.
+pub(crate) fn current_value(option: &SessionConfigOption) -> String {
+    match &option.kind {
+        SessionConfigKind::Select(select) => select.current_value.0.to_string(),
+        SessionConfigKind::Boolean(boolean) => boolean.current_value.to_string(),
+        other => panic!("unhandled option kind: {other:?}"),
     }
 }
 

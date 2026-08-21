@@ -23,9 +23,15 @@ use basis::{
 /// Maps one basis event to an ACP session update.
 ///
 /// `None` where ACP has no place for it — basis's own bookends, and the
-/// housekeeping events (usage, compaction, retries) that ACP models
-/// differently or not at all. Those still reach a JSONL consumer; they are
-/// simply not part of this protocol's vocabulary.
+/// housekeeping events (usage, memory, branching) that ACP models differently
+/// or not at all. Those still reach a JSONL consumer; they are simply not part
+/// of this protocol's vocabulary.
+///
+/// The events with no ACP kind that a person still needs to see — a retry, a
+/// recoverable error, a compaction — become thought chunks. That is a
+/// deliberate widening of what "thought" means: it is the one update kind ACP
+/// gives an agent for saying something about itself rather than to the user,
+/// and the alternative is silence about a pause or a rewritten conversation.
 pub fn session_update(event: &Event) -> Option<SessionUpdate> {
     let update = match event {
         // basis's bookends. `session/prompt` returning is what tells an ACP
@@ -103,15 +109,34 @@ pub fn session_update(event: &Event) -> Option<SessionUpdate> {
             ..
         } => SessionUpdate::AgentThoughtChunk(chunk(&format!("[{status:?}] {task_title}"))),
 
+        // Compaction rewrites the conversation the model can see. ACP has no
+        // update kind for that, so it goes where every other "the operator
+        // should know this" event goes — a thought chunk, the same shape a
+        // retry takes below. Dropping it left a client unable to explain why
+        // the agent stopped remembering something it was told twenty turns
+        // ago, which is the single most confusing thing a long session does.
+        Event::CompactionCompleted {
+            replaced_items,
+            preserved_items,
+            ..
+        } => SessionUpdate::AgentThoughtChunk(chunk(&format!(
+            "context compacted: {replaced_items} earlier items replaced by a summary, \
+             {preserved_items} kept"
+        ))),
+
+        // Its start is not, and the difference is what each one can tell a
+        // client. `CompactionStarted` carries an agent id the notification
+        // already names and nothing else, so the only chunk it could produce
+        // is "compacting…" — a second line, arriving moments before the one
+        // that says what actually happened, in a stream the user is already
+        // watching a turn run in.
+        Event::CompactionStarted { .. } => return None,
+
         // Housekeeping: real, and worth having on the JSONL stream, but not
         // something an ACP client renders. `UsageUpdate` is about the context
         // window rather than per-turn token counts, so basis does not pretend
         // these are the same thing.
-        Event::CompactionStarted { .. }
-        | Event::CompactionCompleted { .. }
-        | Event::MemoryUpdated { .. }
-        | Event::Usage { .. }
-        | Event::Branched { .. } => return None,
+        Event::MemoryUpdated { .. } | Event::Usage { .. } | Event::Branched { .. } => return None,
 
         // Anything the operator should see becomes a thought chunk: a retry or
         // a recoverable error explains a pause the user is already watching.
@@ -437,6 +462,44 @@ mod tests {
             panic!("expected a thought chunk");
         };
         assert!(text_of(&chunk).contains("context is nearly full"));
+    }
+
+    #[test]
+    fn a_completed_compaction_tells_the_client_what_it_lost() {
+        // The conversation the model can see has just been rewritten. A client
+        // that heard nothing has no way to explain why the agent stopped
+        // remembering what it was told earlier in the same session.
+        let update = session_update(&Event::CompactionCompleted {
+            agent_id: "agent-1".to_string(),
+            replaced_items: 42,
+            preserved_items: 8,
+            transcript_len: 50,
+            extracted_facts: 3,
+            summary_preview: "the user is refactoring the parser".to_string(),
+        })
+        .expect("mapped");
+
+        let SessionUpdate::AgentThoughtChunk(chunk) = update else {
+            panic!("expected a thought chunk");
+        };
+        let text = text_of(&chunk);
+        assert!(
+            text.contains("42") && text.contains('8'),
+            "both counts are what makes this more than a rumor: {text}"
+        );
+    }
+
+    #[test]
+    fn a_started_compaction_says_nothing_the_completion_will_not() {
+        // It carries an agent id the notification already names, so the only
+        // chunk it could produce is "compacting…" — noise arriving moments
+        // before the line that says what happened.
+        assert_eq!(
+            session_update(&Event::CompactionStarted {
+                agent_id: "agent-1".to_string()
+            }),
+            None
+        );
     }
 
     #[test]

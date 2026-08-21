@@ -10,7 +10,7 @@
 use std::{path::PathBuf, sync::Arc};
 
 use mentra::{
-    ContentBlock, Session,
+    Session,
     runtime::{EarlyEnd, ProviderRetry, RunOptions},
 };
 use serde::de::DeserializeOwned;
@@ -19,7 +19,7 @@ use tokio::sync::oneshot;
 
 use self::forward::forward_events;
 use super::{
-    Bound, EventSink, OutputReport, OutputSpec, RunError, RunReport, RunUsage, TurnOptions,
+    Bound, Effort, EventSink, OutputReport, OutputSpec, RunError, RunReport, RunUsage, TurnOptions,
     turn::{bounded, drawable},
 };
 use crate::{
@@ -32,6 +32,9 @@ use crate::{
 };
 
 mod forward;
+mod prompt;
+
+pub use prompt::PromptPart;
 
 /// What a run is about, once the runtime questions are settled.
 #[derive(Debug, Clone)]
@@ -98,6 +101,10 @@ pub struct PreparedRun {
     /// for the same reason. mentra splits the count from the waits; basis
     /// keeps them together, because a host set them as one policy.
     retry_budget: usize,
+    /// What [`set_effort`](PreparedRun::set_effort) last asked for, and only
+    /// that — see [`effort`](PreparedRun::effort) for why it is not the same
+    /// question as "what level is the session at".
+    effort: Option<Effort>,
 }
 
 /// Hand-written because mentra's `Session` is not `Debug`, and because the
@@ -128,6 +135,7 @@ impl PreparedRun {
             levels: SideEffectLevels::new(),
             provider_retry: ProviderRetry::default(),
             retry_budget: RunOptions::default().retry_budget,
+            effort: None,
         }
     }
 
@@ -287,6 +295,70 @@ impl PreparedRun {
         &self.run
     }
 
+    /// Switches the model this conversation's later turns run on, keeping the
+    /// provider it was opened with.
+    ///
+    /// Takes effect from the next turn: mentra threads the model into each
+    /// model request as it builds it, so a turn already in flight finishes on
+    /// the model it started with. It also persists — mentra rewrites the agent
+    /// record — so a session resumed in another process comes back on the model
+    /// it was last set to.
+    ///
+    /// `model` is not checked against the provider's catalogue, and
+    /// deliberately: mentra does not check either, listing models is a network
+    /// round trip, and a caller naming a model basis has never heard of is the
+    /// ordinary case for a self-hosted endpoint. An id the provider rejects
+    /// fails on the next turn, where the provider can say why.
+    ///
+    /// The provider is *not* switchable here. mentra resolves a provider from
+    /// the runtime's registry, and a run built on one provider's credential and
+    /// endpoint (ADR-0018) has no second connection to move to.
+    pub fn set_model(&mut self, model: impl Into<String>) -> Result<(), RunError> {
+        let model = model.into();
+
+        self.session
+            .set_model(mentra::ModelInfo::new(model.clone(), &self.run.provider))?;
+        // The context is what `header()` and every report read the model from.
+        // Leaving it stale would have the stream describe a run that is no
+        // longer happening.
+        self.run.model = model;
+
+        Ok(())
+    }
+
+    /// Asks the model to think harder, or less hard, from the next turn on.
+    ///
+    /// `None` clears the request and restores the provider's own default.
+    /// Persisted and deferred exactly as [`set_model`](Self::set_model) is, and
+    /// for the same reason: mentra reads the level live when it builds each
+    /// model request.
+    ///
+    /// A provider or model that does not offer the requested level fails the
+    /// turn rather than quietly running at a lower one — see [`Effort`].
+    pub fn set_effort(&mut self, effort: Option<Effort>) -> Result<(), RunError> {
+        self.session
+            .set_reasoning(effort.map(|effort| mentra::provider::ReasoningOptions {
+                effort: Some(effort.into()),
+                summary: None,
+            }))?;
+        self.effort = effort;
+
+        Ok(())
+    }
+
+    /// The effort [`set_effort`](Self::set_effort) last asked this run for.
+    ///
+    /// `None` means nothing has asked, *not* that the session is at the
+    /// provider's default: a run whose [`RunSpec`](crate::RunSpec) named an
+    /// effort at mint had it applied to the session before this run existed,
+    /// and mentra offers no way to read the level back off a session. So this
+    /// answers "what has this run been set to", which is what a picker showing
+    /// the user their own last choice needs, and not "what will the next
+    /// request carry".
+    pub const fn effort(&self) -> Option<Effort> {
+        self.effort
+    }
+
     /// Sends the configured prompt and streams the turn into `sink`.
     ///
     /// Consequential calls are approved by [`AllowAll`], the default for a run
@@ -345,7 +417,8 @@ impl PreparedRun {
         options: TurnOptions,
     ) -> Result<RunReport<S>, RunError> {
         let prompt = self.run.prompt.clone();
-        self.turn(prompt, sink, approver, options).await
+        self.turn(vec![PromptPart::Text(prompt)], sink, approver, options)
+            .await
     }
 
     /// Starts this one-shot run under a lifecycle [`Supervisor`].
@@ -403,8 +476,60 @@ impl PreparedRun {
         sink: S,
         approver: A,
     ) -> Result<RunReport<S>, RunError> {
-        self.turn(prompt.into(), sink, approver, TurnOptions::default())
-            .await
+        self.turn(
+            vec![PromptPart::Text(prompt.into())],
+            sink,
+            approver,
+            TurnOptions::default(),
+        )
+        .await
+    }
+
+    /// Sends a prompt that is not only text — a screenshot, a diagram, a photo
+    /// of a whiteboard — on the same conversation.
+    ///
+    /// Additive to [`send`](Self::send) rather than replacing it, because the
+    /// overwhelming majority of turns are a line of text and should not have to
+    /// build a vector to say so. `send` is this with one
+    /// [`PromptPart::Text`].
+    ///
+    /// The parts reach the model in the order they are given, which is
+    /// load-bearing: "look at this, and tell me what changed" reads differently
+    /// depending on which side of the image the question is on.
+    ///
+    /// Every provider mentra serves carries inline image bytes — the Responses
+    /// transport as a `data:` URL, Anthropic as a base64 source, Gemini as
+    /// `inlineData` — so this is portable in a way an image *URL* is not; see
+    /// [`PromptPart`] for why basis offers only the bytes. A media type a
+    /// particular model does not accept fails the turn, with the provider's own
+    /// reason on the stream.
+    ///
+    /// ```no_run
+    /// use basis::PromptPart;
+    ///
+    /// # async fn example(run: &mut basis::PreparedRun, png: Vec<u8>) -> Result<(), basis::RunError> {
+    /// run.send_parts(
+    ///     vec![
+    ///         PromptPart::text("this is what the page renders as"),
+    ///         PromptPart::image("image/png", png),
+    ///         PromptPart::text("the footer overlaps the last row — why?"),
+    ///     ],
+    ///     basis::NullSink,
+    ///     basis::AllowAll,
+    ///     basis::TurnOptions::default(),
+    /// )
+    /// .await?;
+    /// # Ok(())
+    /// # }
+    /// ```
+    pub async fn send_parts<S: EventSink, A: Approver>(
+        &mut self,
+        parts: Vec<PromptPart>,
+        sink: S,
+        approver: A,
+        options: TurnOptions,
+    ) -> Result<RunReport<S>, RunError> {
+        self.turn(parts, sink, approver, options).await
     }
 
     /// Sends a prompt with explicit run options — a cancellation token, a
@@ -425,7 +550,13 @@ impl PreparedRun {
         approver: A,
         options: TurnOptions,
     ) -> Result<RunReport<S>, RunError> {
-        self.turn(prompt.into(), sink, approver, options).await
+        self.turn(
+            vec![PromptPart::Text(prompt.into())],
+            sink,
+            approver,
+            options,
+        )
+        .await
     }
 
     /// Sends a prompt whose answer must be a value of type `T` rather than
@@ -558,14 +689,14 @@ impl PreparedRun {
     /// One turn, start to finish: header, forwarded events, outcome.
     async fn turn<S: EventSink, A: Approver>(
         &mut self,
-        prompt: String,
+        parts: Vec<PromptPart>,
         sink: S,
         approver: A,
         options: TurnOptions,
     ) -> Result<RunReport<S>, RunError> {
         let options = bounded(options, &self.bounds);
         drawable(&options)?;
-        let turn = self.begin(&prompt, sink, approver)?;
+        let turn = self.begin(&parts, sink, approver)?;
 
         // Kept rather than passed straight in: mentra takes the options by
         // value, and the clone is how the run's own account of why it ended
@@ -575,7 +706,7 @@ impl PreparedRun {
 
         let result = self
             .session
-            .append_turn_with_options(vec![ContentBlock::text(prompt)], run_options)
+            .append_turn_with_options(prompt::into_blocks(parts), run_options)
             .await;
 
         let ended = match &result {
@@ -606,7 +737,8 @@ impl PreparedRun {
     ) -> Result<OutputReport<T, S>, RunError> {
         let options = bounded(options, &self.bounds);
         drawable(&options)?;
-        let turn = self.begin(&prompt, sink, approver)?;
+        let parts = vec![PromptPart::Text(prompt)];
+        let turn = self.begin(&parts, sink, approver)?;
 
         // The same clone the untyped turn keeps, for the same reason: a typed
         // turn is boundable like any other and owes the same account of why it
@@ -617,7 +749,7 @@ impl PreparedRun {
         let result = self
             .session
             .append_turn_to_output::<Value>(
-                vec![ContentBlock::text(prompt)],
+                prompt::into_blocks(parts),
                 run_options,
                 spec.into_terminal_spec(),
             )
@@ -650,11 +782,14 @@ impl PreparedRun {
     /// mentra makes internally, and for the same reason.
     fn begin<S: EventSink, A: Approver>(
         &self,
-        prompt: &str,
+        parts: &[PromptPart],
         sink: S,
         approver: A,
     ) -> Result<Turn<S>, RunError> {
-        if prompt.trim().is_empty() {
+        // Emptiness is asked of the whole prompt rather than of its text: a
+        // client that attached a screenshot and typed no caption sent
+        // something, and refusing that would be refusing the attachment.
+        if prompt::says_nothing(parts) {
             return Err(RunError::EmptyPrompt);
         }
 
@@ -895,280 +1030,4 @@ fn header_for(session_id: &str, run: &RunContext) -> Event {
 }
 
 #[cfg(test)]
-mod tests {
-    use super::*;
-    use crate::context::{ContextDocument, ContextScope};
-
-    #[test]
-    fn the_header_lists_context_files_weakest_first() {
-        let context = WorkspaceContext::from_documents(vec![
-            ContextDocument {
-                path: PathBuf::from("/AGENTS.md"),
-                scope: ContextScope::Ancestor { depth: 2 },
-                content: "outer".to_string(),
-            },
-            ContextDocument {
-                path: PathBuf::from("/repo/AGENTS.md"),
-                scope: ContextScope::Workspace,
-                content: "inner".to_string(),
-            },
-        ]);
-
-        let files: Vec<ContextFile> = context
-            .documents()
-            .iter()
-            .map(|document| ContextFile {
-                path: document.path.clone(),
-                scope: document.scope.label(),
-            })
-            .collect();
-
-        assert_eq!(files[0].scope, "ancestor:2");
-        assert_eq!(files[1].scope, "workspace");
-    }
-
-    #[test]
-    fn a_tripped_bound_is_told_apart_from_a_failed_run() {
-        use mentra::error::RuntimeError;
-
-        assert_eq!(
-            tripped_bound(&RuntimeError::DeadlineExceeded),
-            Some(Bound::Deadline)
-        );
-        assert_eq!(
-            tripped_bound(&RuntimeError::ToolBudgetExceeded(40)),
-            Some(Bound::ToolBudget)
-        );
-
-        // A run the provider refused is a failure, and a shell script that
-        // retried it as if it had merely run out of time would retry forever.
-        assert_eq!(tripped_bound(&RuntimeError::EmptyAssistantResponse), None);
-        assert_eq!(tripped_bound(&RuntimeError::Cancelled), None);
-    }
-
-    /// The options a run that ended on `end` hands back to whoever kept a clone.
-    fn recorded(end: EarlyEnd) -> RunOptions {
-        let slot = std::sync::OnceLock::new();
-        let _ = slot.set(end);
-        RunOptions {
-            early_end: std::sync::Arc::new(slot),
-            ..RunOptions::default()
-        }
-    }
-
-    #[test]
-    fn a_run_that_answered_still_names_the_budget_that_ended_it() {
-        // The case that makes reading mentra's record load-bearing rather than
-        // decorative, and the reason both arms consult it: the turn returns an
-        // ordinary `Ok` carrying ordinary prose, so nothing in the result tells
-        // "the model was done" from "the allowance ran out" except what the
-        // runner wrote down at the boundary it decided at.
-        //
-        // Checked here rather than end to end because basis cannot reach the
-        // shape from outside: mentra only re-checks the budget after a
-        // committed final message when a steer or a follow-up is queued behind
-        // it, and basis exposes neither.
-        assert_eq!(
-            ended_on(&recorded(EarlyEnd::TokenBudget), None),
-            Some(Bound::TokenBudget)
-        );
-    }
-
-    #[test]
-    fn a_budget_that_ends_a_run_owing_an_answer_is_not_read_as_a_provider_failure() {
-        // The shape a driven run reaches — `tests/token_budget.rs` — where the
-        // failure is real but the reason for it is the allowance. Classifying
-        // by error alone would exit 1 here, sending someone after a broken
-        // provider when the fix is a larger budget.
-        use mentra::error::RuntimeError;
-
-        assert_eq!(
-            ended_on(
-                &recorded(EarlyEnd::TokenBudget),
-                Some(&RuntimeError::EmptyAssistantResponse)
-            ),
-            Some(Bound::TokenBudget)
-        );
-    }
-
-    #[test]
-    fn a_graceful_stop_is_not_reported_as_a_bound() {
-        // A caller's own stop button is an instruction, not an allowance the
-        // run outgrew. basis has no `Bound` for it, and borrowing one would give
-        // a client's stop the exit code of a run that ran out of budget.
-        use mentra::error::RuntimeError;
-
-        assert_eq!(ended_on(&recorded(EarlyEnd::StopRequested), None), None);
-        assert_eq!(
-            ended_on(
-                &recorded(EarlyEnd::StopRequested),
-                Some(&RuntimeError::EmptyAssistantResponse)
-            ),
-            None
-        );
-    }
-
-    #[test]
-    fn a_run_that_recorded_nothing_is_classified_by_its_failure_alone() {
-        use mentra::error::RuntimeError;
-
-        assert_eq!(ended_on(&RunOptions::default(), None), None);
-        assert_eq!(
-            ended_on(
-                &RunOptions::default(),
-                Some(&RuntimeError::DeadlineExceeded)
-            ),
-            Some(Bound::Deadline)
-        );
-    }
-
-    /// A leaf with no further source — what most of `RuntimeError`'s own
-    /// variants look like.
-    #[derive(Debug)]
-    struct Leaf(&'static str);
-
-    impl std::fmt::Display for Leaf {
-        fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-            f.write_str(self.0)
-        }
-    }
-
-    impl std::error::Error for Leaf {}
-
-    /// A wrapper whose `Display` does not repeat its source's text — the
-    /// shape `reqwest::Error` takes, and the one `chain_message` exists for.
-    #[derive(Debug)]
-    struct Opaque {
-        own_text: &'static str,
-        source: Leaf,
-    }
-
-    impl std::fmt::Display for Opaque {
-        fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-            f.write_str(self.own_text)
-        }
-    }
-
-    impl std::error::Error for Opaque {
-        fn source(&self) -> Option<&(dyn std::error::Error + 'static)> {
-            Some(&self.source)
-        }
-    }
-
-    /// A wrapper whose `Display` interpolates its source's text directly —
-    /// the shape every `RuntimeError` variant takes via thiserror's `{0}`.
-    #[derive(Debug)]
-    struct Interpolated {
-        source: Leaf,
-    }
-
-    impl std::fmt::Display for Interpolated {
-        fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-            write!(f, "wrapper failed: {}", self.source)
-        }
-    }
-
-    impl std::error::Error for Interpolated {
-        fn source(&self) -> Option<&(dyn std::error::Error + 'static)> {
-            Some(&self.source)
-        }
-    }
-
-    #[test]
-    fn a_leaf_error_is_left_exactly_as_its_own_display_wrote_it() {
-        let error = Leaf("no providers are registered");
-
-        assert_eq!(chain_message(&error), "no providers are registered");
-    }
-
-    #[test]
-    fn a_source_a_wrappers_display_never_mentions_is_appended() {
-        // `reqwest::Error`'s own case: "error sending request for url (...)"
-        // says nothing about *why* the request failed, because it never
-        // describes its `source()`. Without walking the chain, that reason —
-        // here, "connection refused" — is gone the moment `.to_string()` is
-        // called, on the report and on mentra's own stream event alike.
-        let error = Opaque {
-            own_text: "error sending request for url (http://127.0.0.1:1/)",
-            source: Leaf("connection refused (os error 61)"),
-        };
-
-        assert_eq!(
-            chain_message(&error),
-            "error sending request for url (http://127.0.0.1:1/): connection refused (os error 61)"
-        );
-    }
-
-    #[test]
-    fn a_source_a_wrappers_display_already_quotes_is_not_repeated() {
-        // Exactly what every `RuntimeError` variant does one hop up, via
-        // thiserror's `{0}`: the source's text is already in the parent's
-        // `Display`, so walking `source()` too would say it twice.
-        let error = Interpolated {
-            source: Leaf("disk quota exceeded"),
-        };
-
-        assert_eq!(
-            chain_message(&error),
-            "wrapper failed: disk quota exceeded",
-            "the source's text must appear once, not twice"
-        );
-    }
-
-    #[test]
-    fn a_chain_three_levels_deep_still_reaches_its_root_cause() {
-        struct Middle {
-            source: Opaque,
-        }
-
-        impl std::fmt::Debug for Middle {
-            fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-                f.debug_struct("Middle").finish()
-            }
-        }
-
-        impl std::fmt::Display for Middle {
-            fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-                write!(f, "failed to send provider request: {}", self.source)
-            }
-        }
-
-        impl std::error::Error for Middle {
-            fn source(&self) -> Option<&(dyn std::error::Error + 'static)> {
-                Some(&self.source)
-            }
-        }
-
-        // `RuntimeError::FailedToSendRequest` wrapping `ProviderError::Transport`
-        // wrapping `reqwest::Error`: two levels interpolate cleanly into
-        // `Display`, and the third — the one that doesn't — is where the
-        // actual cause was hiding.
-        let error = Middle {
-            source: Opaque {
-                own_text: "provider transport error: error sending request for url (http://127.0.0.1:1/)",
-                source: Leaf("connection refused (os error 61)"),
-            },
-        };
-
-        assert_eq!(
-            chain_message(&error),
-            "failed to send provider request: provider transport error: error sending request for url (http://127.0.0.1:1/): connection refused (os error 61)"
-        );
-    }
-
-    #[test]
-    fn a_real_runtime_errors_already_complete_message_is_unchanged() {
-        // serde_json's `Display` is already the full story — message, line,
-        // and column — and its `source()` is written to skip back to
-        // whatever `Display` already showed rather than repeat it, the same
-        // shape as most of `RuntimeError`'s own variants. The chain walk must
-        // add nothing here, on a real mentra error rather than a synthetic one.
-        use mentra::error::RuntimeError;
-
-        let parse_error =
-            serde_json::from_str::<Value>("{").expect_err("truncated JSON does not parse");
-        let error = RuntimeError::FailedToSerializeTasks(parse_error);
-
-        assert_eq!(chain_message(&error), error.to_string());
-    }
-}
+mod tests;
