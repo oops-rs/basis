@@ -15,6 +15,15 @@
 //! after that dispatches on the typed mode — which is why the sugar costs no
 //! type confusion between the approver, the rule store and the audit trail.
 //!
+//! A command may also say *where*: `!@<target> <command>` runs it on an
+//! executor the host registered by that name
+//! ([`RuntimeBuilder::with_command_target`](crate::RuntimeBuilder::with_command_target),
+//! ADR-0021). One more fact on the same act rather than a second tool, because
+//! a second tool would be a second name at the gate and a second rule
+//! namespace — the two doors ADR-0016 closed, rebuilt by hand. The prefix is
+//! read by the same parser, in the same pass, and the target it leaves behind
+//! is a typed field like the mode beside it.
+//!
 //! # What the approver sees
 //!
 //! [`ToolExecutor::authorization_preview`] is overridden rather than left at
@@ -23,8 +32,8 @@
 //! [`ToolSideEffectLevel::LocalState`]; both are consequential, so
 //! [`is_consequential`](crate::approval::is_consequential) never waves either
 //! through under the reads-are-never-asked rule. The preview's
-//! `structured_input` is the parsed `{mode, body, cwd}` — the thing an approver
-//! renders, and the thing mentra globs a remembered rule's pattern against
+//! `structured_input` is the parsed `{mode, body, cwd, target}` — the thing an
+//! approver renders, and the thing mentra globs a remembered rule's pattern against
 //! (`RuleStore::matching_rule`). A `RuleKey { tool_name: "spawn", pattern }` is
 //! therefore a command allowlist expressible as data.
 //!
@@ -57,7 +66,7 @@ use mentra::tool::{
 };
 use serde_json::{Value, json};
 
-use parse::{INPUT_FIELD, Mode, Spawn, parse};
+use parse::{INPUT_FIELD, LOCAL_TARGET, Mode, Spawn, parse};
 
 // The runtime's hook dispatcher must know whether a `spawn` call is a command
 // before denying it for a shell-off workspace, and the module docs above make
@@ -195,13 +204,23 @@ fn preview(
     descriptor: &RuntimeToolDescriptor,
     raw_input: &Value,
 ) -> ToolAuthorizationPreview {
-    // The wire contract of ADR-0016: `{mode, body, cwd}`, and never the string
-    // the model wrote. What an approver renders, what a pattern rule globs
-    // against, and what the audit trail keeps.
+    // The wire contract of ADR-0016, widened by ADR-0021 to
+    // `{mode, body, cwd, target}`, and still never the string the model wrote.
+    // What an approver renders, what a pattern rule globs against, and what the
+    // audit trail keeps.
+    //
+    // `target` is additive in the strict sense: the three older keys keep their
+    // spellings and their values, and serde_json serializes a map in key order,
+    // so `"target"` sorts after all three and a rule an operator already wrote
+    // still matches exactly what it matched before. It reads `"local"` rather
+    // than `null` when no target was named, because *here* is a value an
+    // operator will want to write a rule about and a glob against a JSON null
+    // is a spelling nobody notices missing.
     let structured_input = json!({
         "mode": spawn.mode().as_str(),
         "body": spawn.body(),
         "cwd": cwd,
+        "target": spawn.target().unwrap_or(LOCAL_TARGET),
     });
 
     ToolAuthorizationPreview {
