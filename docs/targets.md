@@ -237,10 +237,13 @@ trip:
 **"body":"xcodebuild *","target":"mac"**
 ```
 
-Two stars, not one. The serialized object carries `cwd`, which is a path, and
-`**` is the spelling that is safe whether or not the matcher reading it treats
-`/` as significant — the same caution the rest of basis's rule documentation
-gives.
+`**` and `*` mean the same thing here: mentra 0.18.2 matches these patterns as
+data, so a wildcard runs over `/` like any other character and JSON's
+punctuation is literal. basis writes `**` out of habit and for continuity with
+rules stored under the older spelling. On mentra 0.18.1 and earlier this did
+not work at all — patterns were matched with a path globber, so with an
+absolute `cwd` no pattern on `target` or `mode` could ever match, silently.
+That is why basis requires 0.18.2.
 
 **And a bare rule now covers every target at once.** An `AllowForSession`
 answer is stored with no pattern, so it covers delegations, local commands and

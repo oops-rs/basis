@@ -68,13 +68,11 @@ host supplies the executor; basis claims nothing about what is on the far side.*
    it matched before. What is new is that a rule can now say
    `**"target":"mac"**` — the routing decision is data an allowlist can be
    written against, on the machinery ADR-0016 already tiered, and the approver
-   renders it and the audit trail keeps it besides. Write these patterns with
-   `**` rather than `*`, which is this repository's standing advice for the
-   reason it always was: the serialized object carries `cwd`, which is a path,
-   and `**` is the spelling that is safe whether or not the matcher treats `/`
-   as significant. `"local"` rather than `null` or an absent key, because
-   *local* is a value an operator will want to write a rule about, and a glob
-   against a JSON `null` is a spelling that invites a mismatch nobody sees.
+   renders it and the audit trail keeps it besides. That this *works* is newer
+   than it looks, and the Consequences say why. `"local"` rather than `null` or
+   an absent key, because *local* is a value an operator will want to write a
+   rule about, and a match against a JSON `null` is a spelling that invites a
+   mismatch nobody sees.
 
 3. **Targets are registered on the runtime, by name.**
    `RuntimeBuilder::with_command_target(name, executor)`. Runtime scope is
@@ -158,6 +156,23 @@ host supplies the executor; basis claims nothing about what is on the far side.*
   matches the same command on the Mac. The mitigation is that the target is in
   the same serialized object and can be pinned in the same pattern; the cost is
   that it has to be, deliberately.
+- **Pinning it was impossible until mentra 0.18.2, and nobody knew.** Rule
+  patterns were matched against the serialized input with `glob-match`, a
+  *path* globber whose `*` stops at `/`. Keys serialize in order, so the moment
+  a preview carried an absolute path — and `cwd` always is one — every key
+  after it became unreachable: `**"target":"mac"**` matched nothing, and so had
+  `**"mode":"command"**` ever since ADR-0016 made mode part of the contract.
+  It failed silently, which is the worst shape this could take: the rule
+  stored, the store reported success, and the operator believed they had
+  bypassed a reviewer that was in fact answering every call. mentra 0.18.2
+  matches these patterns **as data** — no separator, `*` and `**` alike match
+  any run of characters, JSON's punctuation is literal — and keeps the path
+  globber for the file tools, where `/` genuinely is a separator. Found while
+  building this ADR's acceptance test and fixed upstream rather than worked
+  around, which is [ADR-0005](0005-mentra-coevolution-discipline.md) doing its
+  job; it is the second reason basis now requires 0.18.2 rather than 0.18.1.
+  `**` and `*` are equivalent under the new matcher, so basis keeps writing
+  `**` and every rule persisted under the old spelling still answers.
 - **The docs churn is real and load-bearing.** The `!` convention is documented
   in the README, in `ARCHITECTURE.md`'s hooks migration section, and in the
   tool's own description, and a hook that wants to distinguish commands by

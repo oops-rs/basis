@@ -966,10 +966,11 @@ async fn a_pattern_rule_can_allow_a_command_on_one_target_and_not_another() {
     // destination can draw it — deliberately, in the pattern, rather than for
     // free.
     //
-    // Written with `**` rather than `*`, which is this repository's standing
-    // advice for a pattern globbed against this input: the serialized object
-    // carries `cwd`, which is a path, and `**` is the spelling that is safe
-    // whether or not the matcher reading it treats `/` as significant.
+    // Written `**` for continuity with rules stored under mentra's older
+    // spelling; under 0.18.2 these patterns are matched as *data*, where `*`
+    // and `**` mean the same thing and JSON's punctuation is literal. Before
+    // 0.18.2 a path globber read them and none of this worked at all — see
+    // ADR-0021's consequences.
     let workspace = tempfile::tempdir().expect("tempdir");
     let executor = RecordingExecutor::default();
 
@@ -977,9 +978,10 @@ async fn a_pattern_rule_can_allow_a_command_on_one_target_and_not_another() {
         workspace.path(),
         Script::new(vec![
             Turn::calling("call-0", "!@mac xcodebuild -list"),
-            Turn::calling("call-1", "!xcodebuild -list"),
+            Turn::calling("call-1", "!@builder xcodebuild -list"),
+            Turn::calling("call-2", "!xcodebuild -list"),
         ])
-        .routing(&["mac"], &executor)
+        .routing(&["mac", "builder"], &executor)
         .remembering(RememberedRule {
             key: RuleKey {
                 tool_name: SPAWN.to_string(),
@@ -995,23 +997,30 @@ async fn a_pattern_rule_can_allow_a_command_on_one_target_and_not_another() {
     )
     .await;
 
+    // One question reached the reviewer: the `builder` call. The `mac` call was
+    // answered by the pattern above it, and the untargeted one by the bare
+    // `DenyForSession` the reviewer's own refusal left behind — so a pattern
+    // naming `mac` covered neither another target nor here.
     assert_eq!(
         run.asked.len(),
         1,
-        "only the untargeted call should have reached the reviewer: {:?}",
+        "{:?}",
         run.asked
             .iter()
             .map(|request| request.input.clone())
             .collect::<Vec<_>>()
     );
-    assert_eq!(run.asked[0].input["target"], "local");
+    assert_eq!(run.asked[0].input["target"], "builder");
 
     let results = run.results();
     assert_eq!(results[0], (false, "ran on mac".to_string()));
-    assert!(
-        results[1].0 && results[1].1.contains(REFUSAL),
-        "{:?}",
-        results[1]
+    for refused in &results[1..] {
+        assert!(refused.0 && refused.1.contains(REFUSAL), "{refused:?}");
+    }
+    assert_eq!(
+        executor.targets(),
+        vec![Some("mac".to_string())],
+        "only the allowlisted destination may have been reached"
     );
 }
 
@@ -1022,6 +1031,12 @@ async fn a_target_pattern_answers_before_the_approver_is_reached() {
     // model round trip and the reviewer never sees the calls it covers. The
     // sibling above shows the same rule declining to cover a different
     // destination; this one shows it never reaching a person at all.
+    //
+    // Worth one line about why the short spelling is the spelling: on mentra
+    // 0.18.1 and earlier this pattern matched *nothing*, because rules were
+    // matched with a path globber and `cwd` — an absolute path — serializes
+    // ahead of `target`. 0.18.2 matches them as data, which is why basis
+    // requires it (ADR-0021).
     let workspace = tempfile::tempdir().expect("tempdir");
     let executor = RecordingExecutor::default();
 
