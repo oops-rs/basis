@@ -22,7 +22,7 @@ use agent_client_protocol::schema::{
 use super::config::{ServeConfig, SessionSource};
 use super::initialize;
 use super::lifecycle::{list_sessions, session_info, setup_failed};
-use super::turn::{prompt_parts, prompt_text, stop_reason};
+use super::turn::{prompt_parts, prompt_text, stop_reason, usage_update};
 use super::workspaces::{ConfiguredSource, WorkspaceKey};
 use crate::mode::ApprovalMode;
 use basis::{
@@ -284,6 +284,22 @@ fn every_bound_names_a_stop_reason_a_client_can_act_on() {
             "{bound:?} ended the turn early, and `EndTurn` says it ended successfully"
         );
     }
+}
+
+#[test]
+fn a_known_window_becomes_a_usage_update() {
+    let update = usage_update(Some(200_000), 53_000).expect("the window is known");
+
+    assert_eq!(update.used, 53_000);
+    assert_eq!(update.size, 200_000);
+}
+
+#[test]
+fn an_unknown_window_sends_nothing() {
+    // The one case where basis says less rather than guess: ACP's
+    // `UsageUpdate` has no way to mark `size` as an estimate, so a client
+    // reading one would treat a guessed ceiling as a reported fact.
+    assert_eq!(usage_update(None, 53_000), None);
 }
 
 #[test]
