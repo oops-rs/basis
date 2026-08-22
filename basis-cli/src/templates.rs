@@ -12,33 +12,24 @@
 //! the rendered text is what the task records, so `basis watch` and
 //! `basis list` show what was actually asked rather than the shorthand for it.
 //!
-//! # The rule, and why it is total
+//! # The rule
 //!
-//! The first token, and nothing else. A template's name never contains `/` —
-//! nesting is namespacing and joins with `:`
-//! ([`NAMESPACE_SEPARATOR`](basis::templates::NAMESPACE_SEPARATOR)) — so a
-//! first token with a second slash is a path, not a command:
-//! `basis "/usr/bin/x crashes on startup"` is a bug report and passes through
-//! untouched.
+//! [`basis::templates::invocation`] reads the first token and nothing else,
+//! and it lives there rather than here because `basis-acp` reads the same
+//! convention for its own built-ins — a rule two crates spelled separately is
+//! two rules.
 //!
-//! A name that matches the shape and names nothing is refused rather than
-//! sent. A typo'd `/comit` handed to the model as prose is a run that answers
-//! the wrong question and bills for it; and the escape is one character
-//! (`basis spawn -` reads a literal prompt from stdin), which is cheaper than
-//! guessing.
+//! What this file adds is the shell's answer to a name that fits the shape and
+//! matches nothing: refuse, rather than send. A typo'd `/comit` handed to the
+//! model as prose is a run that answers the wrong question and bills for it;
+//! and the escape is one character (`basis spawn -` reads a literal prompt
+//! from stdin), which is cheaper than guessing.
 
 use std::path::Path;
 
-use basis::{Template, TemplatesConfig};
+use basis::{Template, TemplatesConfig, templates::invocation};
 
 use crate::{cli::RunArgs, local::ClientError};
-
-/// The characters a template name can hold: what a filename below the
-/// templates root can hold, plus the `:` that joins its directories.
-/// Deliberately excludes `/`, which is what makes a path pass through.
-fn is_name_char(character: char) -> bool {
-    character.is_ascii_alphanumeric() || matches!(character, '_' | ':' | '.' | '-')
-}
 
 /// The run this invocation asked for, with any `/name` resolved to the prompt
 /// it stands for.
@@ -73,20 +64,6 @@ pub(crate) fn resolve(prompt: &str, workspace: &Path) -> Result<Option<String>, 
         Some(template) => Ok(Some(template.render(arguments))),
         None => Err(unknown(name, &templates)),
     }
-}
-
-/// The template name and arguments a prompt opens with, if it opens with one.
-///
-/// Only the first token is examined, for the reason [`shorthand`] examines
-/// only the first argument: anything that scanned further would have to guess
-/// which later slashes were commands, and prose is full of slashes.
-///
-/// [`shorthand`]: crate::shorthand
-fn invocation(prompt: &str) -> Option<(&str, &str)> {
-    let rest = prompt.strip_prefix('/')?;
-    let end = rest.find(char::is_whitespace).unwrap_or(rest.len());
-    let (name, arguments) = rest.split_at(end);
-    (!name.is_empty() && name.chars().all(is_name_char)).then_some((name, arguments.trim()))
 }
 
 /// A name that fits the shape and names nothing.
@@ -220,23 +197,6 @@ mod tests {
                 "{prose} is prose"
             );
         }
-    }
-
-    #[test]
-    fn only_the_first_token_is_read_as_a_name() {
-        assert_eq!(
-            invocation("/fix auth login.rs"),
-            Some(("fix", "auth login.rs"))
-        );
-        assert_eq!(invocation("/fix"), Some(("fix", "")));
-        assert_eq!(
-            invocation("/review\nthe diff below"),
-            Some(("review", "the diff below")),
-            "a multi-line prompt still opens with one token"
-        );
-        assert_eq!(invocation("fix /review"), None);
-        assert_eq!(invocation("/usr/bin/x"), None);
-        assert_eq!(invocation("/"), None);
     }
 
     /// `-` means the prompt is on stdin, and stdin is the documented way to

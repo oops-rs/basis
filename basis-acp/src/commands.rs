@@ -1,21 +1,68 @@
-//! Templates as ACP commands.
+//! The commands a client offers: basis's own, and the workspace's templates.
 //!
 //! ACP already has the slot: a client that receives `AvailableCommandsUpdate`
 //! offers the names in its own UI, and sends back whatever the person typed
-//! after one. Nothing here decides *when* to send that update — the ACP server
-//! owns the session lifecycle — so this module is only the mapping, kept beside
-//! the templates it maps rather than inside the protocol layer, for the same
-//! reason `Event` exists: one shape, translated at each edge.
+//! after one — as text, on the next `session/prompt`, since ACP has no
+//! separate "invoke a command" method. So this module is both halves of one
+//! convention: which names are advertised, and which of them basis answers
+//! itself rather than sending on to the model.
+//!
+//! Nothing here decides *when* to send the update — the ACP server owns the
+//! session lifecycle — and nothing here runs anything;
+//! [`turn`](crate::server::turn) is where a recognized built-in is acted on.
+//!
+//! # Built-ins, and what happens when a workspace picks the same name
+//!
+//! basis answers exactly one command itself today, `/compact`, and it is
+//! always offered: it acts on the session rather than on the workspace, so
+//! there is no repository in which it does not apply.
+//!
+//! **A built-in wins, and the template of that name is not advertised.** The
+//! rule has to point one way or the other — two commands with one name in the
+//! list is a coin flip the client makes — and this is the direction whose loss
+//! is recoverable. A template author whose `compact.md` is shadowed can rename
+//! the file; a person whose only way to compact a conversation over ACP has
+//! been silently replaced by somebody else's prompt cannot do anything at all.
+//! `docs/conventions.md` states it where the template convention is stated.
 
 use agent_client_protocol::schema::v1::{
     AvailableCommand, AvailableCommandInput, UnstructuredCommandInput,
 };
 
-use basis::Template;
+use basis::{Template, templates::invocation};
 
-/// Maps discovered templates to the commands an ACP client can offer.
+/// The name of the one command basis answers itself.
+pub(crate) const COMPACT: &str = "compact";
+
+/// What a prompt is asking basis to do rather than asking the model.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) enum Builtin<'a> {
+    /// Summarize the conversation so far. The argument, when there is one,
+    /// says what to keep and is added to mentra's standing requirements.
+    Compact { instructions: Option<&'a str> },
+}
+
+/// The built-in a prompt opens with, if it opens with one.
 ///
-/// Order is preserved, so templates that arrived name-ordered stay that way.
+/// Reads the `/name args` convention through
+/// [`basis::templates::invocation`], which is the same parser the shell uses,
+/// so a name typed in an editor and a name typed at a terminal are one rule.
+///
+/// A `/name` that is not a built-in returns `None` and the prompt goes to the
+/// model as typed — including a template's. Expanding a template on this side
+/// would be a second implementation of a rewrite the shell already does; that
+/// gap is real and is not this function's to close.
+pub(crate) fn builtin(prompt: &str) -> Option<Builtin<'_>> {
+    match invocation(prompt)? {
+        (COMPACT, arguments) => Some(Builtin::Compact {
+            instructions: (!arguments.is_empty()).then_some(arguments),
+        }),
+        _ => None,
+    }
+}
+
+/// Every command this session offers: basis's own first, then the workspace's
+/// templates in the order discovery gave them, which is by name.
 ///
 /// The `input` field is set only for a template that declared an
 /// `argument-hint`. ACP describes the hint as text "to display when the input
@@ -27,7 +74,27 @@ use basis::Template;
 /// [`Template::render`](basis::Template::render). The hint governs what a
 /// client displays, not what basis will substitute.
 pub fn available_commands(templates: &[Template]) -> Vec<AvailableCommand> {
-    templates.iter().map(available_command).collect()
+    builtins()
+        .into_iter()
+        .chain(
+            templates
+                .iter()
+                .filter(|template| template.name != COMPACT)
+                .map(available_command),
+        )
+        .collect()
+}
+
+fn builtins() -> Vec<AvailableCommand> {
+    vec![
+        AvailableCommand::new(
+            COMPACT,
+            "Summarize the conversation so far and continue from the summary",
+        )
+        .input(AvailableCommandInput::Unstructured(
+            UnstructuredCommandInput::new("what to keep (optional)"),
+        )),
+    ]
 }
 
 fn available_command(template: &Template) -> AvailableCommand {
@@ -57,9 +124,20 @@ mod tests {
         }
     }
 
+    /// The templates a call to `available_commands` produced, without the
+    /// built-ins every list starts with.
+    fn from_templates(templates: &[Template]) -> Vec<AvailableCommand> {
+        let commands = available_commands(templates);
+        assert_eq!(
+            commands[0].name, COMPACT,
+            "basis's own commands come first: {commands:?}"
+        );
+        commands[1..].to_vec()
+    }
+
     #[test]
     fn a_template_becomes_a_command_with_its_name_and_description() {
-        let commands = available_commands(&[template("review", None)]);
+        let commands = from_templates(&[template("review", None)]);
 
         assert_eq!(commands.len(), 1);
         assert_eq!(commands[0].name, "review");
@@ -68,14 +146,14 @@ mod tests {
 
     #[test]
     fn a_template_without_a_hint_declares_no_input() {
-        let commands = available_commands(&[template("review", None)]);
+        let commands = from_templates(&[template("review", None)]);
 
         assert_eq!(commands[0].input, None);
     }
 
     #[test]
     fn a_hint_becomes_unstructured_input() {
-        let commands = available_commands(&[template("review", Some("<path>"))]);
+        let commands = from_templates(&[template("review", Some("<path>"))]);
 
         let Some(AvailableCommandInput::Unstructured(input)) = &commands[0].input else {
             panic!("expected unstructured input");
@@ -84,13 +162,18 @@ mod tests {
     }
 
     #[test]
-    fn nothing_discovered_means_no_commands() {
-        assert!(available_commands(&[]).is_empty());
+    fn a_workspace_with_no_templates_still_offers_what_basis_answers_itself() {
+        // `/compact` acts on the session, not on the workspace, so there is no
+        // repository in which it does not apply.
+        let commands = available_commands(&[]);
+
+        let names: Vec<&str> = commands.iter().map(|c| c.name.as_str()).collect();
+        assert_eq!(names, vec![COMPACT]);
     }
 
     #[test]
     fn order_is_preserved() {
-        let commands = available_commands(&[
+        let commands = from_templates(&[
             template("alpha", None),
             template("beta", None),
             template("gamma", None),
@@ -102,8 +185,55 @@ mod tests {
 
     #[test]
     fn a_namespaced_name_reaches_the_wire_intact() {
-        let commands = available_commands(&[template("git:commit", None)]);
+        let commands = from_templates(&[template("git:commit", None)]);
 
         assert_eq!(commands[0].name, "git:commit");
+    }
+
+    #[test]
+    fn a_template_that_took_a_builtins_name_is_not_offered_alongside_it() {
+        // Two commands with one name is a coin flip the client makes. The
+        // built-in wins because that loss is the recoverable one: the template
+        // author can rename the file.
+        let commands = available_commands(&[template("compact", None), template("review", None)]);
+
+        let names: Vec<&str> = commands.iter().map(|c| c.name.as_str()).collect();
+        assert_eq!(names, vec![COMPACT, "review"]);
+        assert_ne!(
+            commands[0].description, "does compact",
+            "the surviving `compact` must be basis's, not the template's"
+        );
+    }
+
+    #[test]
+    fn a_slash_compact_is_recognized_with_and_without_an_instruction() {
+        assert_eq!(
+            builtin("/compact"),
+            Some(Builtin::Compact { instructions: None })
+        );
+        assert_eq!(
+            builtin("/compact keep the migration plan"),
+            Some(Builtin::Compact {
+                instructions: Some("keep the migration plan")
+            })
+        );
+        assert_eq!(
+            builtin("/compact   "),
+            Some(Builtin::Compact { instructions: None }),
+            "trailing whitespace is not an instruction"
+        );
+    }
+
+    #[test]
+    fn anything_else_is_a_prompt_for_the_model() {
+        // Including a template's own name: expanding one on this side would be
+        // a second implementation of the rewrite the shell already does.
+        assert_eq!(builtin("/review the diff"), None);
+        assert_eq!(builtin("compact the log output"), None);
+        assert_eq!(
+            builtin("/compaction is what I want"),
+            None,
+            "the name is a whole token, not a prefix"
+        );
     }
 }

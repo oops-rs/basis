@@ -32,8 +32,11 @@
 //! template was never written" look identical to the person who wrote it.
 
 mod discovery;
+mod invocation;
 mod parse;
 mod render;
+
+pub use invocation::invocation;
 
 use std::path::{Path, PathBuf};
 
