@@ -358,50 +358,30 @@ fn failed(spec: &DeclaredToolSpec, code: i32, stdout: &str, stderr: &str) -> Str
     format!("{} exited {code}: {explanation}", spec.name)
 }
 
-/// The half of "schema-checked" basis can do without a JSON Schema
-/// implementation.
+/// The one thing left for this binding to check after mentra validates the
+/// call.
 ///
-/// mentra does not validate a call against the `input_schema` a tool declares —
-/// the schema goes to the provider and the raw `Value` comes back — so a tool
-/// that wants the guarantee its own descriptor advertises has to check. This
-/// checks the two things that make the difference between a legible error and
-/// an inscrutable one: the input is an object, and the properties the schema
-/// calls `required` are there. Anything deeper is the program's own business,
-/// and real validation belongs upstream where every binding would get it
-/// (recorded as an upstream candidate in `docs/REDESIGN.md` §2).
+/// mentra reads a call against the `input_schema` its tool published before it
+/// authorizes anything, so `required`, scalar types, `enum` and a misspelled
+/// property are answered upstream now — with the field named, which is what a
+/// model can act on. basis re-implemented the `required` half while that was
+/// missing; keeping it would be two validators disagreeing about wording over
+/// a call the first one already refused.
+///
+/// What survives is the case mentra's validator cannot see: a manifest may
+/// leave `type` off its schema ([`check_schema`](super::manifest)), and with
+/// no `type` to check, an input that is not an object at all passes every
+/// keyword the validator implements. This binding writes that input to a
+/// program's stdin, so it is worth naming the tool before a program is handed
+/// something its schema never described.
 fn check_input(spec: &DeclaredToolSpec, input: &Value) -> Result<(), String> {
-    if !input.is_object() {
-        return Err(format!(
-            "{} takes a JSON object matching its input schema",
-            spec.name
-        ));
-    }
-
-    let missing: Vec<&str> = spec
-        .input_schema
-        .get("required")
-        .and_then(Value::as_array)
-        .map(|required| {
-            required
-                .iter()
-                .filter_map(Value::as_str)
-                .filter(|field| input.get(*field).is_none())
-                .collect()
-        })
-        .unwrap_or_default();
-
-    if missing.is_empty() {
+    if input.is_object() {
         return Ok(());
     }
 
     Err(format!(
-        "{} was called without {}, which its input schema requires",
-        spec.name,
-        missing
-            .iter()
-            .map(|field| format!("`{field}`"))
-            .collect::<Vec<_>>()
-            .join(", ")
+        "{} takes a JSON object matching its input schema",
+        spec.name
     ))
 }
 

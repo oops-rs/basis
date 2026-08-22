@@ -119,6 +119,14 @@ The program is exec'd directly — no shell — with the tool's JSON input on
 stdin. `side_effect` is `process` (default) or `external`; there is no
 read-only value, so every declared tool reaches the approver.
 
+`input_schema` is checked against each call before the approver is asked and
+before the program starts: a missing `required` field, a wrong scalar type, a
+value outside an `enum`, or a property the schema never named when it sets
+`additionalProperties: false`. The check is partial by design — it ignores
+keywords it does not implement rather than refusing a call it cannot judge —
+so a program that depends on a constraint beyond those still checks its own
+stdin.
+
 ### `.basis/hooks.json`
 
 ```json

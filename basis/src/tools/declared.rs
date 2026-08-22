@@ -105,6 +105,17 @@
 //! file's own `schema` field versions the *manifest*, and the payload's shape
 //! is the tool author's to state.
 //!
+//! *Matching* is now enforced rather than hoped for: mentra reads each call
+//! against the schema its tool published before it authorizes anything, so a
+//! missing `required` field, a string where the schema said number, a value
+//! outside an `enum`, or — under `additionalProperties: false` — a property
+//! the schema never named, is refused with the field named and the program
+//! never started. The check is deliberately partial (it ignores keywords it
+//! does not implement rather than failing a valid call), so a schema is still
+//! a statement to the model first and a gate second: a program that cares
+//! about a constraint mentra does not implement still validates its own
+//! stdin.
+//!
 //! Whatever the program prints on stdout is the result the model reads. Not
 //! parsed, not interpreted: a program that wants to answer in JSON prints JSON
 //! and the model reads JSON. The JSON contract is on the input side, where it

@@ -444,3 +444,35 @@ async fn one_repositorys_tool_is_not_offered_to_another_on_a_shared_runtime() {
     // That it never reaches the bystander's *roster* is asserted on the wire,
     // beside the same claim for MCP: `tests/runtime.rs`.
 }
+
+#[tokio::test]
+async fn a_call_that_does_not_fit_the_manifests_schema_never_starts_the_program() {
+    // The half of "typed and schema-checked" (ADR-0012's words) that this
+    // binding could not keep on its own: a declared tool's schema is *data*,
+    // so there is no code to put the check in. mentra now validates a call
+    // against the schema its tool published, ahead of authorization — which
+    // for a declaration means the manifest's `required` is enforced against
+    // the model, and the program is never started to find out.
+    let fixture = Fixture::new();
+    let ran = fixture.path().join("it-ran");
+    let program = fixture.program("jenkins", &format!("touch {}", ran.display()));
+    fixture.declaring(&program);
+
+    let mock = runtime_calling(json!({"jobb": "nightly"}));
+    for tool in fixture.tools() {
+        mock.runtime().register_tool(tool);
+    }
+    let mut session = session_in(&mock, fixture.path());
+
+    let _ = session.append_turn(vec![ContentBlock::text("go")]).await;
+
+    let results = tool_results(&session);
+    assert!(
+        results.contains("job"),
+        "the model is told which field it left out: {results}"
+    );
+    assert!(
+        !ran.exists(),
+        "a call that cannot fit the declaration must not reach the program"
+    );
+}
