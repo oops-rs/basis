@@ -1,17 +1,25 @@
-//! Routing one runtime's pre-execution hook to many workspaces.
+//! Routing one runtime's execution hooks to many workspaces.
 //!
-//! A mentra runtime takes its pre-hooks at build time and never again, and a
+//! A mentra runtime takes its hooks at build time and never again, and a
 //! shared runtime is built before any workspace opens. So basis registers exactly
-//! one hook — [`HookDispatch`] — and the per-workspace participants arrive and
-//! leave through it: [`WorkspaceBuilder::open`](crate::WorkspaceBuilder::open)
-//! inserts a [`WorkspaceGuardEntry`] keyed by the workspace's canonicalized
-//! root, and the [`HookRegistration`] it gets back removes the entry when the
+//! one dispatcher — [`HookDispatch`], on both seams — and the per-workspace
+//! participants arrive and leave through it:
+//! [`WorkspaceBuilder::open`](crate::WorkspaceBuilder::open) inserts a
+//! [`WorkspaceGuardEntry`] keyed by the workspace's canonicalized root, and the
+//! [`HookRegistration`] it gets back removes the entry when the
 //! [`Workspace`](crate::Workspace) drops.
 //!
-//! Dispatch keys on [`PreExecutionContext::working_directory`], which is the
-//! agent's `base_dir` — the same path basis scoped the agent to at open. Both
-//! sides canonicalize through one helper, so a symlinked spelling and its
-//! target land on one entry.
+//! Dispatch keys on `working_directory`, which is the agent's `base_dir` — the
+//! same path basis scoped the agent to at open, and the same field on both of
+//! mentra's contexts, so a call and its result route to one entry. Both sides
+//! canonicalize through one helper, so a symlinked spelling and its target land
+//! on one entry too.
+//!
+//! Both seams are registered unconditionally, because whether any workspace
+//! will ever have a post hook is not knowable when the runtime is built. That
+//! costs a runtime with no participants at all one map lookup per tool result,
+//! and mentra one context to assemble; the alternative is a runtime that
+//! silently cannot be given one later.
 //!
 //! # What runs, in what order
 //!
@@ -29,6 +37,9 @@
 //! *workspace hooks only*, never for the host's own guards, and the guards
 //! basis adds here were policy-level hygiene rather than a boundary to begin
 //! with (ADR-0004, ADR-0013).
+//!
+//! After the call it is the same routing without the guards: they answer
+//! whether a call happens, and by then it has.
 
 use std::{
     collections::HashMap,
@@ -41,7 +52,10 @@ use std::{
 
 use mentra::{
     error::RuntimeError,
-    runtime::{HookDecision, PreExecutionContext, PreExecutionHook},
+    runtime::{
+        HookDecision, PostExecutionContext, PostExecutionHook, PreExecutionContext,
+        PreExecutionHook, ResultDecision,
+    },
 };
 
 use crate::{
@@ -94,7 +108,7 @@ struct Registered {
     entry: WorkspaceGuardEntry,
 }
 
-/// The one [`PreExecutionHook`] a basis runtime registers.
+/// The one hook a basis runtime registers, on each of mentra's two seams.
 pub(crate) struct HookDispatch {
     /// The host's interceptors, fixed at build like everything else on the
     /// runtime. Folded into each workspace's runner at open, and run alone on
@@ -191,6 +205,38 @@ impl PreExecutionHook for HookDispatch {
     }
 }
 
+#[async_trait::async_trait]
+impl PostExecutionHook for HookDispatch {
+    /// The same routing, on the other side of the call.
+    ///
+    /// [`PostExecutionContext::working_directory`] is the key
+    /// [`PreExecutionContext::working_directory`] was, so a result is judged
+    /// by the workspace whose participants judged the call — the alternative
+    /// being a rewrite from a workspace that never saw what it was rewriting.
+    ///
+    /// basis's own guards do not run here. They decide whether a call happens,
+    /// and this one has; a shell posture cannot un-run a command, and the
+    /// `.git` carve-out has nothing to say about the output of a write it
+    /// already refused.
+    async fn post_tool_execution(
+        &self,
+        context: &PostExecutionContext,
+    ) -> Result<ResultDecision, RuntimeError> {
+        let Some((runner, ..)) = self.entry_for(&context.working_directory) else {
+            if self.interceptors.is_empty() {
+                return Ok(ResultDecision::Keep);
+            }
+            let runner = self.interceptors.iter().cloned().fold(
+                HookRunner::new(&context.working_directory, Vec::new()),
+                |runner, interceptor| runner.with_interceptor(interceptor),
+            );
+            return runner.post_tool_execution(context).await;
+        };
+
+        runner.post_tool_execution(context).await
+    }
+}
+
 /// Forwards to the dispatcher inside, so one dispatcher can be both the hook
 /// mentra owns and the registry basis keeps a handle on.
 pub(crate) struct DispatchHook(pub(crate) Arc<HookDispatch>);
@@ -202,6 +248,16 @@ impl PreExecutionHook for DispatchHook {
         context: &PreExecutionContext,
     ) -> Result<HookDecision, RuntimeError> {
         self.0.pre_tool_execution(context).await
+    }
+}
+
+#[async_trait::async_trait]
+impl PostExecutionHook for DispatchHook {
+    async fn post_tool_execution(
+        &self,
+        context: &PostExecutionContext,
+    ) -> Result<ResultDecision, RuntimeError> {
+        self.0.post_tool_execution(context).await
     }
 }
 

@@ -803,7 +803,12 @@ impl RuntimeBuilder {
             // The one pre-hook basis registers, always: mentra takes hooks at
             // build time only, and workspaces arrive later, through the
             // dispatcher (see `runtime::dispatch`).
-            .with_pre_hook(DispatchHook(Arc::clone(&dispatch)));
+            .with_pre_hook(DispatchHook(Arc::clone(&dispatch)))
+            // And the one post-hook, for the same reason and the same
+            // dispatcher — a second handle on it, because mentra's two seams
+            // are two registrations. Always, again: whether a workspace will
+            // declare a `post_tool_use` hook is not knowable from here.
+            .with_post_hook(DispatchHook(Arc::clone(&dispatch)));
 
         // Host tools registered via `with_tool`, applied after basis's own
         // `spawn` — order that matches every other builder chain above, where
