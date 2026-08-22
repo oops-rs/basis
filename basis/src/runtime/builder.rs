@@ -1055,13 +1055,15 @@ fn git_protected(policy: RuntimePolicy, workspace: &Path) -> RuntimePolicy {
 /// capability set spelled out in basis is one that drifts from whatever mentra
 /// learns next.
 ///
-/// Reaches past [`mentra::provider::openai_compatible`] into
-/// `mentra_provider` deliberately. That module is the natural fit, but
-/// `OpenAiCompatibleProvider` implements mentra's own `Provider` trait while
-/// `RuntimeBuilder::with_registered_provider` asks for `mentra_provider`'s —
-/// two different traits — and mentra offers the compatible endpoint only as a
-/// `Runtime::register_openai_compatible` call *after* the build, which is too
-/// late for a builder that must resolve its provider before it has a runtime.
+/// Reaches past `mentra::provider::openai_compatible` into `provider_core`
+/// deliberately, and not for want of looking. That module is the natural fit,
+/// but its `OpenAiCompatibleProvider` implements `mentra::Provider` while
+/// `mentra::RuntimeBuilder::with_registered_provider` asks for
+/// `mentra_provider::RegisteredProvider` — two different traits, and rustc
+/// says so — leaving `Runtime::register_openai_compatible`, which runs
+/// *after* the build and is therefore no use to a builder that has to settle
+/// its provider before it has a runtime. `ChatCompletionsProvider` is the same
+/// wire one layer down, where the trait matches.
 fn chat_completions_provider(
     provider: BuiltinProvider,
     base_url: &str,
