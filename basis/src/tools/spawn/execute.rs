@@ -7,7 +7,8 @@
 //! [`parse`](super::parse) already decided the meaning of.
 
 use mentra::{
-    ContentBlock, SpawnedAgentStatus,
+    ContentBlock, DelegationArtifact, DelegationEdge, DelegationKind, DelegationStatus,
+    SpawnedAgentStatus, SpawnedAgentSummary,
     runtime::CommandOutput,
     tool::{ToolContext, ToolResult},
 };
@@ -114,6 +115,24 @@ fn read_back(output: CommandOutput) -> ToolResult {
 /// to wait a minute for. basis sets that schedule once, on the runtime
 /// ([`RuntimeBuilder::with_provider_retry`](crate::RuntimeBuilder::with_provider_retry)),
 /// and mentra's `RunOptions::child` carries it here.
+///
+/// Two things follow the child's run out to the parent, and both exist because
+/// a subagent has an event bus and a transcript of its own while basis reads
+/// the parent's:
+///
+/// - its **usage reports**, relayed onto the parent's bus. The delegated spend
+///   already counts against the parent's `token_budget` — that is what the
+///   shared counter is for — so without the relay a run could stop on a total
+///   its own [`RunUsage`](crate::RunUsage) never saw, which is exactly what
+///   that type's doc promises cannot happen. Usage and nothing else: relaying
+///   the child's tool calls and text would put a second run's work on the
+///   parent's stream, where a host renders it as the parent's own.
+/// - the **delegation entries**, written into the parent's transcript. Without
+///   them the answer appears in the transcript with nothing saying where it
+///   came from, and a reader following delegation edges to reconstruct who
+///   asked whom sees `spawn`'s delegations as work the parent did itself. The
+///   shape is mentra's `task` intrinsic's, because `spawn` replaces that door
+///   (ADR-0016) and a reader should not have to know which one was used.
 pub(super) async fn delegate(
     ledger: &Depth,
     ctx: &mut ToolContext<'_>,
@@ -130,34 +149,116 @@ pub(super) async fn delegate(
     let _entered = ledger.entered(&child_id, depth + 1);
 
     let started = ctx.register_subagent(&child);
-    // A subagent has its own event bus and basis reads the parent's, so without
-    // this the delegation is a silence of unknown length. Progress is the one
-    // channel a host-registered tool has into the parent's stream.
+    // Held for the same span and for the same kind of reason: the relay ends
+    // when this guard drops, and one that ended early would leave the parent's
+    // tally short by whatever the child spent afterwards.
+    let _usage_relay = ctx.relay_subagent_usage(&child);
+
+    // Progress is the one channel a host-registered tool has into the parent's
+    // *stream*, so without this the delegation is a silence of unknown length.
     ctx.emit_progress(format!(
         "delegating to {} ({})",
         started.name, started.model
     ));
 
+    let edge = DelegationEdge {
+        kind: DelegationKind::Subagent,
+        local_agent_id: ctx.agent_id.clone(),
+        remote_agent_id: child_id.clone(),
+    };
+    let requested = ctx.record_delegation_request(
+        format!(
+            "<delegation-request agent=\"{}\" model=\"{}\">\n{prompt}\n</delegation-request>",
+            started.name, started.model
+        ),
+        artifact(&started, prompt, DelegationStatus::Requested, None),
+        Some(edge.clone()),
+    );
+    note(ctx, requested);
+
     let options = ctx.child_run_options();
     let answer = Box::pin(child.run(vec![ContentBlock::text(prompt)], options)).await;
 
-    let status = match &answer {
-        Ok(_) => SpawnedAgentStatus::Finished,
-        Err(error) => SpawnedAgentStatus::Failed(error.to_string()),
+    // Read once, here, so the transcript's result summary and the string the
+    // model gets back are the same words.
+    let outcome = answer
+        .as_ref()
+        .map(|message| said(message.text()))
+        .map_err(ToString::to_string);
+
+    ctx.finish_subagent(
+        &child_id,
+        match &outcome {
+            Ok(_) => SpawnedAgentStatus::Finished,
+            Err(error) => SpawnedAgentStatus::Failed(error.clone()),
+        },
+    );
+
+    let (status, told, summary) = match &outcome {
+        Ok(text) => (DelegationStatus::Finished, "finished", text),
+        Err(error) => (DelegationStatus::Failed, "failed", error),
     };
-    ctx.finish_subagent(&child_id, status);
+    let returned = ctx.record_delegation_result(
+        format!(
+            "<delegation-result agent=\"{}\" status=\"{told}\">\n{summary}\n</delegation-result>",
+            started.name
+        ),
+        artifact(&started, prompt, status, Some(summary.clone())),
+        Some(edge),
+    );
+    note(ctx, returned);
+
     // The child may have written the shared task list; the parent reads a stale
     // copy until it is told, exactly as mentra's own `task` intrinsic refreshes.
     ctx.refresh_tasks().map_err(|error| {
         format!("the delegated run finished but its tasks did not load: {error}")
     })?;
 
-    let message = answer.map_err(|error| format!("the delegated run failed: {error}"))?;
-    let text = message.text();
+    outcome.map_err(|error| format!("the delegated run failed: {error}"))
+}
 
-    Ok(if text.trim().is_empty() {
-        "The subagent finished without saying anything.".to_string()
-    } else {
-        text
-    })
+/// What the model reads back, with a name for the case where a subagent
+/// answered with nothing: an empty result reads as a tool that did nothing,
+/// which is a different thing from one that finished quietly.
+fn said(text: String) -> String {
+    if text.trim().is_empty() {
+        return "The subagent finished without saying anything.".to_string();
+    }
+
+    text
+}
+
+/// The delegation entry both halves of the record carry, differing only in what
+/// has happened to it by then.
+fn artifact(
+    child: &SpawnedAgentSummary,
+    prompt: &str,
+    status: DelegationStatus,
+    result_summary: Option<String>,
+) -> DelegationArtifact {
+    DelegationArtifact {
+        kind: DelegationKind::Subagent,
+        agent_id: child.id.clone(),
+        agent_name: child.name.clone(),
+        role: Some("subagent".to_string()),
+        status,
+        task_summary: prompt.to_string(),
+        result_summary,
+        artifacts: Vec::new(),
+    }
+}
+
+/// Says that half a delegation's record did not get written, and lets the
+/// delegation stand.
+///
+/// A transcript entry that could not be written is a bookkeeping failure, and
+/// turning it into a failed tool call would hand the model an error about work
+/// that actually happened — which it would answer by doing the work again.
+/// mentra's own `task` intrinsic drops the same error entirely; this one says
+/// so on the progress channel, because a transcript with half a delegation in
+/// it is worth knowing about and there is nowhere else for basis to say it.
+fn note(ctx: &ToolContext<'_>, written: Result<(), mentra::error::RuntimeError>) {
+    if let Err(error) = written {
+        ctx.emit_progress(format!("the delegation was not recorded: {error}"));
+    }
 }
