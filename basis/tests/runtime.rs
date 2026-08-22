@@ -22,7 +22,10 @@ use std::{
     io::{Read, Write},
     net::{TcpListener, TcpStream},
     path::{Path, PathBuf},
-    sync::{Arc, Mutex},
+    sync::{
+        Arc, Mutex,
+        atomic::{AtomicUsize, Ordering},
+    },
     thread,
 };
 
@@ -542,15 +545,16 @@ impl ScriptedEndpoint {
         let requests = Arc::new(Mutex::new(Vec::new()));
 
         let recorded = Arc::clone(&requests);
+        let script = Arc::new(script);
+        let turns = Arc::new(AtomicUsize::new(0));
         thread::spawn(move || {
-            let mut index = 0_usize;
             while let Ok((stream, _)) = listener.accept() {
-                index += 1;
-                let reply = script.get(index - 1).cloned().unwrap_or(Reply::Text);
+                let script = Arc::clone(&script);
+                let turns = Arc::clone(&turns);
                 let recorded = Arc::clone(&recorded);
                 // One thread per connection, so concurrent runs are answered
                 // concurrently rather than queued.
-                thread::spawn(move || answer(stream, index, &reply, &recorded));
+                thread::spawn(move || answer(stream, &script, &turns, &recorded));
             }
         });
 
@@ -565,8 +569,36 @@ impl ScriptedEndpoint {
     }
 }
 
-fn answer(mut stream: TcpStream, index: usize, reply: &Reply, recorded: &Mutex<Vec<String>>) {
+/// A pinned model is looked up in the provider's listing before the first
+/// turn (mentra `bfe952b`), which is one `GET …/models` per run that is
+/// neither a turn nor scripted. Answered with a listing that names the test
+/// model, so the lookup succeeds the way a real provider's would, and never
+/// counted or recorded as a turn.
+fn model_listing(request: &str) -> Option<String> {
+    let line = request.lines().next()?;
+    let target = line.split_whitespace().nth(1)?;
+    (line.starts_with("GET ") && target.ends_with("/models")).then(|| {
+        let body = r#"{"object":"list","data":[{"id":"test-model","object":"model"}]}"#;
+        format!(
+            "HTTP/1.1 200 OK\r\nconnection: close\r\ncontent-type: application/json\r\ncontent-length: {}\r\n\r\n{body}",
+            body.len()
+        )
+    })
+}
+
+fn answer(
+    mut stream: TcpStream,
+    script: &[Reply],
+    turns: &AtomicUsize,
+    recorded: &Mutex<Vec<String>>,
+) {
     let request = read_http_request(&mut stream);
+    if let Some(listing) = model_listing(&request) {
+        let _ = stream.write_all(listing.as_bytes());
+        return;
+    }
+    let index = turns.fetch_add(1, Ordering::SeqCst) + 1;
+    let reply = &script.get(index - 1).cloned().unwrap_or(Reply::Text);
     recorded.lock().expect("requests").push(request);
 
     let body = sse_body(index, reply);

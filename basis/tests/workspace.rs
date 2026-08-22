@@ -801,9 +801,9 @@ impl ScriptedEndpoint {
                 // One thread per connection, so a second request that arrives
                 // while the first is still being answered is not made to wait
                 // — the point of the test is that both are in flight.
-                let index = counted.fetch_add(1, Ordering::SeqCst) + 1;
+                let counted = Arc::clone(&counted);
                 let recorded = Arc::clone(&recorded);
-                thread::spawn(move || answer(stream, script(index), &recorded));
+                thread::spawn(move || answer(stream, script, &counted, &recorded));
             }
         });
 
@@ -835,8 +835,35 @@ impl ScriptedEndpoint {
 
 /// Reads one request, records what it said about itself, and writes one
 /// completed response.
-fn answer(mut stream: TcpStream, body: String, recorded: &Mutex<Vec<Seen>>) {
+/// A pinned model is looked up in the provider's listing before the first
+/// turn (mentra `bfe952b`), which is one `GET …/models` per run that is
+/// neither a turn nor scripted. Answered with a listing that names the test
+/// model, so the lookup succeeds the way a real provider's would, and never
+/// counted or recorded as a turn.
+fn model_listing(request: &str) -> Option<String> {
+    let line = request.lines().next()?;
+    let target = line.split_whitespace().nth(1)?;
+    (line.starts_with("GET ") && target.ends_with("/models")).then(|| {
+        let body = r#"{"object":"list","data":[{"id":"test-model","object":"model"}]}"#;
+        format!(
+            "HTTP/1.1 200 OK\r\nconnection: close\r\ncontent-type: application/json\r\ncontent-length: {}\r\n\r\n{body}",
+            body.len()
+        )
+    })
+}
+
+fn answer(
+    mut stream: TcpStream,
+    script: fn(usize) -> String,
+    turns: &AtomicUsize,
+    recorded: &Mutex<Vec<Seen>>,
+) {
     let request = read_http_request(&mut stream);
+    if let Some(listing) = model_listing(&request) {
+        let _ = stream.write_all(listing.as_bytes());
+        return;
+    }
+    let body = script(turns.fetch_add(1, Ordering::SeqCst) + 1);
     recorded.lock().expect("seen").push(Seen {
         path: request_path(&request).to_string(),
         bearer: request_bearer(&request),
