@@ -246,7 +246,7 @@ mod roster {
             .as_array()
             .expect("a tools array")
             .iter()
-            .filter_map(|tool| tool["name"].as_str())
+            .filter_map(|tool| tool["function"]["name"].as_str())
             .collect();
 
         assert!(
@@ -294,11 +294,13 @@ mod declared_roster {
         )
         .expect("a JSON request");
 
+        // `chat/completions` nests the name under `function`, unlike the
+        // Responses wire, which puts it flat on the tool.
         body["tools"]
             .as_array()
             .expect("a tools array")
             .iter()
-            .filter_map(|tool| tool["name"].as_str().map(str::to_string))
+            .filter_map(|tool| tool["function"]["name"].as_str().map(str::to_string))
             .collect()
     }
 
@@ -517,9 +519,10 @@ impl Reply {
     }
 }
 
-/// An OpenAI-compatible endpoint on loopback that follows a per-connection
-/// script (falling back to a numbered text reply) and keeps every request it
-/// was sent. `tests/workspace.rs` explains why loopback is not "the network".
+/// An OpenAI-compatible endpoint on loopback speaking `chat/completions` — the
+/// wire a base URL gets — that follows a per-connection script (falling back to
+/// a numbered text reply) and keeps every request it was sent.
+/// `tests/workspace.rs` explains why loopback is not "the network".
 struct ScriptedEndpoint {
     base_url: String,
     #[cfg_attr(
@@ -574,50 +577,45 @@ fn answer(mut stream: TcpStream, index: usize, reply: &Reply, recorded: &Mutex<V
     let _ = stream.write_all(response.as_bytes());
 }
 
-/// The smallest stream that is a finished turn of the requested shape.
+/// The smallest `chat/completions` stream that is a finished turn of the
+/// requested shape. This wire streams flat deltas and ends at `[DONE]`; there
+/// is no item to open or close, so a whole reply is one chunk.
 fn sse_body(index: usize, reply: &Reply) -> String {
-    let mut events = vec![json!({
-        "type": "response.created",
-        "response": {"id": format!("resp_{index}"), "model": "test-model", "status": "in_progress"}
-    })];
+    let id = format!("chatcmpl_{index}");
+    let mut events = Vec::new();
 
     match reply {
         Reply::Text => {
             events.push(json!({
-                "type": "response.output_item.added",
-                "output_index": 0,
-                "item": {"type": "message", "content": []}
+                "id": id, "model": "test-model",
+                "choices": [{"index": 0, "delta": {"role": "assistant", "content": format!("reply-{index}")}}]
             }));
             events.push(json!({
-                "type": "response.output_item.done",
-                "output_index": 0,
-                "item": {"type": "message", "content": [{"type": "output_text", "text": format!("reply-{index}")}]}
+                "id": id,
+                "choices": [{"index": 0, "delta": {}, "finish_reason": "stop"}]
             }));
         }
         Reply::ToolCall { name, arguments } => {
             events.push(json!({
-                "type": "response.output_item.added",
-                "output_index": 0,
-                "item": {"type": "function_call", "id": format!("fc_{index}"),
-                         "call_id": format!("call_{index}"), "name": name, "arguments": ""}
+                "id": id, "model": "test-model",
+                "choices": [{"index": 0, "delta": {"role": "assistant", "tool_calls": [{
+                    "index": 0, "id": format!("call_{index}"), "type": "function",
+                    // Arguments are a JSON *string* on this wire, and arrive in
+                    // slices; one slice is enough to be a call.
+                    "function": {"name": name, "arguments": arguments}
+                }]}}]
             }));
             events.push(json!({
-                "type": "response.output_item.done",
-                "output_index": 0,
-                "item": {"type": "function_call", "call_id": format!("call_{index}"),
-                         "name": name, "arguments": arguments}
+                "id": id,
+                "choices": [{"index": 0, "delta": {}, "finish_reason": "tool_calls"}]
             }));
         }
     }
 
-    events.push(json!({
-        "type": "response.completed",
-        "response": {"id": format!("resp_{index}"), "model": "test-model", "status": "completed"}
-    }));
-
     events
         .iter()
         .map(|event| format!("data: {event}\n\n"))
+        .chain(std::iter::once("data: [DONE]\n\n".to_string()))
         .collect()
 }
 

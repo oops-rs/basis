@@ -454,32 +454,29 @@ fn answer(mut stream: TcpStream, index: usize, reply: &Reply, recorded: &Mutex<V
     let _ = stream.write_all(response.as_bytes());
 }
 
-/// The smallest stream that is a finished turn, with the usage report a real
-/// provider sends on the completed response.
+/// The smallest `chat/completions` stream that is a finished turn, with the
+/// usage report a real provider sends in answer to
+/// `stream_options.include_usage`.
 fn sse_body(index: usize) -> String {
+    let id = format!("chatcmpl_{index}");
+
     [
         json!({
-            "type": "response.created",
-            "response": {"id": format!("resp_{index}"), "model": "test-model", "status": "in_progress"}
+            "id": id, "model": "test-model",
+            "choices": [{"index": 0, "delta": {"role": "assistant", "content": format!("reply-{index}")}}]
         }),
         json!({
-            "type": "response.output_item.added",
-            "output_index": 0,
-            "item": {"type": "message", "content": []}
+            "id": id,
+            "choices": [{"index": 0, "delta": {}, "finish_reason": "stop"}]
         }),
         json!({
-            "type": "response.output_item.done",
-            "output_index": 0,
-            "item": {"type": "message", "content": [{"type": "output_text", "text": format!("reply-{index}")}]}
-        }),
-        json!({
-            "type": "response.completed",
-            "response": {"id": format!("resp_{index}"), "model": "test-model", "status": "completed",
-                         "usage": {"input_tokens": 100, "output_tokens": 20, "total_tokens": 120}}
+            "id": id, "choices": [],
+            "usage": {"prompt_tokens": 100, "completion_tokens": 20, "total_tokens": 120}
         }),
     ]
     .iter()
     .map(|event| format!("data: {event}\n\n"))
+    .chain(std::iter::once("data: [DONE]\n\n".to_string()))
     .collect()
 }
 

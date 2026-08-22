@@ -91,9 +91,9 @@ fn spawn_two_response_server() -> (String, thread::JoinHandle<Vec<String>>) {
 }
 
 #[tokio::test]
-async fn compatible_provider_skips_automatic_previous_response_id_chaining() {
+async fn a_responses_endpoint_skips_automatic_previous_response_id_chaining() {
     let (base_url, handle) = spawn_two_response_server();
-    let provider = compatible_provider(&base_url, "test-key");
+    let provider = responses_provider(&base_url, "test-key");
 
     for (index, message) in ["first", "second"].into_iter().enumerate() {
         let request = mentra::provider_core::Request {
