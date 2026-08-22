@@ -32,11 +32,13 @@ use crate::{
     workspace::Workspace,
 };
 
+mod compact;
 mod forward;
 mod outcome;
 mod prompt;
 mod typed;
 
+pub use compact::Compacted;
 pub use prompt::PromptPart;
 
 /// What a run is about, once the runtime questions are settled.
@@ -322,6 +324,29 @@ impl PreparedRun {
         self.run.model = model;
 
         Ok(())
+    }
+
+    /// Renames this conversation, and persists the new name.
+    ///
+    /// The name is what [`store::list`](crate::store::list) — and so ACP's
+    /// `session/list` — reports as a conversation's title, and mentra fixes it
+    /// at creation otherwise. That is the wrong moment for it: a session is
+    /// opened before anyone knows what it will be about, so a host that mints
+    /// one per conversation is stuck offering a list of identical placeholders.
+    ///
+    /// Nothing derives a name here. What a conversation should be called is a
+    /// convention of whatever is driving it — its first prompt, a ticket id,
+    /// what the user typed — and basis has no opinion to impose (PROPOSAL.md
+    /// Bet 4).
+    pub fn set_name(&mut self, name: impl Into<String>) -> Result<(), RunError> {
+        self.session.set_name(name)?;
+
+        Ok(())
+    }
+
+    /// The name this conversation is filed under.
+    pub fn name(&self) -> &str {
+        self.session.name()
     }
 
     /// Asks the model to think harder, or less hard, from the next turn on.
