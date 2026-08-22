@@ -132,6 +132,8 @@ fn a_listed_session_is_reported_in_the_workspace_it_was_listed_for() {
             agent_id: "agent-1".to_string(),
             name: "basis acp".to_string(),
             messages: 4,
+            created_at: Some(1_000_000_000),
+            updated_at: Some(1_709_164_800),
         },
         Path::new("/repo"),
     );
@@ -147,9 +149,28 @@ fn a_listed_session_is_reported_in_the_workspace_it_was_listed_for() {
     );
     assert_eq!(info.title.as_deref(), Some("basis acp"));
     assert_eq!(
-        info.updated_at, None,
-        "mentra exposes no timestamp, and a made-up one would sort a picker by nothing"
+        info.updated_at.as_deref(),
+        Some("2024-02-29T00:00:00Z"),
+        "ACP's slot for last activity, in the format ACP asks for"
     );
+}
+
+#[test]
+fn a_conversation_with_no_recorded_time_is_listed_without_one() {
+    // A guess here would be worse than the gap: a client sorts and labels by
+    // this field, and an invented instant is indistinguishable from a real one.
+    let info = session_info(
+        PersistedSession {
+            agent_id: "agent-1".to_string(),
+            name: "basis acp".to_string(),
+            messages: 4,
+            created_at: None,
+            updated_at: None,
+        },
+        Path::new("/repo"),
+    );
+
+    assert_eq!(info.updated_at, None);
 }
 
 #[test]

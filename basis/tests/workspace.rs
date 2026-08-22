@@ -370,6 +370,81 @@ async fn a_conversation_is_listed_for_the_workspace_that_minted_it() {
     );
 }
 
+/// A list is read to find the conversation you were just in, so that one is at
+/// the top — even when it is the oldest.
+///
+/// The discriminating shape, and the reason listing by creation was never the
+/// answer: the conversation minted *first* is the one touched *last*, so an
+/// order by `created_at` and an order by `updated_at` disagree, and only one of
+/// them puts the right row first. mentra's store keeps both columns and
+/// `PersistedAgentSummary` now carries them; before that, basis had nothing to
+/// sort by and said so.
+///
+/// The sleep is not decoration. mentra's timestamps are whole seconds, so two
+/// writes inside one second are a tie the stable sort deliberately leaves
+/// alone — which is exactly what this test would then be checking.
+#[tokio::test]
+async fn the_conversation_touched_last_is_listed_first() {
+    let dir = tempfile::tempdir().expect("tempdir");
+    write(&dir.path().join("AGENTS.md"), "house rules");
+    let store_dir = tempfile::tempdir().expect("tempdir");
+
+    let workspace = offline(dir.path())
+        .with_runtime_builder(offline_runtime().with_store_dir(store_dir.path()))
+        .open()
+        .await
+        .expect("opens");
+
+    let mut first = workspace.prepare("first").expect("mints");
+    let first_id = first.agent_id().to_string();
+
+    tokio::time::sleep(std::time::Duration::from_millis(1_100)).await;
+    let second_id = workspace
+        .prepare("second")
+        .expect("mints")
+        .agent_id()
+        .to_string();
+
+    assert_eq!(
+        listed_ids(store_dir.path(), dir.path()),
+        vec![second_id.clone(), first_id.clone()],
+        "creation order is what mentra returns, and it is the reverse of this"
+    );
+
+    tokio::time::sleep(std::time::Duration::from_millis(1_100)).await;
+    // Renaming rewrites the agent's row, which is what "used" means to a store
+    // that records when it last wrote one. Nothing about *creation* changed,
+    // so an order that followed `created_at` would not move.
+    first.set_name("came back to this one").expect("renames");
+
+    let listed = store::list_in(store_dir.path(), dir.path()).expect("lists");
+    assert_eq!(
+        listed
+            .iter()
+            .map(|session| session.agent_id.clone())
+            .collect::<Vec<_>>(),
+        vec![first_id, second_id],
+        "the conversation that was returned to is the one at the top"
+    );
+
+    let revisited = &listed[0];
+    let created_at = revisited.created_at.expect("a durable store records both");
+    let updated_at = revisited.updated_at.expect("a durable store records both");
+    assert!(
+        updated_at > created_at,
+        "a conversation that was written twice must not report one instant: \
+         created {created_at}, updated {updated_at}"
+    );
+}
+
+fn listed_ids(store_dir: &Path, workspace: &Path) -> Vec<String> {
+    store::list_in(store_dir, workspace)
+        .expect("lists")
+        .into_iter()
+        .map(|session| session.agent_id)
+        .collect()
+}
+
 #[tokio::test]
 async fn one_workspace_does_not_list_anothers_conversations() {
     // The discriminating half: two workspaces sharing one store file, which is

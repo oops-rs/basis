@@ -89,11 +89,17 @@ pub(super) async fn list_sessions(
 /// workspace's list *because* it belongs to that workspace, so this is the one
 /// it was opened in.
 ///
-/// `updated_at` is left unset. mentra orders by creation and exposes no
-/// timestamp, and a client sorting by a value basis made up would be sorting by
-/// nothing.
+/// `updated_at` is ACP's slot for exactly what basis now has — "ISO 8601
+/// timestamp of last activity" — rendered from the epoch second the store
+/// holds. A conversation with none is sent without one rather than with a
+/// guess: ACP treats the field as optional, and a client sorting by a value
+/// basis made up would be sorting by nothing. The list is already in that
+/// order when it arrives ([`store::list_in`](basis::store::list_in)), so this
+/// is what a client needs to *show* the ordering, not to reproduce it.
 pub(super) fn session_info(session: PersistedSession, cwd: &Path) -> SessionInfo {
-    SessionInfo::new(session.agent_id, cwd.to_path_buf()).title(session.name)
+    SessionInfo::new(session.agent_id, cwd.to_path_buf())
+        .title(session.name)
+        .updated_at(session.updated_at.map(crate::timestamp::rfc3339))
 }
 
 /// A session that has just been opened, and what to tell the client about it

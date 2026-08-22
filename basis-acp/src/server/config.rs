@@ -62,7 +62,13 @@ pub trait SessionSource: Send + Sync + 'static {
         false
     }
 
-    /// Every conversation persisted for `cwd`, oldest first.
+    /// Every conversation persisted for `cwd`, most recently used first.
+    ///
+    /// The order is the source's to decide and is sent on unchanged: a list is
+    /// read to find the conversation you were just in, and a source knows what
+    /// "just" means for the store it keeps. basis's own answers from
+    /// [`store::list`](basis::store::list), which sorts by when a row was last
+    /// written.
     ///
     /// Only called when [`lists_sessions`](Self::lists_sessions) is true, so
     /// the default is unreachable rather than a claim about anything.

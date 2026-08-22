@@ -130,6 +130,8 @@ impl SessionSource for MockSource {
                 agent_id: agent.id,
                 name: agent.name,
                 messages: agent.history_len,
+                created_at: agent.created_at,
+                updated_at: agent.updated_at,
             })
             .collect())
     }
