@@ -10,30 +10,48 @@
 //! `[Previous: used <tool>]`, for any result over 100 bytes. There is no token
 //! budget in that decision and no event when it fires: it happens on the fourth
 //! tool call of a conversation as readily as on the four-hundredth, on a
-//! 1M-token model as readily as on a small one. mentra's default is **3**, so a
-//! coding agent that reads five files and then edits one edits from a
-//! transcript where the first two reads are blank.
-//!
-//! basis's default is to keep every tool result. A harness that silently blanks
-//! what the model just read is worse at the job than one that does not, and the
-//! cost of keeping them is paid in tokens the host can see and price. Elision is
-//! therefore an opt-in a host asks for **by number**
+//! 1M-token model as readily as on a small one. mentra's own default is
+//! `usize::MAX` — keep everything — and basis agrees, so this is one knob
+//! basis states only to make the same default explicit: elision is opt-in a
+//! host asks for **by number**
 //! ([`with_keep_recent_tool_results`](Compaction::with_keep_recent_tool_results)),
 //! which is exactly how mentra models the off switch it already has:
 //! `keep_recent == usize::MAX` returns the history untouched.
 //!
 //! **Real compaction** is the summarizing pass: the transcript is written to a
 //! snapshot file, an older prefix of it is replaced by a model-written summary,
-//! and the recent tail is preserved. It fires when the estimated request size
-//! crosses `auto_compact_threshold_tokens`, and it does announce itself. basis
-//! keeps mentra's trigger unchanged, because choosing a better number needs the
-//! model's context window and **nothing in basis or mentra knows it** — a
-//! window-relative trigger is an upstream capability, not something to guess at
-//! here (`docs/REDESIGN.md` §2 records the candidate).
+//! and the recent tail is preserved. It fires three ways, and it announces
+//! itself the same way every time
+//! ([`Event::CompactionStarted`](crate::Event::CompactionStarted) /
+//! [`CompactionCompleted`](crate::Event::CompactionCompleted)):
+//!
+//! - The estimated request size crosses `auto_threshold_tokens` — an absolute
+//!   token count, for a model whose context window basis does not know.
+//! - Or, when the model's window *is* known
+//!   ([`ModelInfo::context_window`](mentra::ModelInfo::context_window) —
+//!   populated from Gemini's model listing, `None` for Anthropic and the
+//!   Responses transport), it crosses `auto_threshold_percent` of that window
+//!   instead, which wins over the absolute number whenever both apply. This is
+//!   the knob that did not exist until mentra could ask the model itself how
+//!   big it is: 50,000 tokens is most of a small model's window and a rounding
+//!   error in a 1M-token one, so no single constant was ever going to be right
+//!   for both. [`PreparedRun::context_window`](crate::PreparedRun::context_window)
+//!   and
+//!   [`estimated_context_tokens`](crate::PreparedRun::estimated_context_tokens)
+//!   are how a host reads the same two figures for itself, ahead of whichever
+//!   trigger fires first.
+//! - Or the provider refuses a request as too long
+//!   (`ProviderError::ContextLengthExceeded`), regardless of either threshold —
+//!   including with `auto_threshold_tokens` cleared. mentra compacts once and
+//!   retries the same request; a second overflow after that is not retried
+//!   again. So `with_auto_threshold_tokens(None)` still means basis never
+//!   compacts *ahead of* running out of room, not that a conversation which
+//!   does is guaranteed to fail — the provider's own refusal gets the one
+//!   attempt basis's own trigger would have spent earlier.
 //!
 //! # What is not here
 //!
-//! mentra's `CompactionConfig` has nine fields. This exposes three: the two
+//! mentra's `CompactionConfig` has ten fields. This exposes four: the three
 //! triggers above and how much recent user text a summarizing pass must leave
 //! alone. The rest — the summary's input and output caps, local versus remote
 //! summarization, how many snapshots are kept — are defaults nobody has had a
@@ -61,19 +79,25 @@ pub struct Compaction {
     /// How many of the most recent tool results keep their content on the way
     /// to the provider. `None` — basis's default — keeps every one of them.
     keep_recent_tool_results: Option<usize>,
-    /// The estimated request size that triggers a summarizing pass. `None`
-    /// never triggers one.
+    /// The estimated request size that triggers a summarizing pass, for a
+    /// model whose context window is unknown. `None` never triggers one this
+    /// way — see [`auto_threshold_percent`](Self::auto_threshold_percent) for
+    /// the trigger that still can.
     auto_threshold_tokens: Option<usize>,
+    /// The percentage of a *known* context window that triggers a summarizing
+    /// pass, winning over `auto_threshold_tokens` when both apply. `None`
+    /// pins the trigger to the absolute number even when the window is known.
+    auto_threshold_percent: Option<u8>,
     /// How much recent user text a summarizing pass must leave verbatim.
     preserve_recent_user_tokens: usize,
 }
 
-/// Keeps every tool result, and leaves both of mentra's summarizing numbers
-/// where mentra put them.
+/// Keeps every tool result, and leaves every one of mentra's summarizing
+/// numbers where mentra put them.
 ///
-/// The two it leaves alone are *read off* mentra's own default rather than
-/// copied into a constant here. basis has no basis for choosing either — the
-/// trigger needs a context window nothing in this process knows, and the
+/// The three it leaves alone are *read off* mentra's own default rather than
+/// copied into a constant here. basis has no basis for choosing any of
+/// them — the window-relative trigger is a fact about the model, and the
 /// preserved-user-text budget is a property of how mentra summarizes — so
 /// restating them as literals would mean maintaining a second opinion that can
 /// silently drift from the first.
@@ -87,6 +111,7 @@ impl Default for Compaction {
             // model just read.
             keep_recent_tool_results: None,
             auto_threshold_tokens: mentra.auto_compact_threshold_tokens,
+            auto_threshold_percent: mentra.auto_compact_threshold_percent,
             preserve_recent_user_tokens: mentra.preserve_recent_user_tokens,
         }
     }
@@ -113,22 +138,49 @@ impl Compaction {
     }
 
     /// Triggers a summarizing pass once an estimated request reaches `tokens`,
-    /// or never with `None`.
+    /// for a model whose context window basis does not know — or never this
+    /// way, with `None`.
     ///
     /// The estimate is mentra's, over the serialized messages plus the system
-    /// prompt, and it is not the provider's accounting. A host that knows its
-    /// model's context window is the only party in a position to set this
-    /// meaningfully; basis does not know it and so does not move mentra's
-    /// number.
+    /// prompt, and it is not the provider's accounting.
+    /// [`with_auto_threshold_percent`](Self::with_auto_threshold_percent) wins
+    /// over this whenever the window *is* known, so this is the fallback a
+    /// host sets for a model it cannot ask, or the only number that matters
+    /// once the percentage is cleared.
     ///
-    /// `None` is a real posture, not a way of saying *later*: nothing then
-    /// shortens the history, and a conversation that outgrows the window fails
-    /// at the provider instead. It suits a run that is bounded by construction
-    /// — one prompt, a handful of turns — where a summarizing pass would only
-    /// ever cost a model call it did not need.
+    /// `None` is a real posture, not a way of saying *later*: nothing here
+    /// shortens the history ahead of time, and a conversation that outgrows
+    /// the window gets exactly the recovery every other posture also gets — the
+    /// provider's own refusal triggers one compaction and one retry (see this
+    /// module's header) — rather than a second, earlier attempt basis would
+    /// have made on its own guess. It suits a run that is bounded by
+    /// construction — one prompt, a handful of turns — where an earlier pass
+    /// would only ever cost a model call it did not need.
     pub fn with_auto_threshold_tokens(self, tokens: Option<usize>) -> Self {
         Self {
             auto_threshold_tokens: tokens,
+            ..self
+        }
+    }
+
+    /// Triggers a summarizing pass once an estimated request reaches `percent`
+    /// of the model's context window, when that window is known — or pins the
+    /// trigger to [`with_auto_threshold_tokens`](Self::with_auto_threshold_tokens)'s
+    /// absolute number regardless, with `None`.
+    ///
+    /// The window is known when
+    /// [`PreparedRun::context_window`](crate::PreparedRun::context_window)
+    /// returns `Some` — today, a workspace whose provider is Gemini; Anthropic
+    /// and the Responses transport do not report one, so this has no effect for
+    /// them until they do. Values above 100 are treated as 100.
+    ///
+    /// basis reads mentra's own default (75) here rather than choosing one:
+    /// unlike the absolute number, a percentage is not a guess about any
+    /// particular model, so there is nothing basis knows that would make a
+    /// different figure more honest.
+    pub fn with_auto_threshold_percent(self, percent: Option<u8>) -> Self {
+        Self {
+            auto_threshold_percent: percent,
             ..self
         }
     }
@@ -138,7 +190,7 @@ impl Compaction {
     ///
     /// What the user actually asked for is the thing a summary is least able to
     /// stand in for, which is why mentra protects a budget of it and why this
-    /// is the third knob rather than one of the six that stayed behind.
+    /// is a knob rather than one of the six that stayed behind.
     pub fn with_preserve_recent_user_tokens(self, tokens: usize) -> Self {
         Self {
             preserve_recent_user_tokens: tokens,
@@ -155,7 +207,7 @@ impl Compaction {
     /// there from being two answers.
     ///
     /// Every field this does not name stays at mentra's default, which is the
-    /// point of the three-knob surface: basis states what it has a reason to
+    /// point of the four-knob surface: basis states what it has a reason to
     /// state and inherits the rest, so an upstream improvement to summarization
     /// arrives rather than being shadowed by a copy of the old numbers.
     pub(crate) fn into_mentra(self, transcript_dir: PathBuf) -> mentra::agent::CompactionConfig {
@@ -166,6 +218,7 @@ impl Compaction {
             // configuration of upstream rather than a fork of it.
             keep_recent_tool_results: self.keep_recent_tool_results.unwrap_or(usize::MAX),
             auto_compact_threshold_tokens: self.auto_threshold_tokens,
+            auto_compact_threshold_percent: self.auto_threshold_percent,
             preserve_recent_user_tokens: self.preserve_recent_user_tokens,
             transcript_dir,
             ..Default::default()
