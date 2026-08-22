@@ -160,9 +160,17 @@ async fn loading_a_session_replays_the_conversation_and_resuming_does_not() {
     .await;
 
     assert!(resumed.is_some());
+
+    let observed = observed.lock().expect("not poisoned");
     assert!(
-        observed.lock().expect("not poisoned").updates.is_empty(),
-        "resuming replays nothing, which is the whole difference from loading"
+        observed.replayed_user_text().is_empty() && observed.agent_text().is_empty(),
+        "resuming replays no conversation, which is the whole difference from loading"
+    );
+    assert_eq!(
+        observed.command_names(),
+        vec!["compact".to_string()],
+        "a resumed session still learns what it can be asked to do — that is a \
+         capability announcement, not a replay"
     );
 }
 
