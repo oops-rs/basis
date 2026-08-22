@@ -40,7 +40,9 @@ use std::collections::HashMap;
 use std::path::{Path, PathBuf};
 use std::sync::{Arc, Mutex};
 
-use mentra::{BuiltinProvider, ModelInfo, ModelSelector, Session, agent::AgentConfig};
+use mentra::{
+    BuiltinProvider, ModelInfo, ModelSelector, Session, agent::AgentConfig, runtime::SessionOptions,
+};
 
 pub use builder::RuntimeBuilder;
 
@@ -255,23 +257,29 @@ impl Runtime {
 
     /// The one place a workspace's sessions are created.
     ///
-    /// `persist_identifier` is the workspace tag the session's rows *should*
-    /// carry ([`store::runtime_identifier`](crate::store::runtime_identifier)).
-    /// mentra 0.18 persists under the runtime-wide identifier fixed at build,
-    /// so on a shared runtime the tag cannot yet be applied — the parameter is
-    /// accepted and unread so that the upstream per-session override, once it
-    /// exists, lands in this one line. The private path is unaffected: its
-    /// runtime-wide identifier already is this value.
+    /// `persist_identifier` is the workspace tag the session's rows carry
+    /// ([`store::runtime_identifier`](crate::store::runtime_identifier)), and
+    /// it is applied per session rather than per runtime: on a shared runtime
+    /// every workspace's sessions would otherwise be tagged with the one
+    /// identifier fixed at build, and a per-workspace listing could not tell
+    /// them apart. The private path is unaffected — its runtime-wide
+    /// identifier already is this value, so the override is a no-op there.
     pub(crate) fn mint(
         &self,
         name: impl Into<String>,
         model: ModelInfo,
         config: AgentConfig,
-        _persist_identifier: &str,
+        persist_identifier: &str,
     ) -> Result<Session, RunError> {
+        let options = SessionOptions {
+            config,
+            project_id: None,
+            runtime_identifier: Some(Arc::from(persist_identifier)),
+        };
+
         Ok(self
             .mentra
-            .create_session_with_config(name, model, config)?)
+            .create_session_with_options(name, model, options)?)
     }
 
     /// The one place a workspace's sessions are resumed; see

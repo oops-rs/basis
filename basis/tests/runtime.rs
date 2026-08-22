@@ -138,12 +138,10 @@ async fn two_workspaces_minted_from_one_runtime_share_it() {
     );
 }
 
-/// Gated on the mentra per-session persist identifier (see `Runtime::mint`):
-/// today a shared runtime tags every row `"basis:runtime"`, so per-workspace
-/// listing cannot distinguish them. Unignore in the commit that adopts the
-/// upstream override.
+/// Each session's rows are tagged with its own workspace (`Runtime::mint`
+/// passes the per-session identifier), so one store file serving two
+/// workspaces lists each one's conversations apart.
 #[tokio::test]
-#[ignore = "requires mentra's per-session persist identifier; see Runtime::mint"]
 async fn a_shared_runtimes_conversations_list_under_their_own_workspaces() {
     let endpoint = ScriptedEndpoint::start(Vec::new());
     let store_dir = tempfile::tempdir().expect("tempdir");
