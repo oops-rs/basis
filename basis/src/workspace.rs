@@ -208,7 +208,7 @@ impl Workspace {
     /// (`Agent::from_loaded` always resumes at `None` — `set_model` is the
     /// only way back), so a resumed session starts with an unknown one. This
     /// reapplies this workspace's own resolved model exactly when the
-    /// resumed conversation is still on it — the same model [`prepare`] would
+    /// resumed conversation is still on it — the same model [`prepare`](Self::prepare) would
     /// have minted — which restores mentra's own compaction threshold as well
     /// as [`PreparedRun::context_window`]. A conversation
     /// [`PreparedRun::set_model`] had already moved elsewhere keeps whatever
