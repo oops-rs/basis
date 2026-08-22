@@ -117,7 +117,7 @@ through `spawn` and declared tools' programs alike) — joined by `with_command_
 registers an executor a
 command can name with `!@<target> <command>`
 ([ADR-0021](adr/0021-a-command-names-where-it-runs.md), [targets.md](targets.md)), and by the
-two below that describe the provider connection itself. A
+three below that describe the provider connection itself. A
 single-workspace host that wants one of them hands the recipe
 to `WorkspaceBuilder::with_runtime_builder`, which configures the private runtime
 `Workspace::open` would have built rather than switching to a shared one. Mentra's own
@@ -252,7 +252,40 @@ server's own `Retry-After` may make this process wait. None of it is a deadline:
 `TurnOptions::with_deadline` still bounds the whole turn, and a generous schedule inside a
 short deadline is bounded by the deadline.
 
-## Which wire the model's requests go over
+## Which wire a custom endpoint is spoken to in
+
+Two request formats answer to the name "OpenAI-compatible" and they agree on almost nothing:
+a flat `messages` array against typed input items, tool arguments as a JSON string against a
+value, `max_tokens` against `max_output_tokens` — and, the half an operator meets first,
+`v1/chat/completions` against `v1/responses`. Speaking the wrong one is a 404 on the very
+first turn, worded like a mistyped URL.
+
+`with_base_url` gets `chat/completions`, because that is what the name means in the wild:
+Ollama, LM Studio, vLLM, llama.cpp, DeepSeek, Groq, Together, OpenRouter, and the gateways in
+front of them serve it and nothing else. OpenAI's own `v1/responses` is served by OpenAI —
+where `with_provider(BuiltinProvider::OpenAI)` reaches it with no base URL at all — and by a
+few proxies that forward to it. Those proxies say so:
+
+```rust
+use basis::runtime::Wire;
+
+let runtime = basis::Runtime::builder()
+    .with_base_url("https://gateway.internal/v1")
+    .with_wire(Wire::Responses)
+    .build()?;
+```
+
+Paste the URL the server publishes on either wire: a trailing `/v1` is stripped during
+resolution, because both transports append their own `v1/…` and the published form would
+otherwise produce `/v1/v1/…`.
+
+Builder-only, and that is deliberate. `.basis/config.json` carries `provider`, `model`,
+`effort` and — global file only — `base_url`, but not this: a wire is not a fact a repository
+has about itself, and the host that needs the other one is embedding basis rather than typing
+at it. Reading this knob at all requires a base URL; a provider preset carries the wire its
+vendor speaks, and basis will not talk `chat/completions` to Anthropic because a builder asked.
+
+## Which transport a Responses stream goes over
 
 mentra streams the Responses wire format over HTTP+SSE or over a websocket. Unset, it picks,
 and what it picks is HTTP+SSE — what every basis run has ever used. A host driving basis
@@ -273,7 +306,8 @@ a host that asked for a transport should learn it did not get one, not discover 
 its traffic went the other way. A provider that does not serve websockets — Anthropic and
 Gemini report that they do not — refuses an explicit choice at its first request, naming
 itself, for the same reason. `Runtime::mentra_runtime().responses_transport()` reads back
-what a runtime chose.
+what a runtime chose. An endpoint on `Wire::ChatCompletions` is unaffected either way: that
+wire is HTTP+SSE and has no websocket to ask for.
 
 ## Answers you can branch on
 
