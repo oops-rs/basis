@@ -104,8 +104,12 @@ impl HookRequest {
     /// [`Event::ToolQueued`](crate::event::Event::ToolQueued) does with the
     /// same value.
     ///
-    /// The call has no working directory of its own — mentra's context does not
-    /// carry one — so `workspace` is the root basis scoped the run to.
+    /// `workspace` is the root basis scoped the run to, and it is also the
+    /// call's working directory: mentra's `PreExecutionContext` carries one
+    /// (`working_directory`, the agent's `base_dir`), and it is the key the
+    /// dispatcher (`runtime::dispatch`) resolves to this workspace's runner in
+    /// the first place — so the two are one path by construction, and a
+    /// second field would only invite them to disagree.
     pub fn from_call(event: HookEvent, workspace: &Path, call: &HookCall) -> Self {
         Self {
             hook_schema: HOOK_SCHEMA_VERSION,
