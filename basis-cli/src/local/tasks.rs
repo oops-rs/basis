@@ -5,7 +5,7 @@
 //! from the two facts an executor already publishes — whether `terminal.json`
 //! exists, and whether anyone holds `attach.lock`. It is the same derivation
 //! `wait` and `watch` use, reached through the same
-//! [`probe_state`](super::error::probe_state), so the three verbs cannot
+//! [`probe_state`], so the three verbs cannot
 //! disagree about what a task is doing.
 //!
 //! It mints nothing. A workspace that has never run anything is reported as
