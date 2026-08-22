@@ -256,9 +256,9 @@ short deadline is bounded by the deadline.
 
 Two request formats answer to the name "OpenAI-compatible" and they agree on almost nothing:
 a flat `messages` array against typed input items, tool arguments as a JSON string against a
-value, `max_tokens` against `max_output_tokens` — and, the half an operator meets first,
-`v1/chat/completions` against `v1/responses`. Speaking the wrong one is a 404 on the very
-first turn, worded like a mistyped URL.
+value, `max_tokens` against `max_output_tokens` — and, the difference an operator meets
+first, `v1/chat/completions` against `v1/responses`. Speaking the wrong one is a 404 on the
+very first turn, worded like a mistyped URL.
 
 `with_base_url` gets `chat/completions`, because that is what the name means in the wild:
 Ollama, LM Studio, vLLM, llama.cpp, DeepSeek, Groq, Together, OpenRouter, and the gateways in
@@ -282,7 +282,7 @@ otherwise produce `/v1/v1/…`.
 Builder-only, and that is deliberate. `.basis/config.json` carries `provider`, `model`,
 `effort` and — global file only — `base_url`, but not this: a wire is not a fact a repository
 has about itself, and the host that needs the other one is embedding basis rather than typing
-at it. Reading this knob at all requires a base URL; a provider preset carries the wire its
+at it. Nothing reads this without a base URL, either: a provider preset carries the wire its
 vendor speaks, and basis will not talk `chat/completions` to Anthropic because a builder asked.
 
 ## Which transport a Responses stream goes over
