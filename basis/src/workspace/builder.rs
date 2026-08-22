@@ -412,6 +412,7 @@ impl WorkspaceBuilder {
             .map(|skill| LoadedSkill {
                 name: skill.name,
                 description: skill.description,
+                model_invocable: skill.model_invocable,
                 path: skill.path,
             })
             .collect();

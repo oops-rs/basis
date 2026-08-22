@@ -89,6 +89,12 @@ context. The `.agents` spellings are what other harnesses read and are not
 configurable — a fixed path is what makes a shared convention shared. Within a
 scope the basis-specific root comes first.
 
+Frontmatter `disable-model-invocation: true` (or `disable_model_invocation`)
+keeps a skill out of the list the model is shown and makes `load_skill` refuse
+it. basis still reports it, marked `model_invocable: false`, so a host can
+offer it to a person. basis does not turn one into a `/name` command — that is
+what `.basis/templates/` is for.
+
 ### `.basis/templates/`
 
 Markdown whose body is a prompt, with optional YAML frontmatter

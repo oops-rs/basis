@@ -47,6 +47,16 @@ run.send("and which of those is riskiest?", sink, basis::AllowAll).await?;
 `run.agent_id()` is the handle `Workspace::resume` takes, so a later process can pick the
 same conversation back up.
 
+`workspace.skills()` reports what the four skill roots produced, after layering — see
+[conventions.md](conventions.md) for which roots and in what order. Each entry carries
+`model_invocable`, which is `false` when that `SKILL.md`'s frontmatter set
+`disable-model-invocation`: the skill is left out of the list the model is shown and
+`load_skill` refuses it, so it exists for a person to invoke. A host that offers skills in
+its own UI is the only thing that can act on that distinction, which is why the report
+carries it rather than quietly listing both kinds alike. basis does not itself route to
+one — a skill is a body of instructions with no argument convention, and `/name args` is
+already what `.basis/templates/` means.
+
 When one prompt really is the whole job, the free functions are the same path with the
 workspace opened and dropped around it — the binary is a thin shell over this:
 

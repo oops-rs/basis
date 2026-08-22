@@ -65,6 +65,16 @@ pub struct RunContext {
 pub struct LoadedSkill {
     pub name: String,
     pub description: String,
+    /// Whether the model may reach this one.
+    ///
+    /// `false` when the `SKILL.md` frontmatter set `disable-model-invocation`
+    /// (or `disable_model_invocation`): mentra keeps it out of the list the
+    /// model is shown and `load_skill` refuses it, while leaving it in the set
+    /// a host is shown — a skill a person invokes deliberately. Carried here
+    /// because the distinction is only actionable by a host, and one that
+    /// could not see it would have to re-read every `SKILL.md` to tell two
+    /// entries apart that look alike and behave differently.
+    pub model_invocable: bool,
     pub path: PathBuf,
 }
 
