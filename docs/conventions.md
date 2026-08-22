@@ -89,6 +89,12 @@ context. The `.agents` spellings are what other harnesses read and are not
 configurable — a fixed path is what makes a shared convention shared. Within a
 scope the basis-specific root comes first.
 
+Frontmatter `disable-model-invocation: true` (or `disable_model_invocation`)
+keeps a skill out of the list the model is shown and makes `load_skill` refuse
+it. basis still reports it, marked `model_invocable: false`, so a host can
+offer it to a person. basis does not turn one into a `/name` command — that is
+what `.basis/templates/` is for.
+
 ### `.basis/templates/`
 
 Markdown whose body is a prompt, with optional YAML frontmatter
@@ -118,6 +124,14 @@ each as a command.
 The program is exec'd directly — no shell — with the tool's JSON input on
 stdin. `side_effect` is `process` (default) or `external`; there is no
 read-only value, so every declared tool reaches the approver.
+
+`input_schema` is checked against each call before the approver is asked and
+before the program starts: a missing `required` field, a wrong scalar type, a
+value outside an `enum`, or a property the schema never named when it sets
+`additionalProperties: false`. The check is partial by design — it ignores
+keywords it does not implement rather than refusing a call it cannot judge —
+so a program that depends on a constraint beyond those still checks its own
+stdin.
 
 ### `.basis/hooks.json`
 

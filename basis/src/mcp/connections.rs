@@ -7,21 +7,26 @@
 //! — so basis connects through its own [`McpManager`] after the build, on both
 //! the shared and the private path, and `build` stays synchronous everywhere.
 //!
-//! The runtime's tool registry is single and has no unregister, so:
+//! The runtime's tool registry is single, so:
 //!
 //! - each server's name is **claimed** on the runtime first
 //!   ([`Runtime::claim_mcp_server`]), and a name another workspace holds comes
 //!   back suffixed — the effective name is what tools are bridged under and
 //!   what [`Workspace::mcp_servers`](crate::Workspace::mcp_servers) reports;
-//! - entries left behind by a dropped workspace are inert rather than removed:
-//!   every roster minted afterwards hides them (`Workspace` extends
-//!   `hidden_tools` with every `mcp__*` tool it does not own), and the claim
-//!   release makes the name reusable.
+//! - a workspace's bridged tools come off the registry when it drops, together
+//!   with the claim. While `unregister_tool` was `pub(crate)` upstream they
+//!   could only be left where they were and hidden from every roster minted
+//!   afterwards; the hiding stays, because it is what keeps a *live* sibling's
+//!   tools out of this workspace's roster, but the registry no longer grows by
+//!   one server's worth of entries per open.
 //!
 //! A server that fails to connect degrades exactly as mentra's `build_async`
 //! degraded: a warning names it, the open continues, and the name still
 //! appears in the workspace's report — a client can see which servers are
-//! configured whether or not they came up.
+//! configured whether or not they came up. A tool whose name the registry
+//! already answers to degrades the same way, for the same reason: one tool
+//! that cannot be bridged must no more sink a workspace than one server that
+//! cannot be reached.
 
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
@@ -41,6 +46,11 @@ pub(crate) struct McpConnections {
     manager: Option<McpManager>,
     /// Claimed effective names, released on drop.
     claimed: Vec<String>,
+    /// The bridged tool names this workspace put on the shared registry, taken
+    /// off again on drop. Not derivable from `claimed`: a server that failed to
+    /// connect bridged nothing, and a name the registry already answered to was
+    /// skipped.
+    bridged: Vec<String>,
     /// The claim owner; only this root can release its names.
     root: PathBuf,
     /// Every configured server's effective name, connected or not — what the
@@ -58,6 +68,7 @@ impl McpConnections {
     ) -> Self {
         let mut manager = McpManager::new();
         let mut claimed = Vec::new();
+        let mut bridged = Vec::new();
         let mut names = Vec::new();
 
         for server in servers {
@@ -81,11 +92,7 @@ impl McpConnections {
             };
 
             match outcome {
-                Ok(bridged) => {
-                    for tool in bridged {
-                        runtime.mentra_runtime().register_tool(tool);
-                    }
-                }
+                Ok(tools) => bridged.extend(bridge(&runtime, &effective, tools)),
                 // Degraded mode, mentra's own wording: one unreachable server
                 // must not sink the open.
                 Err(error) => {
@@ -100,6 +107,7 @@ impl McpConnections {
             runtime,
             manager: Some(manager),
             claimed,
+            bridged,
             root: root.to_path_buf(),
             names,
         }
@@ -111,8 +119,44 @@ impl McpConnections {
     }
 }
 
+/// Puts one server's tools on the shared registry, reporting the names that
+/// took.
+///
+/// `try_register_tool` rather than the replacing `register_tool`: the server
+/// name is claimed, so mentra's `mcp__<server>__<tool>` namespacing already
+/// keeps two live workspaces apart, and anything left to collide with is a
+/// name basis's claim map never granted — a host that registered on the same
+/// `mentra::Runtime` itself. Replacing that silently would send calls meant
+/// for the host's tool to somebody's MCP server.
+fn bridge<T>(runtime: &Runtime, server: &str, tools: Vec<T>) -> Vec<String>
+where
+    T: mentra::tool::ExecutableTool + 'static,
+{
+    let mut registered = Vec::new();
+
+    for tool in tools {
+        let name = tool.descriptor().provider.name;
+        match runtime.mentra_runtime().try_register_tool(tool) {
+            Ok(()) => registered.push(name),
+            Err(collision) => eprintln!(
+                "Warning: MCP server '{server}' offers a tool called '{}', which this runtime \
+                 already answers to; it was not bridged",
+                collision.name
+            ),
+        }
+    }
+
+    registered
+}
+
 impl Drop for McpConnections {
     fn drop(&mut self) {
+        // Before the claims: a name freed while the tools under it are still
+        // registered is a name the next claimant would bridge over.
+        for name in self.bridged.drain(..) {
+            self.runtime.mentra_runtime().unregister_tool(&name);
+        }
+
         for name in self.claimed.drain(..) {
             self.runtime.release_mcp_claim(&name, &self.root);
         }
@@ -129,5 +173,115 @@ impl Drop for McpConnections {
                 });
             }
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use async_trait::async_trait;
+    use mentra::tool::{
+        ParallelToolContext, RuntimeToolDescriptor, ToolDefinition, ToolExecutor, ToolResult,
+    };
+    use serde_json::{Value, json};
+
+    use super::*;
+
+    /// Stands in for what a connected server hands back: something registrable
+    /// under a name, without a child process to reach for it.
+    struct Bridged(&'static str);
+
+    impl ToolDefinition for Bridged {
+        fn descriptor(&self) -> RuntimeToolDescriptor {
+            RuntimeToolDescriptor::builder(self.0)
+                .description("a bridged tool")
+                .input_schema(json!({"type": "object"}))
+                .build()
+        }
+    }
+
+    #[async_trait]
+    impl ToolExecutor for Bridged {
+        async fn execute(&self, _ctx: ParallelToolContext, _input: Value) -> ToolResult {
+            Ok("bridged".to_string())
+        }
+    }
+
+    fn runtime() -> Arc<Runtime> {
+        Arc::new(
+            Runtime::builder()
+                .with_base_url("http://127.0.0.1:1/v1")
+                .with_api_key("test-key")
+                .with_ephemeral_history()
+                .build()
+                .expect("builds"),
+        )
+    }
+
+    fn registers(runtime: &Runtime, name: &str) -> bool {
+        runtime
+            .mentra_runtime()
+            .tools()
+            .iter()
+            .any(|tool| tool.provider.name == name)
+    }
+
+    #[test]
+    fn every_tool_a_server_offers_reaches_the_registry() {
+        let runtime = runtime();
+
+        let names = bridge(
+            &runtime,
+            "docs",
+            vec![Bridged("mcp__docs__search"), Bridged("mcp__docs__fetch")],
+        );
+
+        assert_eq!(names, ["mcp__docs__search", "mcp__docs__fetch"]);
+        assert!(registers(&runtime, "mcp__docs__search"));
+        assert!(registers(&runtime, "mcp__docs__fetch"));
+    }
+
+    #[test]
+    fn a_name_the_runtime_already_answers_to_is_left_where_it_is() {
+        // The claim map namespaces every *server*, so anything still colliding
+        // was registered by whoever holds the same `mentra::Runtime` — and a
+        // repository's server must not take over a name the host chose.
+        let runtime = runtime();
+        runtime
+            .mentra_runtime()
+            .register_tool(Bridged("mcp__docs__search"));
+
+        let names = bridge(
+            &runtime,
+            "docs",
+            vec![Bridged("mcp__docs__search"), Bridged("mcp__docs__fetch")],
+        );
+
+        assert_eq!(
+            names,
+            ["mcp__docs__fetch"],
+            "the collision is skipped and the rest of the server still bridges"
+        );
+    }
+
+    #[test]
+    fn what_a_workspace_bridged_comes_off_when_it_drops() {
+        let runtime = runtime();
+        let connections = McpConnections {
+            runtime: Arc::clone(&runtime),
+            manager: None,
+            claimed: vec!["docs".to_string()],
+            bridged: bridge(&runtime, "docs", vec![Bridged("mcp__docs__search")]),
+            root: PathBuf::from("/repo"),
+            names: vec!["docs".to_string()],
+        };
+        assert!(registers(&runtime, "mcp__docs__search"));
+
+        drop(connections);
+
+        assert!(
+            !registers(&runtime, "mcp__docs__search"),
+            "a registry a host keeps for its whole process must not grow by one \
+             server's worth of tools per workspace open"
+        );
     }
 }

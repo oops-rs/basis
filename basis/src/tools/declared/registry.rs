@@ -1,12 +1,11 @@
 //! Putting a workspace's declared tools on the runtime it borrows, and taking
 //! the claim back when the workspace goes.
 //!
-//! The shape is `mcp::connections`'s, because the problem is the same
-//! one: the tool registry is the *runtime's*, single, and has no unregister,
-//! while what is being registered came out of one repository's file and belongs
-//! to that repository. So a name is claimed before anything is registered, the
-//! claim is released on drop, and what a dropped workspace left behind is kept
-//! out of every other workspace's roster rather than removed.
+//! The shape is `mcp::connections`'s, because the problem is the same one: the
+//! tool registry is the *runtime's* and single, while what is being registered
+//! came out of one repository's file and belongs to that repository. So a name
+//! is claimed before anything is registered, and the claim — with the tool
+//! under it — is released when the last workspace holding it goes.
 //!
 //! Where it differs is the collision rule, and [`Runtime::claim_declared_tool`]
 //! carries the argument: a bridged MCP tool's name is synthetic and can be
@@ -39,12 +38,22 @@ pub(crate) struct DeclaredTools {
 }
 
 impl DeclaredTools {
-    /// Claims every name, then registers every tool.
+    /// Claims every name, then registers the tools this open is the first
+    /// holder of.
     ///
     /// Two passes rather than one, and the order is the point: a manifest whose
     /// fourth tool collides must leave the first three unregistered, because on
     /// a shared runtime a half-registered manifest from a workspace that failed
     /// to open would still be in every other workspace's roster.
+    ///
+    /// The second pass registers with `try_register_tool`, which is the
+    /// difference between a check-then-act that is safe *because* of the claim
+    /// map and one that is safe on its own. Nothing basis does can reach the
+    /// gap between the two passes — the claim map serializes every workspace on
+    /// this runtime — but a host holding the same `mentra::Runtime` can call
+    /// `register_tool` on it directly, and a claim it walked past would
+    /// otherwise be a repository's program silently answering to the host's
+    /// name, or the reverse.
     pub(crate) fn register(
         runtime: Arc<Runtime>,
         root: &Path,
@@ -57,11 +66,12 @@ impl DeclaredTools {
             root: root.to_path_buf(),
             names: Vec::new(),
         };
+        let mut first_holder = Vec::new();
 
         for (path, spec) in &declared {
             // On failure `claimed` drops, releasing whatever it had taken, so a
             // refused open leaves the runtime as it found it.
-            claimed
+            let fresh = claimed
                 .runtime
                 .claim_declared_tool(&spec.name, root)
                 .map_err(|reason| DeclaredToolError::NameTaken {
@@ -70,13 +80,28 @@ impl DeclaredTools {
                     reason,
                 })?;
             claimed.names.push(spec.name.clone());
+            first_holder.push(fresh);
         }
 
-        for (_, spec) in declared {
+        for ((path, spec), fresh) in declared.into_iter().zip(first_holder) {
+            // A sibling open of this same root already registered it, and one
+            // name is one program: joining that registration is what keeps the
+            // sibling's running agents on the program they started with.
+            if !fresh {
+                continue;
+            }
+
             claimed
                 .runtime
                 .mentra_runtime()
-                .register_tool(wrapped(&claimed.runtime, spec, root));
+                .try_register_tool(wrapped(&claimed.runtime, spec, root))
+                .map_err(|collision| DeclaredToolError::NameTaken {
+                    path,
+                    name: collision.name,
+                    reason: "something registered a tool by that name on this runtime while this \
+                             workspace was opening"
+                        .to_string(),
+                })?;
         }
 
         Ok(claimed)
@@ -157,6 +182,17 @@ mod tests {
             scope: ContextScope::Workspace,
             tools: names.iter().map(|name| spec(name)).collect(),
         }
+    }
+
+    /// Whether mentra's registry answers to `name` — the only honest answer to
+    /// "is this tool on the runtime", since basis's claim map is a separate
+    /// ledger that could disagree.
+    fn registers(runtime: &Runtime, name: &str) -> bool {
+        runtime
+            .mentra_runtime()
+            .tools()
+            .iter()
+            .any(|tool| tool.provider.name == name)
     }
 
     #[test]
@@ -276,6 +312,10 @@ mod tests {
             error.to_string().contains("/repo/two"),
             "the refusal names the file to fix: {error}"
         );
+        assert!(
+            error.to_string().contains("/repo/one"),
+            "and the claimant it collided with, which is the other half of the fix: {error}"
+        );
 
         drop(first);
 
@@ -288,10 +328,35 @@ mod tests {
     }
 
     #[test]
-    fn a_workspace_can_be_reopened_over_the_entry_its_last_open_left_behind() {
-        // mentra has no unregister, so the registry still holds the tool after
-        // the first workspace drops. Refusing on that would make a host that
-        // opens a repository per request fail on the second one.
+    fn a_dropped_workspace_takes_its_tools_off_the_runtime() {
+        // What a workspace registered on a runtime it borrows lives exactly as
+        // long as the workspace does. Before mentra had an unregister these
+        // entries stayed forever — hidden from every other workspace's roster,
+        // but still on a registry a long-running host keeps for its whole
+        // process.
+        let runtime = runtime();
+        let sources = [source("/repo/.basis/tools.json", &["deploy"])];
+
+        let held = DeclaredTools::register(Arc::clone(&runtime), Path::new("/repo"), &sources)
+            .expect("registers");
+        assert!(registers(&runtime, "deploy"));
+
+        drop(held);
+
+        assert!(
+            !registers(&runtime, "deploy"),
+            "the workspace is gone and so is what it declared"
+        );
+        assert!(
+            runtime
+                .foreign_declared_tools(Path::new("/elsewhere"))
+                .is_empty(),
+            "and nothing is left to hide from anyone"
+        );
+    }
+
+    #[test]
+    fn a_workspace_can_be_reopened_after_its_last_open_released_the_name() {
         let runtime = runtime();
         let sources = [source("/repo/.basis/tools.json", &["deploy"])];
 
@@ -301,6 +366,47 @@ mod tests {
 
         DeclaredTools::register(runtime, Path::new("/repo"), &sources)
             .expect("the same workspace registers its own tool again");
+    }
+
+    #[test]
+    fn a_second_open_does_not_swap_the_program_the_first_one_is_serving() {
+        // Both opens hold the same name, so there is one tool and a precedence
+        // question — the module's own rule. The live registration answers it:
+        // an agent running in the first workspace must not have the program
+        // under its feet replaced because somebody opened the repository again.
+        let runtime = runtime();
+        let serving = |name: &str, description: &str| ToolsSource {
+            path: PathBuf::from("/repo/.basis/tools.json"),
+            scope: ContextScope::Workspace,
+            tools: vec![DeclaredToolSpec {
+                description: description.to_string(),
+                ..spec(name)
+            }],
+        };
+
+        let _first = DeclaredTools::register(
+            Arc::clone(&runtime),
+            Path::new("/repo"),
+            &[serving("deploy", "the first open's program")],
+        )
+        .expect("registers");
+        let _second = DeclaredTools::register(
+            Arc::clone(&runtime),
+            Path::new("/repo"),
+            &[serving("deploy", "the second open's program")],
+        )
+        .expect("registers");
+
+        assert_eq!(
+            runtime
+                .mentra_runtime()
+                .tool_descriptor("deploy")
+                .expect("registered")
+                .provider
+                .description
+                .as_deref(),
+            Some("the first open's program")
+        );
     }
 
     #[test]
@@ -314,6 +420,10 @@ mod tests {
             .expect("registers");
 
         drop(first);
+        assert!(
+            registers(&runtime, "deploy"),
+            "one holder went, the other is still serving it"
+        );
 
         // The second is still open, so the name is still spoken for.
         let error = DeclaredTools::register(

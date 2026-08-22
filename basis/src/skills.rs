@@ -29,6 +29,25 @@
 //! replace (`Runtime::register_skills_dirs` is additive, and an earlier root's
 //! name wins), so a repository shadows a personal skill by name and inherits
 //! everything it did not shadow.
+//!
+//! # `disable-model-invocation`
+//!
+//! A `SKILL.md` may set `disable-model-invocation: true` in its frontmatter
+//! (the underscore spelling is accepted too). mentra then leaves the skill out
+//! of the list the model is shown and refuses it from `load_skill`, while
+//! keeping it in `Runtime::skills()` with `model_invocable: false` — a skill a
+//! person invokes deliberately rather than one a model reaches for.
+//!
+//! basis reads the flag nowhere: discovery is about *where to look*, and what
+//! a `SKILL.md` says is mentra's to parse. What basis does is carry the answer
+//! out, on [`LoadedSkill::model_invocable`](crate::run::LoadedSkill), so a host
+//! listing a workspace's skills can tell which of them the model will never
+//! reach. It is deliberately **not** offered as a `/name` command beside
+//! templates: rendering one would mean re-reading and re-parsing the
+//! `SKILL.md` basis handed mentra (mentra exposes the body of a skill it will
+//! not invoke through no API at all), and giving it an argument convention
+//! `SKILL.md` does not define — which is [`crate::templates`] a second time,
+//! under a second set of rules.
 
 use std::path::{Path, PathBuf};
 

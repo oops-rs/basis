@@ -119,6 +119,34 @@ async fn context_is_discovered_at_open_not_at_mint() {
 }
 
 #[tokio::test]
+async fn a_skill_the_model_may_not_reach_is_reported_as_one() {
+    // `disable-model-invocation` keeps a skill out of the model's list and
+    // makes `load_skill` refuse it, while leaving it in the set a host is
+    // shown. A host is the only one who can act on that, so the workspace's
+    // report has to carry the distinction rather than hand back two entries
+    // that look alike and behave differently.
+    let dir = tempfile::tempdir().expect("tempdir");
+    write(
+        &dir.path().join(".basis/skills/release/SKILL.md"),
+        "---\nname: release\ndescription: cut a release\ndisable-model-invocation: true\n---\nSteps.",
+    );
+    write(
+        &dir.path().join(".basis/skills/review/SKILL.md"),
+        "---\nname: review\ndescription: review a diff\n---\nSteps.",
+    );
+
+    let workspace = offline(dir.path()).open().await.expect("opens");
+
+    let reported: Vec<(&str, bool)> = workspace
+        .skills()
+        .iter()
+        .map(|skill| (skill.name.as_str(), skill.model_invocable))
+        .collect();
+
+    assert_eq!(reported, [("release", false), ("review", true)]);
+}
+
+#[tokio::test]
 async fn every_run_from_one_workspace_reports_the_same_resolution() {
     let dir = tempfile::tempdir().expect("tempdir");
     write(&dir.path().join("AGENTS.md"), "house rules");
