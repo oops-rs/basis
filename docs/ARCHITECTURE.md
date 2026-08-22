@@ -1,6 +1,6 @@
 # basis — Architecture
 
-> rev 12 · 2026-08-22 · **basis** — the minimal set everything else is built from
+> rev 13 · 2026-08-22 · **basis** — the minimal set everything else is built from
 > The *how*. For the *why* — problem, idea, bets — see [`PROPOSAL.md`](PROPOSAL.md);
 > locked decisions live in [`adr/`](adr/); deferred ideas in [`proposals/`](proposals/);
 > research grounding in [`p0-groundwork.md`](p0-groundwork.md).
@@ -21,8 +21,13 @@
 > the wave after it measured basis against pi capability by capability and
 > closed what that found: the split file-tool roster, compaction configured by
 > basis, the shared skill roots and `CLAUDE.md`, a system-prompt seam, a shell
-> that streams, and per-session model and effort over ACP. The ledger and
-> phases are in [`REDESIGN.md`](REDESIGN.md).
+> that streams, and per-session model and effort over ACP. The wave after
+> *that* went to mentra with everything basis could not build alone and came
+> back the same day: a base URL speaks `chat/completions` and needs no key, a
+> hook runs after a tool as well as before, compaction knows the model's
+> window, a conversation can be compacted, renamed, listed by recency and
+> deleted, and a delegated run's spend is finally in its parent's tally. The
+> ledger and phases are in [`REDESIGN.md`](REDESIGN.md).
 > Reference bar: [pi](https://github.com/earendil-works/pi) (earendil-works) — minimal core, complete harness.
 > General-purpose: no domain assumptions. Periodic bug-checking is one use case, never a design input.
 
@@ -49,15 +54,15 @@ hot-reloadable extensions. Two pi decisions independently validate ours:
 | Capability (pi has it) | Ours | Source |
 |---|---|---|
 | Agent loop + tool calling | Mentra runtime, async tool traits | mentra |
-| Multi-provider LLM API | mentra-provider: OpenAI, Anthropic, Gemini, OpenRouter, Ollama, LM Studio | mentra |
+| Multi-provider LLM API | mentra-provider: OpenAI, Anthropic, Gemini, OpenRouter, Ollama, LM Studio — and any `chat/completions` endpoint by base URL, keyed or not (§8) ✅ | mentra |
 | Session persistence + resume | SQLite-backed sessions, snapshots | mentra |
-| Compaction | mentra's compaction, configured by basis (`Compaction`) ✅ — every tool result the model was shown is kept, elision is opt-in by number, snapshots follow the store | built |
+| Compaction | mentra's compaction, configured by basis (`Compaction`) ✅ — every tool result the model was shown is kept, elision is opt-in by number, the trigger is a share of the model's window when the provider reports one, snapshots follow the store; `PreparedRun::compact` and ACP `/compact` run a pass on demand | built |
 | Session branching / tree | mentra's transcript tree, exposed on `PreparedRun` ✅ | built |
 | Builtin tools (files, shell, background exec, tasks) | Mentra builtins, with the roster basis's: `read`, `ls`, `grep`, `glob`, `write`, `edit` (mentra's split file tools, `RuntimeBuilder::with_file_tools`), `compact`, `memory_pin`/`memory_forget`/`memory_search`, `load_skill`, and `spawn` for commands and delegation. `shell`, `background_run`, `check_background`, `task`, `task_*`, `team_*` and `idle` are registered but not offered ✅ | mentra + built |
 | Context files (AGENTS.md) | Loader: workspace + global, parent-dir walk; `CLAUDE.md` per directory where there is no `AGENTS.md` | build |
 | Skills (on-demand) | SKILL.md discovery, description-first loading, four roots — `.basis/skills` and `.agents/skills` in the workspace, `skills/` in the global config dir and `~/.agents/skills` | build |
 | Prompt templates (/commands) | Markdown templates with args, exposed over ACP as commands ✅ | built |
-| Extensions (custom tools, event interception) | MCP servers + interception with two bindings — in-process `Interceptor`, subprocess hooks — allow/deny/modify (§3) ✅ | built |
+| Extensions (custom tools, event interception) | MCP servers + declared subprocess tools + interception with two bindings — in-process `Interceptor`, subprocess hooks — before a call (allow/deny/modify) and after it (keep/replace) (§3) ✅ | built |
 | Packages (shareable bundles) | Directory convention over skills/templates/hooks/MCP — defer | later |
 | RPC / headless mode | `spawn --json` event stream (`run` is a compatibility alias) + **ACP** (standard, not bespoke) ✅; durable task control over a global data directory, with no resident process of any kind ✅; the model and the reasoning effort are per-session config options a client sets over the protocol, where pi spends six RPC commands ✅ | built |
 | SDK | `basis`: a `Workspace` opened once, runs minted from it with typed output, bounds, cancellation ✅ — other languages use ACP | built |

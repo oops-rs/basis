@@ -1,6 +1,6 @@
 # basis — Redesign plan
 
-> rev 12 · 2026-08-20 · The transition from the P0–P4 harness to the SDK-first
+> rev 13 · 2026-08-22 · The transition from the P0–P4 harness to the SDK-first
 > shape decided in [ADR-0010](adr/0010-the-crate-is-the-workflow-surface.md)
 > through [ADR-0017](adr/0017-structured-agent-concurrency.md). This document is the
 > honest ledger of that transition: what exists, what is in between, what is not
@@ -54,6 +54,15 @@
 > the §2 tally with two new candidates, both found the same way ADR-0016's
 > three were: by registering a kind of tool mentra had not been asked for
 > before.
+> **Rev 13 records the second upstream wave.** Every candidate §2's tally had
+> open went to mentra as one handoff and came back the same day
+> (`026fbf5..bfe952b`); basis met each, and six more found while meeting them
+> went up and came back the same afternoon. The tally is at zero open upstream
+> candidates for the second time, with the one workaround it carries
+> (mentra#21) still the only one. What the wave did instead of making this
+> document shorter is the same as rev 6: each fix is written with what it
+> cost and what it newly exposes, and the three candidates it created on the
+> way — none upstream-shaped — are named where the old ones were.
 
 ## 1. The target in one paragraph
 
@@ -145,6 +154,16 @@ ledger).
 | A way back into a conversation (`list`, `--continue`, `--session`) | 0015/0017/0019 | **Built** (the commit that carries these lines) — a shell user who closed the terminal had lost every handle basis printed, while the tasks themselves sat durable on disk. **What it is**: `basis list` reads `<data>/workspaces/<key>/agents/*/meta.json` back — handle, state, age, the prompt's first line, and what the task spent — newest first, 50 rows unless `--all`, one JSON object per line under `--json`. It takes no lock and writes nothing; a listing that minted a directory would be a listing that changed its own answer, so it reads the workspace marker rather than calling `ensure_workspace`. State is derived through the same `probe_state` `wait` and `watch` use — terminal record first, then the attach lock — so the three verbs cannot disagree. **Why continuing is a new task and not `send`**: a task holding a terminal record accepts no messages at all. `inbox::enqueue` refuses the moment `terminal.json` exists (ADR-0019: "a worker past its own turn accepts no new messages"), and that is deliberate — terminal means immutable and repeatably observable. So `--continue` (the newest task in this workspace that has a conversation) and `--session <TASK>` (the one that handle names) mint a *new* task recording the agent id it continues, and its first attach calls `Workspace::resume` on that id instead of `prepare`: new handle, one conversation, all four of ADR-0017's rules untouched. Bounds, model, effort and approval mode come from the new invocation, because a bound belongs to a run and the old task's are spent. **Two refusals, for two different reasons.** A task something is *driving* is refused with exit 1 and the state that caused it — one executor per conversation is the whole point of the attach lock, and a second resume of the same agent would interleave two dialogues into one transcript; the same command works once it settles. A handle from another workspace is refused with exit 2, because the key is half the handle and no amount of waiting makes it right. The attended `--json` route refuses both spellings for a third reason: it mints no checkpoint and never opens the workspace-keyed store, so it would silently run the prompt as if it opened the dialogue — ADR-0020's routing table is untouched rather than grown a cell. **What it costs**: a fourth persisted field, `answered_before`, and the reason is a correctness one rather than bookkeeping — the resume recovery reads "any committed assistant turn" as "the prompt was already answered", which on a continued conversation is true from the first turn, so without a baseline a continued task that crashed before committing would settle `succeeded` on the *previous* task's answer without ever asking its own. `list` also costs one `read_dir` plus one `meta.json` read per task, bounded by `MAX_TASKS` (1024) and by the 50-row default. **What it newly exposes**: nothing outside the data directory basis already owns. `list` shows the first line of prompts that were always in `meta.json`, on a `0700` tree, to the user who wrote them |
 | Templates typeable at a shell (`/name`) | 0015 | **Built** (the commit that carries these lines) — `.basis/templates/**/*.md` has been discovered since P2 and surfaced in exactly one place: over ACP, as the `AvailableCommand`s a client offers. `grep -rn template basis-cli/src` found one unrelated comment, so the person who wrote `.basis/templates/git/commit.md` could not type it at a shell — a convention every peer CLI spells `/command`, reaching the editor and stopping there. **What it is**: a prompt whose first token is `/<name>` is a template invocation, rendered with the rest of the line as `$ARGUMENTS`/`$1`… and handed to `spawn` as the prompt. Discovery is `basis::templates::load`, the same function the workspace builder hands ACP its list from, so a name a client offers and a name a shell accepts are one set, layering included. It is resolved once in `main`, before ADR-0020's route is chosen, because every route takes a prompt — and the *rendered* text is what the task records, so `basis watch` and `basis list` show the question that was really asked. `send` and `ask` bodies resolve the same way, against the workspace their task recorded rather than whichever one the shell is standing in. **What it costs**: a name-shaped first token that names nothing is refused with exit 2 and the names that exist, rather than sent as prose — a typo'd `/comit` handed to the model is a run that answers the wrong question and bills for it, and the escape is one character (`basis spawn -` reads a literal prompt from stdin, which is why `-` is never expanded). A workspace with a template file that does not parse now fails the *spawn* as well as the ACP session, which is basis's existing rule about templates applied one door further along. **What it newly exposes**: nothing basis was not already reading. The files are the ones ACP has been loading since P2, from the same two roots in the same precedence order. A first token with a second slash is a path, not a command — template names never contain `/`, since nesting is namespacing and joins with `:` — so `basis "/usr/bin/x crashes on startup"` passes through untouched, which is what lets the rule apply to every prompt without an escape for the ordinary case |
 | Usage where consumers can see it | 0014 | **Built** (the commit that carries these lines) — `RunReport::usage` was correct in-process and invisible everywhere else: the JSONL stream carried per-round `Event::Usage` and no total, the terminal record carried none, and the CLI printed none. basis rightly ships no price table — prices are the host's and they move — but that argument only holds if the counts arrive. **What it is**: `usage` on `Event::RunFinished`, sourced from the figure the run already summed; the same four numbers on the terminal record, so `basis wait --json` and `basis list --json` report what a settled task spent; and one compact `basis: 12.3k in · 1.2k out` at the end of a streamed run, on stderr with the rest of the progress, never on stdout — `basis "…" > answer.md` leaves a file holding the answer, not a receipt. The CLI banks the tally per turn in `meta.json` rather than recomputing it from the journal, because a task settles once but its turns may be driven by several processes and the journal is capped at 32 MiB. **What it costs**: one atomic `meta.json` write per model turn, which is nothing beside the round-trip that earned it; and every `run_finished` line grows a field. Not a schema bump — `EVENT_SCHEMA_VERSION` stays 1, on the rule `stopped_by` already set: the field is optional and skipped when absent, a schema-1 reader that ignores the key reads the line as before, and `Deserialize` defaults it so an older line still parses. **Absent is not zero, deliberately.** A provider that reports nothing leaves the counters at zero, so a `usage` object full of zeros would claim a measurement nobody made; the record and the stderr line both say nothing instead, and the field's absence means "not stated" rather than "free". **What it newly exposes**: token counts for a run, to whoever could already read that run's terminal or its `--json`. No prices, no per-agent attribution — mentra's usage report carries no agent id, so a delegated round lands in the same total as its parent's, which the `RunUsage` doc already said and this makes visible |
+| `chat/completions` is the wire a base URL speaks | 0005/0018 | **Built** (`b3cfa3e`, `362df0b`, `c62e7ff`, `e35c8f4`, over mentra `62ac1c4`) — **the first-turn 404 is gone.** A `base_url` was spoken to in OpenAI's Responses wire, which Ollama, LM Studio, vLLM, llama.cpp and the gateways in front of them have never served; that is the wire "OpenAI-compatible" means everywhere except OpenAI, so the flag basis documents as its route to a local model failed on the first request, worded like a mistyped URL. Now a base URL gets `chat/completions` through mentra's own `with_openai_compatible` — filed under the id the choice resolved, so `--provider gemini --base-url …` finds its model instead of failing at the first turn under a name nobody registered (`362df0b`, a pre-existing bug the change forced into view) — and OpenAI's Responses wire is what the `openai` preset reaches with no base URL at all. A proxy that forwards Responses says so: `RuntimeBuilder::with_wire(Wire::Responses)`, basis's own two-variant enum rather than a re-export of `WireApi`, whose other two variants a base URL cannot be spoken to in. **What it costs**: every scripted endpoint in the suite spoke Responses and seven harnesses were converted; `tools[].name` became `tools[].function.name` in two assertions. **What it newly exposes**: nothing — one wire replaced another on the same connection. **Refused**: a `wire` key in `config.json` — a wire is not a fact a repository has about itself, and the operator who needs the other one is embedding basis rather than typing at it |
+| A keyless endpoint is reached without inventing a key | — | **Built** (`05a8ce9`) — `--provider ollama` was refused for lacking a key it never needed, and a base URL with no key anywhere was refused outright; with the wire fixed that turned away exactly the servers it most often names. `ProviderChoice::api_key` is `Option<String>`; a local preset and a keyless base URL resolve with `None`, the provider is built with `AuthScheme::None` so the request carries no `Authorization` header at all — not an empty bearer a server would refuse — and a server that wanted one answers 401 in its own words. `NotKeyed` and `NoCompatibleCredential` went with the refusals they named. **What it costs**: a mistyped key variable now surfaces as the server's 401 rather than basis's "no key" — a worse message for the keyed case, taken because the keyless case is the common one and a heuristic ("loopback needs no key") would have been a guess. **What it exposes**: a request with no credential to a URL the operator named; nothing is sent anywhere the operator did not point it |
+| `post_tool_use` in `.basis/hooks.json` | 0010 | **Built** (`5d685ba`, `cc32938`, `4eeac7b`, over mentra `145d4ef`) — the second half of the interception seam, which the contract had a word for and mentra had no hook for. One envelope for both events: `event: "post_tool_use"` adds `output` (the result as the runtime typed it — structured as itself, text as a JSON string) and `is_error` to the request a pre hook already gets, with `input` being what the tool *ran* with, after any `modify`. One `decision` vocabulary: `allow` is keep, `deny` shows the model the reason in place of the output with `is_error: true` (after the call nothing can be stopped — the stream already carried the real result), `replace` carries `output` and an optional `is_error` where omitted means unchanged, so redacting a failing result does not declare it a success. `HOOK_SCHEMA_VERSION` stays 1, because a hook written against the old shape is still right: never asked at an event it did not declare, byte-identical requests, unchanged answers — and `UnsupportedSchema` compares for equality, so a bump would refuse every `hooks.json` in existence. In-process, `Interceptor::review` is defaulted to allow, with `Box`/`Arc` forwarding explicitly so an indirection cannot silently swallow a guard's objection. **What it costs**: one map lookup per tool result on a runtime with no participants, since whether a workspace will declare a post hook is unknowable at build. **What it newly exposes**: a hook now reads every tool's *output*, which is the point and is also a second channel for a credential to leave the process — the same `on_failure: deny` default applies, and a broken guard replaces the result with its failure rather than letting it through |
+| Compaction knows the window | — | **Built** (`8108e24`, `b9478b7`, `bd10912`, `e35c8f4`, over mentra `4883ba9`, `2c77792`, `11826ee`, `bfe952b`) — the row above's "what it does not do" done: `Compaction::with_auto_threshold_percent` beside the token trigger (75% of the window by default, read off mentra's own default), `PreparedRun::context_window()` read off the live session and `estimated_context_tokens()` with mentra's own estimator, and `basis-acp` sending a `UsageUpdate` after each turn when the window is known and nothing when it is not. The stale argument in `compaction.rs` — that nothing in basis or mentra knows the window — is retired with the default it argued against. **What it costs**: `estimated_context_tokens` is a floor — mentra adds a task-reminder banner and a skill block to the *effective* prompt, inside a private method — and a resumed conversation must have its model reapplied to get a window back. **What it exposes**: nothing new on the wire; a number the client was already entitled to |
+| Session verbs: `compact`, `set_name`, `effort` | 0010 | **Built** (`1384a3a`, `e17d112`, `63ef04a`, `5522b69`, over mentra `ee01c30`, `bfe952b`) — `PreparedRun::compact(instructions, sink)` runs mentra's summarizing pass on demand and delivers mentra's own `CompactionStarted`/`CompactionCompleted` to the sink exactly once (the run subscribes before the pass and drains after, because the per-turn forwarder is not installed for a pass that is not a turn); `set_name`/`name()`; and `effort()` now reads `Session::reasoning()` instead of a field that said `None` for a session running at `high` because the level was applied at mint — which is what `basis-acp`'s picker had been drawing. `basis-acp` answers a built-in `/compact` beside the workspace templates; the built-in wins a name clash and a `compact.md` template is not advertised, because this direction's loss is a rename and the other's is a person's only compaction control silently replaced by someone else's prompt. **What it costs**: `/compact` arms no cancellation token — a summarizing pass has no round boundary for one to be read at. **Refused**: expanding templates over ACP (a visible inconsistency now, named in the tally) |
+| Conversations carry timestamps, list by recency, and can be deleted | 0018 | **Built** (`b06e9bc`, `9cc10ec`, `51b5d10`, over mentra `ee01c30`) — `PersistedSession::{created_at, updated_at}`, `list_in` ordered newest first with `None` (a volatile store) deterministic, `SessionInfo::updated_at` on ACP's `session/list`; `session/delete` answered on `store::forget`/`forget_in` — not on `Workspace`, because `session/delete` carries no `cwd` and opening a workspace to delete a row would resolve a model over the network on a connection that had only listed. And the per-session persist identifier: `Runtime::mint` applies the workspace tag it had been accepting and ignoring since E1, so a shared runtime's `session/list` answers per workspace, and the test this ledger shipped `#[ignore]`d runs. **Refused**: ordering `basis list` by `updated_at` — it lists CLI tasks off the filesystem by ADR-0019's design and never touches the store; the real bug there is `--continue`'s, named in the tally |
+| Schema checked upstream, names claimed without replacing | 0012/0018 | **Built** (`6b37ddb`, `a45b01d`, `5ebd1be`, over mentra `dd2e38a`) — mentra#23 and mentra#24, closed; the tally records what each was and what basis did with it. A second concurrent open of the same repository now *joins* the first's declared-tool registration rather than swapping the program under a running agent, and a dropped workspace takes its declared and bridged tools off the runtime instead of leaving tombstones — the first time a released claim is dropped rather than remembered |
+| Delegated spend is tallied and the delegation recorded | 0016 | **Built** (`e22aa63`, `54f3d21`, over mentra `5f303b8`, `bfe952b`) — the three ADR-0016 candidates, closed; the tally records them. `RunUsage` now agrees with the bound (`delegated_spend_lands_on_the_budget_that_delegated_it` flipped from pinning a 10-vs-210 gap to asserting they match), `spawn` writes `DelegationRequest`/`DelegationResult` entries in the `task` intrinsic's shape, and the child is announced on the parent's stream by mentra rather than narrated by basis. Events other than usage are deliberately *not* relayed: a second run's tool calls and text on the parent's stream would be rendered as the parent's own |
+| Usage says what was reasoning; a turn says how many images it carried | — | **Built** (`0293331`, over mentra `1e9a15c`, `3ef731a`) — `reasoning_tokens` and `thoughts_tokens` kept apart on `RunUsage` and `Event::Usage`, because the Responses wire counts reasoning inside `output_tokens` and Gemini counts thoughts outside it, so one sum is wrong for one of the two; `image_count` on `UserMessage`, absent when zero, so an image-only turn is no longer a blank message. Both read as zero from a record written before the split |
+| `disable-model-invocation` carried out to the host | — | **Built, narrowly** (`e628beb`, over mentra `b44f53a`, `bfe952b`) — `LoadedSkill::model_invocable`, one field wide, so a host reading `Workspace::skills()` can tell an unreachable skill from a reachable one without re-reading every file; the docs in three places say what the flag does and why such a skill is not a command. The slash-command wiring is deferred on the one ground that still holds — `SKILL.md` carries no argument convention — and is named in the tally |
 
 Footnotes on the Phase B, C and D rows, because a ledger that records only
 the wins is not a ledger:
@@ -618,7 +637,8 @@ ninth was basis's own** rather than mentra's — a store knob on `WorkspaceBuild
 — and `397ca13` plus `71cc59d` built it (footnote 6). **Zero were open, for one
 day.** ADR-0016's first wave then found three more, all upstream-shaped and all
 open, rev 12's declared tools found two more after them, and wiring compaction
-found two more again. All seven are named further down.
+found two more again. All seven are named further down — and, as of rev 13,
+all seven are closed, kept there as what they were.
 
 That is still the first time this ledger has been clean, and it is worth being
 precise about what it measures. Not that mentra is finished, and not that basis
@@ -648,64 +668,68 @@ dishonesty, and easier to see on the one day the counted column was empty.
 **Then ADR-0016 put three back in it**, and a tally that only *drained* would
 say something as wrong as one that only accumulated. All three were found by
 registering a tool for the first time, which is exactly where a working
-discipline finds holes, and all three have the same shape: a door mentra opened
-for its own `task` intrinsic and has not opened for a registered tool.
+discipline finds holes, and all three had the same shape: a door mentra opened
+for its own `task` intrinsic and had not opened for a registered tool. **All
+three are closed** (rev 13), and are kept here as what they were.
 
-- **A delegated child's usage is bounded but invisible.** Agent mode drives its
-  subagent on `ToolContext::child_run_options`, so the spend counts against the
-  parent's counter and its bounds — but the relay that puts a child's
-  `UsageReport` on the parent's event bus is `pub(crate)`, written for the
-  intrinsic, and a host-registered tool cannot reach it. So a run can be stopped
-  by a total more than ten times what `RunReport::usage` admits to, which
+- **A delegated child's usage was bounded but invisible.** Agent mode drives
+  its subagent on `ToolContext::child_run_options`, so the spend counted
+  against the parent's counter and its bounds — but the relay that puts a
+  child's `UsageReport` on the parent's event bus was `pub(crate)`, written
+  for the intrinsic. So a run could be stopped by a total more than ten times
+  what `RunReport::usage` admitted to, which
   `basis/tests/spawn.rs::delegated_spend_lands_on_the_budget_that_delegated_it`
-  asserts in both directions. It also makes footnote 10's second half — "an
-  observer summing basis's event stream gets the same total the accounting handle
-  reports" — true of `task` and no longer true of the route basis actually uses.
-- **A subagent's events reach no basis stream.** A delegation's inner turns are
-  visible only in that agent's own transcript, so a client watching a run sees
-  the tool call and its answer and nothing in between. Same root: the event bus
-  is per-agent and the bridge between two of them is mentra's to expose. Read
-  off a test rather than asserted by one —
-  `delegation_stops_at_the_floor` can only find the depth refusal by reading
-  the deepest agent's transcript, because it never reaches the parent.
-- **Delegation transcript artifacts are unwritable from a host tool.**
-  `DelegationArtifact` and `DelegationEdge` are public types, and
-  `Agent::record_delegation_request` / `record_delegation_result` — the only
-  things that write them — are `pub(crate)`. So the delegation `spawn` performs
-  leaves no edge in the transcript where mentra's own would, and this one is an
-  absence with nothing to assert against, which is why it is named here rather
-  than pinned.
-
-None is blocking and none is built. They go upstream rather than into a
-basis-side workaround, which is the whole of the discipline this tally measures.
+  asserted in both directions. Closed: `ToolContext::relay_subagent_usage`
+  (mentra `5f303b8`), held for the child's whole run by `spawn` (basis
+  `e22aa63`); the test now asserts the two figures agree, and footnote 10's
+  second half is true of the route basis actually uses.
+- **A subagent's events reached no basis stream.** The event bus is
+  per-agent and the bridge between two of them was mentra's to expose.
+  Closed in two halves: `relay_subagent_events` exists (mentra `5f303b8`) and
+  basis deliberately does *not* call it — relaying a child's tool calls and
+  text onto the parent's stream would have a host render a second run's work
+  as the parent's own — while `register_subagent` now announces the child
+  itself (mentra `bfe952b`), which reaches basis as a `TaskUpdated` of kind
+  `Subagent` and made `spawn`'s own narration redundant (basis `54f3d21`).
+- **Delegation transcript artifacts were unwritable from a host tool.**
+  `record_delegation_request` / `record_delegation_result` are public on
+  `ToolContext` (mentra `5f303b8`) and `spawn` writes both in the `task`
+  intrinsic's shape (basis `e22aa63`), so a reader following delegation edges
+  no longer sees `spawn`'s delegations as work the parent did itself.
 
 **And rev 12's declared tools put two more in it**, found the same way — by
-registering a kind of tool mentra had not been asked for before. Both are about
-the registry rather than about execution, which is where a *declaration*-driven
-binding differs from a code-driven one: the thing being registered arrives from
-a file that a repository ships, so the registry's defaults become a security
-question rather than an ergonomic one.
+registering a kind of tool mentra had not been asked for before. Both were
+about the registry rather than about execution, which is where a
+*declaration*-driven binding differs from a code-driven one: the thing being
+registered arrives from a file that a repository ships, so the registry's
+defaults become a security question rather than an ergonomic one. **Both are
+closed** (rev 13).
 
-- **A tool's declared `input_schema` is never checked against the call.** mentra
-  sends the schema to the provider and hands the raw `Value` back, so every tool
-  that wants the guarantee its own descriptor advertises has to re-implement the
-  check. For a tool written in Rust that is a nuisance; for one whose schema is
-  *data* it is the difference between "typed and schema-checked" (ADR-0012's
-  words) and a promise the binding cannot keep, because there is no code to put
-  the check in. basis does the cheap half — the input is an object, and the
-  properties `required` names are present — and stops there rather than pulling a
-  JSON Schema implementation into the SDK's graph for a check every binding
-  would benefit from having once, upstream. Filed as
-  [mentra#23](https://github.com/oops-rs/mentra/issues/23).
-- **`ToolRegistry::register_tool` replaces on a duplicate name, and nothing can
-  ask it not to.** There is no `try_register`, no `is_registered`, and
-  `unregister_tool` is `pub(crate)`. So basis reads the roster, decides, and then
-  registers — a check-then-act that is only safe because basis's own claim map
-  serializes it, and that a second registrar on the same runtime would walk
-  straight past. What it protects is not hypothetical: the name it would take is
-  `spawn`. The absence of an unregister is the same gap seen from the other end,
-  and it is why a released claim has to be remembered rather than dropped. Filed
-  as [mentra#24](https://github.com/oops-rs/mentra/issues/24).
+- **A tool's declared `input_schema` was never checked against the call.**
+  Filed as [mentra#23](https://github.com/oops-rs/mentra/issues/23); closed by
+  mentra `dd2e38a`, which validates a call against the tool's schema before
+  authorization — deliberately partial (`required`, scalar types, `enum`,
+  `additionalProperties: false`) and ignoring keywords it does not implement,
+  because an unimplemented feature must never fail a valid call; terminal
+  output tools exempt, since double-checking turned a clean failure into an
+  infinite retry. It caught mentra's own `edit` accepting a shape its schema
+  never described. basis's cheap half is deleted (`6b37ddb`): the one check
+  that survives is that the input is an object, because a manifest may omit
+  `type` and with no `type` keyword the validator cannot reject a non-object
+  this binding pipes to a program's stdin. An audit of every tool basis
+  registers found no schema/parser disagreement to fix.
+- **`ToolRegistry::register_tool` replaced on a duplicate name, and nothing
+  could ask it not to.** Filed as
+  [mentra#24](https://github.com/oops-rs/mentra/issues/24); closed by the same
+  commit — `try_register_tool` refuses and leaves the registry untouched,
+  `unregister_tool` is public. basis uses both (`a45b01d`, `5ebd1be`): the
+  last holder to release a declared tool's name takes it off the runtime
+  rather than leaving a tombstone, a second open of the same repository joins
+  the first's registration instead of swapping the program under a running
+  agent, and a workspace's bridged MCP tools come off with it. A cross-
+  workspace refusal names both claimants. What did **not** change, on
+  purpose: `RuntimeBuilder::with_tool` still replaces, because a host naming
+  `spawn` is the policy owner making a choice.
 
 **And one more, which is the first this ledger carries a workaround for.** It
 was found where the other five were — by a production host, iBot, hitting it —
@@ -746,35 +770,61 @@ unwritable rather than merely awkward.
   are deleted with the file the day mentra#21 lands.
 
 **And wiring compaction put two more in it**, found the way the last five were:
-by being the first caller that needed the thing. Neither is filed, and neither
-blocks the row above — basis's defaults work today, and both of these are about
-doing better than a fixed number rather than about doing it at all.
+by being the first caller that needed the thing. Neither was filed, and
+neither blocked the row above — basis's defaults worked, and both were about
+doing better than a fixed number rather than about doing it at all. **Both are
+closed** (rev 13).
 
-- **`keep_recent_tool_results: 3` is the wrong default for a coding agent.**
-  basis now overrides it, which is a downstream fix to an upstream default, and
-  a default is the one thing that should not need overriding by everyone who
-  hits it. The number is defensible for an assistant whose tool results are
-  weather lookups; it is hostile to a harness whose tool results *are* the work,
-  because the elision is unconditional — no budget, no window, no event — so the
-  fourth read of a five-file session already blanks the first. Upstream has the
-  better view of both sides of that trade, including whether the default should
-  be a count at all rather than a share of a budget. basis's override is one
-  line, so calling it a workaround overstates it; but if every serious harness
-  has to write that line, the default is the bug.
-- **A window-relative trigger and overflow recovery cannot be built
-  downstream.** Three facts, each closing a route on its own. `ModelInfo`
-  carries no context window — id, provider, display name, description,
-  created-at — so neither basis nor mentra knows how large the thing it is
-  filling is. `compaction::estimated_request_tokens`, which is how mentra
-  itself decides whether to compact, is `pub(crate)`, so a host cannot even ask
-  *how full is it now* and judge for itself. And no `ProviderError` variant
-  means "context overflow" — that arrives as `Http { status, body }`, prose a
-  provider wrote — so nothing can recognize the one failure whose correct
-  answer is *compact and retry* rather than *fail the turn*. Together they mean
-  the trigger can only ever be a number a host guessed, and that guessing high
-  is unrecoverable rather than merely late. One candidate rather than three,
-  because a window on `ModelInfo` without a classified overflow still leaves a
-  run failing on the turn it should have survived.
+- **`keep_recent_tool_results: 3` was the wrong default for a coding agent.**
+  basis overrode it, which is a downstream fix to an upstream default, and a
+  default is the one thing that should not need overriding by everyone who
+  hits it. Closed by mentra `7a539be`: the default is `usize::MAX`, the
+  elision is opt-in by number on both sides, and basis's `None` now maps to
+  mentra's own default rather than against it. The knob stays; the argument
+  in `compaction.rs` against a default that no longer exists is gone
+  (`8108e24`).
+- **A window-relative trigger and overflow recovery could not be built
+  downstream.** Three facts closed the route: `ModelInfo` carried no window,
+  `estimated_request_tokens` was `pub(crate)`, and no `ProviderError` meant
+  "context overflow". Closed by mentra `4883ba9`, `2c77792`, `11826ee`, and
+  — found on the way — `bfe952b`, which fixed `resolve_model` synthesizing a
+  bare `ModelInfo` for a pinned id so the window-relative threshold had
+  applied to no `--model` at all. basis exposes the percent trigger beside
+  the token one, reads `context_window()` off the live session, estimates
+  with mentra's own estimator, and sends an ACP `UsageUpdate` after each turn
+  when the window is known and nothing when it is not (`8108e24`, `b9478b7`,
+  `bd10912`, `e35c8f4`). What it costs: a resumed conversation starts with no
+  window, because the record stores a model id and nothing about the model,
+  so `Workspace::resume` reapplies the workspace's model exactly while the
+  conversation is still on it. What stays unknown: Anthropic's and the OpenAI
+  wires' listings report no window, so on those the 50,000-token fallback is
+  still the trigger.
+
+**Six more went up while those were being met, and came back the same
+afternoon** (mentra `bfe952b`). They are listed in §3's Rev 13 rather than
+here because none was ever open for longer than it took to write it down: a
+builder-level door for a compatible endpoint, keyed or not; `Session::compact`
+emitting on the session stream out of turn; `Session::context_window()` and a
+pinned model resolved through the listing; a body for a skill the model may
+not invoke; `MockRuntimeBuilder::with_post_hook`; and `register_subagent`
+announcing what it registers. One was refused on basis's own account — a
+`try_` form of `RuntimeBuilder::with_tool`, which basis does not want — and is
+recorded in §2's row rather than asked for.
+
+**What the wave created, named now rather than waited for.** Three, none
+upstream-shaped, none built. A skill marked `disable-model-invocation` is
+exactly what `basis-acp` advertises a workspace *template* as, and now that
+mentra hands a host the body, the one thing between it and an ACP slash
+command is that `SKILL.md` carries no argument convention — adding one beside
+`$1`/`$ARGUMENTS` and `argument-hint` would be a second templating system, so
+it waits for a case that wants it. `basis-acp` advertises templates as
+commands and does not expand them — a client sending `/review the diff` has
+the literal text forwarded — which was invisible until `/compact` started
+working and is now an inconsistency a reader can see. And `--continue` picks
+the newest task by *start* time, so `basis spawn A; basis spawn B; basis send
+A …; basis --continue` resolves to B; the ADR-0019-consistent fix is for the
+executor to touch its own `meta.json` on activity, not to read mentra's store
+for a different fact than the column the row displays.
 
 ## 3. Phases
 
@@ -989,6 +1039,67 @@ stay on one page. And the suite went red once on the way to that 641, in
 `basis/tests/hooks.rs`, on a five-second subprocess deadline that the same
 target clears in a third of a second when run alone — the third such sighting,
 recorded in footnote 20 rather than rerun until green and forgotten.
+
+### Rev 13 — the second upstream wave (no phase) — **landed**
+
+Rev 6's shape again, one size larger, and with the other author in the room:
+mentra and basis have the same author, so the list that would once have been
+filed as issues went to the mentra session as a handoff and came back the same
+day as seventeen commits (`026fbf5..bfe952b`). Every candidate §2's tally was
+carrying — the three ADR-0016 put in, the two rev 12's declared tools put in,
+the two wiring compaction put in — is closed in mentra and met on basis's side,
+and six more found *while* meeting them went up and came back in the same
+afternoon. The tally below records them as fixed holes, each with its
+original defect intact.
+
+1. ✅ The `chat/completions` wire, and a base URL that speaks it by default —
+   mentra `62ac1c4`, basis `b3cfa3e`, `362df0b`, `c62e7ff`, `e35c8f4`.
+2. ✅ `keep_recent_tool_results` defaults to *keep everything* upstream, so
+   basis's override is a configuration of upstream again rather than a
+   correction of it — mentra `7a539be`, basis `8108e24`.
+3. ✅ A model carries its context window, the trigger is a share of it, a
+   pinned id is looked up too, an overflow compacts and retries once, and
+   the estimate is public — mentra `4883ba9`, `2c77792`, `11826ee`, `bfe952b`;
+   basis `8108e24`, `b9478b7`, `bd10912`, `e35c8f4`.
+4. ✅ A post-execution hook — mentra `145d4ef`, basis `5d685ba`, `cc32938`,
+   `4eeac7b`.
+5. ✅ `Session::compact` / `set_name` / `reasoning()`, timestamps on the
+   summary, `delete_agent`, and compaction events out of turn — mentra
+   `ee01c30`, `bfe952b`; basis `1384a3a`, `e17d112`, `b06e9bc`, `9cc10ec`,
+   `63ef04a`.
+6. ✅ A per-session persist identifier — mentra `ee01c30`; basis `51b5d10`,
+   which un-ignores the one test this ledger had been carrying `#[ignore]`d
+   since E1.
+7. ✅ mentra#23 and mentra#24: a call is validated against its schema before
+   authorization, and a name can be claimed without replacing — basis
+   `6b37ddb`, `a45b01d`, `5ebd1be`.
+8. ✅ A registered tool relays and records its delegations, and announces the
+   child it registers — mentra `5f303b8`, `bfe952b`; basis `e22aa63`, `54f3d21`.
+9. ✅ `disable-model-invocation` honored, and a body for a host to run —
+   mentra `b44f53a`, `bfe952b`; basis `e628beb` (the slash-command wiring is
+   deferred, below).
+10. ✅ Usage split into reasoning and thoughts, an image-only turn counted,
+    the Anthropic cache tail, tail-keeping truncation, an ignore-aware search
+    walk, an SSE idle timeout — mentra `1e9a15c`, `3ef731a`, `46756e4`,
+    `1996c3b`, `fb36945`, `77d6449`; basis `0293331`.
+
+Acceptance: the tally in §2 reaches zero open *upstream* candidates for the
+second time, with mentra#21 — the one it carries a workaround for — still
+open and still the only one. `cargo test --workspace` is 1149 passed, 0
+failed, 0 ignored, against mentra `bfe952b` through the `[patch.crates-io]`
+at the foot of `Cargo.toml`; nothing is publishable until mentra 0.19.0 and
+mentra-provider 0.6.0 are cut, and the patch's comment says so. Three things
+are deliberately not claimed. The 800-line ceiling is no better: `prepared.rs`
+came back under (774) and two hook test files were split, while
+`runtime/builder.rs` (1095), its tests (1060), `run.rs` (920), `cli.rs` (870)
+and four integration suites sit over it, unchanged (footnote 19). The suite
+went red on the known five-second subprocess deadline in `basis/tests/hooks/`
+twice on the way here, and passed alone both times (footnote 20). And every
+scripted endpoint in the suite is still its own copy — seven of them, patched
+identically in `0cbcf5a` when a pinned model started asking for a listing —
+which is the day's clearest case for a shared test-support crate, and is
+named here rather than built.
+
 
 ### Phase E — The runtime and the files — **landed**
 
