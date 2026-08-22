@@ -93,7 +93,7 @@ fn spawn_two_response_server() -> (String, thread::JoinHandle<Vec<String>>) {
 #[tokio::test]
 async fn a_responses_endpoint_skips_automatic_previous_response_id_chaining() {
     let (base_url, handle) = spawn_two_response_server();
-    let provider = responses_provider(&base_url, "test-key");
+    let provider = responses_provider(BuiltinProvider::OpenAI, &base_url, "test-key");
 
     for (index, message) in ["first", "second"].into_iter().enumerate() {
         let request = mentra::provider_core::Request {
@@ -425,6 +425,41 @@ fn a_shared_runtime_resolves_its_provider_without_the_network() {
         .expect("builds offline");
 
     assert_eq!(runtime.provider(), "openai");
+}
+
+/// A base URL is filed under the id the model will be looked up by, on either
+/// wire.
+///
+/// [`Runtime::resolve_model`](crate::Runtime::resolve_model) asks mentra for a
+/// model *under a provider id*, and the id it asks with is the one resolution
+/// settled on. A definition registered under any other name is a provider
+/// mentra cannot find, and the failure arrives at the first turn rather than at
+/// `build` — so it is asserted where it is decided. A *named* provider beside
+/// a base URL is what distinguishes it: `openai` is the id an unnamed one
+/// resolves to anyway, so it would pass whatever the code did.
+#[test]
+fn a_custom_endpoint_is_filed_under_the_provider_the_choice_resolved() {
+    for wire in [Wire::ChatCompletions, Wire::Responses] {
+        let runtime = RuntimeBuilder::default()
+            .with_provider(BuiltinProvider::OpenRouter)
+            .with_base_url("http://127.0.0.1:1/v1")
+            .with_api_key("test-key")
+            .with_wire(wire)
+            .with_ephemeral_history()
+            .build()
+            .expect("builds offline");
+
+        assert_eq!(runtime.provider(), "openrouter");
+        let descriptors = runtime.mentra_runtime().providers();
+        let registered: Vec<&str> = descriptors
+            .iter()
+            .map(|descriptor| descriptor.id.as_str())
+            .collect();
+        assert!(
+            registered.contains(&"openrouter"),
+            "{wire:?} filed the endpoint where the model is not looked up: {registered:?}"
+        );
+    }
 }
 
 /// An executor that reaches nothing, standing in for whatever a host actually

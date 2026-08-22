@@ -918,9 +918,9 @@ impl RuntimeBuilder {
             (Some(base_url), Wire::ChatCompletions) => builder.with_registered_provider(
                 chat_completions_provider(choice.provider, base_url, &choice.api_key),
             ),
-            (Some(base_url), Wire::Responses) => {
-                builder.with_registered_provider(responses_provider(base_url, &choice.api_key))
-            }
+            (Some(base_url), Wire::Responses) => builder.with_registered_provider(
+                responses_provider(choice.provider, base_url, &choice.api_key),
+            ),
             (None, _) => builder.with_provider(choice.provider, choice.api_key.clone()),
         }
         .build()?;
@@ -1081,9 +1081,19 @@ fn chat_completions_provider(
 /// automatic Hybrid HTTP state chaining. Building on the preset avoids
 /// describing a provider from scratch and drifting from whatever mentra learns
 /// next.
-fn responses_provider(base_url: &str, api_key: &str) -> ResponsesProvider<StaticCredentialSource> {
+///
+/// The preset's own id is `openai`, which is right only when nothing named
+/// another: it is filed under the resolved id for [`chat_completions_provider`]'s
+/// reason, so that `--provider … --base-url …` finds its model rather than
+/// failing at the first turn under a name nobody registered.
+fn responses_provider(
+    provider: BuiltinProvider,
+    base_url: &str,
+    api_key: &str,
+) -> ResponsesProvider<StaticCredentialSource> {
     let mut definition = responses::openai_definition();
     definition.base_url = Some(base_url.to_string());
+    definition.descriptor.id = ProviderId::from(provider);
     definition.descriptor.display_name = Some(format!("OpenAI-compatible ({base_url})"));
 
     // A compatible endpoint promises the Responses wire shape, not every
