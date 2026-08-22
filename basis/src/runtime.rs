@@ -173,16 +173,16 @@ pub struct Runtime {
     #[cfg(feature = "mcp")]
     mcp_claims: Mutex<HashMap<String, PathBuf>>,
     /// Which workspace owns each declared tool name on the same single
-    /// registry. See [`Runtime::claim_declared_tool`] for why this exists and
-    /// why a released claim is remembered rather than removed.
+    /// registry. See [`Runtime::claim_declared_tool`] for why this exists.
     declared_claims: Mutex<HashMap<String, DeclaredClaim>>,
 }
 
-/// A declared tool name that has been registered on this runtime at least once.
+/// A declared tool name registered on this runtime by a workspace still open.
 ///
 /// `holders` rather than a bare owner because one root may be open twice — a
 /// host that opens the same repository for two concurrent callers — and the
 /// first of those to drop must not free a name the second is still serving.
+/// The entry goes when the count reaches zero, together with the tool itself.
 #[derive(Debug)]
 struct DeclaredClaim {
     root: PathBuf,
@@ -375,24 +375,26 @@ impl Runtime {
     /// declare a tool called `spawn` and take over the name basis's own tool —
     /// and every rule an operator ever wrote about it — answers to.
     ///
-    /// A released claim is kept with `holders: 0` rather than removed, because
-    /// mentra has no public unregister: the entry a dropped workspace left
-    /// behind is still in the registry, and forgetting that basis put it there
-    /// would make the same workspace's next open refuse its own tool.
-    pub(crate) fn claim_declared_tool(&self, name: &str, root: &Path) -> Result<(), String> {
+    /// `Ok(true)` means this caller is the name's *first* live holder and owes
+    /// the runtime a registration; `Ok(false)` means a sibling open of the same
+    /// root already registered it, and the tool on the runtime is the one that
+    /// open is serving. One name is one program, so the second open of a
+    /// repository joins the registration rather than replacing it under the
+    /// first open's running agents.
+    pub(crate) fn claim_declared_tool(&self, name: &str, root: &Path) -> Result<bool, String> {
         let mut claims = self
             .declared_claims
             .lock()
             .expect("declared tool claim map poisoned");
 
         match claims.get_mut(name) {
-            Some(claim) if claim.holders > 0 && claim.root != root => Err(
-                "another workspace open on this runtime declares a tool by that name".to_string(),
-            ),
+            Some(claim) if claim.root != root => Err(format!(
+                "the workspace at {} is open on this runtime and declares a tool by that name",
+                claim.root.display()
+            )),
             Some(claim) => {
-                claim.root = root.to_path_buf();
                 claim.holders += 1;
-                Ok(())
+                Ok(false)
             }
             None if self.registers_tool(name) => {
                 Err("this runtime already offers a tool by that name".to_string())
@@ -405,29 +407,45 @@ impl Runtime {
                         holders: 1,
                     },
                 );
-                Ok(())
+                Ok(true)
             }
         }
     }
 
     /// Releases a claim [`claim_declared_tool`](Self::claim_declared_tool)
-    /// granted. Only the owning root can release, so one workspace's drop
-    /// cannot free a name another still serves.
+    /// granted, taking the tool off the runtime when the last holder goes.
+    ///
+    /// Only the owning root can release, so one workspace's drop cannot free a
+    /// name another still serves. The unregister is what makes the claim map
+    /// and mentra's registry say the same thing: a released name is free
+    /// because nothing answers to it any more, rather than free-with-a-stale-
+    /// entry-behind-it. Before mentra's unregister was public a claim had to be
+    /// remembered with `holders: 0` forever, and every dropped workspace left a
+    /// tool on a registry a host keeps for its whole process.
     pub(crate) fn release_declared_tool(&self, name: &str, root: &Path) {
         let mut claims = self
             .declared_claims
             .lock()
             .expect("declared tool claim map poisoned");
 
-        if let Some(claim) = claims.get_mut(name)
-            && claim.root == root
-        {
-            claim.holders = claim.holders.saturating_sub(1);
+        let Some(claim) = claims.get_mut(name) else {
+            return;
+        };
+        if claim.root != root {
+            return;
+        }
+
+        claim.holders = claim.holders.saturating_sub(1);
+        if claim.holders == 0 {
+            claims.remove(name);
+            // Under the claim lock, so no other claimant can see the name free
+            // while the tool is still registered.
+            self.mentra.unregister_tool(name);
         }
     }
 
     /// Every declared tool name on this runtime that belongs to some *other*
-    /// workspace, including one that has since been dropped.
+    /// workspace still open.
     ///
     /// What a mint hides, for the reason it hides another workspace's `mcp__*`
     /// tools: the registry is the runtime's and single, but a tool declared by
