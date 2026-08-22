@@ -104,10 +104,6 @@ pub struct PreparedRun {
     /// for the same reason. mentra splits the count from the waits; basis
     /// keeps them together, because a host set them as one policy.
     retry_budget: usize,
-    /// What [`set_effort`](PreparedRun::set_effort) last asked for, and only
-    /// that — see [`effort`](PreparedRun::effort) for why it is not the same
-    /// question as "what level is the session at".
-    effort: Option<Effort>,
 }
 
 /// Hand-written because mentra's `Session` is not `Debug`, and because the
@@ -138,7 +134,6 @@ impl PreparedRun {
             levels: SideEffectLevels::new(),
             provider_retry: ProviderRetry::default(),
             retry_budget: RunOptions::default().retry_budget,
-            effort: None,
         }
     }
 
@@ -344,22 +339,28 @@ impl PreparedRun {
                 effort: Some(effort.into()),
                 summary: None,
             }))?;
-        self.effort = effort;
 
         Ok(())
     }
 
-    /// The effort [`set_effort`](Self::set_effort) last asked this run for.
+    /// The level this session's next turn will be sent with.
     ///
-    /// `None` means nothing has asked, *not* that the session is at the
-    /// provider's default: a run whose [`RunSpec`](crate::RunSpec) named an
-    /// effort at mint had it applied to the session before this run existed,
-    /// and mentra offers no way to read the level back off a session. So this
-    /// answers "what has this run been set to", which is what a picker showing
-    /// the user their own last choice needs, and not "what will the next
-    /// request carry".
-    pub const fn effort(&self) -> Option<Effort> {
-        self.effort
+    /// Read off the session rather than tracked here, which is what makes it
+    /// an answer about the conversation rather than about this handle on it: a
+    /// run whose [`RunSpec`](crate::RunSpec) or whose repository's
+    /// `config.json` named an effort had it applied at mint, before anything
+    /// called [`set_effort`](Self::set_effort), and a tracked copy reported
+    /// `None` for a session demonstrably running at `high`.
+    ///
+    /// `None` means no level is being requested — the provider's own default —
+    /// and not that nobody has asked yet. A level mentra has grown and basis
+    /// has no name for also reads as `None`, because reporting the wrong one
+    /// is worse than reporting none; see [`Effort`]'s `TryFrom`.
+    pub fn effort(&self) -> Option<Effort> {
+        self.session
+            .reasoning()
+            .and_then(|reasoning| reasoning.effort)
+            .and_then(|effort| Effort::try_from(effort).ok())
     }
 
     /// Sends the configured prompt and streams the turn into `sink`.

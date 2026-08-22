@@ -103,6 +103,31 @@ impl From<Effort> for mentra::provider::ReasoningEffort {
     }
 }
 
+/// The level a session is set to, read back as basis names it.
+///
+/// The direction [`PreparedRun::effort`](crate::PreparedRun::effort) needs, and
+/// it is a `TryFrom` because mentra's enum is `#[non_exhaustive]` too: a level
+/// added upstream that basis has no name for is not a level basis can report,
+/// and answering `Low` — or `None`, which means *no level requested* — would
+/// both be claims about a session that are simply untrue. The error carries the
+/// mentra value so a caller that wants to render something can.
+impl TryFrom<mentra::provider::ReasoningEffort> for Effort {
+    type Error = mentra::provider::ReasoningEffort;
+
+    fn try_from(effort: mentra::provider::ReasoningEffort) -> Result<Self, Self::Error> {
+        use mentra::provider::ReasoningEffort as Upstream;
+
+        match effort {
+            Upstream::Low => Ok(Self::Low),
+            Upstream::Medium => Ok(Self::Medium),
+            Upstream::High => Ok(Self::High),
+            Upstream::XHigh => Ok(Self::XHigh),
+            Upstream::Max => Ok(Self::Max),
+            unknown => Err(unknown),
+        }
+    }
+}
+
 /// Everything a run needs. Task-specific behavior lives in `prompt` and in the
 /// workspace, never in this struct.
 ///
