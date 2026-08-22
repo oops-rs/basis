@@ -135,7 +135,11 @@ pub fn session_update(event: &Event) -> Option<SessionUpdate> {
         // Housekeeping: real, and worth having on the JSONL stream, but not
         // something an ACP client renders. `UsageUpdate` is about the context
         // window rather than per-turn token counts, so basis does not pretend
-        // these are the same thing.
+        // these are the same thing — `Event::Usage` stays dropped here even
+        // now that basis can sometimes know the window, because a
+        // `UsageUpdate` needs both figures at once and this event carries
+        // only the second. `server/turn.rs` sends the real thing separately,
+        // once per turn and only when `PreparedRun::context_window` answers.
         Event::MemoryUpdated { .. } | Event::Usage { .. } | Event::Branched { .. } => return None,
 
         // Anything the operator should see becomes a thought chunk: a retry or

@@ -28,7 +28,9 @@ mcp = []
 
 # mentra streams the Responses wire format over HTTP+SSE or over a websocket,
 # and the second transport is the only reason tokio-tungstenite was ever in
-# this crate's tree.
+# this crate's tree. Responses only: a custom base URL is spoken to in
+# `chat/completions` by default, and that wire has no websocket to ask for, so
+# this feature buys such a host nothing at all.
 #
 # Off by default, and the reason has changed. It used to be reachability: no
 # code path in basis could select the websocket transport at all, so the default

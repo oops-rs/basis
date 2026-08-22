@@ -18,10 +18,10 @@ fn nothing_the_model_read_is_elided_by_default() {
 }
 
 #[test]
-fn the_summarizing_trigger_is_still_mentras() {
-    // basis has no context-window knowledge, so it has no business choosing a
-    // trigger. Pinned against upstream's own default rather than a literal, so
-    // that a number basis inherits cannot be inherited by accident.
+fn the_summarizing_triggers_are_still_mentras() {
+    // basis has no window-independent reason to choose either number. Pinned
+    // against upstream's own defaults rather than literals, so that a number
+    // basis inherits cannot be inherited by accident.
     let config = Compaction::default().into_mentra(transcripts());
     let mentra = mentra::agent::CompactionConfig::default();
 
@@ -31,6 +31,11 @@ fn the_summarizing_trigger_is_still_mentras() {
     );
     assert_eq!(config.auto_compact_threshold_tokens, Some(50_000));
     assert_eq!(
+        config.auto_compact_threshold_percent,
+        mentra.auto_compact_threshold_percent
+    );
+    assert_eq!(config.auto_compact_threshold_percent, Some(75));
+    assert_eq!(
         config.preserve_recent_user_tokens,
         mentra.preserve_recent_user_tokens
     );
@@ -38,7 +43,7 @@ fn the_summarizing_trigger_is_still_mentras() {
 
 #[test]
 fn every_knob_basis_does_not_offer_stays_at_mentras_default() {
-    // The three-knob surface is only honest if the other six are genuinely
+    // The four-knob surface is only honest if the other six are genuinely
     // untouched: a field basis quietly restated would be a second opinion to
     // keep in step with upstream's first.
     let config = Compaction::default().into_mentra(transcripts());
@@ -77,24 +82,38 @@ fn every_knob_reaches_the_config_mentra_reads() {
     let config = Compaction::default()
         .with_keep_recent_tool_results(Some(7))
         .with_auto_threshold_tokens(Some(180_000))
+        .with_auto_threshold_percent(Some(90))
         .with_preserve_recent_user_tokens(4_000)
         .into_mentra(transcripts());
 
     assert_eq!(config.keep_recent_tool_results, 7);
     assert_eq!(config.auto_compact_threshold_tokens, Some(180_000));
+    assert_eq!(config.auto_compact_threshold_percent, Some(90));
     assert_eq!(config.preserve_recent_user_tokens, 4_000);
 }
 
 #[test]
-fn an_unset_threshold_never_summarizes() {
-    // Distinct from a very large one: mentra reads `None` as "do not check",
-    // so nothing shortens the history and an oversized turn fails at the
-    // provider instead.
+fn an_unset_absolute_threshold_still_leaves_the_percent_trigger_live() {
+    // Distinct from a very large one: mentra reads `None` as "do not check
+    // this way", not "never summarize" — a known context window still
+    // triggers through the percentage, and an unknown one still gets the
+    // provider's own compact-and-retry if it overflows regardless.
     let config = Compaction::default()
         .with_auto_threshold_tokens(None)
         .into_mentra(transcripts());
 
     assert_eq!(config.auto_compact_threshold_tokens, None);
+    assert_eq!(config.auto_compact_threshold_percent, Some(75));
+}
+
+#[test]
+fn an_unset_percent_pins_the_trigger_to_the_absolute_number() {
+    let config = Compaction::default()
+        .with_auto_threshold_percent(None)
+        .into_mentra(transcripts());
+
+    assert_eq!(config.auto_compact_threshold_percent, None);
+    assert_eq!(config.auto_compact_threshold_tokens, Some(50_000));
 }
 
 #[test]

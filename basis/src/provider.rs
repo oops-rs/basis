@@ -117,13 +117,18 @@ pub enum ProviderError {
     UnattributedCredential,
 }
 
-/// Trims a base URL to what mentra's Responses transport expects.
+/// Trims a base URL to what mentra's transports expect.
 ///
-/// The transport appends `v1/responses` and `v1/models` itself, but every
-/// gateway publishes its URL *with* `/v1` on the end, because that is the form
-/// the OpenAI SDKs take. Pasting the published URL would otherwise produce
-/// `/v1/v1/responses` and a puzzling 404, so strip a trailing `/v1` here
-/// rather than making each user discover the difference.
+/// They append `v1/chat/completions`, `v1/responses` and `v1/models`
+/// themselves, but every gateway publishes its URL *with* `/v1` on the end,
+/// because that is the form the OpenAI SDKs take. Pasting the published URL
+/// would otherwise produce `/v1/v1/…` and a puzzling 404, so strip a trailing
+/// `/v1` here rather than making each user discover the difference.
+///
+/// One rule for both wires, which is what keeps "paste the URL as published"
+/// true whichever one [`RuntimeBuilder::with_wire`](crate::RuntimeBuilder::with_wire)
+/// selects: they differ in the path they append, never in the base they append
+/// it to.
 pub fn normalize_base_url(raw: &str) -> Result<String, ProviderError> {
     let trimmed = raw.trim();
     let rest = trimmed
@@ -259,8 +264,14 @@ fn resolve_against(
     }
 }
 
-/// A custom endpoint speaks the OpenAI Responses wire format, so it is
-/// registered under the OpenAI provider id unless the caller named another.
+/// A custom endpoint is filed under the OpenAI provider id unless the caller
+/// named another — which is only a name for the credential and the model
+/// lookup, not a claim about the endpoint's vendor.
+///
+/// Which *wire* it is spoken to in is decided later, at
+/// [`RuntimeBuilder::with_wire`](crate::RuntimeBuilder::with_wire), and
+/// defaults to `chat/completions`. Resolution has nothing to say about it: it
+/// answers where and with what, never how.
 fn resolve_compatible(
     lookup: &dyn Fn(&str) -> Option<String>,
     raw: &str,

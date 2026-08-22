@@ -17,10 +17,11 @@ let report = run.execute(basis::CollectingSink::default()).await?;
 
 To try it as a command, set a provider key — `ANTHROPIC_API_KEY`, `OPENAI_API_KEY`, `GEMINI_API_KEY`,
 or `OPENROUTER_API_KEY` — and point it at a repository. At a shell a prompt runs and answers, while
-leaving a durable handle behind it; any endpoint serving the OpenAI **Responses** API works — a
-gateway, a proxy, a local server — URL as published, `/v1` handled. (`chat/completions`-only
-endpoints do not: mentra speaks three wires, Responses, Anthropic Messages and Gemini, and that is
-not one of them yet.)
+leaving a durable handle behind it; any endpoint serving the OpenAI **`chat/completions`** API
+works — Ollama, LM Studio, vLLM, llama.cpp, a gateway, a proxy — URL as published, `/v1` handled.
+(That is the wire "OpenAI-compatible" means in the wild. OpenAI's own **Responses** wire is what
+the `openai` provider already speaks; a proxy that serves it instead is reached by saying
+`RuntimeBuilder::with_wire(Wire::Responses)`.)
 
 ```sh
 cargo install basis-cli          # the binary is `basis`

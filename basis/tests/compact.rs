@@ -282,12 +282,17 @@ fn answer(mut stream: TcpStream, recorded: &Mutex<Vec<String>>) {
     let _ = stream.write_all(response.as_bytes());
 }
 
+/// The smallest chat/completions stream that is a finished assistant turn.
+///
+/// A custom `base_url` speaks chat/completions, which is also why compaction
+/// here takes mentra's *local* summarizing path: the wire declares
+/// `supports_history_compaction: false`, so there is no remote `compact` call
+/// to answer and the summary is asked for as an ordinary completion.
 fn sse_body() -> String {
     [
-        r#"{"type":"response.created","response":{"id":"resp_1","model":"test-model","status":"in_progress"}}"#,
-        r#"{"type":"response.output_item.added","output_index":0,"item":{"type":"message","content":[]}}"#,
-        r#"{"type":"response.output_item.done","output_index":0,"item":{"type":"message","content":[{"type":"output_text","text":"done"}]}}"#,
-        r#"{"type":"response.completed","response":{"id":"resp_1","model":"test-model","status":"completed"}}"#,
+        r#"{"id":"chatcmpl_1","model":"test-model","choices":[{"index":0,"delta":{"role":"assistant","content":"done"}}]}"#,
+        r#"{"id":"chatcmpl_1","choices":[{"index":0,"delta":{},"finish_reason":"stop"}]}"#,
+        "[DONE]",
     ]
     .iter()
     .map(|event| format!("data: {event}\n\n"))

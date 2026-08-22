@@ -117,7 +117,7 @@ through `spawn` and declared tools' programs alike) — joined by `with_command_
 registers an executor a
 command can name with `!@<target> <command>`
 ([ADR-0021](adr/0021-a-command-names-where-it-runs.md), [targets.md](targets.md)), and by the
-two below that describe the provider connection itself. A
+three below that describe the provider connection itself. A
 single-workspace host that wants one of them hands the recipe
 to `WorkspaceBuilder::with_runtime_builder`, which configures the private runtime
 `Workspace::open` would have built rather than switching to a shared one. Mentra's own
@@ -252,7 +252,40 @@ server's own `Retry-After` may make this process wait. None of it is a deadline:
 `TurnOptions::with_deadline` still bounds the whole turn, and a generous schedule inside a
 short deadline is bounded by the deadline.
 
-## Which wire the model's requests go over
+## Which wire a custom endpoint is spoken to in
+
+Two request formats answer to the name "OpenAI-compatible" and they agree on almost nothing:
+a flat `messages` array against typed input items, tool arguments as a JSON string against a
+value, `max_tokens` against `max_output_tokens` — and, the difference an operator meets
+first, `v1/chat/completions` against `v1/responses`. Speaking the wrong one is a 404 on the
+very first turn, worded like a mistyped URL.
+
+`with_base_url` gets `chat/completions`, because that is what the name means in the wild:
+Ollama, LM Studio, vLLM, llama.cpp, DeepSeek, Groq, Together, OpenRouter, and the gateways in
+front of them serve it and nothing else. OpenAI's own `v1/responses` is served by OpenAI —
+where `with_provider(BuiltinProvider::OpenAI)` reaches it with no base URL at all — and by a
+few proxies that forward to it. Those proxies say so:
+
+```rust
+use basis::runtime::Wire;
+
+let runtime = basis::Runtime::builder()
+    .with_base_url("https://gateway.internal/v1")
+    .with_wire(Wire::Responses)
+    .build()?;
+```
+
+Paste the URL the server publishes on either wire: a trailing `/v1` is stripped during
+resolution, because both transports append their own `v1/…` and the published form would
+otherwise produce `/v1/v1/…`.
+
+Builder-only, and that is deliberate. `.basis/config.json` carries `provider`, `model`,
+`effort` and — global file only — `base_url`, but not this: a wire is not a fact a repository
+has about itself, and the host that needs the other one is embedding basis rather than typing
+at it. Nothing reads this without a base URL, either: a provider preset carries the wire its
+vendor speaks, and basis will not talk `chat/completions` to Anthropic because a builder asked.
+
+## Which transport a Responses stream goes over
 
 mentra streams the Responses wire format over HTTP+SSE or over a websocket. Unset, it picks,
 and what it picks is HTTP+SSE — what every basis run has ever used. A host driving basis
@@ -273,7 +306,8 @@ a host that asked for a transport should learn it did not get one, not discover 
 its traffic went the other way. A provider that does not serve websockets — Anthropic and
 Gemini report that they do not — refuses an explicit choice at its first request, naming
 itself, for the same reason. `Runtime::mentra_runtime().responses_transport()` reads back
-what a runtime chose.
+what a runtime chose. An endpoint on `Wire::ChatCompletions` is unaffected either way: that
+wire is HTTP+SSE and has no websocket to ask for.
 
 ## Answers you can branch on
 
@@ -485,20 +519,22 @@ Two unrelated things shorten a history, and only one of them is the one you woul
 
 **Every provider request** passes through micro-compaction, which blanks the content of
 older tool results — no token budget in the decision, no event when it fires, on the fourth
-tool call as readily as the four-hundredth. mentra keeps the three most recent. basis keeps
-them all: a harness that silently blanks the file the model just read is worse at the job,
-and the tokens are ones you can already see and price.
+tool call as readily as the four-hundredth. mentra's own default keeps them all, and basis
+agrees: a harness that silently blanks the file the model just read is worse at the job, and
+the tokens are ones you can already see and price.
 
-**A long conversation** crosses `auto_threshold_tokens` and gets summarized: the transcript
-is snapshotted to disk, an older prefix is replaced by a model-written summary, and the
-recent tail is preserved. That one announces itself.
+**A long conversation** gets summarized: the transcript is snapshotted to disk, an older
+prefix is replaced by a model-written summary, and the recent tail is preserved. It fires
+three ways, and it announces itself (`Event::CompactionStarted` /
+`Event::CompactionCompleted`) every time — including the third, unconditional one:
 
 ```rust
 let workspace = basis::Workspace::builder("/repo")
     .with_compaction(
         basis::Compaction::default()
-            .with_keep_recent_tool_results(Some(5))  // elide older ones; default None keeps all
-            .with_auto_threshold_tokens(Some(400_000))  // default Some(50_000); None never summarizes
+            .with_keep_recent_tool_results(Some(5))       // elide older ones; default None keeps all
+            .with_auto_threshold_tokens(Some(400_000))    // default Some(50_000); None never triggers this way
+            .with_auto_threshold_percent(Some(80))        // default Some(75); wins when the window is known
             .with_preserve_recent_user_tokens(20_000),
     )
     .open()
@@ -509,10 +545,36 @@ The knob is the workspace's, not the runtime's: these numbers live on mentra's a
 config, one is built per workspace, and every session and subagent that workspace mints
 carries it.
 
-The threshold stays at mentra's number because **basis does not know your model's context
-window** — nothing in basis or mentra does. If you know it, this is where to say so; 50,000
-tokens is a floor that is right for a small model and wasteful on a large one. Where the
-snapshots go is not a knob here: it follows the store (above).
+`auto_threshold_tokens` is the fallback for a model whose context window basis does not
+know. `auto_threshold_percent` is the one that did not exist until mentra could ask the
+model itself how big it is, and it wins whenever the window *is* known — 50,000 tokens is
+most of a small model's window and a rounding error in a 1M-token one, so no single constant
+was ever going to be right for both. A run reads the same two figures a host would need to
+decide this for itself:
+
+```rust
+if let Some(window) = run.context_window() {
+    println!("{}/{window} tokens", run.estimated_context_tokens());
+}
+```
+
+The window is known only when the workspace's model was resolved from a provider's listing
+— `ModelSelector::NewestAvailable`, what a workspace resolves to when nothing named a model
+— and only if that listing reports one: Gemini's does (`inputTokenLimit`); Anthropic's and
+the Responses transport's do not. Naming a model explicitly — `--model`, a repository's
+`config.json`, `RunConfig::with_model(ModelSelector::Id(_))` — resolves without a listing at
+all, so the window is unknown for it regardless of provider. `estimated_context_tokens` is a
+floor even when the window is known: it covers the history and the system prompt basis
+configured, but not the task-reminder banner or skill-description block mentra may add to
+the *effective* prompt, which nothing outside mentra can read.
+
+Third, independent of both thresholds: a provider that refuses a request as too long
+(`ProviderError::ContextLengthExceeded`) gets exactly one compaction and one retry, even with
+`auto_threshold_tokens` cleared — a second overflow after that is not retried again. So
+turning the first trigger off means basis never compacts *ahead of* running out of room, not
+that an oversized conversation is guaranteed to fail outright.
+
+Where the snapshots go is not a knob here: it follows the store (above).
 
 ## The fingerprint, in process
 
