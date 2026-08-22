@@ -485,20 +485,22 @@ Two unrelated things shorten a history, and only one of them is the one you woul
 
 **Every provider request** passes through micro-compaction, which blanks the content of
 older tool results — no token budget in the decision, no event when it fires, on the fourth
-tool call as readily as the four-hundredth. mentra keeps the three most recent. basis keeps
-them all: a harness that silently blanks the file the model just read is worse at the job,
-and the tokens are ones you can already see and price.
+tool call as readily as the four-hundredth. mentra's own default keeps them all, and basis
+agrees: a harness that silently blanks the file the model just read is worse at the job, and
+the tokens are ones you can already see and price.
 
-**A long conversation** crosses `auto_threshold_tokens` and gets summarized: the transcript
-is snapshotted to disk, an older prefix is replaced by a model-written summary, and the
-recent tail is preserved. That one announces itself.
+**A long conversation** gets summarized: the transcript is snapshotted to disk, an older
+prefix is replaced by a model-written summary, and the recent tail is preserved. It fires
+three ways, and it announces itself (`Event::CompactionStarted` /
+`Event::CompactionCompleted`) every time — including the third, unconditional one:
 
 ```rust
 let workspace = basis::Workspace::builder("/repo")
     .with_compaction(
         basis::Compaction::default()
-            .with_keep_recent_tool_results(Some(5))  // elide older ones; default None keeps all
-            .with_auto_threshold_tokens(Some(400_000))  // default Some(50_000); None never summarizes
+            .with_keep_recent_tool_results(Some(5))       // elide older ones; default None keeps all
+            .with_auto_threshold_tokens(Some(400_000))    // default Some(50_000); None never triggers this way
+            .with_auto_threshold_percent(Some(80))        // default Some(75); wins when the window is known
             .with_preserve_recent_user_tokens(20_000),
     )
     .open()
@@ -509,10 +511,36 @@ The knob is the workspace's, not the runtime's: these numbers live on mentra's a
 config, one is built per workspace, and every session and subagent that workspace mints
 carries it.
 
-The threshold stays at mentra's number because **basis does not know your model's context
-window** — nothing in basis or mentra does. If you know it, this is where to say so; 50,000
-tokens is a floor that is right for a small model and wasteful on a large one. Where the
-snapshots go is not a knob here: it follows the store (above).
+`auto_threshold_tokens` is the fallback for a model whose context window basis does not
+know. `auto_threshold_percent` is the one that did not exist until mentra could ask the
+model itself how big it is, and it wins whenever the window *is* known — 50,000 tokens is
+most of a small model's window and a rounding error in a 1M-token one, so no single constant
+was ever going to be right for both. A run reads the same two figures a host would need to
+decide this for itself:
+
+```rust
+if let Some(window) = run.context_window() {
+    println!("{}/{window} tokens", run.estimated_context_tokens());
+}
+```
+
+The window is known only when the workspace's model was resolved from a provider's listing
+— `ModelSelector::NewestAvailable`, what a workspace resolves to when nothing named a model
+— and only if that listing reports one: Gemini's does (`inputTokenLimit`); Anthropic's and
+the Responses transport's do not. Naming a model explicitly — `--model`, a repository's
+`config.json`, `RunConfig::with_model(ModelSelector::Id(_))` — resolves without a listing at
+all, so the window is unknown for it regardless of provider. `estimated_context_tokens` is a
+floor even when the window is known: it covers the history and the system prompt basis
+configured, but not the task-reminder banner or skill-description block mentra may add to
+the *effective* prompt, which nothing outside mentra can read.
+
+Third, independent of both thresholds: a provider that refuses a request as too long
+(`ProviderError::ContextLengthExceeded`) gets exactly one compaction and one retry, even with
+`auto_threshold_tokens` cleared — a second overflow after that is not retried again. So
+turning the first trigger off means basis never compacts *ahead of* running out of room, not
+that an oversized conversation is guaranteed to fail outright.
+
+Where the snapshots go is not a knob here: it follows the store (above).
 
 ## The fingerprint, in process
 
