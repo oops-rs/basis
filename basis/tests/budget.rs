@@ -17,8 +17,8 @@
 //! reasoning written on `BudgetPool` needs revisiting rather than quietly
 //! becoming wrong.
 //!
-//! The endpoint is the one `tests/workspace.rs` uses, with usage added to the
-//! completed response — loopback, no name resolved, no packet off the machine.
+//! The endpoint is the one `tests/workspace.rs` uses, with a usage report added
+//! to the stream — loopback, no name resolved, no packet off the machine.
 
 use std::{
     io::{Read, Write},
@@ -348,21 +348,22 @@ fn answer(mut stream: TcpStream, index: usize) {
     let _ = stream.write_all(response.as_bytes());
 }
 
-/// The smallest stream that is a finished assistant turn, with usage on the
-/// completed response — which is where the Responses wire format puts it, and
-/// where mentra reads it from.
+/// The smallest `chat/completions` stream that is a finished assistant turn,
+/// with usage on a final choiceless chunk — which is where this wire puts it,
+/// in answer to the `stream_options.include_usage` mentra sends, and where
+/// mentra reads it from.
 fn sse_body(index: usize) -> String {
     [
         format!(
-            r#"{{"type":"response.created","response":{{"id":"resp_{index}","model":"test-model","status":"in_progress"}}}}"#
-        ),
-        r#"{"type":"response.output_item.added","output_index":0,"item":{"type":"message","content":[]}}"#.to_string(),
-        format!(
-            r#"{{"type":"response.output_item.done","output_index":0,"item":{{"type":"message","content":[{{"type":"output_text","text":"reply-{index}"}}]}}}}"#
+            r#"{{"id":"chatcmpl_{index}","model":"test-model","choices":[{{"index":0,"delta":{{"role":"assistant","content":"reply-{index}"}}}}]}}"#
         ),
         format!(
-            r#"{{"type":"response.completed","response":{{"id":"resp_{index}","model":"test-model","status":"completed","usage":{{"input_tokens":{INPUT_TOKENS},"output_tokens":{OUTPUT_TOKENS},"total_tokens":{ROUND_COST}}}}}}}"#
+            r#"{{"id":"chatcmpl_{index}","choices":[{{"index":0,"delta":{{}},"finish_reason":"stop"}}]}}"#
         ),
+        format!(
+            r#"{{"id":"chatcmpl_{index}","choices":[],"usage":{{"prompt_tokens":{INPUT_TOKENS},"completion_tokens":{OUTPUT_TOKENS},"total_tokens":{ROUND_COST}}}}}"#
+        ),
+        "[DONE]".to_string(),
     ]
     .iter()
     .map(|event| format!("data: {event}\n\n"))

@@ -481,11 +481,12 @@ fn workspace_hooks_guard_turns_driven_through_attach() {
             .expect("a request body"),
     )
     .expect("a JSON request");
+    // `chat/completions` nests the name under `function`.
     let offered: Vec<&str> = body["tools"]
         .as_array()
         .expect("a tools array")
         .iter()
-        .filter_map(|tool| tool["name"].as_str())
+        .filter_map(|tool| tool["function"]["name"].as_str())
         .collect();
     assert!(
         offered.contains(&"spawn"),
@@ -832,71 +833,58 @@ fn answer(mut stream: TcpStream, index: usize, reply: &Reply, recorded: &Mutex<V
     let _ = stream.write_all(response.as_bytes());
 }
 
-/// The smallest stream that is a finished turn of the requested shape.
+/// The smallest `chat/completions` stream that is a finished turn of the
+/// requested shape — the wire a base URL is spoken to in. Flat deltas, no items
+/// to open or close, and `[DONE]` at the end.
 fn sse_body(index: usize, reply: &Reply) -> String {
-    let mut events = vec![json!({
-        "type": "response.created",
-        "response": {"id": format!("resp_{index}"), "model": "test-model", "status": "in_progress"}
-    })];
+    let id = format!("chatcmpl_{index}");
+    let mut events = Vec::new();
 
     match reply {
         Reply::Stall => unreachable!("a stall never writes a body"),
         Reply::Text => {
             events.push(json!({
-                "type": "response.output_item.added",
-                "output_index": 0,
-                "item": {"type": "message", "content": []}
+                "id": id, "model": "test-model",
+                "choices": [{"index": 0, "delta": {"role": "assistant", "content": format!("reply-{index}")}}]
             }));
             events.push(json!({
-                "type": "response.output_item.done",
-                "output_index": 0,
-                "item": {"type": "message", "content": [{"type": "output_text", "text": format!("reply-{index}")}]}
+                "id": id,
+                "choices": [{"index": 0, "delta": {}, "finish_reason": "stop"}]
             }));
         }
         Reply::Streamed => {
-            events.push(json!({
-                "type": "response.output_item.added",
-                "output_index": 0,
-                "item": {"type": "message", "content": []}
-            }));
             for delta in ["streamed ", &format!("reply-{index}")] {
                 events.push(json!({
-                    "type": "response.output_text.delta",
-                    "output_index": 0,
-                    "content_index": 0,
-                    "delta": delta
+                    "id": id, "model": "test-model",
+                    "choices": [{"index": 0, "delta": {"role": "assistant", "content": delta}}]
                 }));
             }
             events.push(json!({
-                "type": "response.output_item.done",
-                "output_index": 0,
-                "item": {"type": "message", "content": [{"type": "output_text", "text": format!("streamed reply-{index}")}]}
+                "id": id,
+                "choices": [{"index": 0, "delta": {}, "finish_reason": "stop"}]
             }));
         }
         Reply::ToolCall { name, arguments } => {
             events.push(json!({
-                "type": "response.output_item.added",
-                "output_index": 0,
-                "item": {"type": "function_call", "id": format!("fc_{index}"),
-                         "call_id": format!("call_{index}"), "name": name, "arguments": ""}
+                "id": id, "model": "test-model",
+                "choices": [{"index": 0, "delta": {"role": "assistant", "tool_calls": [{
+                    "index": 0, "id": format!("call_{index}"), "type": "function",
+                    // Arguments are a JSON *string* on this wire; one slice is
+                    // enough to be a whole call.
+                    "function": {"name": name, "arguments": arguments}
+                }]}}]
             }));
             events.push(json!({
-                "type": "response.output_item.done",
-                "output_index": 0,
-                "item": {"type": "function_call", "call_id": format!("call_{index}"),
-                         "name": name, "arguments": arguments}
+                "id": id,
+                "choices": [{"index": 0, "delta": {}, "finish_reason": "tool_calls"}]
             }));
         }
     }
 
-    events.push(json!({
-        "type": "response.completed",
-        "response": {"id": format!("resp_{index}"), "model": "test-model", "status": "completed"}
-    }));
-
     events
         .iter()
         .map(|event| format!("data: {event}\n\n"))
+        .chain(std::iter::once("data: [DONE]\n\n".to_string()))
         .collect()
 }
 

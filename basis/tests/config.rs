@@ -245,7 +245,7 @@ async fn the_workspace_files_effort_reaches_the_provider() {
 
     let request = endpoint.first_request();
     assert!(
-        request.contains(r#""effort":"high""#),
+        request.contains(r#""reasoning_effort":"high""#),
         "the file's effort never reached the request: {request}"
     );
 }
@@ -276,7 +276,7 @@ async fn a_run_that_asked_for_an_effort_keeps_its_own() {
 
     let request = endpoint.first_request();
     assert!(
-        request.contains(r#""effort":"low""#),
+        request.contains(r#""reasoning_effort":"low""#),
         "the run's own answer must win: {request}"
     );
 }
@@ -336,9 +336,9 @@ fn answer(mut stream: TcpStream, index: usize, recorded: &Mutex<Vec<String>>) {
 
     let body = format!(
         concat!(
-            "data: {{\"type\":\"response.created\",\"response\":{{\"id\":\"resp_{0}\",\"model\":\"test-model\",\"status\":\"in_progress\"}}}}\n\n",
-            "data: {{\"type\":\"response.output_item.done\",\"output_index\":0,\"item\":{{\"type\":\"message\",\"content\":[{{\"type\":\"output_text\",\"text\":\"done\"}}]}}}}\n\n",
-            "data: {{\"type\":\"response.completed\",\"response\":{{\"id\":\"resp_{0}\",\"model\":\"test-model\",\"status\":\"completed\"}}}}\n\n"
+            "data: {{\"id\":\"chatcmpl_{0}\",\"model\":\"test-model\",\"choices\":[{{\"index\":0,\"delta\":{{\"role\":\"assistant\",\"content\":\"done\"}}}}]}}\n\n",
+            "data: {{\"id\":\"chatcmpl_{0}\",\"choices\":[{{\"index\":0,\"delta\":{{}},\"finish_reason\":\"stop\"}}]}}\n\n",
+            "data: [DONE]\n\n"
         ),
         index
     );

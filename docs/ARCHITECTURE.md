@@ -447,10 +447,12 @@ adaptive thinking only on models that support it. Provider/model combinations
 without a requested tier fail explicitly instead of silently lowering it;
 omitting the flag leaves the provider default unchanged.
 
-Any endpoint serving the OpenAI **Responses** API works too — a gateway, a proxy, or a
-local server. Paste the URL as published; the trailing `/v1` is handled. An endpoint
-that serves only `chat/completions` does not: mentra-provider's wires are Responses,
-Anthropic Messages and Gemini, and a fourth is an upstream ask, not a basis shim.
+Any endpoint serving the OpenAI **`chat/completions`** API works too — Ollama, LM Studio,
+vLLM, llama.cpp, a gateway, a proxy. Paste the URL as published; the trailing `/v1` is
+handled. That wire is the default for a base URL because it is what "OpenAI-compatible"
+means everywhere except OpenAI: `v1/responses` is OpenAI's own, served by OpenAI — where
+the `openai` preset reaches it with no base URL at all — and by a handful of proxies that
+forward to it.
 
 ```sh
 export BASIS_BASE_URL=http://127.0.0.1:3455/v1
@@ -458,10 +460,16 @@ export BASIS_API_KEY=…
 basis spawn --model gpt-5.6 "explain the module layout"
 ```
 
-Custom endpoints use complete local transcript replay and do not automatically
-send `previous_response_id`. That optional extension is not part of basis's
+Such a proxy is reached by naming the wire: `RuntimeBuilder::with_wire(Wire::Responses)`,
+a builder-only knob, deliberately. Neither `.basis/config.json` nor a flag carries it —
+a wire is not a fact a repository has, and the operator who needs the other one is
+embedding basis rather than typing at it.
+
+Endpoints reached on the Responses wire use complete local transcript replay and do not
+automatically send `previous_response_id`. That optional extension is not part of basis's
 compatibility assumption; native provider presets retain Mentra's Hybrid state
-chaining.
+chaining. The question does not arise on `chat/completions`, which has no server-side
+conversation state to chain.
 
 A repository can state its own answer instead of relying on the flag or the
 variable. `.basis/config.json` — `provider`, `model`, `effort`, and in the
