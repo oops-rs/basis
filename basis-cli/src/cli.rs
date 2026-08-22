@@ -256,8 +256,8 @@ pub(crate) struct AcpArgs {
     #[arg(long, value_name = "NAME")]
     pub(crate) provider: Option<String>,
 
-    /// An OpenAI-compatible endpoint, e.g. http://127.0.0.1:3455/v1. basis uses
-    /// complete local replay instead of automatic previous_response_id chaining.
+    /// An OpenAI-compatible endpoint, e.g. http://127.0.0.1:11434/v1, spoken to
+    /// in chat/completions. Paste the URL as published; a trailing /v1 is handled.
     #[arg(long, value_name = "URL")]
     pub(crate) base_url: Option<String>,
 
@@ -357,11 +357,11 @@ pub(crate) struct RunArgs {
     #[arg(long, value_name = "NAME")]
     pub(crate) provider: Option<String>,
 
-    /// An OpenAI-compatible endpoint, e.g. http://127.0.0.1:3455/v1. Paste the
-    /// URL as published; a trailing /v1 is handled. Falls back to
-    /// BASIS_BASE_URL or OPENAI_BASE_URL; the key comes from BASIS_API_KEY or
-    /// OPENAI_API_KEY. basis uses complete local replay instead of automatic
-    /// previous_response_id chaining on compatible endpoints.
+    /// An OpenAI-compatible endpoint, e.g. http://127.0.0.1:11434/v1, spoken to
+    /// in chat/completions — what Ollama, LM Studio, vLLM and the gateways in
+    /// front of them serve. Paste the URL as published; a trailing /v1 is
+    /// handled. Falls back to BASIS_BASE_URL or OPENAI_BASE_URL; the key comes
+    /// from BASIS_API_KEY or OPENAI_API_KEY.
     #[arg(long, value_name = "URL")]
     pub(crate) base_url: Option<String>,
 
