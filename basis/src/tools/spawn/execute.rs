@@ -154,12 +154,10 @@ pub(super) async fn delegate(
     // tally short by whatever the child spent afterwards.
     let _usage_relay = ctx.relay_subagent_usage(&child);
 
-    // Progress is the one channel a host-registered tool has into the parent's
-    // *stream*, so without this the delegation is a silence of unknown length.
-    ctx.emit_progress(format!(
-        "delegating to {} ({})",
-        started.name, started.model
-    ));
+    // `register_subagent` above announced the child on the parent's stream
+    // (`TaskUpdated`, kind `Subagent`, since mentra `bfe952b`), so the
+    // delegation is no longer a silence of unknown length and nothing is
+    // narrated twice here.
 
     let edge = DelegationEdge {
         kind: DelegationKind::Subagent,
