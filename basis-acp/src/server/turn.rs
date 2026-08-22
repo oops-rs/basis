@@ -13,7 +13,8 @@
 use agent_client_protocol::{
     Client, ConnectionTo,
     schema::v1::{
-        ContentBlock, Error, ImageContent, PromptRequest, PromptResponse, SessionId, StopReason,
+        ContentBlock, Error, ImageContent, PromptRequest, PromptResponse, SessionId, SessionUpdate,
+        StopReason, UsageUpdate,
     },
 };
 use base64::Engine;
@@ -58,7 +59,22 @@ pub(super) async fn prompt(
 
     let report = run.send_parts(parts, sink, approver, options).await;
     session.end_turn();
+
+    // Read before the run is dropped — `context_window` and
+    // `estimated_context_tokens` are `PreparedRun`'s own, not the report's.
+    let usage = usage_update(run.context_window(), run.estimated_context_tokens());
     drop(run);
+
+    // Best-effort: a dead connection here must not turn an otherwise finished
+    // turn into a failure the client never asked about — the response below
+    // is what actually reports the outcome.
+    if let Some(usage) = usage {
+        let _ = notify(
+            connection,
+            &request.session_id,
+            SessionUpdate::UsageUpdate(usage),
+        );
+    }
 
     // A cancelled turn fails inside mentra, so the token — not the error — is
     // what distinguishes "the client stopped it" from "it broke". ACP requires
@@ -83,6 +99,23 @@ pub(super) async fn prompt(
         },
         Err(error) => Err(Error::internal_error().data(error.to_string())),
     }
+}
+
+/// This turn's `UsageUpdate`, or nothing when the window is unknown.
+///
+/// A per-turn token count beside a guessed ceiling would tell a client's usage
+/// bar something basis does not actually know, and ACP's `UsageUpdate` has no
+/// field for marking `size` as a guess — so unlike every other update in this
+/// module, silence here is the honest answer rather than a gap. `used` is
+/// [`PreparedRun::estimated_context_tokens`](basis::PreparedRun::estimated_context_tokens)'s
+/// floor, not the provider's own count: ACP has no field for that distinction
+/// either, and a floor that undercounts a full context is safer to show than
+/// one that never appears.
+pub(super) fn usage_update(
+    context_window: Option<usize>,
+    estimated_tokens: usize,
+) -> Option<UsageUpdate> {
+    context_window.map(|size| UsageUpdate::new(estimated_tokens as u64, size as u64))
 }
 
 /// Which of ACP's stop reasons a tripped bound is.
