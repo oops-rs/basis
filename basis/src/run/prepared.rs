@@ -7,7 +7,7 @@
 //! whole pipeline against a scripted runtime, so the event contract is checked
 //! without a network call.
 
-use std::{path::PathBuf, sync::Arc};
+use std::sync::Arc;
 
 use mentra::{
     Session,
@@ -18,6 +18,7 @@ use tokio::sync::oneshot;
 use self::{
     context::ContextSnapshot,
     forward::forward_events,
+    header::header_for,
     outcome::{Ended, chain_message, ended_on},
 };
 use super::{
@@ -36,44 +37,14 @@ use crate::{
 mod compact;
 mod context;
 mod forward;
+mod header;
 mod outcome;
 mod prompt;
 mod typed;
 
 pub use compact::Compacted;
+pub use header::{LoadedSkill, RunContext};
 pub use prompt::PromptPart;
-
-/// What a run is about, once the runtime questions are settled.
-#[derive(Debug, Clone)]
-pub struct RunContext {
-    pub workspace: PathBuf,
-    pub prompt: String,
-    pub provider: String,
-    pub model: String,
-    pub context: WorkspaceContext,
-    /// Skills directories registered on the runtime, most specific first.
-    pub skills_dirs: Vec<PathBuf>,
-    /// The skills those directories actually produced, after layering.
-    pub skills: Vec<LoadedSkill>,
-    /// Template directories that exist, most specific first.
-    pub templates_dirs: Vec<PathBuf>,
-    /// The templates those directories produced, after layering, name-ordered.
-    /// Over ACP these become the client's commands, mapped by `basis-acp`.
-    pub templates: Vec<Template>,
-    /// MCP configuration files in effect, weakest precedence first.
-    pub mcp_files: Vec<ContextFile>,
-    /// The servers those files produced, after layering. Names only: the
-    /// header must not echo a command or a credential.
-    pub mcp_servers: Vec<String>,
-}
-
-/// A skill available to the run, without its body.
-#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
-pub struct LoadedSkill {
-    pub name: String,
-    pub description: String,
-    pub path: PathBuf,
-}
 
 /// A session and the prompt to send it. Nothing has been sent yet.
 pub struct PreparedRun {
@@ -819,49 +790,3 @@ struct Turn<S> {
     done: oneshot::Sender<()>,
     forwarder: tokio::task::JoinHandle<(S, RunUsage)>,
 }
-
-/// Builds the opening line. Kept separate so [`PreparedRun::header`] and the
-/// line actually emitted can never drift apart.
-fn header_for(session_id: &str, run: &RunContext) -> Event {
-    Event::RunStarted {
-        schema: EVENT_SCHEMA_VERSION,
-        basis: env!("CARGO_PKG_VERSION").to_string(),
-        session_id: session_id.to_string(),
-        workspace: run.workspace.clone(),
-        model: run.model.clone(),
-        provider: run.provider.clone(),
-        context_files: run
-            .context
-            .documents()
-            .iter()
-            .map(|document| ContextFile {
-                path: document.path.clone(),
-                scope: document.scope.label(),
-            })
-            .collect(),
-        skills_dirs: run.skills_dirs.clone(),
-        skills: run
-            .skills
-            .iter()
-            .map(|skill| SkillSummary {
-                name: skill.name.clone(),
-                description: skill.description.clone(),
-            })
-            .collect(),
-        templates_dirs: run.templates_dirs.clone(),
-        templates: run
-            .templates
-            .iter()
-            .map(|template| TemplateSummary {
-                name: template.name.clone(),
-                description: template.description.clone(),
-                argument_hint: template.argument_hint.clone(),
-            })
-            .collect(),
-        mcp_files: run.mcp_files.clone(),
-        mcp_servers: run.mcp_servers.clone(),
-    }
-}
-
-#[cfg(test)]
-mod tests;
