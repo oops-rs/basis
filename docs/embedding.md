@@ -495,6 +495,57 @@ spawned at all. A participant that errors or panics **denies**. The trait is `as
 `basis::async_trait` is the attribute to spell it with — re-exported, so implementing a
 basis trait costs your manifest nothing.
 
+### And a say over each result
+
+Some questions have no answer before the call. Whether a grep pulled a credential out of a
+file nobody meant to expose is not knowable from its pattern. `Interceptor::review` is the
+same seam after the tool has run, and a workspace reaches it with `"event":
+"post_tool_use"` in `.basis/hooks.json`:
+
+```rust
+#[basis::async_trait]
+impl basis::Interceptor for Redact {
+    fn name(&self) -> &str { "redact" }
+
+    async fn intercept(&self, _call: &basis::HookRequest)
+        -> Result<basis::HookOutcome, basis::InterceptorError>
+    {
+        Ok(basis::HookOutcome::Allow)
+    }
+
+    // Defaulted to Allow — keep — so an interceptor that only guards calls
+    // says nothing here and is not made to.
+    async fn review(&self, result: &basis::HookRequest)
+        -> Result<basis::HookOutcome, basis::InterceptorError>
+    {
+        let Some(output) = result.output.as_ref().and_then(|o| o.as_str()) else {
+            return Ok(basis::HookOutcome::Allow);
+        };
+        if !output.contains("AKIA") {
+            return Ok(basis::HookOutcome::Allow);
+        }
+        Ok(basis::HookOutcome::Replace {
+            output: serde_json::json!(output.replace("AKIA0123", "[redacted]")),
+            // The tool's own verdict, unless you mean to overturn it.
+            is_error: result.is_error.unwrap_or(false),
+            reason: Some("a key".to_string()),
+        })
+    }
+}
+```
+
+`result` is the same `HookRequest` with `output` and `is_error` on it, and `input` holding
+what the tool actually *ran* with rather than what the model asked for. `Allow` keeps the
+result; `Replace` shows the model something else; `Deny` shows it the reason instead,
+marked as an error — which is what a refusal can still mean once a tool has run, and what a
+broken guard falls back to.
+
+**A post hook cannot un-run anything.** The side effects have happened, and the event stream
+already carried the real result to every subscriber: `Event::ToolCompleted` reports what the
+tool returned whatever the model is shown. That split is the point — the stream is the
+record, this seam is the model's view — and it is why a guard that must *stop* something
+belongs before the call.
+
 The other seam is `Approver`, and the two are deliberately not merged: an approver answers
 *may this happen* and feeds the permission machinery a person drives, while an interceptor
 answers *may this happen, in this form* and composes with everything else on the chain.

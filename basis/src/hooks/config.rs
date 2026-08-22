@@ -26,9 +26,10 @@ pub const DEFAULT_GLOBAL_HOOKS_FILE: &str = "hooks.json";
 
 /// How long a hook gets to answer before it is killed.
 ///
-/// A pre-execution hook sits on the critical path of every matching tool call,
-/// so the budget is a check's worth of time, not a job's. A hook that needs
-/// longer says so per hook.
+/// A hook sits on the critical path of every matching tool call — before it at
+/// [`PreToolUse`](HookEvent::PreToolUse), between the tool and the model at
+/// [`PostToolUse`](HookEvent::PostToolUse) — so the budget is a check's worth
+/// of time, not a job's. A hook that needs longer says so per hook.
 pub const DEFAULT_HOOK_TIMEOUT: Duration = Duration::from_secs(5);
 
 /// What to do when a hook cannot answer.
@@ -55,6 +56,12 @@ pub const DEFAULT_HOOK_TIMEOUT: Duration = Duration::from_secs(5);
 #[serde(rename_all = "snake_case")]
 pub enum OnFailure {
     /// Treat a broken hook as a refusal.
+    ///
+    /// What a refusal costs depends on when the hook was asked. Before the
+    /// call it does not run; afterwards it already has, so the model is shown
+    /// the failure in place of the output. Both are the same ruling — a guard
+    /// that could not speak has not cleared anything — and after the call it
+    /// is the only part of it still available.
     #[default]
     Deny,
     /// Treat a broken hook as no opinion, and carry on.
@@ -72,6 +79,12 @@ pub struct HookSpec {
     /// Tool names this hook is asked about. Absent means every tool.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub tools: Option<Vec<String>>,
+    /// When this hook is asked. Absent means before the call, which is what
+    /// every hooks file written before there was a second event meant.
+    ///
+    /// One entry is asked at one event. A guard that wants a say on both sides
+    /// of a call writes two, which keeps "what does this hook run for" a
+    /// question the file answers.
     #[serde(default)]
     pub event: HookEvent,
     /// Absent means [`DEFAULT_HOOK_TIMEOUT`].
@@ -99,6 +112,10 @@ impl HookSpec {
             tools: Some(tools),
             ..self
         }
+    }
+
+    pub fn with_event(self, event: HookEvent) -> Self {
+        Self { event, ..self }
     }
 
     pub fn with_timeout(self, timeout: Duration) -> Self {
@@ -420,6 +437,52 @@ mod tests {
 
         assert!(spec.applies_to(HookEvent::PreToolUse, "shell"));
         assert!(!spec.applies_to(HookEvent::PreToolUse, "files"));
+    }
+
+    #[test]
+    fn a_hook_can_say_it_runs_after_the_call() {
+        let spec: HookSpec = serde_json::from_str(
+            r#"{"name": "redact", "command": ["/bin/true"], "event": "post_tool_use"}"#,
+        )
+        .expect("parses");
+
+        assert_eq!(spec.event, HookEvent::PostToolUse);
+        assert!(spec.applies_to(HookEvent::PostToolUse, "anything"));
+        assert!(
+            !spec.applies_to(HookEvent::PreToolUse, "anything"),
+            "a hook is asked at the event it declared and at no other"
+        );
+    }
+
+    #[test]
+    fn a_file_that_names_no_event_still_means_what_it_did() {
+        // The whole reason `event` defaults: every hooks file written before
+        // there was a second event keeps its meaning, unread field and all.
+        let tmp = tempfile::tempdir().expect("tempdir");
+        write_hooks(tmp.path(), DEFAULT_WORKSPACE_HOOKS_FILE, ONE_HOOK);
+
+        let hooks = load(tmp.path(), &config(None)).expect("parses");
+
+        assert_eq!(hooks[0].event, HookEvent::PreToolUse);
+    }
+
+    #[test]
+    fn an_event_this_basis_does_not_know_is_refused_by_name() {
+        let tmp = tempfile::tempdir().expect("tempdir");
+        write_hooks(
+            tmp.path(),
+            DEFAULT_WORKSPACE_HOOKS_FILE,
+            r#"{"schema": 1, "hooks": [
+                {"name": "g", "command": ["/bin/true"], "event": "during_tool_use"}
+            ]}"#,
+        );
+
+        let error = load(tmp.path(), &config(None)).expect_err("rejected");
+
+        // Not silently a pre hook: a file asking for something basis is not
+        // doing is the same silent removal of a control that `OnFailure::Deny`
+        // exists to prevent.
+        assert!(matches!(error, HookConfigError::Parse { .. }));
     }
 
     #[test]

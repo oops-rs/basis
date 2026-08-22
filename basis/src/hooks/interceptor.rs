@@ -76,6 +76,11 @@ pub type InterceptorError = Box<dyn std::error::Error + Send + Sync>;
 /// is only who is speaking — the host's compiled code rather than a program
 /// named in a file.
 ///
+/// Two questions, one trait: [`intercept`](Self::intercept) before the call and
+/// [`review`](Self::review) after it. The second is defaulted to no objection,
+/// so an interceptor written when there was only the first still compiles and
+/// still means what it said.
+///
 /// The other seam is [`Approver`](crate::approval::Approver), and the two are
 /// deliberately not merged (ADR-0012, and mentra keeps them apart for the same
 /// reason). An approver answers *may this happen* and its answer feeds the
@@ -106,6 +111,11 @@ pub type InterceptorError = Box<dyn std::error::Error + Send + Sync>;
 /// equivalent here, and none is needed — an interceptor that would rather be
 /// ignored is one `Ok(HookOutcome::Allow)` away from saying so, in code it
 /// already owns.
+///
+/// After the call the same rule holds, and denying means what it can still
+/// mean there: the model is shown the reason instead of the output. A guard
+/// that broke while checking a result for credentials has not established that
+/// there were none in it.
 #[async_trait::async_trait]
 pub trait Interceptor: Send + Sync {
     /// Names this interceptor in denials and in the audit trail.
@@ -122,6 +132,30 @@ pub trait Interceptor: Send + Sync {
     /// participant's modification is already applied, so an interceptor never
     /// judges an input that has since been rewritten.
     async fn intercept(&self, call: &HookRequest) -> Result<HookOutcome, InterceptorError>;
+
+    /// Decides about one tool call's result, once it has run.
+    ///
+    /// `result` is the same [`HookRequest`], with `output` and `is_error` on
+    /// it and `input` holding what the tool actually ran with. As with
+    /// [`intercept`](Self::intercept), it is the result as the chain has left
+    /// it, so no interceptor judges an output a later one has already replaced.
+    ///
+    /// The answers are [`HookOutcome::Allow`] to let the result stand,
+    /// [`HookOutcome::Replace`] to show the model something else, and
+    /// [`HookOutcome::Deny`] to show it the reason instead, marked as an
+    /// error. Nothing here can un-run the tool: the side effects have happened
+    /// and the event stream already carries what it returned. What is being
+    /// decided is only what the model reads.
+    ///
+    /// Defaulted to `Allow`, so an interceptor that only guards calls says
+    /// nothing about results and is not made to. A guard that wants both
+    /// writes both — the two questions have different answers often enough
+    /// that folding them into one method would mean asking every host to
+    /// branch on `result.output.is_some()`.
+    async fn review(&self, result: &HookRequest) -> Result<HookOutcome, InterceptorError> {
+        let _ = result;
+        Ok(HookOutcome::Allow)
+    }
 }
 
 /// Forwards to the interceptor inside.
@@ -139,6 +173,13 @@ impl<T: Interceptor + ?Sized> Interceptor for Box<T> {
     async fn intercept(&self, call: &HookRequest) -> Result<HookOutcome, InterceptorError> {
         (**self).intercept(call).await
     }
+
+    // Forwarded rather than inherited: taking the default here would answer
+    // "no objection" on behalf of an interceptor that had one, and do it
+    // silently, only for hosts that hold theirs behind a box.
+    async fn review(&self, result: &HookRequest) -> Result<HookOutcome, InterceptorError> {
+        (**self).review(result).await
+    }
 }
 
 #[async_trait::async_trait]
@@ -149,6 +190,10 @@ impl<T: Interceptor + ?Sized> Interceptor for Arc<T> {
 
     async fn intercept(&self, call: &HookRequest) -> Result<HookOutcome, InterceptorError> {
         (**self).intercept(call).await
+    }
+
+    async fn review(&self, result: &HookRequest) -> Result<HookOutcome, InterceptorError> {
+        (**self).review(result).await
     }
 }
 
@@ -180,6 +225,15 @@ mod tests {
         )
     }
 
+    fn result() -> HookRequest {
+        HookRequest::from_result(
+            Path::new("/repo"),
+            &HookCall::new("agent-1", "shell", "call-1", r#"{"command":"cat .env"}"#),
+            serde_json::json!("TOKEN=hunter2"),
+            false,
+        )
+    }
+
     #[tokio::test]
     async fn an_indirected_interceptor_answers_exactly_as_the_one_inside() {
         // What a host relies on to choose between several without writing the
@@ -196,6 +250,95 @@ mod tests {
         assert_eq!(
             shared.intercept(&request()).await.expect("answers"),
             HookOutcome::Deny("shell".to_string())
+        );
+    }
+
+    #[tokio::test]
+    async fn an_interceptor_that_only_guards_calls_keeps_every_result() {
+        // What every impl written before there was a second seam does, and
+        // the reason the method is defaulted: a host that never asked to see
+        // results is not made to answer about them.
+        assert_eq!(
+            Named("guard").review(&result()).await.expect("answers"),
+            HookOutcome::Allow
+        );
+    }
+
+    #[tokio::test]
+    async fn an_indirection_forwards_a_review_too() {
+        // A `Box` that inherited the default would swallow the inner
+        // interceptor's opinion and report no objection — the one failure
+        // this whole module is arranged to avoid.
+        struct Redacts;
+
+        #[async_trait::async_trait]
+        impl Interceptor for Redacts {
+            fn name(&self) -> &str {
+                "redacts"
+            }
+
+            async fn intercept(
+                &self,
+                _call: &HookRequest,
+            ) -> Result<HookOutcome, InterceptorError> {
+                Ok(HookOutcome::Allow)
+            }
+
+            async fn review(&self, result: &HookRequest) -> Result<HookOutcome, InterceptorError> {
+                Ok(HookOutcome::Replace {
+                    output: serde_json::json!("[redacted]"),
+                    is_error: result.is_error.unwrap_or(false),
+                    reason: Some("a credential".to_string()),
+                })
+            }
+        }
+
+        let boxed: Box<dyn Interceptor> = Box::new(Redacts);
+        let shared: Arc<dyn Interceptor> = Arc::new(Redacts);
+
+        for indirected in [&boxed as &dyn Interceptor, &shared as &dyn Interceptor] {
+            assert_eq!(
+                indirected.review(&result()).await.expect("answers"),
+                HookOutcome::Replace {
+                    output: serde_json::json!("[redacted]"),
+                    is_error: false,
+                    reason: Some("a credential".to_string()),
+                }
+            );
+        }
+    }
+
+    #[tokio::test]
+    async fn a_review_is_shown_the_output_as_well_as_the_input() {
+        struct SeesOutput;
+
+        #[async_trait::async_trait]
+        impl Interceptor for SeesOutput {
+            fn name(&self) -> &str {
+                "sees-output"
+            }
+
+            async fn intercept(
+                &self,
+                _call: &HookRequest,
+            ) -> Result<HookOutcome, InterceptorError> {
+                Ok(HookOutcome::Allow)
+            }
+
+            async fn review(&self, result: &HookRequest) -> Result<HookOutcome, InterceptorError> {
+                // The input is what the tool *ran* with, which is half of
+                // what makes an output judgeable.
+                Ok(HookOutcome::Deny(format!(
+                    "{} -> {}",
+                    result.input["command"],
+                    result.output.clone().unwrap_or_default()
+                )))
+            }
+        }
+
+        assert_eq!(
+            SeesOutput.review(&result()).await.expect("answers"),
+            HookOutcome::Deny("\"cat .env\" -> \"TOKEN=hunter2\"".to_string())
         );
     }
 

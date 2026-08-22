@@ -19,9 +19,16 @@
 //!   (ADR-0001, and `docs/proposals/0001`, which stays deferred).
 //!
 //! Both answer in one vocabulary — allow, deny with a reason, modify with a
-//! replacement input — and both go through one [`HookRunner`], so the ordering,
-//! the short-circuit and the threading of a modification are decided once for
-//! the pair rather than twice.
+//! replacement input, replace with a different result — and both go through one
+//! [`HookRunner`], so the ordering, the short-circuit and the threading of a
+//! rewrite are decided once for the pair rather than twice.
+//!
+//! Both are asked at two moments, too. Before a call, the question is whether
+//! it should happen and in what form; after it, the tool has run and the only
+//! thing left to decide is what the model is shown — which is where some
+//! questions can first be answered at all, because a command's output is not
+//! knowable from its arguments. [`HookEvent`] names the two, a hook declares
+//! which it wants, and an [`Interceptor`] implements one method or both.
 //!
 //! The other seam is approval ([`crate::approval`]), and the two are siblings
 //! rather than one thing: an [`Approver`](crate::approval::Approver) answers
@@ -41,13 +48,25 @@
 //! | how a subprocess is declared and found | [`HookSpec`], [`HooksConfig`] |
 //! | the one chain both arrive at | [`HookRunner`] |
 //!
-//! # The seam underneath
+//! # The seams underneath
 //!
 //! mentra's [`PreExecutionHook`](mentra::runtime::PreExecutionHook) fires after
-//! authorization and before the tool runs. basis registers exactly one
-//! implementation, [`HookRunner`], which fans out to every interceptor and every
-//! configured command — not because it must (`with_pre_hook` appends) but
-//! because basis wants to own the ordering and the short-circuit.
+//! authorization and before the tool runs;
+//! [`PostExecutionHook`](mentra::runtime::PostExecutionHook) fires after it and
+//! before the result reaches the model — before mentra's own pager, so a
+//! participant sees the whole output rather than its first window, and without
+//! touching `AgentEvent::ToolExecutionFinished`, so the audit trail keeps what
+//! actually happened whatever the model is shown.
+//!
+//! basis registers exactly one implementation on each, [`HookRunner`], which
+//! fans out to every interceptor and every configured command — not because it
+//! must (`with_pre_hook` and `with_post_hook` both append) but because basis
+//! wants to own the ordering and the short-circuit.
+//!
+//! What a post hook *cannot* do is un-run anything. By the time it speaks the
+//! side effects have happened, which is why the two events are not
+//! interchangeable and why a guard that must stop something belongs before the
+//! call.
 //!
 //! # Configuration
 //!
@@ -63,9 +82,15 @@
 //!     {
 //!       "name": "no-force-push",
 //!       "command": ["./.basis/hooks/no-force-push.sh"],
-//!       "tools": ["shell"],
+//!       "tools": ["spawn"],
+//!       "event": "pre_tool_use",
 //!       "timeout_ms": 5000,
 //!       "on_failure": "deny"
+//!     },
+//!     {
+//!       "name": "no-secrets",
+//!       "command": ["./.basis/hooks/no-secrets.sh"],
+//!       "event": "post_tool_use"
 //!     }
 //!   ]
 //! }
@@ -76,6 +101,9 @@
 //! A relative program path is resolved against the workspace root; a bare name
 //! is left to `PATH`, which is what a person writing the file expects. Omitting
 //! `tools` means every tool; listing them matches on the exact tool name.
+//! Omitting `event` means before the call, which is what every hooks file
+//! written before there was a second event meant — one entry is asked at one
+//! event, and a guard that wants both sides writes two.
 //!
 //! There is nothing equivalent for the in-process binding, because there is
 //! nothing to discover: an interceptor is registered as a value, by code that
@@ -109,6 +137,12 @@
 //! loud and gets fixed. A hook that would rather be ignored says
 //! `"on_failure": "allow"`; an interceptor that would rather be ignored returns
 //! `Allow` in code it already owns.
+//!
+//! After the call, denying is the same ruling with the only power still
+//! available: the model is shown the failure in place of the output, marked as
+//! an error. A guard that broke while checking an output for credentials has
+//! not established that there were none in it — and the stream still carries
+//! what the tool really returned, so nothing is lost to whoever is auditing.
 //!
 //! # A hook takes as long as it takes
 //!
