@@ -191,6 +191,15 @@ impl HookRunner {
                 Ok(HookOutcome::Allow) => Answer::Allow,
                 Ok(HookOutcome::Deny(reason)) => Answer::Deny(Some(reason)),
                 Ok(HookOutcome::Modify { input, reason }) => Answer::Modify { input, reason },
+                Ok(HookOutcome::Replace {
+                    output,
+                    is_error,
+                    reason,
+                }) => Answer::Replace {
+                    output,
+                    is_error: Some(is_error),
+                    reason,
+                },
                 Err(failure) => Answer::Broken(failure),
             };
 
@@ -219,6 +228,15 @@ impl HookRunner {
                 Ok(HookResponse::Allow { .. }) => Answer::Allow,
                 Ok(HookResponse::Deny { reason }) => Answer::Deny(reason),
                 Ok(HookResponse::Modify { input, reason }) => Answer::Modify { input, reason },
+                Ok(HookResponse::Replace {
+                    output,
+                    is_error,
+                    reason,
+                }) => Answer::Replace {
+                    output,
+                    is_error,
+                    reason,
+                },
                 Err(failure) => Answer::Broken(failure.to_string()),
             };
 
@@ -334,6 +352,12 @@ impl PreExecutionHook for HookRunner {
                     "a replacement input could not be re-encoded: {error}"
                 )),
             },
+            // Unreachable: the chain refuses a replacement before the call has
+            // run, so one cannot survive to here. Denying says which
+            // impossible thing happened instead of panicking about it.
+            HookOutcome::Replace { .. } => HookDecision::Deny(
+                "a participant replaced the result of a call that has not run yet".to_string(),
+            ),
         })
     }
 }
