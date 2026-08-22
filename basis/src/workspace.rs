@@ -203,6 +203,18 @@ impl Workspace {
     /// here checks that — mentra's store is keyed by agent, not by path — so
     /// resuming an agent under a workspace it never ran in gives it that
     /// workspace's context and tools alongside its own history.
+    ///
+    /// mentra does not persist a model's context window
+    /// (`Agent::from_loaded` always resumes at `None` — `set_model` is the
+    /// only way back), so a resumed session starts with an unknown one. This
+    /// reapplies this workspace's own resolved model exactly when the
+    /// resumed conversation is still on it — the same model [`prepare`] would
+    /// have minted — which restores mentra's own compaction threshold as well
+    /// as [`PreparedRun::context_window`]. A conversation
+    /// [`PreparedRun::set_model`] had already moved elsewhere keeps whatever
+    /// that call left it at instead: basis has no window for a model it does
+    /// not resolve, and forcing this one back would silently undo a choice
+    /// the caller made.
     pub fn resume(
         &self,
         agent_id: &str,
@@ -211,6 +223,9 @@ impl Workspace {
         let spec = spec.into();
         let mut session = self.runtime.resume_minted(agent_id)?;
         apply_effort(&mut session, spec.effort.or(self.effort))?;
+        if session_on_resolved_model(&session, &self.model) {
+            session.set_model(self.model.clone())?;
+        }
 
         Ok(self.minted(session, spec))
     }
@@ -375,6 +390,13 @@ impl Workspace {
     /// two cannot disagree about what a run from this workspace reports.
     fn minted(&self, session: Session, spec: RunSpec) -> PreparedRun {
         let bounds = spec.turn_options();
+        // Trusted only while the session's live model is still the one this
+        // workspace resolved — true for every fresh `prepare`, and for a
+        // `resume` that reapplied it above; `None` otherwise, honestly, rather
+        // than reporting a window for a model this run has left.
+        let context_window = session_on_resolved_model(&session, &self.model)
+            .then_some(self.model.context_window)
+            .flatten();
 
         PreparedRun::new(
             session,
@@ -404,7 +426,19 @@ impl Workspace {
         // takes it per run, so the mint is where a runtime-scoped knob becomes
         // a per-run option.
         .with_provider_retry(self.runtime.provider_retry())
+        .with_context_snapshot(context_window, self.agent.system.clone())
     }
+}
+
+/// Whether `session`'s live model is still the one this workspace resolved.
+///
+/// True immediately after [`Runtime::mint`](crate::runtime::Runtime::mint) —
+/// a fresh session is always created on `model` — and after [`Workspace::resume`]
+/// reapplies it; false when a resumed conversation had
+/// [`PreparedRun::set_model`] move it somewhere else, which nothing here may
+/// overwrite with a guess.
+fn session_on_resolved_model(session: &Session, model: &ModelInfo) -> bool {
+    session.metadata().model == model.id
 }
 
 /// Asks the model for a reasoning effort, when one was requested.
@@ -443,5 +477,41 @@ mod tests {
 
         assert_send_sync::<Workspace>();
         assert_send_sync::<RunSpec>();
+    }
+
+    /// A session freshly created on `model` is trivially on it — the case
+    /// every `prepare` mint is in, and what makes `resume`'s own check of the
+    /// same function correct: nothing distinguishes "just minted" from
+    /// "resumed and still on the same model" once the session exists.
+    #[test]
+    fn a_freshly_created_session_is_on_its_own_model() {
+        let mock = mentra::test::MockRuntime::builder()
+            .model("gpt-5", "openai")
+            .build()
+            .expect("mock runtime builds");
+        let model = mock.model();
+        let session = mock
+            .runtime()
+            .create_session("s", model.clone())
+            .expect("session");
+
+        assert!(session_on_resolved_model(&session, &model));
+    }
+
+    /// The case `resume` must not paper over: a conversation `PreparedRun::set_model`
+    /// already moved elsewhere is not this workspace's window to guess at.
+    #[test]
+    fn a_session_on_a_different_model_does_not_match() {
+        let mock = mentra::test::MockRuntime::builder()
+            .model("gpt-5", "openai")
+            .build()
+            .expect("mock runtime builds");
+        let session = mock
+            .runtime()
+            .create_session("s", mock.model())
+            .expect("session");
+        let workspace_model = ModelInfo::new("gpt-6", "openai");
+
+        assert!(!session_on_resolved_model(&session, &workspace_model));
     }
 }

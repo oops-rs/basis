@@ -244,6 +244,54 @@ async fn a_conversation_is_found_again_only_through_the_directory_it_was_written
     );
 }
 
+/// `offline` resolves its model by explicit id, which mentra never asks a
+/// listing for (`Runtime::resolve_model`) — so this workspace's context
+/// window is unknown before *and* after a resume. What this pins is that
+/// `resume`'s own reapplication of the resolved model — the fix for a
+/// resumed agent otherwise losing a *known* window mentra does not persist —
+/// does not corrupt the model a resumed conversation reports, in the one case
+/// that exercises the same code path without a known window to lose.
+#[tokio::test]
+async fn resuming_on_the_same_model_reports_the_same_model_and_an_honest_unknown_window() {
+    let dir = tempfile::tempdir().expect("tempdir");
+    write(&dir.path().join("AGENTS.md"), "house rules");
+    let store = tempfile::tempdir().expect("tempdir");
+
+    let opened = offline(dir.path())
+        .with_runtime_builder(offline_runtime().with_store_dir(store.path()))
+        .open()
+        .await
+        .expect("opens");
+    let prepared = opened.prepare("go").expect("mints");
+    assert_eq!(
+        prepared.context_window(),
+        None,
+        "an id-selected model was never listed, on any provider"
+    );
+    assert!(
+        prepared.estimated_context_tokens() > 0,
+        "the estimate still counts the system prompt AGENTS.md rendered, \
+         even with an empty history"
+    );
+    let agent_id = prepared.agent_id().to_string();
+    drop(prepared);
+    drop(opened);
+
+    let reopened = offline(dir.path())
+        .with_runtime_builder(offline_runtime().with_store_dir(store.path()))
+        .open()
+        .await
+        .expect("opens");
+    let resumed = reopened.resume(&agent_id, "again").expect("resumes");
+
+    assert_eq!(resumed.context_window(), None);
+    assert_eq!(
+        resumed.context().model,
+        "test-model",
+        "reapplying the resolved model on resume must not rename it"
+    );
+}
+
 /// A workspace that keeps its history nowhere is still a workspace.
 ///
 /// The knob's floor. Swapping the backing store is exactly the kind of change

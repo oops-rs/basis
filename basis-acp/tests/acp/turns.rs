@@ -8,7 +8,7 @@
 use std::sync::Arc;
 
 use agent_client_protocol::schema::v1::{
-    ContentBlock, ImageContent, PromptRequest, StopReason, TextContent,
+    ContentBlock, ImageContent, PromptRequest, SessionUpdate, StopReason, TextContent,
 };
 use mentra::{RuntimePolicy, test::MockRuntime};
 
@@ -34,6 +34,27 @@ async fn a_prompt_streams_back_and_ends_the_turn() {
     assert!(
         observed.permission_requests.is_empty(),
         "nothing consequential happened, so nothing should have been asked"
+    );
+}
+
+#[tokio::test]
+async fn a_session_with_no_known_context_window_sends_no_usage_update() {
+    // `MockSource` prepares through `prepare_with_session`, which never
+    // learns a context window — basis was not the party that resolved this
+    // session's model. `UsageUpdate` must not appear at all rather than carry
+    // a guessed `size`.
+    let workspace = workspace();
+    let mock = Arc::new(text_mock(&["Hel", "lo ", "world"]));
+
+    let (_, observed) = drive(MockSource::new(&mock, &workspace), vec!["say hello"], None).await;
+
+    let observed = observed.lock().expect("not poisoned");
+    assert!(
+        !observed
+            .updates
+            .iter()
+            .any(|update| matches!(update, SessionUpdate::UsageUpdate(_))),
+        "no known window means no usage update, not a guessed one"
     );
 }
 

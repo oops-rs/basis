@@ -17,7 +17,7 @@ use serde::de::DeserializeOwned;
 use serde_json::Value;
 use tokio::sync::oneshot;
 
-use self::forward::forward_events;
+use self::{context::ContextSnapshot, forward::forward_events};
 use super::{
     Bound, Effort, EventSink, OutputReport, OutputSpec, RunError, RunReport, RunUsage, TurnOptions,
     turn::{bounded, drawable},
@@ -31,6 +31,7 @@ use crate::{
     workspace::Workspace,
 };
 
+mod context;
 mod forward;
 mod prompt;
 
@@ -115,6 +116,14 @@ pub struct PreparedRun {
     /// that — see [`effort`](PreparedRun::effort) for why it is not the same
     /// question as "what level is the session at".
     effort: Option<Effort>,
+    /// What this run's mint knew about its model's context window and system
+    /// prompt; see [`context_window`](Self::context_window) and
+    /// [`estimated_context_tokens`](Self::estimated_context_tokens).
+    ///
+    /// Named apart from [`context()`](Self::context)'s own `run: RunContext`
+    /// deliberately: the two answer different questions and a shared name
+    /// would blur them at every call site.
+    context_snapshot: ContextSnapshot,
 }
 
 /// Hand-written because mentra's `Session` is not `Debug`, and because the
@@ -146,6 +155,27 @@ impl PreparedRun {
             provider_retry: ProviderRetry::default(),
             retry_budget: RunOptions::default().retry_budget,
             effort: None,
+            context_snapshot: ContextSnapshot::default(),
+        }
+    }
+
+    /// Records what this run's mint knew about its model's context window and
+    /// the system prompt it opened with.
+    ///
+    /// [`Workspace::minted`](crate::workspace::Workspace) is the only caller:
+    /// both figures come from data only a workspace holds — the resolved
+    /// [`ModelInfo`](mentra::ModelInfo), the rendered system prompt — so
+    /// [`prepare_with_session`](super::prepare_with_session), the path with no
+    /// workspace, leaves this at its `None`/`None` default, honestly: basis
+    /// was not the party that built that session's request either.
+    pub(crate) fn with_context_snapshot(
+        self,
+        context_window: Option<usize>,
+        system_prompt: Option<String>,
+    ) -> Self {
+        Self {
+            context_snapshot: ContextSnapshot::new(context_window, system_prompt),
+            ..self
         }
     }
 
@@ -300,6 +330,50 @@ impl PreparedRun {
         self.session.history()
     }
 
+    /// This run's model's context window, when it is known.
+    ///
+    /// Known only when the workspace's model was resolved from a provider's
+    /// listing — mentra's `ModelSelector::NewestAvailable`, which is what a
+    /// workspace resolves to when nothing named a model — and only if that
+    /// listing reports one: Gemini's does, as `inputTokenLimit`; Anthropic's
+    /// and the Responses transport's do not. An explicitly named model —
+    /// `--model`, a repository's `config.json`, `RunConfig::with_model(
+    /// ModelSelector::Id(_))` — resolves without a listing at all
+    /// (`mentra::Runtime::resolve_model`), so this is `None` for it
+    /// regardless of provider. Also `None` for any run
+    /// [`set_model`](Self::set_model) has since moved onto a model named by id
+    /// alone, where basis has nothing to report from. A resumed conversation
+    /// keeps its window only while it is still on the model its workspace
+    /// resolved; see `Workspace::resume`.
+    ///
+    /// This mirrors what basis itself told mentra rather than reading
+    /// mentra's own `Agent::context_window` back — mentra's `Session` has no
+    /// accessor for it, so a caller that reaches past this run into
+    /// [`session_mut`](Self::session_mut) and calls mentra's own `set_model`
+    /// moves the live agent's window without moving this one.
+    pub const fn context_window(&self) -> Option<usize> {
+        self.context_snapshot.context_window()
+    }
+
+    /// Estimates how many tokens the next request would spend on this run's
+    /// history and system prompt, using mentra's own estimator
+    /// ([`mentra::memory::estimated_request_tokens`]) — the same one mentra's
+    /// auto-compaction threshold is compared against.
+    ///
+    /// **A floor, not the real number.** mentra's actual request adds a
+    /// task-reminder banner and a skill-description block on top of the
+    /// system prompt basis configured, when either applies — both are
+    /// computed inside mentra's own `Agent::effective_system_prompt`, which is
+    /// private, so nothing outside it can include them. The gap is largest
+    /// for a run with many skills registered or an overdue task reminder, and
+    /// zero for a run with neither. Useful beside
+    /// [`context_window`](Self::context_window) for a host deciding whether to
+    /// compact or warn before mentra's own trigger would.
+    pub fn estimated_context_tokens(&self) -> usize {
+        self.context_snapshot
+            .estimated_tokens(self.session.history())
+    }
+
     /// What this run is about, minus the session.
     pub fn context(&self) -> &RunContext {
         &self.run
@@ -332,6 +406,11 @@ impl PreparedRun {
         // Leaving it stale would have the stream describe a run that is no
         // longer happening.
         self.run.model = model;
+        // `ModelInfo::new` above carries no window — basis was handed a bare
+        // id, not a listing — so the old one is no longer this run's fact and
+        // `context_window()` must say so rather than describe a model this run
+        // has left.
+        self.context_snapshot = self.context_snapshot.without_window();
 
         Ok(())
     }
