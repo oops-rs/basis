@@ -99,6 +99,34 @@ pub use mentra::provider::ResponsesTransport;
 /// for why, and for who would want the other.
 pub use mentra::FileToolProfile;
 
+/// Which request format a custom endpoint is spoken to in, as
+/// [`RuntimeBuilder::with_wire`] takes it.
+///
+/// Two wires answer to the name "OpenAI-compatible" and they agree on almost
+/// nothing: a flat `messages` array against typed input items, tool arguments
+/// as a JSON string against a value, `max_tokens` against `max_output_tokens`
+/// — and, the part an operator meets first, `v1/chat/completions` against
+/// `v1/responses`. Speaking the wrong one is a 404 on the very first turn,
+/// worded like a mistyped URL.
+///
+/// basis's own enum rather than mentra's `WireApi`, which is where the rule
+/// above gives way. `WireApi` also names Anthropic's and Gemini's formats, and
+/// neither is something a base URL can be spoken to in — re-exporting it would
+/// let a host write a call basis could only refuse. Two wires are what basis
+/// can honor here, so two variants is what it takes.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub enum Wire {
+    /// What the OpenAI-compatible ecosystem actually implements: Ollama, LM
+    /// Studio, vLLM, llama.cpp, DeepSeek, Groq, Together, OpenRouter, and the
+    /// gateways in front of them. The default, because it is the wire behind
+    /// nearly every URL anyone pastes.
+    #[default]
+    ChatCompletions,
+    /// OpenAI's own `v1/responses` — served by OpenAI, by the proxies that
+    /// forward to it, and by almost nothing else.
+    Responses,
+}
+
 use crate::{approval::SideEffectLevels, run::RunError};
 
 use dispatch::{HookDispatch, HookRegistration, WorkspaceGuardEntry};

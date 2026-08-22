@@ -16,7 +16,10 @@ use std::{
 
 use mentra::{
     BuiltinProvider, ModelSelector, ProviderId, RuntimePolicy,
-    provider_core::{StaticCredentialSource, responses, responses::ResponsesProvider},
+    provider_core::{
+        StaticCredentialSource, chat_completions, chat_completions::ChatCompletionsProvider,
+        responses, responses::ResponsesProvider,
+    },
 };
 
 use crate::{
@@ -33,7 +36,7 @@ use crate::{
 };
 
 use super::{
-    FileToolProfile, ProviderRetry, ResponsesTransport, Runtime, RuntimeExecutor,
+    FileToolProfile, ProviderRetry, ResponsesTransport, Runtime, RuntimeExecutor, Wire,
     dispatch::{DispatchHook, HookDispatch},
     executor::{CommandTargets, TargetedExecutor},
 };
@@ -91,6 +94,17 @@ pub struct RuntimeBuilder {
     /// default is mentra's to state, basis has no business restating it, and
     /// `None` here means the builder chain never mentions transport at all.
     responses_transport: Option<ResponsesTransport>,
+    /// Which request format a custom endpoint is spoken to in
+    /// ([`with_wire`](Self::with_wire)).
+    ///
+    /// A plain value rather than an `Option`, unlike
+    /// [`responses_transport`](Self::responses_transport) directly above: this
+    /// default is basis's own to state and not mentra's, because mentra has no
+    /// view on what is behind somebody's base URL and basis does — almost
+    /// always `chat/completions`. Read only when
+    /// [`base_url`](Self::base_url) is set; a provider preset carries its own
+    /// wire and this cannot override it.
+    wire: Wire,
     /// Which builtin file tools the model is offered
     /// ([`with_file_tools`](Self::with_file_tools)).
     ///
@@ -153,6 +167,7 @@ impl std::fmt::Debug for RuntimeBuilder {
             .field("provider_retry", &self.provider_retry)
             .field("provider_retry_budget", &self.provider_retry_budget)
             .field("responses_transport", &self.responses_transport)
+            .field("wire", &self.wire)
             .field("file_tools", &self.file_tools)
             .field(
                 "command_environment",
@@ -182,6 +197,7 @@ impl Default for RuntimeBuilder {
             provider_retry: ProviderRetry::default(),
             provider_retry_budget: mentra::runtime::RunOptions::default().retry_budget,
             responses_transport: None,
+            wire: Wire::ChatCompletions,
             file_tools: FileToolProfile::Split,
             command_environment: BTreeMap::new(),
             command_targets: CommandTargets::new(),
@@ -198,9 +214,20 @@ impl RuntimeBuilder {
         }
     }
 
-    /// Points the runtime at an OpenAI-compatible endpoint. A trailing `/v1`
-    /// is stripped during resolution — paste the URL a gateway publishes.
-    /// Compatible endpoints use complete local replay rather than automatic
+    /// Points the runtime at an OpenAI-compatible endpoint.
+    ///
+    /// Paste the URL the server publishes. A trailing `/v1` is stripped during
+    /// resolution, because every gateway advertises itself with one — that is
+    /// the form the OpenAI SDKs take — and mentra's transports append their
+    /// own `v1/…`; without the strip the published URL would produce
+    /// `/v1/v1/…` and a 404 that names nothing.
+    ///
+    /// **The endpoint is spoken to in `chat/completions`**, which is what
+    /// "OpenAI-compatible" means in the wild: Ollama, LM Studio, vLLM,
+    /// llama.cpp, and the gateways in front of them serve that wire and not
+    /// OpenAI's own `v1/responses`. A proxy that does serve Responses is
+    /// reached by saying [`with_wire(Wire::Responses)`](Self::with_wire), and
+    /// such an endpoint then uses complete local replay rather than automatic
     /// `previous_response_id` chaining.
     pub fn with_base_url(self, base_url: impl Into<String>) -> Self {
         Self {
@@ -397,6 +424,32 @@ impl RuntimeBuilder {
             responses_transport: Some(transport),
             ..self
         }
+    }
+
+    /// Which request format the endpoint behind
+    /// [`with_base_url`](Self::with_base_url) is spoken to in.
+    ///
+    /// [`Wire::ChatCompletions`] by default, and that default is the point: an
+    /// operator who pastes a base URL has pasted Ollama, LM Studio, vLLM,
+    /// llama.cpp, or a gateway in front of one of them, and every one of those
+    /// serves `chat/completions` alone. OpenAI's own `v1/responses` is served
+    /// by OpenAI — reached through the `openai` preset with no base URL at all
+    /// — and by a handful of proxies that forward to it.
+    ///
+    /// So this exists for those proxies, and for nothing else. Without it the
+    /// new default would not be a default but a removal: a Responses-speaking
+    /// gateway was reachable by base URL before, and one word here keeps it
+    /// reachable rather than sending its operator off to build a mentra
+    /// runtime by hand. Choosing wrong is not subtle — the wrong wire is a 404
+    /// on the first turn.
+    ///
+    /// **Read only when a base URL is set.** A provider preset carries the
+    /// wire its vendor speaks, so calling this without
+    /// [`with_base_url`](Self::with_base_url) says nothing: basis will not
+    /// talk `chat/completions` to Anthropic because a builder asked.
+    #[must_use]
+    pub fn with_wire(self, wire: Wire) -> Self {
+        Self { wire, ..self }
     }
 
     /// Which builtin file tools this runtime offers the model.
@@ -864,11 +917,16 @@ impl RuntimeBuilder {
         // `build`, not `build_async`: no MCP server is ever registered at the
         // runtime level, so there is nothing for the async constructor to
         // connect. Workspace-owned connections arrive post-build (ADR-0018).
-        let mentra = match &choice.base_url {
-            Some(base_url) => {
-                builder.with_registered_provider(compatible_provider(base_url, &choice.api_key))
-            }
-            None => builder.with_provider(choice.provider, choice.api_key.clone()),
+        // A base URL is the only place the wire is a question: a preset carries
+        // the one its vendor speaks.
+        let mentra = match (&choice.base_url, self.wire) {
+            (Some(base_url), Wire::ChatCompletions) => builder.with_registered_provider(
+                chat_completions_provider(choice.provider, base_url, &choice.api_key),
+            ),
+            (Some(base_url), Wire::Responses) => builder.with_registered_provider(
+                responses_provider(choice.provider, base_url, &choice.api_key),
+            ),
+            (None, _) => builder.with_provider(choice.provider, choice.api_key.clone()),
         }
         .build()?;
 
@@ -989,16 +1047,60 @@ fn git_protected(policy: RuntimePolicy, workspace: &Path) -> RuntimePolicy {
         .with_denied_write_root(git.join("config"))
 }
 
-/// Builds a provider aimed at an OpenAI-compatible endpoint.
+/// Builds the provider a base URL gets: the `chat/completions` wire, which is
+/// what "OpenAI-compatible" means everywhere except OpenAI.
+///
+/// Registered under the provider id the choice resolved to, because that is the
+/// id [`Runtime::resolve_model`](crate::Runtime::resolve_model) will look the
+/// model up by — a definition filed under some other name is a provider mentra
+/// cannot find.
+///
+/// Built from mentra's own definition for the wire rather than described here,
+/// the same reason [`responses_provider`] builds on the OpenAI preset: a
+/// capability set spelled out in basis is one that drifts from whatever mentra
+/// learns next.
+///
+/// Reaches past `mentra::provider::openai_compatible` into `provider_core`
+/// deliberately, and not for want of looking. That module is the natural fit,
+/// but its `OpenAiCompatibleProvider` implements `mentra::Provider` while
+/// `mentra::RuntimeBuilder::with_registered_provider` asks for
+/// `mentra_provider::RegisteredProvider` — two different traits, and rustc
+/// says so — leaving `Runtime::register_openai_compatible`, which runs
+/// *after* the build and is therefore no use to a builder that has to settle
+/// its provider before it has a runtime. `ChatCompletionsProvider` is the same
+/// wire one layer down, where the trait matches.
+fn chat_completions_provider(
+    provider: BuiltinProvider,
+    base_url: &str,
+    api_key: &str,
+) -> ChatCompletionsProvider<StaticCredentialSource> {
+    let mut definition = chat_completions::definition(provider, base_url);
+    definition.descriptor.display_name = Some(format!("OpenAI-compatible ({base_url})"));
+
+    ChatCompletionsProvider::new(definition, StaticCredentialSource::new(api_key))
+}
+
+/// Builds a provider aimed at a base URL that serves OpenAI's own Responses
+/// wire — [`RuntimeBuilder::with_wire`]'s other answer.
 ///
 /// mentra's OpenAI preset is the right shape — the Responses wire format and
 /// bearer auth — so basis takes that definition, swaps the base URL, and disables
 /// automatic Hybrid HTTP state chaining. Building on the preset avoids
 /// describing a provider from scratch and drifting from whatever mentra learns
 /// next.
-fn compatible_provider(base_url: &str, api_key: &str) -> ResponsesProvider<StaticCredentialSource> {
+///
+/// The preset's own id is `openai`, which is right only when nothing named
+/// another: it is filed under the resolved id for [`chat_completions_provider`]'s
+/// reason, so that `--provider … --base-url …` finds its model rather than
+/// failing at the first turn under a name nobody registered.
+fn responses_provider(
+    provider: BuiltinProvider,
+    base_url: &str,
+    api_key: &str,
+) -> ResponsesProvider<StaticCredentialSource> {
     let mut definition = responses::openai_definition();
     definition.base_url = Some(base_url.to_string());
+    definition.descriptor.id = ProviderId::from(provider);
     definition.descriptor.display_name = Some(format!("OpenAI-compatible ({base_url})"));
 
     // A compatible endpoint promises the Responses wire shape, not every
