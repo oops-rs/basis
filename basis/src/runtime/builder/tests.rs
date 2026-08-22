@@ -467,17 +467,13 @@ fn a_custom_endpoint_is_filed_under_the_provider_the_choice_resolved() {
 }
 
 /// Resolution can answer "no key" — a local preset, or a base URL with none
-/// exported — and the provider built from that answer must ask the server for
-/// nothing rather than present an empty bearer it would refuse.
+/// exported — and the Responses provider basis builds from that answer must
+/// ask the server for nothing rather than present an empty bearer it would
+/// refuse. (The chat/completions branch is mentra's `with_openai_compatible`,
+/// which takes the same `Option` and is pinned end to end in
+/// `basis/tests/workspace.rs`.)
 #[test]
-fn an_endpoint_without_a_key_is_not_asked_to_bear_one() {
-    let chat = chat_completions_provider(
-        BuiltinProvider::OpenAI,
-        "http://127.0.0.1:1/",
-        Credential::new(None),
-    );
-    assert!(matches!(chat.definition().auth_scheme, AuthScheme::None));
-
+fn a_responses_endpoint_without_a_key_is_not_asked_to_bear_one() {
     let responses = responses_provider(
         BuiltinProvider::OpenAI,
         "http://127.0.0.1:1/",
@@ -490,14 +486,14 @@ fn an_endpoint_without_a_key_is_not_asked_to_bear_one() {
 }
 
 #[test]
-fn an_endpoint_with_a_key_bears_it() {
-    let chat = chat_completions_provider(
+fn a_responses_endpoint_with_a_key_bears_it() {
+    let responses = responses_provider(
         BuiltinProvider::OpenAI,
         "http://127.0.0.1:1/",
         Credential::new(Some("k")),
     );
     assert!(matches!(
-        chat.definition().auth_scheme,
+        responses.definition().auth_scheme,
         AuthScheme::BearerToken
     ));
 }

@@ -116,8 +116,7 @@ pub struct PreparedRun {
     /// that — see [`effort`](PreparedRun::effort) for why it is not the same
     /// question as "what level is the session at".
     effort: Option<Effort>,
-    /// What this run's mint knew about its model's context window and system
-    /// prompt; see [`context_window`](Self::context_window) and
+    /// What this run's mint knew about its system prompt; see
     /// [`estimated_context_tokens`](Self::estimated_context_tokens).
     ///
     /// Named apart from [`context()`](Self::context)'s own `run: RunContext`
@@ -159,22 +158,16 @@ impl PreparedRun {
         }
     }
 
-    /// Records what this run's mint knew about its model's context window and
-    /// the system prompt it opened with.
+    /// Records the system prompt this run's mint opened with.
     ///
     /// [`Workspace::minted`](crate::workspace::Workspace) is the only caller:
-    /// both figures come from data only a workspace holds — the resolved
-    /// [`ModelInfo`](mentra::ModelInfo), the rendered system prompt — so
+    /// the rendered prompt is data only a workspace holds, so
     /// [`prepare_with_session`](super::prepare_with_session), the path with no
-    /// workspace, leaves this at its `None`/`None` default, honestly: basis
-    /// was not the party that built that session's request either.
-    pub(crate) fn with_context_snapshot(
-        self,
-        context_window: Option<usize>,
-        system_prompt: Option<String>,
-    ) -> Self {
+    /// workspace, leaves this at its `None` default, honestly: basis was not
+    /// the party that built that session's request either.
+    pub(crate) fn with_context_snapshot(self, system_prompt: Option<String>) -> Self {
         Self {
-            context_snapshot: ContextSnapshot::new(context_window, system_prompt),
+            context_snapshot: ContextSnapshot::new(system_prompt),
             ..self
         }
     }
@@ -332,27 +325,20 @@ impl PreparedRun {
 
     /// This run's model's context window, when it is known.
     ///
-    /// Known only when the workspace's model was resolved from a provider's
-    /// listing — mentra's `ModelSelector::NewestAvailable`, which is what a
-    /// workspace resolves to when nothing named a model — and only if that
-    /// listing reports one: Gemini's does, as `inputTokenLimit`; Anthropic's
-    /// and the Responses transport's do not. An explicitly named model —
-    /// `--model`, a repository's `config.json`, `RunConfig::with_model(
-    /// ModelSelector::Id(_))` — resolves without a listing at all
-    /// (`mentra::Runtime::resolve_model`), so this is `None` for it
-    /// regardless of provider. Also `None` for any run
-    /// [`set_model`](Self::set_model) has since moved onto a model named by id
-    /// alone, where basis has nothing to report from. A resumed conversation
-    /// keeps its window only while it is still on the model its workspace
-    /// resolved; see `Workspace::resume`.
-    ///
-    /// This mirrors what basis itself told mentra rather than reading
-    /// mentra's own `Agent::context_window` back — mentra's `Session` has no
-    /// accessor for it, so a caller that reaches past this run into
-    /// [`session_mut`](Self::session_mut) and calls mentra's own `set_model`
-    /// moves the live agent's window without moving this one.
-    pub const fn context_window(&self) -> Option<usize> {
-        self.context_snapshot.context_window()
+    /// Read from the live session, so it is whatever mentra is compacting
+    /// against right now. Known when the model was resolved through the
+    /// provider's listing and that listing reports one — mentra looks a
+    /// pinned id up there too (`bfe952b`), so `--model`, a repository's
+    /// `config.json` and `RunConfig::with_model` all get a window when the
+    /// provider publishes one. Gemini's listing does, as `inputTokenLimit`;
+    /// Anthropic's and the OpenAI wires' do not, and neither does a server
+    /// that cannot list. `None` for a run [`set_model`](Self::set_model) has
+    /// since moved onto a model named by id alone, and for a resumed
+    /// conversation that is no longer on the model its workspace resolved —
+    /// mentra does not persist a window, and `Workspace::resume` reapplies
+    /// the workspace's model only while the conversation is still on it.
+    pub fn context_window(&self) -> Option<usize> {
+        self.session.context_window()
     }
 
     /// Estimates how many tokens the next request would spend on this run's
@@ -404,13 +390,9 @@ impl PreparedRun {
             .set_model(mentra::ModelInfo::new(model.clone(), &self.run.provider))?;
         // The context is what `header()` and every report read the model from.
         // Leaving it stale would have the stream describe a run that is no
-        // longer happening.
+        // longer happening. (`ModelInfo::new` above carries no window, so
+        // `context_window()` answers `None` from here on, from the session.)
         self.run.model = model;
-        // `ModelInfo::new` above carries no window — basis was handed a bare
-        // id, not a listing — so the old one is no longer this run's fact and
-        // `context_window()` must say so rather than describe a model this run
-        // has left.
-        self.context_snapshot = self.context_snapshot.without_window();
 
         Ok(())
     }

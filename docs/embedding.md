@@ -626,12 +626,12 @@ if let Some(window) = run.context_window() {
 }
 ```
 
-The window is known only when the workspace's model was resolved from a provider's listing
-— `ModelSelector::NewestAvailable`, what a workspace resolves to when nothing named a model
-— and only if that listing reports one: Gemini's does (`inputTokenLimit`); Anthropic's and
-the Responses transport's do not. Naming a model explicitly — `--model`, a repository's
-`config.json`, `RunConfig::with_model(ModelSelector::Id(_))` — resolves without a listing at
-all, so the window is unknown for it regardless of provider. `estimated_context_tokens` is a
+The window is known when the provider's listing reports one, and mentra consults the listing
+for a named model as well as for `NewestAvailable` (a pinned id that the listing does not
+name still resolves — the id is the caller's intent, not a claim the listing must confirm).
+Gemini's listing reports a window (`inputTokenLimit`); Anthropic's and the OpenAI wires' do
+not, and a server that cannot list reports nothing. The value is read from the live session,
+so it is exactly what mentra is compacting against. `estimated_context_tokens` is a
 floor even when the window is known: it covers the history and the system prompt basis
 configured, but not the task-reminder banner or skill-description block mentra may add to
 the *effective* prompt, which nothing outside mentra can read.

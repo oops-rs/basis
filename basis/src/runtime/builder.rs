@@ -16,10 +16,7 @@ use std::{
 
 use mentra::{
     BuiltinProvider, ModelSelector, ProviderId, RuntimePolicy,
-    provider_core::{
-        AuthScheme, chat_completions, chat_completions::ChatCompletionsProvider, responses,
-        responses::ResponsesProvider,
-    },
+    provider_core::{AuthScheme, responses, responses::ResponsesProvider},
 };
 
 use super::credential::Credential;
@@ -921,14 +918,21 @@ impl RuntimeBuilder {
         // connect. Workspace-owned connections arrive post-build (ADR-0018).
         // A base URL is the only place the wire is a question: a preset carries
         // the one its vendor speaks.
-        let credential = Credential::new(choice.api_key.as_deref());
         let mentra = match (&choice.base_url, self.wire) {
-            (Some(base_url), Wire::ChatCompletions) => builder.with_registered_provider(
-                chat_completions_provider(choice.provider, base_url, credential),
+            // mentra's own door for a compatible endpoint, keyed or not;
+            // filed under the resolved id so the model lookup finds it.
+            (Some(base_url), Wire::ChatCompletions) => builder.with_openai_compatible(
+                ProviderId::from(choice.provider),
+                base_url,
+                choice.api_key.clone(),
             ),
-            (Some(base_url), Wire::Responses) => builder.with_registered_provider(
-                responses_provider(choice.provider, base_url, credential),
-            ),
+            (Some(base_url), Wire::Responses) => {
+                builder.with_registered_provider(responses_provider(
+                    choice.provider,
+                    base_url,
+                    Credential::new(choice.api_key.as_deref()),
+                ))
+            }
             // A preset takes a `String`; resolution hands one back for every
             // keyed preset, and the two local ones ignore what they are given.
             (None, _) => {
@@ -1052,42 +1056,6 @@ fn git_protected(policy: RuntimePolicy, workspace: &Path) -> RuntimePolicy {
     policy
         .with_denied_write_root(git.join("hooks"))
         .with_denied_write_root(git.join("config"))
-}
-
-/// Builds the provider a base URL gets: the `chat/completions` wire, which is
-/// what "OpenAI-compatible" means everywhere except OpenAI.
-///
-/// Registered under the provider id the choice resolved to, because that is the
-/// id [`Runtime::resolve_model`](crate::Runtime::resolve_model) will look the
-/// model up by — a definition filed under some other name is a provider mentra
-/// cannot find.
-///
-/// Built from mentra's own definition for the wire rather than described here,
-/// the same reason [`responses_provider`] builds on the OpenAI preset: a
-/// capability set spelled out in basis is one that drifts from whatever mentra
-/// learns next.
-///
-/// Reaches past `mentra::provider::openai_compatible` into `provider_core`
-/// deliberately, and not for want of looking. That module is the natural fit,
-/// but its `OpenAiCompatibleProvider` implements `mentra::Provider` while
-/// `mentra::RuntimeBuilder::with_registered_provider` asks for
-/// `mentra_provider::RegisteredProvider` — two different traits, and rustc
-/// says so — leaving `Runtime::register_openai_compatible`, which runs
-/// *after* the build and is therefore no use to a builder that has to settle
-/// its provider before it has a runtime. `ChatCompletionsProvider` is the same
-/// wire one layer down, where the trait matches.
-fn chat_completions_provider(
-    provider: BuiltinProvider,
-    base_url: &str,
-    credential: Credential,
-) -> ChatCompletionsProvider<Credential> {
-    let mut definition = chat_completions::definition(provider, base_url);
-    definition.descriptor.display_name = Some(format!("OpenAI-compatible ({base_url})"));
-    if !credential.is_some() {
-        definition.auth_scheme = AuthScheme::None;
-    }
-
-    ChatCompletionsProvider::new(definition, credential)
 }
 
 /// Builds a provider aimed at a base URL that serves OpenAI's own Responses

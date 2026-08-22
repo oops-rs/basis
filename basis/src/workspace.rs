@@ -390,13 +390,6 @@ impl Workspace {
     /// two cannot disagree about what a run from this workspace reports.
     fn minted(&self, session: Session, spec: RunSpec) -> PreparedRun {
         let bounds = spec.turn_options();
-        // Trusted only while the session's live model is still the one this
-        // workspace resolved — true for every fresh `prepare`, and for a
-        // `resume` that reapplied it above; `None` otherwise, honestly, rather
-        // than reporting a window for a model this run has left.
-        let context_window = session_on_resolved_model(&session, &self.model)
-            .then_some(self.model.context_window)
-            .flatten();
 
         PreparedRun::new(
             session,
@@ -426,7 +419,7 @@ impl Workspace {
         // takes it per run, so the mint is where a runtime-scoped knob becomes
         // a per-run option.
         .with_provider_retry(self.runtime.provider_retry())
-        .with_context_snapshot(context_window, self.agent.system.clone())
+        .with_context_snapshot(self.agent.system.clone())
     }
 }
 
