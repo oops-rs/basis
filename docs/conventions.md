@@ -102,6 +102,31 @@ Markdown whose body is a prompt, with optional YAML frontmatter
 nested path is a namespace: `git/commit.md` is `git:commit`. ACP clients get
 each as a command.
 
+A prompt is read as an invocation when its **first token** is `/` plus a name —
+`/git:commit the parser fix`. Only the first token, and a name never contains
+`/`, so `basis "/usr/bin/x crashes on startup"` is a bug report and passes
+through untouched. At a shell a name that matches nothing is refused rather
+than sent, with the names that exist; `basis spawn -` reads a prompt beginning
+with a literal `/` from stdin.
+
+### Commands basis answers itself
+
+One name is basis's rather than the workspace's, and it is offered to every ACP
+client whatever the repository holds, because it acts on the conversation
+rather than on the workspace:
+
+| Command | What it does |
+| --- | --- |
+| `/compact [what to keep]` | Summarizes the conversation so far and continues from the summary. The argument is *added* to the standing continuity requirements, not substituted for them. |
+
+**A built-in wins the name.** A `.basis/templates/compact.md` still loads and is
+still discovered, but it is not offered as a command and `/compact` reaches
+basis. The rule has to point one way — two commands with one name is a coin
+flip the client makes — and this is the direction whose loss is recoverable:
+the template's author can rename the file, where a person whose only way to
+compact a conversation had been silently replaced by somebody else's prompt
+could do nothing at all.
+
 ### `.basis/tools.json`
 
 ```json

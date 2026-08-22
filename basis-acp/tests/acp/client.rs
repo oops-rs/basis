@@ -71,6 +71,39 @@ impl Observed {
             .collect()
     }
 
+    /// Everything the agent said about itself rather than to the user, which
+    /// is where a compaction, a retry and basis's own asides all land.
+    pub(crate) fn thought_text(&self) -> String {
+        self.updates
+            .iter()
+            .filter_map(|update| match update {
+                SessionUpdate::AgentThoughtChunk(chunk) => match &chunk.content {
+                    ContentBlock::Text(text) => Some(text.text.as_str()),
+                    _ => None,
+                },
+                _ => None,
+            })
+            .collect()
+    }
+
+    /// The names in the last `AvailableCommandsUpdate` the agent sent.
+    pub(crate) fn command_names(&self) -> Vec<String> {
+        self.updates
+            .iter()
+            .rev()
+            .find_map(|update| match update {
+                SessionUpdate::AvailableCommandsUpdate(commands) => Some(
+                    commands
+                        .available_commands
+                        .iter()
+                        .map(|command| command.name.clone())
+                        .collect(),
+                ),
+                _ => None,
+            })
+            .unwrap_or_default()
+    }
+
     pub(crate) fn mode_changes(&self) -> Vec<String> {
         self.updates
             .iter()

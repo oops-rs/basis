@@ -29,12 +29,17 @@ fn workspace_templates(root: &Path) -> PathBuf {
 }
 
 #[test]
-fn a_workspace_without_templates_offers_no_commands() {
+fn a_workspace_without_templates_offers_only_what_basis_answers_itself() {
     let tmp = tempfile::tempdir().expect("tempdir");
 
     let loaded = templates::load(tmp.path(), &config()).expect("absent is not an error");
 
-    assert!(available_commands(&loaded).is_empty());
+    let commands = available_commands(&loaded);
+    let names: Vec<&str> = commands
+        .iter()
+        .map(|command| command.name.as_str())
+        .collect();
+    assert_eq!(names, vec!["compact"]);
 }
 
 #[test]
@@ -59,16 +64,51 @@ fn discovered_templates_become_acp_commands() {
         .iter()
         .map(|command| command.name.as_str())
         .collect();
-    assert_eq!(names, vec!["git:commit", "plan"]);
+    assert_eq!(
+        names,
+        vec!["compact", "git:commit", "plan"],
+        "basis's own first, then the workspace's, name-ordered"
+    );
 
-    let commit = &commands[0];
+    let commit = &commands[1];
     assert_eq!(commit.description, "Write a commit message");
     assert!(
         commit.input.is_none(),
         "a template that declared no hint must not advertise one"
     );
     assert!(
-        commands[1].input.is_some(),
+        commands[2].input.is_some(),
         "a declared argument-hint must reach the client"
+    );
+}
+
+/// The rule a repository can trip over, checked through real files because
+/// that is how somebody trips over it: a `compact.md` in `.basis/templates/`
+/// does not take the name of the command basis answers itself.
+#[test]
+fn a_workspace_template_does_not_take_a_builtins_name() {
+    let tmp = tempfile::tempdir().expect("tempdir");
+    write(
+        &workspace_templates(tmp.path()),
+        "compact.md",
+        "---\ndescription: Squash the branch\n---\nSquash $ARGUMENTS.\n",
+    );
+
+    let loaded = templates::load(tmp.path(), &config()).expect("load succeeds");
+    assert_eq!(
+        loaded.len(),
+        1,
+        "the template still loads and is discovered"
+    );
+
+    let commands = available_commands(&loaded);
+    let names: Vec<&str> = commands
+        .iter()
+        .map(|command| command.name.as_str())
+        .collect();
+    assert_eq!(names, vec!["compact"], "offered once, not twice");
+    assert_ne!(
+        commands[0].description, "Squash the branch",
+        "and the one offered is basis's"
     );
 }

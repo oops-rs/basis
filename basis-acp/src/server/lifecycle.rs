@@ -21,10 +21,10 @@ use agent_client_protocol::{
     Client, ConnectionTo,
     schema::v1::{
         AvailableCommand, CloseSessionRequest, CloseSessionResponse, ConfigOptionUpdate,
-        CurrentModeUpdate, Error, ListSessionsRequest, ListSessionsResponse, NewSessionRequest,
-        NewSessionResponse, SessionConfigOption, SessionId, SessionInfo, SessionModeState,
-        SessionUpdate, SetSessionConfigOptionRequest, SetSessionConfigOptionResponse,
-        SetSessionModeRequest, SetSessionModeResponse,
+        CurrentModeUpdate, DeleteSessionRequest, DeleteSessionResponse, Error, ListSessionsRequest,
+        ListSessionsResponse, NewSessionRequest, NewSessionResponse, SessionConfigOption,
+        SessionId, SessionInfo, SessionModeState, SessionUpdate, SetSessionConfigOptionRequest,
+        SetSessionConfigOptionResponse, SetSessionModeRequest, SetSessionModeResponse,
     },
 };
 
@@ -89,11 +89,17 @@ pub(super) async fn list_sessions(
 /// workspace's list *because* it belongs to that workspace, so this is the one
 /// it was opened in.
 ///
-/// `updated_at` is left unset. mentra orders by creation and exposes no
-/// timestamp, and a client sorting by a value basis made up would be sorting by
-/// nothing.
+/// `updated_at` is ACP's slot for exactly what basis now has — "ISO 8601
+/// timestamp of last activity" — rendered from the epoch second the store
+/// holds. A conversation with none is sent without one rather than with a
+/// guess: ACP treats the field as optional, and a client sorting by a value
+/// basis made up would be sorting by nothing. The list is already in that
+/// order when it arrives ([`store::list_in`](basis::store::list_in)), so this
+/// is what a client needs to *show* the ordering, not to reproduce it.
 pub(super) fn session_info(session: PersistedSession, cwd: &Path) -> SessionInfo {
-    SessionInfo::new(session.agent_id, cwd.to_path_buf()).title(session.name)
+    SessionInfo::new(session.agent_id, cwd.to_path_buf())
+        .title(session.name)
+        .updated_at(session.updated_at.map(crate::timestamp::rfc3339))
 }
 
 /// A session that has just been opened, and what to tell the client about it
@@ -334,6 +340,52 @@ pub(super) fn close_session(
     session.cancel();
 
     Ok(CloseSessionResponse::new())
+}
+
+/// Removes a conversation from the store for good, closing it first if this
+/// process was holding it open.
+///
+/// Always called from a spawned task: it takes the turn lock, which a running
+/// turn holds while waiting for the client.
+///
+/// The order is the whole of it, and it is what makes this a deletion rather
+/// than a suggestion. mentra's delete removes rows; an agent still live in
+/// memory keeps running and writes its row back on the next persist. So the
+/// session leaves the registry first, so nothing can start a turn on it; then
+/// its turn lock is taken, which is how a turn already running is waited out
+/// rather than raced; then the last handle this process holds goes; and only
+/// then is the row deleted. A client that never opened the conversation skips
+/// straight to the last step, which is the ordinary case — `session/delete`
+/// arrives from a list, not from a session.
+///
+/// Deleting a conversation nothing knows about succeeds. Unlike
+/// `session/close`, which is about a session this process is holding and can
+/// honestly say it has never heard of, this is about a row: a client deleting
+/// by an id it read from a list is racing anyone else holding that store, and
+/// "it is gone" is the outcome both of them asked for.
+pub(super) async fn delete_session(
+    config: &ServeConfig,
+    sessions: &SessionRegistry,
+    request: DeleteSessionRequest,
+) -> Result<DeleteSessionResponse, Error> {
+    if !config.source.deletes_sessions() {
+        return Err(Error::method_not_found());
+    }
+
+    if let Some(session) = sessions.remove(&request.session_id) {
+        session.cancel();
+        // Taken and dropped: what is wanted is the *wait*, not the guard.
+        drop(session.lock_turn().await);
+        drop(session);
+    }
+
+    config
+        .source
+        .delete(&request.session_id.0)
+        .await
+        .map_err(setup_failed)?;
+
+    Ok(DeleteSessionResponse::new())
 }
 
 /// Turns a setup failure into the error a client can act on.

@@ -7,17 +7,20 @@
 //! whole pipeline against a scripted runtime, so the event contract is checked
 //! without a network call.
 
-use std::{path::PathBuf, sync::Arc};
+use std::sync::Arc;
 
 use mentra::{
     Session,
-    runtime::{EarlyEnd, ProviderRetry, RunOptions},
+    runtime::{ProviderRetry, RunOptions},
 };
-use serde::de::DeserializeOwned;
-use serde_json::Value;
 use tokio::sync::oneshot;
 
-use self::{context::ContextSnapshot, forward::forward_events};
+use self::{
+    context::ContextSnapshot,
+    forward::forward_events,
+    header::header_for,
+    outcome::{Ended, chain_message, ended_on},
+};
 use super::{
     Bound, Effort, EventSink, OutputReport, OutputSpec, RunError, RunReport, RunUsage, TurnOptions,
     turn::{bounded, drawable},
@@ -31,53 +34,17 @@ use crate::{
     workspace::Workspace,
 };
 
+mod compact;
 mod context;
 mod forward;
+mod header;
+mod outcome;
 mod prompt;
+mod typed;
 
+pub use compact::Compacted;
+pub use header::{LoadedSkill, RunContext};
 pub use prompt::PromptPart;
-
-/// What a run is about, once the runtime questions are settled.
-#[derive(Debug, Clone)]
-pub struct RunContext {
-    pub workspace: PathBuf,
-    pub prompt: String,
-    pub provider: String,
-    pub model: String,
-    pub context: WorkspaceContext,
-    /// Skills directories registered on the runtime, most specific first.
-    pub skills_dirs: Vec<PathBuf>,
-    /// The skills those directories actually produced, after layering.
-    pub skills: Vec<LoadedSkill>,
-    /// Template directories that exist, most specific first.
-    pub templates_dirs: Vec<PathBuf>,
-    /// The templates those directories produced, after layering, name-ordered.
-    /// Over ACP these become the client's commands, mapped by `basis-acp`.
-    pub templates: Vec<Template>,
-    /// MCP configuration files in effect, weakest precedence first.
-    pub mcp_files: Vec<ContextFile>,
-    /// The servers those files produced, after layering. Names only: the
-    /// header must not echo a command or a credential.
-    pub mcp_servers: Vec<String>,
-}
-
-/// A skill available to the run, without its body.
-#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
-pub struct LoadedSkill {
-    pub name: String,
-    pub description: String,
-    /// Whether the model may reach this one.
-    ///
-    /// `false` when the `SKILL.md` frontmatter set `disable-model-invocation`
-    /// (or `disable_model_invocation`): mentra keeps it out of the list the
-    /// model is shown and `load_skill` refuses it, while leaving it in the set
-    /// a host is shown — a skill a person invokes deliberately. Carried here
-    /// because the distinction is only actionable by a host, and one that
-    /// could not see it would have to re-read every `SKILL.md` to tell two
-    /// entries apart that look alike and behave differently.
-    pub model_invocable: bool,
-    pub path: PathBuf,
-}
 
 /// A session and the prompt to send it. Nothing has been sent yet.
 pub struct PreparedRun {
@@ -112,10 +79,6 @@ pub struct PreparedRun {
     /// for the same reason. mentra splits the count from the waits; basis
     /// keeps them together, because a host set them as one policy.
     retry_budget: usize,
-    /// What [`set_effort`](PreparedRun::set_effort) last asked for, and only
-    /// that — see [`effort`](PreparedRun::effort) for why it is not the same
-    /// question as "what level is the session at".
-    effort: Option<Effort>,
     /// What this run's mint knew about its system prompt; see
     /// [`estimated_context_tokens`](Self::estimated_context_tokens).
     ///
@@ -153,7 +116,6 @@ impl PreparedRun {
             levels: SideEffectLevels::new(),
             provider_retry: ProviderRetry::default(),
             retry_budget: RunOptions::default().retry_budget,
-            effort: None,
             context_snapshot: ContextSnapshot::default(),
         }
     }
@@ -397,6 +359,29 @@ impl PreparedRun {
         Ok(())
     }
 
+    /// Renames this conversation, and persists the new name.
+    ///
+    /// The name is what [`store::list`](crate::store::list) — and so ACP's
+    /// `session/list` — reports as a conversation's title, and mentra fixes it
+    /// at creation otherwise. That is the wrong moment for it: a session is
+    /// opened before anyone knows what it will be about, so a host that mints
+    /// one per conversation is stuck offering a list of identical placeholders.
+    ///
+    /// Nothing derives a name here. What a conversation should be called is a
+    /// convention of whatever is driving it — its first prompt, a ticket id,
+    /// what the user typed — and basis has no opinion to impose (PROPOSAL.md
+    /// Bet 4).
+    pub fn set_name(&mut self, name: impl Into<String>) -> Result<(), RunError> {
+        self.session.set_name(name)?;
+
+        Ok(())
+    }
+
+    /// The name this conversation is filed under.
+    pub fn name(&self) -> &str {
+        self.session.name()
+    }
+
     /// Asks the model to think harder, or less hard, from the next turn on.
     ///
     /// `None` clears the request and restores the provider's own default.
@@ -412,22 +397,28 @@ impl PreparedRun {
                 effort: Some(effort.into()),
                 summary: None,
             }))?;
-        self.effort = effort;
 
         Ok(())
     }
 
-    /// The effort [`set_effort`](Self::set_effort) last asked this run for.
+    /// The level this session's next turn will be sent with.
     ///
-    /// `None` means nothing has asked, *not* that the session is at the
-    /// provider's default: a run whose [`RunSpec`](crate::RunSpec) named an
-    /// effort at mint had it applied to the session before this run existed,
-    /// and mentra offers no way to read the level back off a session. So this
-    /// answers "what has this run been set to", which is what a picker showing
-    /// the user their own last choice needs, and not "what will the next
-    /// request carry".
-    pub const fn effort(&self) -> Option<Effort> {
-        self.effort
+    /// Read off the session rather than tracked here, which is what makes it
+    /// an answer about the conversation rather than about this handle on it: a
+    /// run whose [`RunSpec`](crate::RunSpec) or whose repository's
+    /// `config.json` named an effort had it applied at mint, before anything
+    /// called [`set_effort`](Self::set_effort), and a tracked copy reported
+    /// `None` for a session demonstrably running at `high`.
+    ///
+    /// `None` means no level is being requested — the provider's own default —
+    /// and not that nobody has asked yet. A level mentra has grown and basis
+    /// has no name for also reads as `None`, because reporting the wrong one
+    /// is worse than reporting none; see [`Effort`]'s `TryFrom`.
+    pub fn effort(&self) -> Option<Effort> {
+        self.session
+            .reasoning()
+            .and_then(|reasoning| reasoning.effort)
+            .and_then(|effort| Effort::try_from(effort).ok())
     }
 
     /// Sends the configured prompt and streams the turn into `sink`.
@@ -630,133 +621,6 @@ impl PreparedRun {
         .await
     }
 
-    /// Sends a prompt whose answer must be a value of type `T` rather than
-    /// prose.
-    ///
-    /// ADR-0010's structured output, and the primitive a workflow is built on:
-    /// the model is handed one terminal tool whose input *is* the answer, and
-    /// `T` is deserialized from what it sent. The caller writes the schema —
-    /// see [`OutputSpec`] for why basis derives nothing.
-    ///
-    /// **By default a typed turn is a shaping turn, not a working one.** That
-    /// terminal tool is the *only* tool the turn holds — no files, no shell, no
-    /// MCP — and the model is required to call it, so the turn can answer only
-    /// from the conversation it already has. Asking it to review code in the
-    /// same call returns a structurally valid answer from a model that read
-    /// nothing, reported as a success. Two ways past that, and they are
-    /// different trades. [`OutputSpec::with_tools`] keeps the ordinary toolset
-    /// on this turn, so one call reads and answers — and gives up the forcing
-    /// that guaranteed an answer. Or do the work on an ordinary turn
-    /// ([`send`](Self::send) or [`execute`](Self::execute)) and ask for the
-    /// shape on the next, which keeps the forcing and keeps each run's reading
-    /// in a context of its own; `examples/review_workflow.rs` is that written
-    /// out.
-    ///
-    /// The stream is unchanged. Header, forwarded events, permissions put to
-    /// the approver, `RunFinished`: a client reading events cannot tell a typed
-    /// turn from any other, which is the point — only the return value differs.
-    /// The answer travels as the terminal tool's
-    /// [`ToolQueued`](Event::ToolQueued) input and
-    /// [`ToolCompleted`](Event::ToolCompleted) summary, and
-    /// [`RunReport::final_message`] stays `None`, because a typed turn's
-    /// committed final message is that tool result — putting a JSON payload in
-    /// a field named for the assistant's prose would have every client render
-    /// it as speech. Prose the model wrote alongside the call, usually none,
-    /// arrives as [`Event::AssistantMessage`].
-    ///
-    /// Where a plain turn reports its failure on the stream and still returns
-    /// `Ok`, this returns `Err`: a typed turn without a value has nothing to
-    /// hand back.
-    ///
-    /// - [`RunError::OutputMismatch`] — an answer arrived that `T` did not
-    ///   accept. mentra commits the exchange before basis reads it, so the
-    ///   transcript keeps the attempt and a follow-up turn can say what was
-    ///   wrong with it.
-    /// - [`RunError::Runtime`] — the turn failed, *or* it finished without ever
-    ///   calling the terminal tool. mentra reports both as
-    ///   `MalformedProviderEvent` and basis will not read error prose to tell
-    ///   them apart. A working turn ([`OutputSpec::with_tools`]) reaches the
-    ///   second of those the most ways, since nothing forces its ending: it can
-    ///   answer in prose, or be refused another round by a bound while it is
-    ///   still gathering. Which bound that was is on the stream, as
-    ///   [`Event::RunFinished`]'s `stopped_by` — [`Bound::TokenBudget`] for an
-    ///   allowance spent mid-gather — and only there, because the report that
-    ///   would otherwise carry it is not handed back when there is no value to
-    ///   hand back with it.
-    ///
-    /// The stream is complete and closed in every one of those cases, so a sink
-    /// with somewhere to put events — a file, a channel — has the whole run.
-    /// Only the sink *value* is lost, because it comes back inside the report.
-    ///
-    /// ```no_run
-    /// use serde::Deserialize;
-    /// use serde_json::json;
-    ///
-    /// #[derive(Deserialize)]
-    /// struct Review {
-    ///     verdict: String,
-    /// }
-    ///
-    /// # async fn example(run: &mut basis::PreparedRun) -> Result<(), basis::RunError> {
-    /// let spec = basis::OutputSpec::new(
-    ///     "submit_review",
-    ///     "call this once you have weighed everything you read on the last turn",
-    ///     json!({
-    ///         "type": "object",
-    ///         "properties": {
-    ///             "verdict": { "type": "string", "description": "ship or hold" }
-    ///         },
-    ///         "required": ["verdict"]
-    ///     }),
-    /// );
-    ///
-    /// // The reading happened on an ordinary turn; this one only shapes it.
-    /// run.execute(basis::NullSink).await?;
-    /// let output = run
-    ///     .output::<Review, _, _>(
-    ///         "submit your review of what you just read",
-    ///         spec,
-    ///         basis::NullSink,
-    ///         basis::AllowAll,
-    ///     )
-    ///     .await?;
-    ///
-    /// // A value, not a paragraph to parse — and what it cost, for a caller
-    /// // adding runs up against a budget.
-    /// println!("{} ({} tokens)", output.value.verdict, output.report.usage.total_tokens());
-    /// # Ok(())
-    /// # }
-    /// ```
-    pub async fn output<T: DeserializeOwned, S: EventSink, A: Approver>(
-        &mut self,
-        prompt: impl Into<String>,
-        spec: OutputSpec,
-        sink: S,
-        approver: A,
-    ) -> Result<OutputReport<T, S>, RunError> {
-        self.typed_turn(prompt.into(), spec, sink, approver, TurnOptions::default())
-            .await
-    }
-
-    /// A typed turn with explicit run options.
-    ///
-    /// Same relationship to [`output`](Self::output) as
-    /// [`send_with_options`](Self::send_with_options) has to
-    /// [`send`](Self::send): a typed turn is cancellable and boundable like any
-    /// other, and a fan-out that gives each of its runs a deadline should not
-    /// have to give up types to get one.
-    pub async fn output_with_options<T: DeserializeOwned, S: EventSink, A: Approver>(
-        &mut self,
-        prompt: impl Into<String>,
-        spec: OutputSpec,
-        sink: S,
-        approver: A,
-        options: TurnOptions,
-    ) -> Result<OutputReport<T, S>, RunError> {
-        self.typed_turn(prompt.into(), spec, sink, approver, options)
-            .await
-    }
-
     /// One turn, start to finish: header, forwarded events, outcome.
     async fn turn<S: EventSink, A: Approver>(
         &mut self,
@@ -785,64 +649,6 @@ impl PreparedRun {
             Err(error) => Ended::Failed(error),
         };
         self.finish(turn, ended, &observed).await
-    }
-
-    /// One typed turn. Identical to [`turn`](Self::turn) but for the one call
-    /// in the middle — which is the whole reason both are written this way,
-    /// since a second copy of the header-and-forwarding dance is a second thing
-    /// to keep in step with the stream contract.
-    ///
-    /// mentra is asked for a [`Value`] rather than for `T` directly, and basis
-    /// deserializes. That costs nothing (the payload is already JSON) and buys
-    /// the error distinction: a value that does not fit `T` is basis's own
-    /// finding, reported as [`RunError::OutputMismatch`], instead of arriving
-    /// as one more `MalformedProviderEvent` indistinguishable from a provider
-    /// that misbehaved.
-    async fn typed_turn<T: DeserializeOwned, S: EventSink, A: Approver>(
-        &mut self,
-        prompt: String,
-        spec: OutputSpec,
-        sink: S,
-        approver: A,
-        options: TurnOptions,
-    ) -> Result<OutputReport<T, S>, RunError> {
-        let options = bounded(options, &self.bounds);
-        drawable(&options)?;
-        let parts = vec![PromptPart::Text(prompt)];
-        let turn = self.begin(&parts, sink, approver)?;
-
-        // The same clone the untyped turn keeps, for the same reason: a typed
-        // turn is boundable like any other and owes the same account of why it
-        // ended.
-        let run_options = self.run_options(options);
-        let observed = run_options.clone();
-
-        let result = self
-            .session
-            .append_turn_to_output::<Value>(
-                prompt::into_blocks(parts),
-                run_options,
-                spec.into_terminal_spec(),
-            )
-            .await;
-
-        let typed = match result {
-            Ok(output) => Ok(serde_json::from_value::<T>(output.value)),
-            Err(error) => Err(error),
-        };
-        let ended = match &typed {
-            Ok(Ok(_)) => Ended::Answered(None),
-            Ok(Err(mismatch)) => Ended::Mismatched(mismatch),
-            Err(error) => Ended::Failed(error),
-        };
-
-        let report = self.finish(turn, ended, &observed).await?;
-
-        match typed {
-            Ok(Ok(value)) => Ok(OutputReport { value, report }),
-            Ok(Err(mismatch)) => Err(RunError::OutputMismatch(mismatch)),
-            Err(error) => Err(RunError::Runtime(error)),
-        }
     }
 
     /// Opens a turn: checks the prompt, emits the header, starts forwarding.
@@ -966,143 +772,3 @@ struct Turn<S> {
     done: oneshot::Sender<()>,
     forwarder: tokio::task::JoinHandle<(S, RunUsage)>,
 }
-
-/// How a turn ended, in the terms the stream reports.
-///
-/// Borrowed rather than owned so a caller can hand the failure over for
-/// classification and still return it: the error a typed turn reports to its
-/// caller and the message the stream carries have to be the same error.
-enum Ended<'a> {
-    /// mentra completed the turn. Carries the assistant's final prose, when the
-    /// turn had any — a typed turn's answer is not prose and is not put here.
-    Answered(Option<String>),
-    /// mentra failed the turn.
-    Failed(&'a mentra::error::RuntimeError),
-    /// The turn completed, but its answer did not fit the requested type.
-    Mismatched(&'a serde_json::Error),
-}
-
-/// Which bound ended the turn, if one did.
-///
-/// Two sources, asked in this order because only one of them is the runner's
-/// own account. mentra records a graceful early end at the boundary it decides
-/// on — reachable here through the caller's clone of the options — while
-/// [`tripped_bound`] can only read a failure after the fact. So the record is
-/// consulted first and on *both* arms: a run that ends on its token budget with
-/// the assistant's answer already committed returns an ordinary `Ok` carrying
-/// ordinary prose, and nothing in that result says an allowance is why there is
-/// no more of it.
-///
-/// [`EarlyEnd::StopRequested`] deliberately maps to nothing. A stop is an
-/// instruction the caller issued rather than an allowance the run outgrew, and
-/// basis has no `Bound` for it — inventing one would put a caller's own stop
-/// button on the same exit code as running out of budget.
-fn ended_on(observed: &RunOptions, error: Option<&mentra::error::RuntimeError>) -> Option<Bound> {
-    match observed.ended_early() {
-        Some(EarlyEnd::TokenBudget) => Some(Bound::TokenBudget),
-        // `EarlyEnd` is non-exhaustive, and a variant basis has not been taught
-        // is not a bound basis can name. Falling through leaves the failure to
-        // speak for itself rather than guessing.
-        _ => error.and_then(tripped_bound),
-    }
-}
-
-/// Which of the run's own bounds ended the turn, if one did.
-///
-/// Classified here, from the typed error, rather than left for someone to
-/// recognize in a message later — a caller matching on prose would break the
-/// first time mentra reworded one.
-fn tripped_bound(error: &mentra::error::RuntimeError) -> Option<Bound> {
-    match error {
-        mentra::error::RuntimeError::DeadlineExceeded => Some(Bound::Deadline),
-        mentra::error::RuntimeError::ToolBudgetExceeded(_) => Some(Bound::ToolBudget),
-        // Everything else is a failure of the work, not of the allowance: a
-        // provider error, a cancelled turn, an unreadable transcript.
-        _ => None,
-    }
-}
-
-/// Renders `error`'s message together with whatever its `source()` chain adds
-/// that the message does not already say.
-///
-/// thiserror interpolates a `#[source]` straight into `Display` wherever a
-/// variant's format string names it, and every
-/// [`RuntimeError`](mentra::error::RuntimeError) variant does — so
-/// `error.to_string()` already reads several layers deep on its own, down to
-/// whatever the innermost wrapped type's `Display` shows. The gap is past
-/// that point: `reqwest::Error`'s `Display` only classifies itself ("error
-/// sending request for url (...)") and never describes its own `source()`, so
-/// a DNS failure, a refused connection, or a TLS handshake error — the actual
-/// reason a `ProviderError::Transport` or `ProviderError::Decode` failed —
-/// reaches neither `to_string()` nor, since mentra's own stream event for the
-/// same failure is built the same way (`Session::finish_turn`), the event
-/// stream either. Walking the chain here recovers it, and is the only place
-/// in basis that needs to: everywhere else a `RuntimeError`'s `Display`
-/// already says everything its sources do.
-///
-/// Safe to run unconditionally. Nothing reachable from a `RuntimeError` today
-/// forwards a request or response body through `source()` — that path is
-/// `ProviderError::Http`, which interpolates its body into `Display` directly
-/// rather than through a source, and this function does not change what it
-/// shows. The substring check below is what keeps a level whose text a parent
-/// already interpolated — exactly what happens one hop up, via thiserror's
-/// own `{0}` — from being repeated.
-fn chain_message(error: &dyn std::error::Error) -> String {
-    let mut message = error.to_string();
-    let mut cause = error.source();
-    while let Some(source) = cause {
-        let text = source.to_string();
-        if !message.contains(&text) {
-            message.push_str(": ");
-            message.push_str(&text);
-        }
-        cause = source.source();
-    }
-    message
-}
-
-/// Builds the opening line. Kept separate so [`PreparedRun::header`] and the
-/// line actually emitted can never drift apart.
-fn header_for(session_id: &str, run: &RunContext) -> Event {
-    Event::RunStarted {
-        schema: EVENT_SCHEMA_VERSION,
-        basis: env!("CARGO_PKG_VERSION").to_string(),
-        session_id: session_id.to_string(),
-        workspace: run.workspace.clone(),
-        model: run.model.clone(),
-        provider: run.provider.clone(),
-        context_files: run
-            .context
-            .documents()
-            .iter()
-            .map(|document| ContextFile {
-                path: document.path.clone(),
-                scope: document.scope.label(),
-            })
-            .collect(),
-        skills_dirs: run.skills_dirs.clone(),
-        skills: run
-            .skills
-            .iter()
-            .map(|skill| SkillSummary {
-                name: skill.name.clone(),
-                description: skill.description.clone(),
-            })
-            .collect(),
-        templates_dirs: run.templates_dirs.clone(),
-        templates: run
-            .templates
-            .iter()
-            .map(|template| TemplateSummary {
-                name: template.name.clone(),
-                description: template.description.clone(),
-                argument_hint: template.argument_hint.clone(),
-            })
-            .collect(),
-        mcp_files: run.mcp_files.clone(),
-        mcp_servers: run.mcp_servers.clone(),
-    }
-}
-
-#[cfg(test)]
-mod tests;

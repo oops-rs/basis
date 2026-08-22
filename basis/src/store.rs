@@ -126,9 +126,26 @@ pub struct PersistedSession {
     /// How many messages the conversation holds. Zero means it was opened and
     /// never used.
     pub messages: usize,
+    /// When the conversation was first written, in seconds since the epoch.
+    ///
+    /// Optional because mentra's summary is: a store that keeps nothing across
+    /// process lifetimes has no row and therefore no answer, and basis carries
+    /// that rather than inventing a number to fill the gap. Nothing reached
+    /// through [`list_in`] is one of those — listing opens a SQLite store of
+    /// its own, whatever the workspace was running on — so in practice both of
+    /// these arrive set. [`list_in`]'s ordering still handles `None`, because a
+    /// rule that only works for the values it happens to see is not a rule.
+    pub created_at: Option<u64>,
+    /// When it was last written, on the same clock and absent in the same case.
+    ///
+    /// This is *last persisted*, not last spoken: mentra rewrites an agent's
+    /// row on every turn and on every `set_model`, `set_effort` or `set_name`,
+    /// so it moves for a rename as readily as for an exchange. Close enough to
+    /// "last activity" to sort a list by, and not close enough to bill by.
+    pub updated_at: Option<u64>,
 }
 
-/// Every conversation persisted for `workspace`, oldest first.
+/// Every conversation persisted for `workspace`, most recently used first.
 ///
 /// Reads the default directory. A workspace opened with
 /// [`with_store_dir`](crate::RuntimeBuilder::with_store_dir) is read by
@@ -139,8 +156,6 @@ pub struct PersistedSession {
 /// they are internal to a conversation rather than conversations a person
 /// started, and offering one to be resumed would be offering something that was
 /// never theirs to resume.
-///
-/// The order is mentra's, which is creation order.
 pub fn list(workspace: &Path) -> Result<Vec<PersistedSession>, RunError> {
     list_in(&default_directory(), workspace)
 }
@@ -154,7 +169,7 @@ pub fn list(workspace: &Path) -> Result<Vec<PersistedSession>, RunError> {
 pub fn list_in(dir: &Path, workspace: &Path) -> Result<Vec<PersistedSession>, RunError> {
     let identifier = runtime_identifier(workspace);
 
-    Ok(enumerating_runtime(&identifier, dir)?
+    let mut sessions: Vec<PersistedSession> = enumerating_runtime(&identifier, dir)?
         .list_persisted_agents(&identifier)?
         .into_iter()
         .filter(|agent| !agent.is_teammate)
@@ -162,19 +177,93 @@ pub fn list_in(dir: &Path, workspace: &Path) -> Result<Vec<PersistedSession>, Ru
             agent_id: agent.id,
             name: agent.name,
             messages: agent.history_len,
+            created_at: agent.created_at,
+            updated_at: agent.updated_at,
         })
-        .collect())
+        .collect();
+    by_recency(&mut sessions);
+
+    Ok(sessions)
 }
 
-/// A runtime that exists only to read the store.
+/// Orders conversations the way a person looks for one: the last thing they
+/// touched at the top.
 ///
-/// Reading a persisted agent needs a `Runtime`, and `RuntimeBuilder::build`
-/// refuses to produce one with an empty provider registry — so a provider is
-/// registered to satisfy the builder, with a placeholder key. Nothing here
-/// resolves a model or reaches the network: listing reads a SQLite table, and
-/// the runtime is dropped as soon as it has. Requiring a real credential to
-/// enumerate local rows would make `session/list` fail for a reason that has
-/// nothing to do with listing.
+/// Ordered here rather than at each surface, because there are two of them —
+/// `basis list` and ACP's `session/list` — and a client that sorted for itself
+/// would need a timestamp basis might not have. mentra returns creation order
+/// (`ORDER BY created_at, id` for SQLite, insertion order for the volatile
+/// store), which answers "which is oldest" and never "which was I just in".
+///
+/// Two rules, and the second is what makes the answer usable at all:
+///
+/// - A conversation with no timestamp sorts **last**, not first. `None` comes
+///   from a store that persists nothing, so it is *unknown*, and floating an
+///   unknown to the top of a list sorted by recency claims the one thing it
+///   cannot know.
+/// - The sort is **stable**, so conversations that tie — the same second, or a
+///   volatile store where every one of them is `None` — keep the order mentra
+///   gave them, which is deterministic in both backends. A tiebreak of basis's
+///   own would replace a meaningful order with an arbitrary one.
+fn by_recency(sessions: &mut [PersistedSession]) {
+    sessions.sort_by(|left, right| match (left.updated_at, right.updated_at) {
+        (Some(left), Some(right)) => right.cmp(&left),
+        (Some(_), None) => std::cmp::Ordering::Less,
+        (None, Some(_)) => std::cmp::Ordering::Greater,
+        (None, None) => std::cmp::Ordering::Equal,
+    });
+}
+
+/// Removes a conversation from the default directory's store for good.
+///
+/// The writing counterpart to [`list`], and the second half of what a client
+/// with a session list can do with it: pick one to resume, or decide it is
+/// finished with. mentra removes the record *and* its memory, because a record
+/// without its memory is a row `resume` refuses with "missing persisted
+/// memory" — a listing entry that cannot be opened.
+///
+/// Deleting a conversation that is not there is **not** an error. A caller
+/// deleting by an id it read from a list is racing anyone else holding the
+/// same store, and "it is gone" is the outcome both of them asked for.
+///
+/// Keyed by the conversation, not by a workspace: mentra's store is indexed by
+/// agent id, so this does not check that the id belongs anywhere in
+/// particular — the same ruling [`Workspace::resume`](crate::Workspace::resume)
+/// makes for the same reason. A caller that means "one of mine" takes the id
+/// from [`list`] for its own workspace, which is where a client got it anyway.
+///
+/// **A live conversation is not stopped by this.** mentra deletes rows; an
+/// agent still in memory keeps running and writes its row back on its next
+/// persist. A caller holding a [`PreparedRun`](crate::PreparedRun) on this id
+/// must drop it first, or the row returns.
+pub fn forget(agent_id: &str) -> Result<(), RunError> {
+    forget_in(&default_directory(), agent_id)
+}
+
+/// The same, for conversations kept somewhere of the caller's choosing.
+///
+/// `dir` is what was passed to
+/// [`with_store_dir`](crate::RuntimeBuilder::with_store_dir), exactly as for
+/// [`list_in`]: a conversation is deleted from the file it was listed out of,
+/// and nothing here can guess which one a caller chose.
+pub fn forget_in(dir: &Path, agent_id: &str) -> Result<(), RunError> {
+    // The identifier tags rows on write and filters them on `list_agents_by_
+    // runtime`; deletion is keyed by id alone, so what is passed here cannot
+    // change which conversation goes. It is still derived rather than invented,
+    // so nothing in this module opens a store under a tag no workspace uses.
+    Ok(enumerating_runtime(&runtime_identifier(dir), dir)?.delete_agent(agent_id)?)
+}
+
+/// A runtime that exists only to reach the store.
+///
+/// Reading or removing a persisted agent needs a `Runtime`, and
+/// `RuntimeBuilder::build` refuses to produce one with an empty provider
+/// registry — so a provider is registered to satisfy the builder, with a
+/// placeholder key. Nothing here resolves a model or reaches the network:
+/// listing reads a SQLite table and deleting writes one, and the runtime is
+/// dropped as soon as it has. Requiring a real credential to touch local rows
+/// would make `session/list` and `session/delete` fail for a reason that has
+/// nothing to do with either.
 ///
 /// The store is built from `dir` rather than left at mentra's default, so that
 /// this and [`RuntimeBuilder::with_store_dir`](crate::RuntimeBuilder::with_store_dir)
@@ -285,6 +374,77 @@ pub fn default_directory() -> PathBuf {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    fn session(agent_id: &str, updated_at: Option<u64>) -> PersistedSession {
+        PersistedSession {
+            agent_id: agent_id.to_string(),
+            name: agent_id.to_string(),
+            messages: 2,
+            created_at: updated_at,
+            updated_at,
+        }
+    }
+
+    fn ordered(sessions: Vec<PersistedSession>) -> Vec<String> {
+        let mut sessions = sessions;
+        by_recency(&mut sessions);
+        sessions
+            .into_iter()
+            .map(|session| session.agent_id)
+            .collect()
+    }
+
+    #[test]
+    fn the_conversation_touched_last_is_listed_first() {
+        assert_eq!(
+            ordered(vec![
+                session("older", Some(100)),
+                session("newest", Some(300)),
+                session("middle", Some(200)),
+            ]),
+            vec!["newest", "middle", "older"]
+        );
+    }
+
+    #[test]
+    fn a_conversation_with_no_timestamp_sorts_last_rather_than_first() {
+        // `None` is a store that persists nothing, which means *unknown* — and
+        // an unknown floated to the top of a list sorted by recency claims the
+        // one thing it cannot know.
+        assert_eq!(
+            ordered(vec![
+                session("unknown", None),
+                session("known", Some(1)),
+                session("also-unknown", None),
+            ]),
+            vec!["known", "unknown", "also-unknown"]
+        );
+    }
+
+    #[test]
+    fn conversations_that_tie_keep_the_order_the_store_gave_them() {
+        // The volatile store's whole case — every timestamp `None` — plus the
+        // ordinary one of two conversations written in the same second. Both
+        // have to come back in mentra's own order, which is deterministic in
+        // either backend; a tiebreak of basis's own would replace a meaningful
+        // order with an arbitrary one.
+        assert_eq!(
+            ordered(vec![
+                session("first", None),
+                session("second", None),
+                session("third", None),
+            ]),
+            vec!["first", "second", "third"]
+        );
+        assert_eq!(
+            ordered(vec![
+                session("first", Some(7)),
+                session("second", Some(7)),
+                session("third", Some(9)),
+            ]),
+            vec!["third", "first", "second"]
+        );
+    }
 
     #[test]
     fn an_identifier_names_its_workspace_and_is_lans_own() {

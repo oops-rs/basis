@@ -62,13 +62,46 @@ pub trait SessionSource: Send + Sync + 'static {
         false
     }
 
-    /// Every conversation persisted for `cwd`, oldest first.
+    /// Every conversation persisted for `cwd`, most recently used first.
+    ///
+    /// The order is the source's to decide and is sent on unchanged: a list is
+    /// read to find the conversation you were just in, and a source knows what
+    /// "just" means for the store it keeps. basis's own answers from
+    /// [`store::list`](basis::store::list), which sorts by when a row was last
+    /// written.
     ///
     /// Only called when [`lists_sessions`](Self::lists_sessions) is true, so
     /// the default is unreachable rather than a claim about anything.
     async fn list_sessions(&self, cwd: PathBuf) -> Result<Vec<PersistedSession>, RunError> {
         let _ = cwd;
         Ok(Vec::new())
+    }
+
+    /// Whether this source can remove a conversation for good.
+    ///
+    /// Separate from [`lists_sessions`](Self::lists_sessions) because the two
+    /// are separate promises: a source can perfectly well enumerate a store it
+    /// has no authority to write to, and `session/delete` is advertised only
+    /// on the strength of this one. The rule is the same either way — a
+    /// capability that answers wrongly is worse than one never claimed.
+    fn deletes_sessions(&self) -> bool {
+        false
+    }
+
+    /// Removes the conversation persisted under `agent_id`, for
+    /// `session/delete`.
+    ///
+    /// No `cwd`, unlike [`create`](Self::create) and
+    /// [`list_sessions`](Self::list_sessions), because `session/delete` sends
+    /// none — and needs to send none: a store is indexed by conversation, so
+    /// the id is the whole of what identifies one.
+    ///
+    /// Only called when [`deletes_sessions`](Self::deletes_sessions) is true.
+    /// Deleting one that is not there must succeed: a client deletes by an id
+    /// it read from a list, and "it is gone" is the outcome either way.
+    async fn delete(&self, agent_id: &str) -> Result<(), RunError> {
+        let _ = agent_id;
+        Err(RunError::NoSuchSession)
     }
 }
 

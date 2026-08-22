@@ -47,6 +47,20 @@ run.send("and which of those is riskiest?", sink, basis::AllowAll).await?;
 `run.agent_id()` is the handle `Workspace::resume` takes, so a later process can pick the
 same conversation back up.
 
+Three more verbs act on the conversation rather than on a turn. `run.set_name(…)` renames it
+— mentra fixes a name at creation, which is before anyone knows what the conversation will
+be about, so a host that mints one per topic would otherwise offer a list of identical
+placeholders. `basis::store::list(&workspace)` is that list, most recently used first, each
+entry carrying `created_at` and `updated_at` as epoch seconds. And
+`basis::store::forget(agent_id)` removes one for good — the record and its memory both, so
+nothing is left that `resume` would refuse. Deleting one that is not there is not an error;
+deleting one a live `PreparedRun` still holds is, in effect, undone, because the run writes
+its row back on its next persist.
+
+`run.effort()` reads what the *session* is set to rather than what this handle was last
+told, so a picker drawn from it shows the level a repository's `config.json` chose at mint
+as readily as one `set_effort` did afterwards.
+
 `workspace.skills()` reports what the four skill roots produced, after layering — see
 [conventions.md](conventions.md) for which roots and in what order. Each entry carries
 `model_invocable`, which is `false` when that `SKILL.md`'s frontmatter set
@@ -593,7 +607,7 @@ the tokens are ones you can already see and price.
 
 **A long conversation** gets summarized: the transcript is snapshotted to disk, an older
 prefix is replaced by a model-written summary, and the recent tail is preserved. It fires
-three ways, and it announces itself (`Event::CompactionStarted` /
+four ways, and it announces itself (`Event::CompactionStarted` /
 `Event::CompactionCompleted`) every time — including the third, unconditional one:
 
 ```rust
@@ -641,6 +655,28 @@ Third, independent of both thresholds: a provider that refuses a request as too 
 `auto_threshold_tokens` cleared — a second overflow after that is not retried again. So
 turning the first trigger off means basis never compacts *ahead of* running out of room, not
 that an oversized conversation is guaranteed to fail outright.
+
+Fourth, and the only one a *person* can ask for: `run.compact(instructions, &mut sink)`
+runs the pass now, whatever the thresholds say.
+
+```rust
+if let Some(compacted) = run.compact(Some("keep the migration plan"), &mut sink).await? {
+    println!("{} items replaced by a summary", compacted.replaced_items);
+}
+```
+
+The instructions are **added** to mentra's standing continuity requirements rather than
+substituted for them, so asking for one extra thing cannot cost the file paths and command
+outcomes every summary needs; `None` asks for the standing ones alone. `Ok(None)` means
+there was nothing to compact — the last turn is always preserved whole, exactly as it is
+for the model's own `compact` intrinsic, so a conversation with only that has no older
+prefix to summarize — and nothing is emitted in that case either.
+
+It is a model call: the summary is written by the same provider the conversation runs on,
+and it is billed and can fail like any other request. It is not a *turn*, though: no prompt
+is committed, the transcript gains no exchange, and nothing is sent afterwards. The sink is
+borrowed rather than taken, because there is no report to hand it back in — two events and
+a value are the whole of what happened.
 
 Where the snapshots go is not a knob here: it follows the store (above).
 

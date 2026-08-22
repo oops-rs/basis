@@ -161,6 +161,17 @@ pub fn session_update(event: &Event) -> Option<SessionUpdate> {
     Some(update)
 }
 
+/// One line for the client to show, in the same place every other "the
+/// operator should know this" line goes.
+///
+/// The server has one thing to say that no [`Event`] carries — that a
+/// `/compact` found nothing to compact — and it says it through this rather
+/// than assembling a `SessionUpdate` of its own, so there is still exactly one
+/// answer to what a basis aside looks like on the wire.
+pub(crate) fn thought(text: &str) -> SessionUpdate {
+    SessionUpdate::AgentThoughtChunk(chunk(text))
+}
+
 fn chunk(text: &str) -> ContentChunk {
     ContentChunk::new(text_block(text))
 }

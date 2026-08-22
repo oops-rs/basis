@@ -284,6 +284,56 @@ async fn a_run_that_asked_for_an_effort_keeps_its_own() {
     );
 }
 
+#[tokio::test]
+async fn a_run_reports_the_effort_it_was_opened_at() {
+    // The reader a picker needs, and the case that makes it worth having: the
+    // effort was applied at mint, from the repository's own file, and nothing
+    // on this run ever asked for one. A `PreparedRun` that answered from what
+    // it had been *told* would report "no effort requested" for a session that
+    // is demonstrably at `high` — and an ACP client would draw its picker on
+    // the wrong value.
+    let dir = tempfile::tempdir().expect("tempdir");
+    write_config(
+        dir.path(),
+        r#"{"schema": 1, "model": "test-model", "effort": "high"}"#,
+    );
+
+    let workspace = pinned(dir.path())
+        .with_runtime(offline())
+        .open()
+        .await
+        .expect("opens");
+
+    let mut run = workspace.prepare("go").expect("mints");
+    assert_eq!(run.effort(), Some(Effort::High));
+
+    run.set_effort(Some(Effort::Low)).expect("sets");
+    assert_eq!(run.effort(), Some(Effort::Low), "and it follows a change");
+
+    run.set_effort(None).expect("clears");
+    assert_eq!(
+        run.effort(),
+        None,
+        "cleared means the provider's own default, which basis has no name for"
+    );
+}
+
+#[tokio::test]
+async fn a_run_nobody_asked_an_effort_of_reports_none() {
+    // The other half: `None` has to mean "no level is being requested", not
+    // "nobody has called `set_effort` yet".
+    let dir = tempfile::tempdir().expect("tempdir");
+    write_config(dir.path(), r#"{"schema": 1, "model": "test-model"}"#);
+
+    let workspace = pinned(dir.path())
+        .with_runtime(offline())
+        .open()
+        .await
+        .expect("opens");
+
+    assert_eq!(workspace.prepare("go").expect("mints").effort(), None);
+}
+
 /// The smallest endpoint that is a finished turn, with the request kept.
 struct ScriptedEndpoint {
     base_url: String,

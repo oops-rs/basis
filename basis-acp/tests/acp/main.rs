@@ -26,6 +26,7 @@ mod client;
 mod source;
 
 mod bounds;
+mod commands;
 mod discovery;
 mod permission;
 mod sessions;

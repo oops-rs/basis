@@ -257,6 +257,19 @@ impl SessionSource for ConfiguredSource {
     async fn list_sessions(&self, cwd: PathBuf) -> Result<Vec<PersistedSession>, RunError> {
         basis::store::list(&cwd)
     }
+
+    fn deletes_sessions(&self) -> bool {
+        true
+    }
+
+    /// Writes to mentra's store directly, for the reason
+    /// [`list_sessions`](Self::list_sessions) reads it directly: opening a
+    /// workspace to delete a row would resolve a model over the network to
+    /// answer a question about SQLite — and would fail for want of a
+    /// credential on a connection that has done nothing but list.
+    async fn delete(&self, agent_id: &str) -> Result<(), RunError> {
+        basis::store::forget(agent_id)
+    }
 }
 
 /// What makes two sessions the same workspace.

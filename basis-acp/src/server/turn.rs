@@ -6,6 +6,13 @@
 //! the way past. Everything else a client can ask for is bookkeeping around
 //! it, in [`lifecycle`](super::lifecycle).
 //!
+//! A `session/prompt` that opens with one of basis's own commands
+//! ([`commands`](crate::commands)) is answered here too, before any of that.
+//! ACP has no separate method for invoking a command — a client sends what the
+//! person typed — so the only place a built-in can be recognized is where a
+//! prompt arrives, and it is the same place because it needs the same turn
+//! lock.
+//!
 //! [`NotificationSink`] is here rather than beside [`session_update`] because
 //! it is that mapping bound to one connection and one session, which is a
 //! thing only a turn has.
@@ -21,7 +28,11 @@ use base64::Engine;
 
 use super::notify;
 use crate::{
-    approver::AcpApprover, mode::ModedApprover, session::SessionRegistry, update::session_update,
+    approver::AcpApprover,
+    commands::{self, Builtin},
+    mode::ModedApprover,
+    session::SessionRegistry,
+    update::session_update,
 };
 use basis::{Event, PromptPart, run::EventSink};
 
@@ -40,6 +51,14 @@ pub(super) async fn prompt(
     let parts = prompt_parts(&request.prompt)?;
     if parts.is_empty() {
         return Err(Error::invalid_params().data("prompt has nothing basis can send"));
+    }
+
+    // Read off the prompt's opening text and only that: a `/compact` typed
+    // after a screenshot is prose about compacting, not a command.
+    if let Some(PromptPart::Text(text)) = parts.first()
+        && let Some(builtin) = commands::builtin(text)
+    {
+        return run_builtin(&session, connection, &request.session_id, builtin).await;
     }
 
     // The session's mode decides which of these requests the client actually
@@ -97,6 +116,50 @@ pub(super) async fn prompt(
                 basis::RunOutcome::Ok => "the turn failed".to_string(),
             })),
         },
+        Err(error) => Err(Error::internal_error().data(error.to_string())),
+    }
+}
+
+/// Answers a `session/prompt` that was a command rather than a prompt.
+///
+/// Takes the turn lock, because a built-in acts on the conversation and one
+/// conversation does one thing at a time: compacting while a turn is mid-flight
+/// would rewrite the transcript out from under it.
+///
+/// It does **not** arm a cancellation token. `session/cancel` trips a token a
+/// running turn checks between rounds, and there is no such boundary inside a
+/// summarizing pass — arming one would tell a client its stop button applies
+/// where nothing would read it.
+async fn run_builtin(
+    session: &crate::session::AcpSession,
+    connection: &ConnectionTo<Client>,
+    session_id: &SessionId,
+    builtin: Builtin<'_>,
+) -> Result<PromptResponse, Error> {
+    let Builtin::Compact { instructions } = builtin;
+
+    let mut sink = NotificationSink::new(session_id.clone(), connection.clone());
+    let mut run = session.lock_turn().await;
+    let compacted = run.compact(instructions, &mut sink).await;
+    drop(run);
+
+    match compacted {
+        // The pass narrates itself: `Event::CompactionCompleted` reached the
+        // sink on the way past and became the thought chunk that says what was
+        // replaced.
+        Ok(Some(_)) => Ok(PromptResponse::new(StopReason::EndTurn)),
+        // Nothing happened, so nothing was narrated — and a client that asked
+        // for something is owed an answer either way. Said here rather than in
+        // the core, which correctly emits nothing for a compaction that did
+        // not occur.
+        Ok(None) => {
+            let _ = notify(
+                connection,
+                session_id,
+                crate::update::thought("there is nothing to compact yet"),
+            );
+            Ok(PromptResponse::new(StopReason::EndTurn))
+        }
         Err(error) => Err(Error::internal_error().data(error.to_string())),
     }
 }

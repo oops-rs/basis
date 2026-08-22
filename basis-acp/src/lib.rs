@@ -55,6 +55,7 @@ mod options;
 mod server;
 mod session;
 mod stdio;
+mod timestamp;
 mod update;
 
 pub use approver::AcpApprover;

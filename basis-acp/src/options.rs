@@ -43,12 +43,12 @@ use basis::Effort;
 pub(crate) const MODEL: &str = "model";
 pub(crate) const EFFORT: &str = "effort";
 
-/// The value id for "leave the effort alone".
+/// The value id for "ask for no particular level".
 ///
-/// Not "the provider's default", though that is usually what it is: a session
-/// opened by an operator who asked for an effort is already at that level, and
-/// mentra offers no way to read the level back off a session. So this value
-/// means *unset by this session*, and its description says so.
+/// The provider's own default, and it means exactly that:
+/// [`PreparedRun::effort`](basis::PreparedRun::effort) reads the level off the
+/// session, so a conversation an operator opened at `high` advertises `high`
+/// here rather than this value. Picking it clears the request.
 const AS_OPENED: &str = "default";
 
 const LOW: &str = "low";
@@ -190,10 +190,8 @@ pub fn options(model: &str, effort: Option<Effort>) -> Vec<SessionConfigOption> 
 
 fn effort_values() -> Vec<SessionConfigSelectOption> {
     vec![
-        SessionConfigSelectOption::new(AS_OPENED, "Default").description(
-            "Leave the effort as the session was opened with — the provider's own, \
-             unless the operator asked for one.",
-        ),
+        SessionConfigSelectOption::new(AS_OPENED, "Default")
+            .description("Ask for no particular level, and take the provider's own."),
         SessionConfigSelectOption::new(LOW, "Low")
             .description("Answer quickly. For gathering, not for deciding."),
         SessionConfigSelectOption::new(MEDIUM, "Medium").description("The usual trade."),
