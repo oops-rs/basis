@@ -124,36 +124,34 @@ fn no_credential_reaches_the_approver_or_the_rule_it_writes() {
 }
 
 #[test]
-fn a_call_missing_a_required_field_never_reaches_the_approver() {
-    let tool = tool(vec!["./ci/jenkins"]);
-
-    let refused = preview(
-        tool.spec(),
-        Path::new("/repo"),
-        &tool.descriptor(),
-        &json!({}),
-    )
-    .expect_err("the schema requires `job`");
-
-    assert!(refused.contains("job"), "{refused}");
-    assert!(refused.contains("jenkins_job"), "{refused}");
-}
-
-#[test]
 fn an_input_that_is_not_an_object_is_refused_by_name() {
-    let refused = check_input(&spec(vec!["./x"]), &json!("nightly")).expect_err("not an object");
+    // The residue mentra's validator cannot see: a manifest may leave `type`
+    // off its schema, and with no `type` there is no keyword saying an input
+    // has to be an object. This binding writes that input to a program's
+    // stdin, so the refusal names the tool.
+    let loose = DeclaredToolSpec {
+        input_schema: json!({"properties": {"job": {"type": "string"}}}),
+        ..spec(vec!["./x"])
+    };
+
+    let refused = check_input(&loose, &json!("nightly")).expect_err("not an object");
 
     assert!(refused.contains("jenkins_job"), "{refused}");
 }
 
 #[test]
-fn a_schema_that_requires_nothing_accepts_an_empty_call() {
+fn a_call_that_fits_is_not_second_guessed_here() {
+    // `required` is mentra's now, checked before authorization and with the
+    // missing field named. What is left here says nothing about a call that
+    // is an object — including the empty one, which a schema requiring
+    // nothing accepts.
     let declared = DeclaredToolSpec {
         input_schema: json!({"type": "object", "properties": {}}),
         ..spec(vec!["./x"])
     };
 
     check_input(&declared, &json!({})).expect("nothing is required");
+    check_input(&spec(vec!["./x"]), &json!({"job": "nightly"})).expect("a call that fits");
 }
 
 #[test]

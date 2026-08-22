@@ -61,6 +61,16 @@ its row back on its next persist.
 told, so a picker drawn from it shows the level a repository's `config.json` chose at mint
 as readily as one `set_effort` did afterwards.
 
+`workspace.skills()` reports what the four skill roots produced, after layering — see
+[conventions.md](conventions.md) for which roots and in what order. Each entry carries
+`model_invocable`, which is `false` when that `SKILL.md`'s frontmatter set
+`disable-model-invocation`: the skill is left out of the list the model is shown and
+`load_skill` refuses it, so it exists for a person to invoke. A host that offers skills in
+its own UI is the only thing that can act on that distinction, which is why the report
+carries it rather than quietly listing both kinds alike. basis does not itself route to
+one — a skill is a body of instructions with no argument convention, and `/name args` is
+already what `.basis/templates/` means.
+
 When one prompt really is the whole job, the free functions are the same path with the
 workspace opened and dropped around it — the binary is a thin shell over this:
 
@@ -293,6 +303,13 @@ Paste the URL the server publishes on either wire: a trailing `/v1` is stripped 
 resolution, because both transports append their own `v1/…` and the published form would
 otherwise produce `/v1/v1/…`.
 
+A key is optional on either wire. `with_base_url` alone, with nothing in `BASIS_API_KEY` or
+`OPENAI_API_KEY`, builds a provider that sends no `Authorization` header — what a local
+vLLM, llama.cpp or Ollama expects — and `with_provider(BuiltinProvider::Ollama)` or
+`LmStudio` needs no key by construction. `ProviderChoice::api_key` is `Option<String>` for
+exactly this reason; a server that wanted a key says so with a 401, which reaches the host
+as the provider's own error rather than a guess basis made about the endpoint.
+
 Builder-only, and that is deliberate. `.basis/config.json` carries `provider`, `model`,
 `effort` and — global file only — `base_url`, but not this: a wire is not a fact a repository
 has about itself, and the host that needs the other one is embedding basis rather than typing
@@ -491,6 +508,57 @@ short-circuits, that is what lets your own guard refuse before a repository's pr
 spawned at all. A participant that errors or panics **denies**. The trait is `async`, and
 `basis::async_trait` is the attribute to spell it with — re-exported, so implementing a
 basis trait costs your manifest nothing.
+
+### And a say over each result
+
+Some questions have no answer before the call. Whether a grep pulled a credential out of a
+file nobody meant to expose is not knowable from its pattern. `Interceptor::review` is the
+same seam after the tool has run, and a workspace reaches it with `"event":
+"post_tool_use"` in `.basis/hooks.json`:
+
+```rust
+#[basis::async_trait]
+impl basis::Interceptor for Redact {
+    fn name(&self) -> &str { "redact" }
+
+    async fn intercept(&self, _call: &basis::HookRequest)
+        -> Result<basis::HookOutcome, basis::InterceptorError>
+    {
+        Ok(basis::HookOutcome::Allow)
+    }
+
+    // Defaulted to Allow — keep — so an interceptor that only guards calls
+    // says nothing here and is not made to.
+    async fn review(&self, result: &basis::HookRequest)
+        -> Result<basis::HookOutcome, basis::InterceptorError>
+    {
+        let Some(output) = result.output.as_ref().and_then(|o| o.as_str()) else {
+            return Ok(basis::HookOutcome::Allow);
+        };
+        if !output.contains("AKIA") {
+            return Ok(basis::HookOutcome::Allow);
+        }
+        Ok(basis::HookOutcome::Replace {
+            output: serde_json::json!(output.replace("AKIA0123", "[redacted]")),
+            // The tool's own verdict, unless you mean to overturn it.
+            is_error: result.is_error.unwrap_or(false),
+            reason: Some("a key".to_string()),
+        })
+    }
+}
+```
+
+`result` is the same `HookRequest` with `output` and `is_error` on it, and `input` holding
+what the tool actually *ran* with rather than what the model asked for. `Allow` keeps the
+result; `Replace` shows the model something else; `Deny` shows it the reason instead,
+marked as an error — which is what a refusal can still mean once a tool has run, and what a
+broken guard falls back to.
+
+**A post hook cannot un-run anything.** The side effects have happened, and the event stream
+already carried the real result to every subscriber: `Event::ToolCompleted` reports what the
+tool returned whatever the model is shown. That split is the point — the stream is the
+record, this seam is the model's view — and it is why a guard that must *stop* something
+belongs before the call.
 
 The other seam is `Approver`, and the two are deliberately not merged: an approver answers
 *may this happen* and feeds the permission machinery a person drives, while an interceptor

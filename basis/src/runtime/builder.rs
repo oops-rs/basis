@@ -17,10 +17,12 @@ use std::{
 use mentra::{
     BuiltinProvider, ModelSelector, ProviderId, RuntimePolicy,
     provider_core::{
-        StaticCredentialSource, chat_completions, chat_completions::ChatCompletionsProvider,
-        responses, responses::ResponsesProvider,
+        AuthScheme, chat_completions, chat_completions::ChatCompletionsProvider, responses,
+        responses::ResponsesProvider,
     },
 };
+
+use super::credential::Credential;
 
 use crate::{
     approval::ApprovalGate,
@@ -856,7 +858,12 @@ impl RuntimeBuilder {
             // The one pre-hook basis registers, always: mentra takes hooks at
             // build time only, and workspaces arrive later, through the
             // dispatcher (see `runtime::dispatch`).
-            .with_pre_hook(DispatchHook(Arc::clone(&dispatch)));
+            .with_pre_hook(DispatchHook(Arc::clone(&dispatch)))
+            // And the one post-hook, for the same reason and the same
+            // dispatcher — a second handle on it, because mentra's two seams
+            // are two registrations. Always, again: whether a workspace will
+            // declare a `post_tool_use` hook is not knowable from here.
+            .with_post_hook(DispatchHook(Arc::clone(&dispatch)));
 
         // Host tools registered via `with_tool`, applied after basis's own
         // `spawn` — order that matches every other builder chain above, where
@@ -914,14 +921,19 @@ impl RuntimeBuilder {
         // connect. Workspace-owned connections arrive post-build (ADR-0018).
         // A base URL is the only place the wire is a question: a preset carries
         // the one its vendor speaks.
+        let credential = Credential::new(choice.api_key.as_deref());
         let mentra = match (&choice.base_url, self.wire) {
             (Some(base_url), Wire::ChatCompletions) => builder.with_registered_provider(
-                chat_completions_provider(choice.provider, base_url, &choice.api_key),
+                chat_completions_provider(choice.provider, base_url, credential),
             ),
             (Some(base_url), Wire::Responses) => builder.with_registered_provider(
-                responses_provider(choice.provider, base_url, &choice.api_key),
+                responses_provider(choice.provider, base_url, credential),
             ),
-            (None, _) => builder.with_provider(choice.provider, choice.api_key.clone()),
+            // A preset takes a `String`; resolution hands one back for every
+            // keyed preset, and the two local ones ignore what they are given.
+            (None, _) => {
+                builder.with_provider(choice.provider, choice.api_key.clone().unwrap_or_default())
+            }
         }
         .build()?;
 
@@ -1067,12 +1079,15 @@ fn git_protected(policy: RuntimePolicy, workspace: &Path) -> RuntimePolicy {
 fn chat_completions_provider(
     provider: BuiltinProvider,
     base_url: &str,
-    api_key: &str,
-) -> ChatCompletionsProvider<StaticCredentialSource> {
+    credential: Credential,
+) -> ChatCompletionsProvider<Credential> {
     let mut definition = chat_completions::definition(provider, base_url);
     definition.descriptor.display_name = Some(format!("OpenAI-compatible ({base_url})"));
+    if !credential.is_some() {
+        definition.auth_scheme = AuthScheme::None;
+    }
 
-    ChatCompletionsProvider::new(definition, StaticCredentialSource::new(api_key))
+    ChatCompletionsProvider::new(definition, credential)
 }
 
 /// Builds a provider aimed at a base URL that serves OpenAI's own Responses
@@ -1091,19 +1106,21 @@ fn chat_completions_provider(
 fn responses_provider(
     provider: BuiltinProvider,
     base_url: &str,
-    api_key: &str,
-) -> ResponsesProvider<StaticCredentialSource> {
+    credential: Credential,
+) -> ResponsesProvider<Credential> {
     let mut definition = responses::openai_definition();
     definition.base_url = Some(base_url.to_string());
     definition.descriptor.id = ProviderId::from(provider);
     definition.descriptor.display_name = Some(format!("OpenAI-compatible ({base_url})"));
+    if !credential.is_some() {
+        definition.auth_scheme = AuthScheme::None;
+    }
 
     // A compatible endpoint promises the Responses wire shape, not every
     // optional OpenAI extension. basis already replays the complete local
     // transcript, so do not probe `previous_response_id` support with a
     // request that may fail; native provider presets retain Hybrid chaining.
-    ResponsesProvider::new(definition, StaticCredentialSource::new(api_key))
-        .without_hybrid_http_previous_response_id()
+    ResponsesProvider::new(definition, credential).without_hybrid_http_previous_response_id()
 }
 
 #[cfg(test)]

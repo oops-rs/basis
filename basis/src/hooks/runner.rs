@@ -34,8 +34,13 @@ use std::{fmt, path::PathBuf, sync::Arc, time::Duration};
 
 use mentra::{
     error::RuntimeError,
-    runtime::{HookDecision, PreExecutionContext, PreExecutionHook},
+    runtime::{
+        HookDecision, PostExecutionContext, PostExecutionHook, PreExecutionContext,
+        PreExecutionHook, ResultDecision,
+    },
+    tool::ToolResultContent,
 };
+use serde_json::Value;
 use thiserror::Error;
 
 use crate::subprocess::{self, Completion};
@@ -154,10 +159,50 @@ impl HookRunner {
             return HookOutcome::Allow;
         }
 
-        let chain = match self
-            .consult_interceptors(Chain::new(self.request(call)))
-            .await
-        {
+        self.consult(HookRequest::from_call(
+            HookEvent::PreToolUse,
+            &self.workspace,
+            call,
+        ))
+        .await
+    }
+
+    /// Consults everybody about a call that has already run.
+    ///
+    /// The after-the-call twin of [`decide_async`](Self::decide_async), down to
+    /// the order and the threading: only the request differs, and the answers
+    /// that request admits. `output` is the result as JSON — a text result is
+    /// a JSON string, a structured one is itself — and `is_error` is the
+    /// tool's own verdict, which a replacement may leave alone or overturn.
+    ///
+    /// Answers [`HookOutcome::Allow`] when nobody objected, which for a result
+    /// means keep.
+    pub async fn review_async(
+        &self,
+        call: &HookCall,
+        output: Value,
+        is_error: bool,
+    ) -> HookOutcome {
+        if self.is_empty() {
+            return HookOutcome::Allow;
+        }
+
+        self.consult(HookRequest::from_result(
+            &self.workspace,
+            call,
+            output,
+            is_error,
+        ))
+        .await
+    }
+
+    /// Interceptors on the caller's runtime, then hooks on a blocking thread.
+    ///
+    /// One body for both events, because which of them this is is a fact about
+    /// `request` — the participants, their order, and what a refusal does to
+    /// the chain are the same question either side of the call.
+    async fn consult(&self, request: HookRequest) -> HookOutcome {
+        let chain = match self.consult_interceptors(Chain::new(request)).await {
             Ok(chain) => chain,
             Err(outcome) => return outcome,
         };
@@ -191,6 +236,15 @@ impl HookRunner {
                 Ok(HookOutcome::Allow) => Answer::Allow,
                 Ok(HookOutcome::Deny(reason)) => Answer::Deny(Some(reason)),
                 Ok(HookOutcome::Modify { input, reason }) => Answer::Modify { input, reason },
+                Ok(HookOutcome::Replace {
+                    output,
+                    is_error,
+                    reason,
+                }) => Answer::Replace {
+                    output,
+                    is_error: Some(is_error),
+                    reason,
+                },
                 Err(failure) => Answer::Broken(failure),
             };
 
@@ -209,8 +263,9 @@ impl HookRunner {
         let mut chain = chain;
 
         for spec in &self.hooks {
-            // Which hooks apply is a function of the tool, and no participant
-            // can change that — only the input moves.
+            // Which hooks apply is a function of the event and the tool, and
+            // no participant can change either — only the input, or the
+            // result, moves.
             if !spec.applies_to(chain.request().event, &chain.request().tool_name) {
                 continue;
             }
@@ -219,6 +274,15 @@ impl HookRunner {
                 Ok(HookResponse::Allow { .. }) => Answer::Allow,
                 Ok(HookResponse::Deny { reason }) => Answer::Deny(reason),
                 Ok(HookResponse::Modify { input, reason }) => Answer::Modify { input, reason },
+                Ok(HookResponse::Replace {
+                    output,
+                    is_error,
+                    reason,
+                }) => Answer::Replace {
+                    output,
+                    is_error,
+                    reason,
+                },
                 Err(failure) => Answer::Broken(failure.to_string()),
             };
 
@@ -239,6 +303,10 @@ impl HookRunner {
     /// relies on for the blocking half. It costs the interceptor the ability to
     /// be cancelled with the turn, which a check answering in milliseconds does
     /// not need.
+    ///
+    /// Which of the trait's two questions is asked is the request's to say:
+    /// the subprocess binding puts `event` on the wire and this one calls the
+    /// method that goes with it.
     async fn ask_interceptor(
         &self,
         interceptor: &Arc<dyn Interceptor>,
@@ -247,7 +315,14 @@ impl HookRunner {
         let interceptor = Arc::clone(interceptor);
         let request = request.clone();
 
-        match tokio::spawn(async move { interceptor.intercept(&request).await }).await {
+        match tokio::spawn(async move {
+            match request.event {
+                HookEvent::PreToolUse => interceptor.intercept(&request).await,
+                HookEvent::PostToolUse => interceptor.review(&request).await,
+            }
+        })
+        .await
+        {
             Ok(Ok(outcome)) => Ok(outcome),
             Ok(Err(error)) => Err(format!("answered with an error: {error}")),
             Err(error) if error.is_panic() => {
@@ -334,7 +409,92 @@ impl PreExecutionHook for HookRunner {
                     "a replacement input could not be re-encoded: {error}"
                 )),
             },
+            // Unreachable: the chain refuses a replacement before the call has
+            // run, so one cannot survive to here. Denying says which
+            // impossible thing happened instead of panicking about it.
+            HookOutcome::Replace { .. } => HookDecision::Deny(
+                "a participant replaced the result of a call that has not run yet".to_string(),
+            ),
         })
+    }
+}
+
+#[async_trait::async_trait]
+impl PostExecutionHook for HookRunner {
+    /// Never returns `Err`, for the reason
+    /// [`pre_tool_execution`](Self::pre_tool_execution) does not: an error here
+    /// fails the turn, and a guard's opinion is worth more to whoever reads the
+    /// transcript than a stack of runtime errors is.
+    ///
+    /// A refusal — a participant's `deny`, or a broken one that denies on
+    /// failure — arrives as the reason in place of the output, `is_error: true`.
+    /// That is the strongest thing left after a tool has run: the side effects
+    /// are done, and `AgentEvent::ToolExecutionFinished` has already carried
+    /// the real result to every subscriber, so what a refusal can still govern
+    /// is what the model reads. A guard that broke while checking an output
+    /// for credentials has not established that there were none in it.
+    async fn post_tool_execution(
+        &self,
+        context: &PostExecutionContext,
+    ) -> Result<ResultDecision, RuntimeError> {
+        let call = HookCall::new(
+            context.agent_id.clone(),
+            context.tool_name.clone(),
+            context.tool_call_id.clone(),
+            // The input the tool ran with, which is half of what makes an
+            // output judgeable: mentra hands over the post-`Modify` input, and
+            // basis passes on what it was given.
+            context.input_json.clone(),
+        );
+
+        Ok(
+            match self
+                .review_async(&call, as_json(&context.content), context.is_error)
+                .await
+            {
+                HookOutcome::Allow => ResultDecision::Keep,
+                HookOutcome::Replace {
+                    output, is_error, ..
+                } => ResultDecision::Replace {
+                    content: as_content(output),
+                    is_error,
+                },
+                HookOutcome::Deny(reason) => ResultDecision::Replace {
+                    content: ToolResultContent::text(reason),
+                    is_error: true,
+                },
+                // Unreachable: the chain refuses a rewritten input once the
+                // call has run. Saying so beats a panic, and beats silently
+                // keeping a result somebody meant to intervene in.
+                HookOutcome::Modify { .. } => ResultDecision::Replace {
+                    content: ToolResultContent::text(
+                        "a participant rewrote the input of a call that had already run",
+                    ),
+                    is_error: true,
+                },
+            },
+        )
+    }
+}
+
+/// A tool result as the contract carries it.
+///
+/// Text becomes a JSON string and structured content stays itself. Nothing
+/// re-parses text that happens to look like JSON: the runtime already said
+/// which of the two it produced, and guessing would turn a tool that printed a
+/// number into one that returned one.
+fn as_json(content: &ToolResultContent) -> Value {
+    match content {
+        ToolResultContent::Text(text) => Value::String(text.clone()),
+        ToolResultContent::Structured(value) => value.clone(),
+    }
+}
+
+/// The same in reverse, so a replacement round-trips what it did not touch.
+fn as_content(output: Value) -> ToolResultContent {
+    match output {
+        Value::String(text) => ToolResultContent::Text(text),
+        other => ToolResultContent::Structured(other),
     }
 }
 

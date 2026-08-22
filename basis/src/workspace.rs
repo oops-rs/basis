@@ -208,7 +208,7 @@ impl Workspace {
     /// (`Agent::from_loaded` always resumes at `None` — `set_model` is the
     /// only way back), so a resumed session starts with an unknown one. This
     /// reapplies this workspace's own resolved model exactly when the
-    /// resumed conversation is still on it — the same model [`prepare`] would
+    /// resumed conversation is still on it — the same model [`prepare`](Self::prepare) would
     /// have minted — which restores mentra's own compaction threshold as well
     /// as [`PreparedRun::context_window`]. A conversation
     /// [`PreparedRun::set_model`] had already moved elsewhere keeps whatever
@@ -356,9 +356,10 @@ impl Workspace {
     ///
     /// Per mint rather than per open, because the shared registry moves as
     /// sibling workspaces come and go, and a roster is honest only about the
-    /// registry it was minted against. Hidden, not unregistered — the registry
-    /// is single and has no unregister — which also keeps a dropped sibling's
-    /// stale entries inert.
+    /// registry it was minted against. Hidden rather than unregistered because
+    /// these tools belong to a sibling that is still open and still serving
+    /// them; what a *dropped* sibling registered is gone from the registry
+    /// altogether, taken off with the claim it was held under.
     fn minted_agent(&self) -> AgentConfig {
         let mut agent = self.agent.clone();
 

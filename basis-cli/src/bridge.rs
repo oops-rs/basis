@@ -10,7 +10,7 @@
 //! # Shape
 //!
 //! One connection is one ACP conversation, exactly as one stdio process is.
-//! [`transport`](self::transport) maps frames to lines, and
+//! [`transport`] maps frames to lines, and
 //! [`serve`](basis_acp::serve) takes it from there, so the server a browser
 //! reaches is the same server an editor reaches — same handlers, same tests,
 //! no second implementation to keep honest.
@@ -30,7 +30,7 @@
 //! - **Another machine** — refused by binding to loopback, which is the
 //!   default and takes an explicit opt-in to leave.
 //! - **A page in the user's browser** — refused by the `Origin` allowlist,
-//!   which is empty by default. See [`origin`](self::origin) for why loopback
+//!   which is empty by default. See [`origin`] for why loopback
 //!   alone does not cover this.
 //!
 //! Nothing here rate-limits or caps connections. A process that can open a

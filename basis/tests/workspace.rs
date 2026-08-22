@@ -119,6 +119,34 @@ async fn context_is_discovered_at_open_not_at_mint() {
 }
 
 #[tokio::test]
+async fn a_skill_the_model_may_not_reach_is_reported_as_one() {
+    // `disable-model-invocation` keeps a skill out of the model's list and
+    // makes `load_skill` refuse it, while leaving it in the set a host is
+    // shown. A host is the only one who can act on that, so the workspace's
+    // report has to carry the distinction rather than hand back two entries
+    // that look alike and behave differently.
+    let dir = tempfile::tempdir().expect("tempdir");
+    write(
+        &dir.path().join(".basis/skills/release/SKILL.md"),
+        "---\nname: release\ndescription: cut a release\ndisable-model-invocation: true\n---\nSteps.",
+    );
+    write(
+        &dir.path().join(".basis/skills/review/SKILL.md"),
+        "---\nname: review\ndescription: review a diff\n---\nSteps.",
+    );
+
+    let workspace = offline(dir.path()).open().await.expect("opens");
+
+    let reported: Vec<(&str, bool)> = workspace
+        .skills()
+        .iter()
+        .map(|skill| (skill.name.as_str(), skill.model_invocable))
+        .collect();
+
+    assert_eq!(reported, [("release", false), ("review", true)]);
+}
+
+#[tokio::test]
 async fn every_run_from_one_workspace_reports_the_same_resolution() {
     let dir = tempfile::tempdir().expect("tempdir");
     write(&dir.path().join("AGENTS.md"), "house rules");
@@ -765,6 +793,41 @@ async fn a_published_url_ending_in_v1_is_not_doubled() {
     assert_eq!(endpoint.paths(), ["/v1/chat/completions"]);
 }
 
+/// The `Authorization` header carries exactly what resolution found, and
+/// nothing when it found nothing. With no key passed here, resolution reads
+/// the environment — so the expectation is read from the same place, which
+/// keeps this true on a workstation that exports a key as well as on one
+/// that does not, and in the second case pins the claim that matters: a
+/// keyless base URL is asked with no header at all, not an empty bearer.
+#[tokio::test]
+async fn a_base_url_is_asked_with_the_key_resolution_found_or_no_header_at_all() {
+    let dir = tempfile::tempdir().expect("tempdir");
+    write(&dir.path().join("AGENTS.md"), "house rules");
+
+    let endpoint = ScriptedEndpoint::start();
+    let workspace = offline(dir.path())
+        .with_runtime_builder(
+            Runtime::builder()
+                .with_base_url(&endpoint.base_url)
+                .with_ephemeral_history(),
+        )
+        .open()
+        .await
+        .expect("opens");
+
+    workspace
+        .prepare("go")
+        .expect("mints")
+        .execute(CollectingSink::default())
+        .await
+        .expect("the run completes");
+
+    let exported = ["BASIS_API_KEY", "OPENAI_API_KEY"]
+        .into_iter()
+        .find_map(|var| std::env::var(var).ok().filter(|key| !key.trim().is_empty()));
+    assert_eq!(endpoint.bearers(), [exported]);
+}
+
 /// An OpenAI-compatible endpoint on loopback that completes any turn.
 ///
 /// Every connection gets its own numbered answer, which is what lets a test
@@ -778,7 +841,17 @@ async fn a_published_url_ending_in_v1_is_not_doubled() {
 struct ScriptedEndpoint {
     base_url: String,
     served: Arc<AtomicUsize>,
-    paths: Arc<Mutex<Vec<String>>>,
+    seen: Arc<Mutex<Vec<Seen>>>,
+}
+
+/// What one request told the endpoint about itself.
+#[derive(Clone, Debug)]
+struct Seen {
+    path: String,
+    /// The bearer token the request carried, or `None` when it sent no
+    /// `Authorization` header — which is what a keyless endpoint must see,
+    /// since an empty bearer is a 401 where no header is simply a request.
+    bearer: Option<String>,
 }
 
 impl ScriptedEndpoint {
@@ -794,10 +867,10 @@ impl ScriptedEndpoint {
         let listener = TcpListener::bind("127.0.0.1:0").expect("bind test endpoint");
         let address = listener.local_addr().expect("read endpoint address");
         let served = Arc::new(AtomicUsize::new(0));
-        let paths = Arc::new(Mutex::new(Vec::new()));
+        let seen = Arc::new(Mutex::new(Vec::new()));
 
         let counted = Arc::clone(&served);
-        let recorded = Arc::clone(&paths);
+        let recorded = Arc::clone(&seen);
         thread::spawn(move || {
             while let Ok((stream, _)) = listener.accept() {
                 // One thread per connection, so a second request that arrives
@@ -812,7 +885,7 @@ impl ScriptedEndpoint {
         Self {
             base_url: format!("http://{address}/"),
             served,
-            paths,
+            seen,
         }
     }
 
@@ -822,24 +895,44 @@ impl ScriptedEndpoint {
 
     /// The paths this endpoint was asked for, in the order they arrived.
     fn paths(&self) -> Vec<String> {
-        self.paths.lock().expect("paths").clone()
+        self.seen().into_iter().map(|seen| seen.path).collect()
+    }
+
+    /// The bearer token each request carried, in the order they arrived.
+    fn bearers(&self) -> Vec<Option<String>> {
+        self.seen().into_iter().map(|seen| seen.bearer).collect()
+    }
+
+    fn seen(&self) -> Vec<Seen> {
+        self.seen.lock().expect("seen").clone()
     }
 }
 
-/// Reads one request, records the path it was addressed to, and writes one
+/// Reads one request, records what it said about itself, and writes one
 /// completed response.
-fn answer(mut stream: TcpStream, body: String, recorded: &Mutex<Vec<String>>) {
+fn answer(mut stream: TcpStream, body: String, recorded: &Mutex<Vec<Seen>>) {
     let request = read_http_request(&mut stream);
-    recorded
-        .lock()
-        .expect("paths")
-        .push(request_path(&request).to_string());
+    recorded.lock().expect("seen").push(Seen {
+        path: request_path(&request).to_string(),
+        bearer: request_bearer(&request),
+    });
 
     let response = format!(
         "HTTP/1.1 200 OK\r\nconnection: close\r\ncontent-type: text/event-stream\r\ncontent-length: {}\r\n\r\n{body}",
         body.len()
     );
     let _ = stream.write_all(response.as_bytes());
+}
+
+/// The token after `Authorization: Bearer`, or `None` when the request sent
+/// no such header.
+fn request_bearer(request: &str) -> Option<String> {
+    request.lines().find_map(|line| {
+        let (name, value) = line.split_once(':')?;
+        name.eq_ignore_ascii_case("authorization")
+            .then(|| value.trim().strip_prefix("Bearer ").map(str::to_string))
+            .flatten()
+    })
 }
 
 /// The target of a request line — `POST /v1/chat/completions HTTP/1.1`.

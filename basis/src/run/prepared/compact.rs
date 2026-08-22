@@ -6,23 +6,31 @@
 //! only they know that the migration plan is worth keeping and the log
 //! spelunking is not.
 //!
-//! # Why basis emits the events itself
+//! # Why the sink is drained rather than written to
 //!
-//! mentra installs the tap that carries an agent event onto a session's event
-//! stream inside `Session::begin_turn` and drops it in `finish_turn`
-//! (`mentra/src/session/handle.rs`). `Session::compact` opens no turn, so the
-//! `AgentEvent::ContextCompacted` it produces has no tap to travel on and
-//! reaches no subscriber at all: a run's sink would see the history shrink
-//! with nothing on the stream to explain it.
+//! [`PreparedRun::compact`] answers twice: the return value goes to the
+//! caller, and the events go to whoever is reading the stream. Both matter —
+//! a sink that watched the history shrink with nothing to explain it would be
+//! describing a conversation nobody could account for.
 //!
-//! So [`PreparedRun::compact`] answers both ways. The return value is the
-//! answer to the caller, and the two events are the answer to whoever is
-//! reading the stream — built here from what mentra returned, in the order and
-//! with the fields mentra's own in-turn mapping uses (`session/mapping.rs`'s
-//! `map_compaction`), so a client cannot tell an on-demand pass from an
-//! automatic one. When that gap closes upstream this file emits nothing and
-//! the events arrive on the stream like every other; until then, emitting
-//! nothing would be the quieter failure.
+//! The events are mentra's own, not basis's re-derivation of them.
+//! `Session::compact` installs the same agent-event tap a turn installs, for
+//! the duration of the pass, so `CompactionStarted` and `CompactionCompleted`
+//! reach the session's stream exactly as they do when a threshold fires. What
+//! is missing outside a turn is only the *other* half: the forwarder that
+//! carries that stream into a run's sink runs per turn, and this is not a
+//! turn. So this subscribes first and drains after, which is what makes an
+//! on-demand pass indistinguishable from an automatic one on the wire.
+//!
+//! Draining after rather than forwarding concurrently is enough because the
+//! pass emits at its end — mentra applies the compaction and *then* announces
+//! it — and because the two events cannot outrun a broadcast channel that
+//! holds 512. A turn needs the concurrent forwarder for a different reason:
+//! it has to answer permission requests while the turn is blocked on them,
+//! and a summarizing pass asks for nothing.
+
+use mentra::SessionEvent;
+use tokio::sync::broadcast::error::TryRecvError;
 
 use super::{Event, EventSink, PreparedRun, RunError};
 
@@ -80,7 +88,13 @@ impl PreparedRun {
         instructions: Option<&str>,
         sink: &mut S,
     ) -> Result<Option<Compacted>, RunError> {
-        let Some(details) = self.session.compact(instructions).await? else {
+        // Subscribed before the pass rather than after, because a broadcast
+        // receiver only sees what is sent once it exists.
+        let mut events = self.session.subscribe();
+        let details = self.session.compact(instructions).await?;
+        drain(&mut events, sink)?;
+
+        let Some(details) = details else {
             return Ok(None);
         };
 
@@ -92,18 +106,38 @@ impl PreparedRun {
             summary_preview: details.summary_preview,
         };
 
-        sink.emit(Event::CompactionStarted {
-            agent_id: details.agent_id.clone(),
-        })?;
-        sink.emit(Event::CompactionCompleted {
-            agent_id: details.agent_id,
-            replaced_items: compacted.replaced_items,
-            preserved_items: compacted.preserved_items,
-            transcript_len: compacted.transcript_len,
-            extracted_facts: compacted.extracted_facts,
-            summary_preview: compacted.summary_preview.clone(),
-        })?;
-
         Ok(Some(compacted))
     }
+}
+
+/// Empties whatever the pass put on the session's stream into the sink.
+///
+/// A lag is impossible in practice — a compaction emits two events into a
+/// channel that holds 512 — so a receiver that reports one has been overtaken
+/// by something this function cannot see, and stopping is the honest response:
+/// the alternative is a stream that quietly disagrees with what happened.
+fn drain<S: EventSink>(
+    events: &mut mentra::SessionEventReceiver,
+    sink: &mut S,
+) -> Result<(), RunError> {
+    loop {
+        match events.try_recv() {
+            Ok(event) => {
+                if let Some(mapped) = map(&event) {
+                    sink.emit(mapped)?;
+                }
+            }
+            Err(TryRecvError::Empty | TryRecvError::Closed | TryRecvError::Lagged(_)) => {
+                return Ok(());
+            }
+        }
+    }
+}
+
+/// The basis event one session event becomes, if it becomes one.
+///
+/// The same mapping a turn's forwarder uses, so a compaction announced during
+/// a turn and one announced on its own are the same two lines.
+fn map(event: &SessionEvent) -> Option<Event> {
+    Event::from_session_event(event)
 }

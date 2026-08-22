@@ -458,7 +458,16 @@ forward to it.
 export BASIS_BASE_URL=http://127.0.0.1:3455/v1
 export BASIS_API_KEY=…
 basis spawn --model gpt-5.6 "explain the module layout"
+
+basis spawn --provider ollama --model qwen3 "…"     # a local preset needs no key
+BASIS_BASE_URL=http://127.0.0.1:8080/v1 basis spawn --model local "…"   # nor does llama.cpp
 ```
+
+A key is what resolution *found*, not what it demands. The two local presets resolve with
+none, and so does a base URL with no key passed or exported: the request then carries no
+`Authorization` header at all — not an empty bearer, which a server would refuse — and a
+server that wanted one answers 401 in its own words. Refusing up front was the earlier
+rule, and it made every Ollama and llama.cpp user invent a key to paste.
 
 Such a proxy is reached by naming the wire: `RuntimeBuilder::with_wire(Wire::Responses)`,
 a builder-only knob, deliberately. Neither `.basis/config.json` nor a flag carries it —

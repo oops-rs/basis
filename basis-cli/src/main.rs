@@ -39,7 +39,7 @@
 //!
 //! The error handling here is the seam between two conventions: a command that
 //! returns `Result` says what went wrong and lets this function print it with
-//! basis's prefix and exit [`EXIT_FAILED`](exit::EXIT_FAILED), while the two
+//! basis's prefix and exit [`EXIT_FAILED`], while the two
 //! servers report and choose their own code, because "the port was taken" is
 //! not the same kind of failure as "the run did not finish".
 //!
@@ -51,8 +51,8 @@
 //! | Code | Meaning |
 //! |---|---|
 //! | [`EXIT_OK`](exit::EXIT_OK) | the run finished |
-//! | [`EXIT_FAILED`](exit::EXIT_FAILED) | the run failed, or basis could not start it |
-//! | [`EXIT_USAGE`](exit::EXIT_USAGE) | the invocation was wrong |
+//! | [`EXIT_FAILED`] | the run failed, or basis could not start it |
+//! | [`EXIT_USAGE`] | the invocation was wrong |
 //! | [`EXIT_BOUNDED`](exit::EXIT_BOUNDED) | a bound tripped: `--deadline`, `--tool-budget`, or `--token-budget` |
 //!
 //! `--token-budget` is the one that can land on a run which *answered*: it ends

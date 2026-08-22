@@ -5,9 +5,13 @@
 //! that each binding's answers are translated faithfully, and that the chain's
 //! rules (which `chain.rs` tests on their own) survive the translation.
 //!
-//! Gated to unix for the same reason as `exec`'s tests: the subprocess
-//! fixtures are `/bin/sh` scripts. The in-process binding needs no shell, and
+//! This file is the seam before a call; [`results`] is the one after it, split
+//! off for size again and sharing the fixtures below. Both are gated to unix
+//! for the same reason as `exec`'s tests: the subprocess fixtures are
+//! `/bin/sh` scripts. The in-process binding needs no shell, and
 //! `tests/interception.rs` covers it on every platform.
+
+mod results;
 
 use std::sync::Mutex;
 

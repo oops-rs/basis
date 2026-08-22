@@ -22,19 +22,22 @@ use serde::{Deserialize, Serialize};
 /// else, which undercounts.
 ///
 /// It counts the rounds of the run's own agent *and* of the work that agent
-/// delegates. mentra's `task` intrinsic drives its subagent on the parent
-/// run's [`RunOptions::child`](mentra::runtime::RunOptions::child) and relays
-/// the child's usage reports onto the parent's bus, so a delegated round
-/// arrives here like any other — indistinguishable from the parent's own,
-/// which is consistent with the accounting being aggregate: mentra's usage
-/// report carries no agent id for anyone to attribute by. Summing the stream
-/// and reading this figure therefore give one answer, and it is the same
-/// answer [`TurnOptions::token_budget`](super::TurnOptions) and
+/// delegates. A delegating tool — basis's [`spawn`](crate::tools::spawn), or
+/// mentra's own `task` intrinsic — drives its subagent on the parent run's
+/// [`RunOptions::child`](mentra::runtime::RunOptions::child) and relays the
+/// child's usage reports onto the parent's bus, so a delegated round arrives
+/// here like any other. Indistinguishable from the parent's own, which is
+/// consistent with the accounting being aggregate: mentra's usage report
+/// carries no agent id for anyone to attribute by. Summing the stream and
+/// reading this figure therefore give one answer, and it is the same answer
+/// [`TurnOptions::token_budget`](super::TurnOptions) and
 /// [`BudgetPool`](crate::BudgetPool) are enforced against, because the child
 /// shares the parent's accounting handle rather than getting one of its own.
-/// None of that was true before mentra `0436bae`: the child ran on fresh
-/// options and reported to a bus nobody read, so a delegating run spent tokens
-/// neither this figure nor any bound ever saw.
+///
+/// Both halves had to be built for that to hold. The shared counter came
+/// first, and until mentra made its event relay public the two disagreed for
+/// basis's own delegations: the *bound* saw a delegated round and the *tally*
+/// did not, so a run could stop on a total it reported a fraction of.
 ///
 /// One edge survives, and it fails loudly rather than leaking: a delegation
 /// issued once the shared budget is already crossed inherits an allowance with

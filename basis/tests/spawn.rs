@@ -27,8 +27,8 @@ use std::{
 use async_trait::async_trait;
 use basis::{
     AllowAll, ApprovalAnswer, ApprovalDecision, ApprovalRequest, Approver, Bound, CollectingSink,
-    Event, RunConfig, RunUsage, SpawnTool, TurnOptions, approval::ApprovalGate,
-    run::prepare_with_session, tools::SPAWN,
+    EntryKind, Event, RunConfig, RunUsage, SpawnTool, TranscriptEntry, TurnOptions,
+    approval::ApprovalGate, run::prepare_with_session, tools::SPAWN,
 };
 use mentra::{
     BuiltinProvider, ContentBlock, ModelInfo, Role, Runtime, RuntimePolicy, Session, TokenUsage,
@@ -391,6 +391,9 @@ struct Run {
     requests: Requests,
     stopped_by: Option<Bound>,
     usage: RunUsage,
+    /// The parent's conversation as it stands after the turn — where a
+    /// delegation leaves its record.
+    transcript: Vec<TranscriptEntry>,
 }
 
 impl Run {
@@ -461,6 +464,7 @@ async fn drive<A: Approver>(workspace: &Path, script: Script, approver: A) -> Ru
         requests,
         stopped_by: report.stopped_by,
         usage: report.usage,
+        transcript: prepared.transcript(),
     }
 }
 
@@ -712,6 +716,43 @@ async fn delegation_hands_work_over_and_reads_the_answer_back() {
         answer, "the README describes a harness",
         "the subagent's final answer is the tool's result"
     );
+
+    // And the parent's transcript says where that answer came from. A reader
+    // follows delegation edges to reconstruct who asked whom; without these
+    // two entries `spawn`'s delegations read as work the parent did itself,
+    // and `EntryKind::DelegationRequest` would be a kind basis models and
+    // never writes.
+    let delegation: Vec<&TranscriptEntry> = run
+        .transcript
+        .iter()
+        .filter(|entry| {
+            matches!(
+                entry.kind,
+                EntryKind::DelegationRequest | EntryKind::DelegationResult
+            )
+        })
+        .collect();
+
+    assert_eq!(
+        delegation
+            .iter()
+            .map(|entry| entry.kind.clone())
+            .collect::<Vec<_>>(),
+        [EntryKind::DelegationRequest, EntryKind::DelegationResult],
+        "the request is recorded before the child runs and the result after it"
+    );
+    assert!(
+        delegation[0].text.contains("summarise the README"),
+        "the request carries what was asked: {}",
+        delegation[0].text
+    );
+    assert!(
+        delegation[1]
+            .text
+            .contains("the README describes a harness"),
+        "and the result what came back: {}",
+        delegation[1].text
+    );
 }
 
 #[tokio::test]
@@ -750,16 +791,15 @@ async fn delegated_spend_lands_on_the_budget_that_delegated_it() {
         "the parent's second round must never have been started"
     );
 
-    // The gap this pins deliberately, so nothing downstream assumes otherwise:
-    // the *bound* is shared, the *tally* is not. A subagent has its own event
-    // bus and mentra's relay of a delegated `UsageReport` onto the parent's bus
-    // is `pub(crate)` — mentra does it for its own `task` intrinsic and a
-    // host-registered tool cannot. So basis reports what the parent's own rounds
-    // cost, and the run stopped on a total more than ten times that.
+    // The bound and the tally are one figure, which is what `RunUsage`'s own
+    // doc promises: what a run reports spending counts the rounds of the work
+    // it delegated as well. A subagent has its own event bus, so that only
+    // holds because `spawn` relays the child's `UsageReport`s onto the
+    // parent's — 10 for the parent's first round, 200 for the child's.
     assert_eq!(
         run.usage.total_tokens(),
-        10,
-        "basis tallies the rounds its own stream carried"
+        210,
+        "a run that stopped on 210 tokens must not report having spent 10"
     );
 }
 

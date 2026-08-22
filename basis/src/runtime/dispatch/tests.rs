@@ -59,6 +59,127 @@ async fn decide(dispatch: &HookDispatch, context: &PreExecutionContext) -> HookD
         .expect("the dispatcher never errors")
 }
 
+/// An interceptor that says nothing about a call and rewrites every result.
+struct Rewrites(&'static str);
+
+#[async_trait::async_trait]
+impl Interceptor for Rewrites {
+    fn name(&self) -> &str {
+        self.0
+    }
+
+    async fn intercept(&self, _call: &HookRequest) -> Result<HookOutcome, InterceptorError> {
+        Ok(HookOutcome::Allow)
+    }
+
+    async fn review(&self, _result: &HookRequest) -> Result<HookOutcome, InterceptorError> {
+        Ok(HookOutcome::Replace {
+            output: json!(self.0),
+            is_error: false,
+            reason: None,
+        })
+    }
+}
+
+fn rewriting_entry(root: &Path, name: &'static str) -> WorkspaceGuardEntry {
+    WorkspaceGuardEntry {
+        runner: Arc::new(HookRunner::new(root, Vec::new()).with_interceptor(Rewrites(name))),
+        shell: ShellAccess::Granted,
+        root: canonical(root),
+        shared: true,
+    }
+}
+
+fn finished(dir: &Path, output: &str) -> PostExecutionContext {
+    PostExecutionContext {
+        agent_id: "agent-1".to_string(),
+        tool_name: "spawn".to_string(),
+        tool_call_id: "call-1".to_string(),
+        input_json: json!({"command": "cat .env"}).to_string(),
+        working_directory: dir.to_path_buf(),
+        content: mentra::tool::ToolResultContent::text(output),
+        is_error: false,
+    }
+}
+
+async fn review(dispatch: &HookDispatch, context: &PostExecutionContext) -> ResultDecision {
+    dispatch
+        .post_tool_execution(context)
+        .await
+        .expect("the dispatcher never errors")
+}
+
+fn replaced(decision: ResultDecision) -> String {
+    match decision {
+        ResultDecision::Replace { content, .. } => content.to_display_string(),
+        other => panic!("expected a replacement, got {other:?}"),
+    }
+}
+
+#[tokio::test]
+async fn a_result_is_routed_by_the_same_key_the_call_was() {
+    let mine = tempfile::tempdir().expect("tempdir");
+    let theirs = tempfile::tempdir().expect("tempdir");
+    let dispatch = Arc::new(HookDispatch::new(Vec::new()));
+    let _mine = dispatch.register(rewriting_entry(mine.path(), "mine"));
+    let _theirs = dispatch.register(rewriting_entry(theirs.path(), "theirs"));
+
+    assert_eq!(
+        replaced(review(&dispatch, &finished(mine.path(), "secret")).await),
+        "mine"
+    );
+    assert_eq!(
+        replaced(review(&dispatch, &finished(theirs.path(), "secret")).await),
+        "theirs"
+    );
+}
+
+#[tokio::test]
+async fn an_unknown_directorys_result_still_reaches_the_host() {
+    let elsewhere = tempfile::tempdir().expect("tempdir");
+
+    let bare = Arc::new(HookDispatch::new(Vec::new()));
+    assert_eq!(
+        review(&bare, &finished(elsewhere.path(), "whatever")).await,
+        ResultDecision::Keep,
+        "no workspace and no host guard is nobody to ask"
+    );
+
+    let guarded = Arc::new(HookDispatch::new(vec![Arc::new(Rewrites("host"))]));
+    assert_eq!(
+        replaced(review(&guarded, &finished(elsewhere.path(), "whatever")).await),
+        "host",
+        "a miss fails open for workspace hooks only, on this seam as on the other"
+    );
+}
+
+#[tokio::test]
+async fn a_workspace_with_nobody_to_ask_keeps_its_results() {
+    let dir = tempfile::tempdir().expect("tempdir");
+    let dispatch = Arc::new(HookDispatch::new(Vec::new()));
+    let _registration = dispatch.register(permissive_entry(dir.path(), ShellAccess::Granted));
+
+    assert_eq!(
+        review(&dispatch, &finished(dir.path(), "untouched")).await,
+        ResultDecision::Keep
+    );
+}
+
+#[tokio::test]
+async fn basis_own_guards_have_nothing_to_say_about_a_result() {
+    // They decide whether a call happens. This one has, and its output is
+    // not theirs to judge — a workspace with commands off that somehow ran
+    // one is a bug in the other seam, not something to re-litigate here.
+    let dir = tempfile::tempdir().expect("tempdir");
+    let dispatch = Arc::new(HookDispatch::new(Vec::new()));
+    let _registration = dispatch.register(permissive_entry(dir.path(), ShellAccess::Denied));
+
+    assert_eq!(
+        review(&dispatch, &finished(dir.path(), "output of a command")).await,
+        ResultDecision::Keep
+    );
+}
+
 #[tokio::test]
 async fn a_registered_workspace_is_the_one_consulted() {
     let dir = tempfile::tempdir().expect("tempdir");

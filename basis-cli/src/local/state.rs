@@ -3,7 +3,7 @@
 //! Three files carry an agent's task state, each atomic-replace JSON:
 //! `meta.json` (bookkeeping and the recorded spawn request — never
 //! conversation content, which is mentra's store's alone), `inbox.json`
-//! (messages, see [`super::inbox`]), and `terminal.json` — written as the
+//! (messages, see [`super::inbox`](mod@super::inbox)), and `terminal.json` — written as the
 //! executor's **last** act, whose existence is the completion signal. An agent
 //! is resumable iff its terminal record does not exist; every crash before
 //! that write resolves toward resumable.

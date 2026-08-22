@@ -25,7 +25,7 @@ configuration would be hiding it from the person who put it there.
 | Skills | `.basis/skills/`, `.agents/skills/` | `<config dir>/skills/`, `$HOME/.agents/skills/` | all four layer, most specific first; a nearer root shadows a *name* |
 | Prompt templates | `.basis/templates/*.md` | `<config dir>/templates/*.md` | workspace shadows global by name |
 | Declared tools | `.basis/tools.json` | `tools.json` | workspace shadows global by tool name |
-| Subprocess hooks | `.basis/hooks.json` | `hooks.json` | both run, global first; the first refusal wins |
+| Subprocess hooks | `.basis/hooks.json` | `hooks.json` | both run, global first; the first refusal wins; each entry names its event |
 | MCP servers | `.mcp.json` | `mcp.json` | client-supplied → workspace → global, by server name |
 
 A missing file is never an error. A file that exists and cannot be read or
@@ -89,6 +89,12 @@ context. The `.agents` spellings are what other harnesses read and are not
 configurable — a fixed path is what makes a shared convention shared. Within a
 scope the basis-specific root comes first.
 
+Frontmatter `disable-model-invocation: true` (or `disable_model_invocation`)
+keeps a skill out of the list the model is shown and makes `load_skill` refuse
+it. basis still reports it, marked `model_invocable: false`, so a host can
+offer it to a person. basis does not turn one into a `/name` command — that is
+what `.basis/templates/` is for.
+
 ### `.basis/templates/`
 
 Markdown whose body is a prompt, with optional YAML frontmatter
@@ -144,6 +150,14 @@ The program is exec'd directly — no shell — with the tool's JSON input on
 stdin. `side_effect` is `process` (default) or `external`; there is no
 read-only value, so every declared tool reaches the approver.
 
+`input_schema` is checked against each call before the approver is asked and
+before the program starts: a missing `required` field, a wrong scalar type, a
+value outside an `enum`, or a property the schema never named when it sets
+`additionalProperties: false`. The check is partial by design — it ignores
+keywords it does not implement rather than refusing a call it cannot judge —
+so a program that depends on a constraint beyond those still checks its own
+stdin.
+
 ### `.basis/hooks.json`
 
 ```json
@@ -151,23 +165,49 @@ read-only value, so every declared tool reaches the approver.
   "schema": 1,
   "hooks": [
     {"name": "guard", "command": ["./scripts/guard"], "tools": ["spawn"],
-     "event": "pre_tool_use", "timeout_ms": 5000, "on_failure": "deny"}
+     "event": "pre_tool_use", "timeout_ms": 5000, "on_failure": "deny"},
+    {"name": "no-secrets", "command": ["./scripts/no-secrets"],
+     "event": "post_tool_use"}
   ]
 }
 ```
 
-`name` and `command` are required; `tools` absent means every tool, `event`
-has one value today (`pre_tool_use`), `timeout_ms` defaults to five seconds,
-and `on_failure` defaults to `deny` — a hook that cannot speak is a control
-the operator believes is in place, so prefer the failure that announces
+`name` and `command` are required; `tools` absent means every tool, `event` is
+`pre_tool_use` (the default) or `post_tool_use`, `timeout_ms` defaults to five
+seconds, and `on_failure` defaults to `deny` — a hook that cannot speak is a
+control the operator believes is in place, so prefer the failure that announces
 itself.
 
-A hook receives JSON on stdin and answers `allow`, `deny` with a reason the
-model sees, or `modify` with a replacement input. Any language. The chain is
+A hook receives JSON on stdin and answers on stdout. Any language. The chain is
 host interceptors → global hooks → workspace hooks, and the first refusal
 short-circuits. `tools` matches the exact tool name, so an entry naming a tool
 that was renamed stops matching silently — `shell` became `spawn`, and `files`
-became the split `read`/`write`/`edit`/`ls`/`grep`/`glob`.
+became the split `read`/`write`/`edit`/`ls`/`grep`/`glob`. One entry is asked at
+one event; a guard that wants a say on both sides of a call writes two.
+
+**`pre_tool_use`** — asked before the call. The request carries `hook_schema`,
+`event`, `workspace`, `agent_id`, `tool_call_id`, `tool_name` and `input`
+(parsed when the tool's input is JSON, the raw string when it is not). The
+answers are `allow`, `deny` with a reason the model reads as the call's error,
+and `modify` with a replacement `input`.
+
+**`post_tool_use`** — asked after the call, before the model is shown what it
+returned. The same request with two more fields: `output` (a structured result
+as itself, a text result as a JSON string) and `is_error`; `input` is what the
+tool actually *ran* with, after any `modify`. The answers are `allow` — keep the
+result as it is — `replace` with an `output` and optionally an `is_error` (say
+nothing about it and the tool's own verdict stands), and `deny`, which shows the
+model the reason in place of the output, marked as an error.
+
+Nothing at `post_tool_use` can stop anything: the tool has run, and the event
+stream already carried its real result to every subscriber, unmodified. What
+this event decides is what the *model* reads — which is where a question like
+"did that command print a credential" can first be answered at all, since the
+output is not knowable from the arguments. A guard that must stop something
+belongs before the call.
+
+Both events share one `hook_schema` and one envelope. A hook that only declared
+`pre_tool_use` sees byte-identical requests to the ones it always did.
 
 ### `.mcp.json`
 
