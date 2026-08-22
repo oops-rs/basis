@@ -611,6 +611,73 @@ fn post(name: &str, script: &str) -> HookSpec {
     sh(name, script).with_event(HookEvent::PostToolUse)
 }
 
+/// Answers whatever it was built with when asked about a result, and nothing
+/// about the call itself.
+struct Reviews {
+    name: &'static str,
+    answer: fn(&HookRequest) -> Result<HookOutcome, InterceptorError>,
+}
+
+#[async_trait::async_trait]
+impl Interceptor for Reviews {
+    fn name(&self) -> &str {
+        self.name
+    }
+
+    async fn intercept(&self, _call: &HookRequest) -> Result<HookOutcome, InterceptorError> {
+        Ok(HookOutcome::Allow)
+    }
+
+    async fn review(&self, result: &HookRequest) -> Result<HookOutcome, InterceptorError> {
+        (self.answer)(result)
+    }
+}
+
+#[tokio::test]
+async fn a_result_reaches_the_host_before_the_workspace() {
+    // The same ordering the call gets, for the same reason: the further a
+    // participant is from the workspace's own data, the earlier it speaks.
+    // The hook answers from what it was shown, so its output is only
+    // reachable if the interceptor went first.
+    let runner = HookRunner::new(
+        ".",
+        vec![post(
+            "annotate",
+            r#"
+            request=$(cat)
+            case "$request" in
+                *'"output":"[redacted]"'*)
+                    echo '{"decision":"replace","output":"[redacted] (checked)"}' ;;
+                *) echo '{"decision":"deny","reason":"saw the original"}' ;;
+            esac
+            "#,
+        )],
+    )
+    .with_interceptor(Reviews {
+        name: "redact",
+        answer: |_| {
+            Ok(HookOutcome::Replace {
+                output: json!("[redacted]"),
+                is_error: false,
+                reason: Some("a credential".to_string()),
+            })
+        },
+    })
+    .with_reporter(|_| {});
+
+    let HookOutcome::Replace { output, reason, .. } = runner
+        .review_async(&call("shell"), json!("TOKEN=hunter2"), false)
+        .await
+    else {
+        panic!("expected a replacement");
+    };
+    assert_eq!(output, json!("[redacted] (checked)"));
+    assert_eq!(
+        reason,
+        Some("interceptor 'redact': a credential; hook 'annotate'".to_string())
+    );
+}
+
 #[tokio::test]
 async fn a_hook_is_told_what_the_tool_produced() {
     // Echoing the request back proves the result reached stdin, and that the
