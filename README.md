@@ -164,6 +164,13 @@ from the workspace's own data, the earlier it speaks. First refusal wins, so you
 refuse before a repository's program is spawned at all, and a participant that errors or panics
 **denies**.
 
+Both are asked again *after* a call — `review(&HookRequest)` in process, `"event":
+"post_tool_use"` in the file — because whether a command printed a credential is not knowable
+from its arguments. There the answers are keep, `Replace` with a different result, or `Deny`,
+which shows the model the reason instead. Nothing there can un-run anything: the event stream
+already carried what the tool really returned, so what this decides is the model's view and not
+the record.
+
 **Sinks** are the third seam: anything `FnMut(Event) -> io::Result<()>` is one, beside
 `CollectingSink`, `NullSink`, `JsonlWriter`, and the tagged sinks above. **Where history goes** is
 yours too — `RuntimeBuilder::with_store_dir` names a directory, `with_ephemeral_history` uses an
@@ -200,7 +207,9 @@ config — never through code in `basis`:
 - **MCP servers** — `.mcp.json`, the same shape other agents read, with `${VAR}` expansion. An ACP
   client can send servers on `session/new`; both sets are honored.
 - **Hooks** — `.basis/hooks.json`: commands that take JSON on stdin and answer `allow`, `deny` with a
-  reason the model sees, or `modify` with a replacement input. Any language; one that breaks denies.
+  reason the model sees, or `modify` with a replacement input. An entry that says `"event":
+  "post_tool_use"` is asked after the call instead, is shown what the tool returned, and may
+  `replace` it. Any language; one that breaks denies.
 
 [docs/conventions.md](docs/conventions.md) is the one-page reference: every file, every directory,
 every `BASIS_*` variable, and which wins when two say the same thing.
