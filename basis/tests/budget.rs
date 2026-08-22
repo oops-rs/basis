@@ -318,8 +318,8 @@ impl ScriptedEndpoint {
             while let Ok((stream, _)) = listener.accept() {
                 // One thread per connection, so two runs in flight are answered
                 // in parallel rather than in turn.
-                let index = counted.fetch_add(1, Ordering::SeqCst) + 1;
-                thread::spawn(move || answer(stream, index));
+                let counted = Arc::clone(&counted);
+                thread::spawn(move || answer(stream, &counted));
             }
         });
 
@@ -337,8 +337,30 @@ impl ScriptedEndpoint {
 }
 
 /// Reads one request and writes one completed response.
-fn answer(mut stream: TcpStream, index: usize) {
-    read_http_request(&mut stream);
+/// A pinned model is looked up in the provider's listing before the first
+/// turn (mentra `bfe952b`), which is one `GET …/models` per run that is
+/// neither a turn nor scripted. Answered with a listing that names the test
+/// model, so the lookup succeeds the way a real provider's would, and never
+/// counted or recorded as a turn.
+fn model_listing(request: &str) -> Option<String> {
+    let line = request.lines().next()?;
+    let target = line.split_whitespace().nth(1)?;
+    (line.starts_with("GET ") && target.ends_with("/models")).then(|| {
+        let body = r#"{"object":"list","data":[{"id":"test-model","object":"model"}]}"#;
+        format!(
+            "HTTP/1.1 200 OK\r\nconnection: close\r\ncontent-type: application/json\r\ncontent-length: {}\r\n\r\n{body}",
+            body.len()
+        )
+    })
+}
+
+fn answer(mut stream: TcpStream, turns: &AtomicUsize) {
+    let request = read_http_request(&mut stream);
+    if let Some(listing) = model_listing(&request) {
+        let _ = stream.write_all(listing.as_bytes());
+        return;
+    }
+    let index = turns.fetch_add(1, Ordering::SeqCst) + 1;
 
     let body = sse_body(index);
     let response = format!(
@@ -374,18 +396,15 @@ fn sse_body(index: usize) -> String {
 ///
 /// Reading to end-of-stream would deadlock: the client keeps the connection
 /// open waiting for the response it has not been sent yet.
-fn read_http_request(stream: &mut TcpStream) {
+fn read_http_request(stream: &mut TcpStream) -> String {
     let mut bytes = Vec::new();
     let mut buffer = [0_u8; 4096];
     let mut header_end = None;
     let mut content_length = 0_usize;
 
-    loop {
-        let Ok(read) = stream.read(&mut buffer) else {
-            return;
-        };
+    while let Ok(read) = stream.read(&mut buffer) {
         if read == 0 {
-            return;
+            break;
         }
         bytes.extend_from_slice(&buffer[..read]);
         if header_end.is_none()
@@ -403,7 +422,9 @@ fn read_http_request(stream: &mut TcpStream) {
                 .unwrap_or_default();
         }
         if header_end.is_some_and(|end| bytes.len() >= end + content_length) {
-            return;
+            break;
         }
     }
+
+    String::from_utf8_lossy(&bytes).into_owned()
 }
