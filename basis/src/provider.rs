@@ -29,7 +29,8 @@ use thiserror::Error;
 ///
 /// Order is the auto-detection preference when several keys are present.
 /// Local providers (Ollama, LM Studio) are deliberately absent: they have no
-/// key to detect, so selecting one is always an explicit choice.
+/// key to detect, so selecting one is always an explicit choice — and, named,
+/// they resolve without one.
 const CANDIDATES: &[(BuiltinProvider, &str)] = &[
     (BuiltinProvider::Anthropic, "ANTHROPIC_API_KEY"),
     (BuiltinProvider::OpenAI, "OPENAI_API_KEY"),
@@ -49,7 +50,12 @@ const COMPATIBLE_KEY_VARS: &[&str] = &["BASIS_API_KEY", "OPENAI_API_KEY"];
 #[derive(Clone)]
 pub struct ProviderChoice {
     pub provider: BuiltinProvider,
-    pub api_key: String,
+    /// `None` when the endpoint asked for none: a local preset, or a base URL
+    /// with no key anywhere. The request then carries no `Authorization`
+    /// header at all, and a server that wanted one answers 401 in its own
+    /// words — which is the honest failure, where refusing up front would
+    /// have made every Ollama and llama.cpp user invent a key to paste.
+    pub api_key: Option<String>,
     /// The variable the key came from, or `None` when it was passed directly.
     pub source_var: Option<&'static str>,
     /// Set when the model lives behind an OpenAI-compatible endpoint rather
@@ -100,15 +106,6 @@ pub enum ProviderError {
         "unknown provider '{0}'; expected one of: anthropic, openai, gemini, openrouter, ollama, lmstudio"
     )]
     Unknown(String),
-
-    #[error("{0} has no API-key environment variable; it is a local provider")]
-    NotKeyed(BuiltinProvider),
-
-    #[error(
-        "a base URL was given but no key; set one of: {}",
-        COMPATIBLE_KEY_VARS.join(", ")
-    )]
-    NoCompatibleCredential,
 
     #[error("base URL must be an absolute http(s) URL, got '{0}'")]
     InvalidBaseUrl(String),
@@ -234,28 +231,38 @@ fn resolve_against(
     match (requested, api_key) {
         (Some(provider), Some(api_key)) => Ok(ProviderChoice {
             provider,
-            api_key: api_key.to_string(),
+            api_key: Some(api_key.to_string()),
             source_var: None,
             base_url: None,
         }),
         (None, Some(_)) => Err(ProviderError::UnattributedCredential),
-        (Some(provider), None) => {
-            let var = key_var(provider).ok_or(ProviderError::NotKeyed(provider))?;
-            let api_key =
-                read(lookup, var).ok_or(ProviderError::MissingCredential { provider, var })?;
-            Ok(ProviderChoice {
+        // A local preset has no variable to read, and nothing to read from
+        // it: mentra reaches Ollama and LM Studio at their fixed local
+        // addresses and ignores whatever key it is handed.
+        (Some(provider), None) => match key_var(provider) {
+            None => Ok(ProviderChoice {
                 provider,
-                api_key,
-                source_var: Some(var),
+                api_key: None,
+                source_var: None,
                 base_url: None,
-            })
-        }
+            }),
+            Some(var) => {
+                let api_key =
+                    read(lookup, var).ok_or(ProviderError::MissingCredential { provider, var })?;
+                Ok(ProviderChoice {
+                    provider,
+                    api_key: Some(api_key),
+                    source_var: Some(var),
+                    base_url: None,
+                })
+            }
+        },
         (None, None) => CANDIDATES
             .iter()
             .find_map(|(provider, var)| {
                 read(lookup, var).map(|api_key| ProviderChoice {
                     provider: *provider,
-                    api_key,
+                    api_key: Some(api_key),
                     source_var: Some(var),
                     base_url: None,
                 })
@@ -279,12 +286,15 @@ fn resolve_compatible(
     api_key: Option<&str>,
 ) -> Result<ProviderChoice, ProviderError> {
     let base_url = normalize_base_url(raw)?;
+    // No key anywhere is an answer, not an error: the servers a base URL
+    // usually names — Ollama, LM Studio, vLLM, llama.cpp on a workstation —
+    // take none, and the one that does take one says so with a 401.
     let (api_key, source_var) = match api_key {
-        Some(api_key) => (api_key.to_string(), None),
+        Some(api_key) => (Some(api_key.to_string()), None),
         None => COMPATIBLE_KEY_VARS
             .iter()
-            .find_map(|var| read(lookup, var).map(|key| (key, Some(*var))))
-            .ok_or(ProviderError::NoCompatibleCredential)?,
+            .find_map(|var| read(lookup, var).map(|key| (Some(key), Some(*var))))
+            .unwrap_or((None, None)),
     };
 
     Ok(ProviderChoice {
@@ -402,7 +412,7 @@ mod tests {
         )
         .expect("the named provider's key is exported");
 
-        assert_eq!(choice.api_key, "gemini-key");
+        assert_eq!(choice.api_key.as_deref(), Some("gemini-key"));
         assert_eq!(choice.source_var, Some("GEMINI_API_KEY"));
     }
 
@@ -438,34 +448,43 @@ mod tests {
         .expect("a base URL and a key are enough");
 
         assert_eq!(choice.base_url.as_deref(), Some("http://127.0.0.1:3455/"));
-        assert_eq!(choice.api_key, "gateway-key");
+        assert_eq!(choice.api_key.as_deref(), Some("gateway-key"));
         assert_eq!(choice.source_var, Some("BASIS_API_KEY"));
     }
 
     #[test]
-    fn a_base_url_with_no_key_anywhere_is_refused() {
-        let error = resolve_against(
-            &exporting(&[("BASIS_BASE_URL", "http://127.0.0.1:3455/v1")]),
+    fn a_base_url_with_no_key_anywhere_goes_without_one() {
+        // The common case for a base URL is a server on this machine that
+        // takes no key; refusing would make its operator invent one.
+        let choice = resolve_against(
+            &exporting(&[("BASIS_BASE_URL", "http://127.0.0.1:11434/v1")]),
             None,
             None,
             None,
         )
-        .expect_err("rejected");
+        .expect("resolves");
 
-        assert!(matches!(error, ProviderError::NoCompatibleCredential));
+        assert_eq!(choice.api_key, None);
+        assert_eq!(choice.source_var, None);
+        assert_eq!(choice.base_url.as_deref(), Some("http://127.0.0.1:11434/"));
     }
 
     #[test]
-    fn selecting_a_local_provider_by_key_is_rejected() {
-        let error = resolve_against(
+    fn a_local_provider_needs_no_key() {
+        let choice = resolve_against(
             &nothing_exported(),
             Some(BuiltinProvider::Ollama),
             None,
             None,
         )
-        .expect_err("rejected");
+        .expect("resolves");
 
-        assert!(matches!(error, ProviderError::NotKeyed(_)));
+        assert_eq!(choice.provider, BuiltinProvider::Ollama);
+        assert_eq!(choice.api_key, None);
+        assert_eq!(
+            choice.base_url, None,
+            "the preset's own address, not a custom one"
+        );
     }
 
     #[test]
@@ -499,7 +518,7 @@ mod tests {
         )
         .expect("a named provider and a key need no lookup");
 
-        assert_eq!(choice.api_key, "supplied-key");
+        assert_eq!(choice.api_key.as_deref(), Some("supplied-key"));
         assert_eq!(choice.provider, BuiltinProvider::Anthropic);
         assert_eq!(
             choice.source_var, None,
@@ -517,7 +536,7 @@ mod tests {
         )
         .expect("a base URL and a key are enough");
 
-        assert_eq!(choice.api_key, "supplied-key");
+        assert_eq!(choice.api_key.as_deref(), Some("supplied-key"));
         assert_eq!(choice.base_url.as_deref(), Some("http://127.0.0.1:3455/"));
         assert!(choice.is_compatible_endpoint());
     }
@@ -601,7 +620,7 @@ mod tests {
     fn an_endpoint_is_flagged_as_compatible() {
         let choice = ProviderChoice {
             provider: BuiltinProvider::OpenAI,
-            api_key: "k".to_string(),
+            api_key: Some("k".to_string()),
             source_var: None,
             base_url: Some("http://localhost:1/".to_string()),
         };

@@ -279,6 +279,13 @@ Paste the URL the server publishes on either wire: a trailing `/v1` is stripped 
 resolution, because both transports append their own `v1/…` and the published form would
 otherwise produce `/v1/v1/…`.
 
+A key is optional on either wire. `with_base_url` alone, with nothing in `BASIS_API_KEY` or
+`OPENAI_API_KEY`, builds a provider that sends no `Authorization` header — what a local
+vLLM, llama.cpp or Ollama expects — and `with_provider(BuiltinProvider::Ollama)` or
+`LmStudio` needs no key by construction. `ProviderChoice::api_key` is `Option<String>` for
+exactly this reason; a server that wanted a key says so with a 401, which reaches the host
+as the provider's own error rather than a guess basis made about the endpoint.
+
 Builder-only, and that is deliberate. `.basis/config.json` carries `provider`, `model`,
 `effort` and — global file only — `base_url`, but not this: a wire is not a fact a repository
 has about itself, and the host that needs the other one is embedding basis rather than typing

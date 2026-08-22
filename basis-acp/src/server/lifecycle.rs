@@ -353,10 +353,6 @@ pub(super) fn setup_failed(error: basis::RunError) -> Error {
 fn is_missing_credential(error: &basis::RunError) -> bool {
     matches!(
         error,
-        RunError::Provider(
-            ProviderError::NoCredential
-                | ProviderError::MissingCredential { .. }
-                | ProviderError::NoCompatibleCredential
-        )
+        RunError::Provider(ProviderError::NoCredential | ProviderError::MissingCredential { .. })
     )
 }

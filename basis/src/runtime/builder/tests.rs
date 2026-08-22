@@ -93,7 +93,11 @@ fn spawn_two_response_server() -> (String, thread::JoinHandle<Vec<String>>) {
 #[tokio::test]
 async fn a_responses_endpoint_skips_automatic_previous_response_id_chaining() {
     let (base_url, handle) = spawn_two_response_server();
-    let provider = responses_provider(BuiltinProvider::OpenAI, &base_url, "test-key");
+    let provider = responses_provider(
+        BuiltinProvider::OpenAI,
+        &base_url,
+        Credential::new(Some("test-key")),
+    );
 
     for (index, message) in ["first", "second"].into_iter().enumerate() {
         let request = mentra::provider_core::Request {
@@ -460,6 +464,55 @@ fn a_custom_endpoint_is_filed_under_the_provider_the_choice_resolved() {
             "{wire:?} filed the endpoint where the model is not looked up: {registered:?}"
         );
     }
+}
+
+/// Resolution can answer "no key" — a local preset, or a base URL with none
+/// exported — and the provider built from that answer must ask the server for
+/// nothing rather than present an empty bearer it would refuse.
+#[test]
+fn an_endpoint_without_a_key_is_not_asked_to_bear_one() {
+    let chat = chat_completions_provider(
+        BuiltinProvider::OpenAI,
+        "http://127.0.0.1:1/",
+        Credential::new(None),
+    );
+    assert!(matches!(chat.definition().auth_scheme, AuthScheme::None));
+
+    let responses = responses_provider(
+        BuiltinProvider::OpenAI,
+        "http://127.0.0.1:1/",
+        Credential::new(None),
+    );
+    assert!(matches!(
+        responses.definition().auth_scheme,
+        AuthScheme::None
+    ));
+}
+
+#[test]
+fn an_endpoint_with_a_key_bears_it() {
+    let chat = chat_completions_provider(
+        BuiltinProvider::OpenAI,
+        "http://127.0.0.1:1/",
+        Credential::new(Some("k")),
+    );
+    assert!(matches!(
+        chat.definition().auth_scheme,
+        AuthScheme::BearerToken
+    ));
+}
+
+/// A local preset resolves with no key at all, and the runtime builds on it
+/// offline exactly as a keyed preset does.
+#[test]
+fn a_local_preset_builds_without_a_key() {
+    let runtime = RuntimeBuilder::default()
+        .with_provider(BuiltinProvider::Ollama)
+        .with_ephemeral_history()
+        .build()
+        .expect("builds offline");
+
+    assert_eq!(runtime.provider(), "ollama");
 }
 
 /// An executor that reaches nothing, standing in for whatever a host actually

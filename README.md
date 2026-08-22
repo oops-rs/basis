@@ -30,7 +30,13 @@ basis spawn -C ../other-repo --deadline 10m --tool-budget 40 "find the slowest t
 
 export BASIS_BASE_URL=http://127.0.0.1:3455/v1 BASIS_API_KEY=…
 basis spawn --model gpt-5.6 "explain the module layout"
+
+basis spawn --provider ollama --model qwen3 "explain the module layout"   # no key: none needed
 ```
+
+A server that takes no key — Ollama and LM Studio by name, or any base URL with no key
+exported — is spoken to with no `Authorization` header at all; one that wanted a key answers
+401 in its own words rather than basis refusing up front.
 
 ## Lightweight, as a number
 

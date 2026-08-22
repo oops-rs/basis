@@ -33,6 +33,7 @@
 //! ```
 
 pub(crate) mod builder;
+mod credential;
 pub(crate) mod dispatch;
 mod executor;
 
