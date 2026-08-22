@@ -196,6 +196,12 @@ pub enum Event {
 
     UserMessage {
         text: String,
+        /// How many images the turn carried. A turn can be images alone, and
+        /// `text` is then empty — a consumer rendering only `text` would show
+        /// a blank user message. Absent from the line when zero, so a stream
+        /// written before the field existed reads the same as one after.
+        #[serde(default, skip_serializing_if = "is_zero")]
+        image_count: usize,
     },
     AssistantDelta {
         text: String,
@@ -279,6 +285,14 @@ pub enum Event {
         output_tokens: u64,
         cache_read_tokens: u64,
         cache_creation_tokens: u64,
+        /// Reasoning counted *inside* `output_tokens` (the Responses wire).
+        #[serde(default)]
+        reasoning_tokens: u64,
+        /// Thinking counted *outside* `output_tokens` (Gemini). Kept apart
+        /// from `reasoning_tokens` for the reason [`RunUsage`](crate::RunUsage)
+        /// gives: a sum would be wrong for one of the two wires.
+        #[serde(default)]
+        thoughts_tokens: u64,
     },
     Notice {
         severity: NoticeSeverity,
@@ -340,6 +354,11 @@ impl Event {
     pub fn from_session_event(event: &mentra::SessionEvent) -> Option<Self> {
         mapping::from_session_event(event)
     }
+}
+
+/// `skip_serializing_if` for a count that is only news when it is not zero.
+fn is_zero(count: &usize) -> bool {
+    *count == 0
 }
 
 #[cfg(test)]
@@ -487,6 +506,8 @@ mod tests {
                     output_tokens: 1_200,
                     cache_read_tokens: 40,
                     cache_creation_tokens: 5,
+                    reasoning_tokens: 300,
+                    thoughts_tokens: 0,
                 }),
             },
         ))

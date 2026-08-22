@@ -28,7 +28,10 @@ pub(super) fn from_session_event(event: &SessionEvent) -> Option<Event> {
         // before the subscription starts, so this would be a duplicate.
         SessionEvent::SessionStarted { .. } => return None,
 
-        SessionEvent::UserMessage { text } => Event::UserMessage { text: text.clone() },
+        SessionEvent::UserMessage { text, image_count } => Event::UserMessage {
+            text: text.clone(),
+            image_count: *image_count,
+        },
         SessionEvent::AssistantTokenDelta { delta, .. } => Event::AssistantDelta {
             text: delta.clone(),
         },
@@ -153,12 +156,16 @@ pub(super) fn from_session_event(event: &SessionEvent) -> Option<Event> {
             output_tokens,
             cache_read_tokens,
             cache_creation_tokens,
+            reasoning_tokens,
+            thoughts_tokens,
         } => Event::Usage {
             agent_id: agent_id.clone(),
             input_tokens: *input_tokens,
             output_tokens: *output_tokens,
             cache_read_tokens: *cache_read_tokens,
             cache_creation_tokens: *cache_creation_tokens,
+            reasoning_tokens: *reasoning_tokens,
+            thoughts_tokens: *thoughts_tokens,
         },
         SessionEvent::Notice { severity, message } => Event::Notice {
             severity: severity_of(*severity),

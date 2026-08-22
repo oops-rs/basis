@@ -57,6 +57,18 @@ pub struct RunUsage {
     pub output_tokens: u64,
     pub cache_read_tokens: u64,
     pub cache_creation_tokens: u64,
+    /// Reasoning the model did *inside* `output_tokens` — the Responses wire
+    /// counts it there, so adding it to the total would count it twice.
+    #[serde(default)]
+    pub reasoning_tokens: u64,
+    /// Thinking the model did *outside* `output_tokens` — Gemini counts its
+    /// thoughts beside the candidates, not in them. Two fields rather than one
+    /// sum because a sum would be wrong for one of the two wires, and a reader
+    /// who wants "how much did it think" adds them; one who wants "what was I
+    /// billed for output" must not. Absent from a record written before the
+    /// split, both read as zero.
+    #[serde(default)]
+    pub thoughts_tokens: u64,
 }
 
 impl RunUsage {
@@ -81,6 +93,8 @@ impl RunUsage {
             output_tokens: self.output_tokens + other.output_tokens,
             cache_read_tokens: self.cache_read_tokens + other.cache_read_tokens,
             cache_creation_tokens: self.cache_creation_tokens + other.cache_creation_tokens,
+            reasoning_tokens: self.reasoning_tokens + other.reasoning_tokens,
+            thoughts_tokens: self.thoughts_tokens + other.thoughts_tokens,
         }
     }
 
@@ -97,6 +111,8 @@ impl RunUsage {
             output_tokens,
             cache_read_tokens,
             cache_creation_tokens,
+            reasoning_tokens,
+            thoughts_tokens,
             ..
         } = event
         else {
@@ -108,6 +124,8 @@ impl RunUsage {
             output_tokens: self.output_tokens + *output_tokens,
             cache_read_tokens: self.cache_read_tokens + *cache_read_tokens,
             cache_creation_tokens: self.cache_creation_tokens + *cache_creation_tokens,
+            reasoning_tokens: self.reasoning_tokens + *reasoning_tokens,
+            thoughts_tokens: self.thoughts_tokens + *thoughts_tokens,
         }
     }
 }
@@ -123,6 +141,8 @@ mod tests {
             output_tokens: output,
             cache_read_tokens: 1,
             cache_creation_tokens: 2,
+            reasoning_tokens: 3,
+            thoughts_tokens: 4,
         }
     }
 
@@ -139,6 +159,8 @@ mod tests {
         assert_eq!(usage.output_tokens, 50);
         assert_eq!(usage.cache_read_tokens, 2);
         assert_eq!(usage.cache_creation_tokens, 4);
+        assert_eq!(usage.reasoning_tokens, 6);
+        assert_eq!(usage.thoughts_tokens, 8);
         assert_eq!(usage.total_tokens(), 300, "the budget counts these two");
     }
 
@@ -147,6 +169,7 @@ mod tests {
         let counted = RunUsage::default().recording(&usage_report(10, 5));
         let after = counted.recording(&mentra::SessionEvent::UserMessage {
             text: "hello".to_string(),
+            image_count: 0,
         });
 
         assert_eq!(after, counted);

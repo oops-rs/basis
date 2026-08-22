@@ -352,7 +352,8 @@ mod tests {
         );
         assert_eq!(
             session_update(&Event::UserMessage {
-                text: "hi".to_string()
+                text: "hi".to_string(),
+                image_count: 0,
             }),
             None,
             "the client sent this; echoing it doubles it"

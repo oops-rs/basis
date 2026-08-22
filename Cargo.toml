@@ -98,3 +98,15 @@ strip = true
 opt-level = "s"
 lto = true
 codegen-units = 1
+
+# **Temporary, and it stays until mentra 0.19.0 / mentra-provider 0.6.0 are
+# published.** Everything basis wired on 2026-08-22 — the chat/completions wire,
+# the post-execution hook, window-relative compaction, `Session::compact`, the
+# per-session persist identifier, the split usage fields — landed in mentra after
+# 0.18.3 went to crates.io. Until the release is out, a standalone checkout of
+# basis does not resolve without these lines and the sibling checkout they
+# name — which is exactly the state this comment exists to make impossible to
+# forget.
+[patch.crates-io]
+mentra = { path = "/Users/wendell/developer/oops-rs/mentra/mentra" }
+mentra-provider = { path = "/Users/wendell/developer/oops-rs/mentra/mentra-provider" }

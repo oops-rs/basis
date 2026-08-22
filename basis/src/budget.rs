@@ -333,6 +333,8 @@ mod tests {
             // down would be enforcing a figure mentra never checks.
             cache_read_tokens: 1_000,
             cache_creation_tokens: 1_000,
+            reasoning_tokens: 1_000,
+            thoughts_tokens: 1_000,
         }
     }
 
