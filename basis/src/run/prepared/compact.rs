@@ -29,7 +29,6 @@
 //! it has to answer permission requests while the turn is blocked on them,
 //! and a summarizing pass asks for nothing.
 
-use mentra::SessionEvent;
 use tokio::sync::broadcast::error::TryRecvError;
 
 use super::{Event, EventSink, PreparedRun, RunError};
@@ -122,8 +121,11 @@ fn drain<S: EventSink>(
 ) -> Result<(), RunError> {
     loop {
         match events.try_recv() {
+            // `from_session_event` is the same mapping a turn's forwarder
+            // uses, so a compaction announced during a turn and one announced
+            // on its own are the same two lines.
             Ok(event) => {
-                if let Some(mapped) = map(&event) {
+                if let Some(mapped) = Event::from_session_event(&event) {
                     sink.emit(mapped)?;
                 }
             }
@@ -132,12 +134,4 @@ fn drain<S: EventSink>(
             }
         }
     }
-}
-
-/// The basis event one session event becomes, if it becomes one.
-///
-/// The same mapping a turn's forwarder uses, so a compaction announced during
-/// a turn and one announced on its own are the same two lines.
-fn map(event: &SessionEvent) -> Option<Event> {
-    Event::from_session_event(event)
 }
