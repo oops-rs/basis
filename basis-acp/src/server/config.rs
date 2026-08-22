@@ -76,6 +76,33 @@ pub trait SessionSource: Send + Sync + 'static {
         let _ = cwd;
         Ok(Vec::new())
     }
+
+    /// Whether this source can remove a conversation for good.
+    ///
+    /// Separate from [`lists_sessions`](Self::lists_sessions) because the two
+    /// are separate promises: a source can perfectly well enumerate a store it
+    /// has no authority to write to, and `session/delete` is advertised only
+    /// on the strength of this one. The rule is the same either way — a
+    /// capability that answers wrongly is worse than one never claimed.
+    fn deletes_sessions(&self) -> bool {
+        false
+    }
+
+    /// Removes the conversation persisted under `agent_id`, for
+    /// `session/delete`.
+    ///
+    /// No `cwd`, unlike [`create`](Self::create) and
+    /// [`list_sessions`](Self::list_sessions), because `session/delete` sends
+    /// none — and needs to send none: a store is indexed by conversation, so
+    /// the id is the whole of what identifies one.
+    ///
+    /// Only called when [`deletes_sessions`](Self::deletes_sessions) is true.
+    /// Deleting one that is not there must succeed: a client deletes by an id
+    /// it read from a list, and "it is gone" is the outcome either way.
+    async fn delete(&self, agent_id: &str) -> Result<(), RunError> {
+        let _ = agent_id;
+        Err(RunError::NoSuchSession)
+    }
 }
 
 /// How a served connection is configured.

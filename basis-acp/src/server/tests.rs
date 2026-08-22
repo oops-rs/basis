@@ -14,14 +14,14 @@ use std::{
 use agent_client_protocol::schema::{
     ProtocolVersion,
     v1::{
-        ContentBlock, ErrorCode, ImageContent, InitializeRequest, ListSessionsRequest,
-        ResourceLink, SessionCapabilities, StopReason, TextContent,
+        ContentBlock, DeleteSessionRequest, ErrorCode, ImageContent, InitializeRequest,
+        ListSessionsRequest, ResourceLink, SessionCapabilities, StopReason, TextContent,
     },
 };
 
 use super::config::{ServeConfig, SessionSource};
 use super::initialize;
-use super::lifecycle::{list_sessions, session_info, setup_failed};
+use super::lifecycle::{delete_session, list_sessions, session_info, setup_failed};
 use super::turn::{prompt_parts, prompt_text, stop_reason, usage_update};
 use super::workspaces::{ConfiguredSource, WorkspaceKey};
 use crate::mode::ApprovalMode;
@@ -78,9 +78,33 @@ fn initialize_advertises_only_the_session_methods_lan_answers() {
         "the default source reads mentra's store, so it can enumerate"
     );
     assert!(
-        capabilities.delete.is_none(),
-        "mentra's store has no delete; claiming one would promise a deletion that undoes itself"
+        capabilities.delete.is_some(),
+        "the default source can remove a row, so `session/delete` is real work"
     );
+}
+
+#[test]
+fn a_source_that_cannot_delete_does_not_claim_that_either() {
+    // The two capabilities are separate promises: a source can perfectly well
+    // enumerate a store it has no authority to write to.
+    assert!(
+        capabilities(&ServeConfig::with_source(Ephemeral))
+            .delete
+            .is_none()
+    );
+}
+
+#[tokio::test]
+async fn a_source_that_cannot_delete_refuses_the_call_it_never_claimed() {
+    let error = delete_session(
+        &ServeConfig::with_source(Ephemeral),
+        &crate::session::SessionRegistry::new(),
+        DeleteSessionRequest::new("agent-1"),
+    )
+    .await
+    .expect_err("a source that cannot delete must not report a deletion");
+
+    assert_eq!(error.code, ErrorCode::MethodNotFound);
 }
 
 #[test]

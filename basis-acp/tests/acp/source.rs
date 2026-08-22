@@ -111,6 +111,16 @@ impl SessionSource for MockSource {
         true
     }
 
+    fn deletes_sessions(&self) -> bool {
+        true
+    }
+
+    /// Removes from the mock's own store, the same one `list_sessions` reads
+    /// and `resume` opens — so a deletion here is observable both ways.
+    async fn delete(&self, agent_id: &str) -> Result<(), RunError> {
+        Ok(self.mock.runtime().delete_agent(agent_id)?)
+    }
+
     /// Enumerates the mock's own store.
     ///
     /// Scoped by the mock's runtime identifier rather than by `cwd`: what is

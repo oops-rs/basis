@@ -36,7 +36,7 @@
 //! # What is not registered, and why
 //!
 //! An unregistered method answers `-32601`, which is an honest "basis cannot do
-//! that". Two are left that way deliberately:
+//! that". One is left that way deliberately:
 //!
 //! - **`authenticate`** — basis reads its credential from the environment
 //!   (`ANTHROPIC_API_KEY` and the rest, see [`provider`](basis::provider)).
@@ -44,16 +44,18 @@
 //!   to advertise. A session opened without a credential fails with ACP's
 //!   `auth_required` instead, naming the variable to set — which is the part a
 //!   client can actually act on.
-//! - **`session/delete`** — mentra's `AgentStore` has no delete. basis could
-//!   forget a conversation in memory, but `session/delete` removes it from
-//!   `session/list`, and the next call would list it again from the store. A
-//!   deletion that does not delete is the one answer worse than `-32601`.
 //!
-//! `session/list` is the third, conditionally: it is registered whatever the
-//! source is — a builder whose type changes with each handler has no chain to
-//! skip one in — and answers `-32601` itself when the [`SessionSource`] cannot
-//! enumerate, which is the answer `initialize` promised by not advertising the
-//! capability. See [`lists_sessions`](SessionSource::lists_sessions).
+//! `session/list` and `session/delete` are conditional rather than absent: both
+//! are registered whatever the source is — a builder whose type changes with
+//! each handler has no chain to skip one in — and each answers `-32601` itself
+//! when the [`SessionSource`] cannot do it, which is the answer `initialize`
+//! promised by not advertising the capability. See
+//! [`lists_sessions`](SessionSource::lists_sessions) and
+//! [`deletes_sessions`](SessionSource::deletes_sessions). `session/delete` was
+//! unregistered outright until mentra grew a store delete: forgetting a
+//! conversation in memory while the store handed it back on the next
+//! `session/list` would have been a deletion that does not delete, which is the
+//! one answer worse than `-32601`.
 
 mod config;
 mod lifecycle;
@@ -66,12 +68,13 @@ use agent_client_protocol::{
     Agent, Client, ConnectionTo, Handled,
     schema::v1::{
         AgentCapabilities, AvailableCommand, AvailableCommandsUpdate, CancelNotification,
-        CloseSessionRequest, Error, InitializeRequest, InitializeResponse, ListSessionsRequest,
-        LoadSessionRequest, LoadSessionResponse, McpCapabilities, NewSessionRequest,
-        PromptCapabilities, PromptRequest, ResumeSessionRequest, ResumeSessionResponse,
-        SessionCapabilities, SessionCloseCapabilities, SessionId, SessionListCapabilities,
-        SessionNotification, SessionResumeCapabilities, SessionUpdate,
-        SetSessionConfigOptionRequest, SetSessionModeRequest,
+        CloseSessionRequest, DeleteSessionRequest, Error, InitializeRequest, InitializeResponse,
+        ListSessionsRequest, LoadSessionRequest, LoadSessionResponse, McpCapabilities,
+        NewSessionRequest, PromptCapabilities, PromptRequest, ResumeSessionRequest,
+        ResumeSessionResponse, SessionCapabilities, SessionCloseCapabilities,
+        SessionDeleteCapabilities, SessionId, SessionListCapabilities, SessionNotification,
+        SessionResumeCapabilities, SessionUpdate, SetSessionConfigOptionRequest,
+        SetSessionModeRequest,
     },
 };
 
@@ -261,6 +264,30 @@ where
         .on_receive_request(
             {
                 let sessions = sessions.clone();
+                let config = config.clone();
+                async move |request: DeleteSessionRequest,
+                            responder,
+                            connection: ConnectionTo<Client>| {
+                    let sessions = sessions.clone();
+                    let config = config.clone();
+
+                    // Spawn: deleting waits out a turn in flight by taking the
+                    // lock that turn is holding, and that turn is waiting for
+                    // the client on this loop.
+                    connection.spawn(async move {
+                        let deleted = lifecycle::delete_session(&config, &sessions, request).await;
+
+                        responder.respond_with_result(deleted)
+                    })?;
+
+                    Ok(Handled::Yes)
+                }
+            },
+            agent_client_protocol::on_receive_request!(),
+        )
+        .on_receive_request(
+            {
+                let sessions = sessions.clone();
                 async move |request: PromptRequest, responder, connection: ConnectionTo<Client>| {
                     let sessions = sessions.clone();
                     let spawned = connection.clone();
@@ -331,6 +358,15 @@ fn initialize(request: &InitializeRequest, config: &ServeConfig) -> InitializeRe
                                 .source
                                 .lists_sessions()
                                 .then(SessionListCapabilities::new),
+                        )
+                        // And only when it can actually remove one. A source
+                        // that cannot is not asked; a client that asks anyway
+                        // gets the -32601 this omission promised.
+                        .delete(
+                            config
+                                .source
+                                .deletes_sessions()
+                                .then(SessionDeleteCapabilities::new),
                         ),
                 ),
         )

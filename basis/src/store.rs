@@ -214,15 +214,56 @@ fn by_recency(sessions: &mut [PersistedSession]) {
     });
 }
 
-/// A runtime that exists only to read the store.
+/// Removes a conversation from the default directory's store for good.
 ///
-/// Reading a persisted agent needs a `Runtime`, and `RuntimeBuilder::build`
-/// refuses to produce one with an empty provider registry — so a provider is
-/// registered to satisfy the builder, with a placeholder key. Nothing here
-/// resolves a model or reaches the network: listing reads a SQLite table, and
-/// the runtime is dropped as soon as it has. Requiring a real credential to
-/// enumerate local rows would make `session/list` fail for a reason that has
-/// nothing to do with listing.
+/// The writing counterpart to [`list`], and the second half of what a client
+/// with a session list can do with it: pick one to resume, or decide it is
+/// finished with. mentra removes the record *and* its memory, because a record
+/// without its memory is a row `resume` refuses with "missing persisted
+/// memory" — a listing entry that cannot be opened.
+///
+/// Deleting a conversation that is not there is **not** an error. A caller
+/// deleting by an id it read from a list is racing anyone else holding the
+/// same store, and "it is gone" is the outcome both of them asked for.
+///
+/// Keyed by the conversation, not by a workspace: mentra's store is indexed by
+/// agent id, so this does not check that the id belongs anywhere in
+/// particular — the same ruling [`Workspace::resume`](crate::Workspace::resume)
+/// makes for the same reason. A caller that means "one of mine" takes the id
+/// from [`list`] for its own workspace, which is where a client got it anyway.
+///
+/// **A live conversation is not stopped by this.** mentra deletes rows; an
+/// agent still in memory keeps running and writes its row back on its next
+/// persist. A caller holding a [`PreparedRun`](crate::PreparedRun) on this id
+/// must drop it first, or the row returns.
+pub fn forget(agent_id: &str) -> Result<(), RunError> {
+    forget_in(&default_directory(), agent_id)
+}
+
+/// The same, for conversations kept somewhere of the caller's choosing.
+///
+/// `dir` is what was passed to
+/// [`with_store_dir`](crate::RuntimeBuilder::with_store_dir), exactly as for
+/// [`list_in`]: a conversation is deleted from the file it was listed out of,
+/// and nothing here can guess which one a caller chose.
+pub fn forget_in(dir: &Path, agent_id: &str) -> Result<(), RunError> {
+    // The identifier tags rows on write and filters them on `list_agents_by_
+    // runtime`; deletion is keyed by id alone, so what is passed here cannot
+    // change which conversation goes. It is still derived rather than invented,
+    // so nothing in this module opens a store under a tag no workspace uses.
+    Ok(enumerating_runtime(&runtime_identifier(dir), dir)?.delete_agent(agent_id)?)
+}
+
+/// A runtime that exists only to reach the store.
+///
+/// Reading or removing a persisted agent needs a `Runtime`, and
+/// `RuntimeBuilder::build` refuses to produce one with an empty provider
+/// registry — so a provider is registered to satisfy the builder, with a
+/// placeholder key. Nothing here resolves a model or reaches the network:
+/// listing reads a SQLite table and deleting writes one, and the runtime is
+/// dropped as soon as it has. Requiring a real credential to touch local rows
+/// would make `session/list` and `session/delete` fail for a reason that has
+/// nothing to do with either.
 ///
 /// The store is built from `dir` rather than left at mentra's default, so that
 /// this and [`RuntimeBuilder::with_store_dir`](crate::RuntimeBuilder::with_store_dir)

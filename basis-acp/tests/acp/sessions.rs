@@ -14,8 +14,8 @@
 use std::{path::PathBuf, sync::Arc};
 
 use agent_client_protocol::schema::v1::{
-    CloseSessionRequest, LoadSessionRequest, NewSessionRequest, ResumeSessionRequest,
-    SetSessionModeRequest,
+    CloseSessionRequest, DeleteSessionRequest, ListSessionsRequest, LoadSessionRequest,
+    NewSessionRequest, ResumeSessionRequest, SetSessionModeRequest,
 };
 use mentra::{RuntimePolicy, test::MockRuntime};
 
@@ -199,4 +199,100 @@ async fn a_closed_session_is_forgotten() {
         result.is_err(),
         "closing frees the session, so prompting it afterwards must fail"
     );
+}
+
+/// The difference between closing and deleting, stated as the two things a
+/// client can observe: a closed conversation is still in `session/list` and
+/// still resumable, and a deleted one is neither.
+///
+/// This is the test the capability existed for. basis answered `-32601` here
+/// until mentra's store grew a delete, because forgetting a session in memory
+/// while the next `session/list` handed it straight back would have been a
+/// deletion that undoes itself.
+#[tokio::test]
+async fn a_deleted_session_is_gone_from_the_list_and_cannot_be_resumed() {
+    let workspace = workspace();
+    let mock = Arc::new(text_mock(&["remembered"]));
+
+    let (outcome, _observed) = connected(
+        MockSource::new(&mock, &workspace),
+        None,
+        |connection| async move {
+            let kept = open(&connection).await?;
+            let doomed = open(&connection).await?;
+
+            connection
+                .send_request(DeleteSessionRequest::new(doomed.clone()))
+                .block_task()
+                .await?;
+
+            let listed = connection
+                .send_request(ListSessionsRequest::new().cwd(PathBuf::from("/")))
+                .block_task()
+                .await?;
+
+            let resumed = connection
+                .send_request(ResumeSessionRequest::new(
+                    doomed.clone(),
+                    PathBuf::from("/"),
+                ))
+                .block_task()
+                .await;
+
+            Ok((kept, doomed, listed, resumed.is_err()))
+        },
+    )
+    .await;
+
+    let (kept, doomed, listed, resume_failed) = outcome;
+
+    let ids: Vec<String> = listed
+        .sessions
+        .iter()
+        .map(|info| info.session_id.0.to_string())
+        .collect();
+    assert!(
+        ids.contains(&kept.0.to_string()),
+        "deleting one conversation must not touch another: {ids:?}"
+    );
+    assert!(
+        !ids.contains(&doomed.0.to_string()),
+        "a deleted conversation must not be offered again: {ids:?}"
+    );
+    assert!(
+        resume_failed,
+        "and there must be nothing left behind it to pick up"
+    );
+}
+
+/// Deleting the same conversation twice is not an error the second time.
+///
+/// A client deletes by an id it read from a list, and is racing anyone else
+/// holding that store. "It is gone" is the outcome both of them asked for, and
+/// an error here would make a successful delete look like a failed one.
+#[tokio::test]
+async fn deleting_a_conversation_that_is_already_gone_succeeds() {
+    let workspace = workspace();
+    let mock = Arc::new(text_mock(&["unused"]));
+
+    let (result, _observed) = connected(
+        MockSource::new(&mock, &workspace),
+        None,
+        |connection| async move {
+            let session = open(&connection).await?;
+
+            connection
+                .send_request(DeleteSessionRequest::new(session.clone()))
+                .block_task()
+                .await?;
+
+            Ok(connection
+                .send_request(DeleteSessionRequest::new(session))
+                .block_task()
+                .await)
+        },
+    )
+    .await;
+
+    assert!(result.is_ok(), "{result:?}");
 }

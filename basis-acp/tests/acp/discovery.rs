@@ -106,14 +106,14 @@ async fn the_advertised_session_methods_are_the_ones_lan_answers() {
     )
     .await;
 
-    // This mock can enumerate, so `list` is claimed here. The source that
-    // cannot, and therefore must not claim it, is a unit test — building one
-    // is cheaper than serving one.
+    // This mock can enumerate and can delete, so both are claimed here. The
+    // source that can do neither, and therefore must claim neither, is a unit
+    // test — building one is cheaper than serving one.
     assert!(capabilities.list.is_some());
     assert!(capabilities.close.is_some());
     assert!(capabilities.resume.is_some());
     assert!(
-        capabilities.delete.is_none(),
-        "mentra's store cannot delete, so basis must not claim it can"
+        capabilities.delete.is_some(),
+        "a source whose store can remove a row must say so, or no client will ask"
     );
 }

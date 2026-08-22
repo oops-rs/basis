@@ -179,6 +179,60 @@ async fn renaming_a_session_is_what_a_later_listing_reports() {
     assert_eq!(named.name, "the parser fix");
 }
 
+#[tokio::test]
+async fn a_forgotten_conversation_is_neither_listed_nor_resumable() {
+    // Both halves, because either alone would be a deletion that did not
+    // delete: a row `list` still offers is one a person can pick, and a row
+    // `resume` still opens is one that was never gone.
+    let dir = tempfile::tempdir().expect("tempdir");
+    let store_dir = tempfile::tempdir().expect("tempdir");
+
+    let workspace = offline(dir.path())
+        .with_runtime(closed_port(store_dir.path()))
+        .open()
+        .await
+        .expect("opens");
+
+    let kept = workspace
+        .prepare("keep me")
+        .expect("mints")
+        .agent_id()
+        .to_string();
+    // Scoped: a live run holds the agent, and mentra's delete removes rows
+    // rather than stopping anything in memory — a run still held would write
+    // its row back on its next persist.
+    let deleted = {
+        let run = workspace.prepare("forget me").expect("mints");
+        run.agent_id().to_string()
+    };
+
+    store::forget_in(store_dir.path(), &deleted).expect("deletes");
+
+    assert_eq!(
+        store::list_in(store_dir.path(), dir.path())
+            .expect("lists")
+            .into_iter()
+            .map(|session| session.agent_id)
+            .collect::<Vec<_>>(),
+        vec![kept],
+        "the one that was forgotten must be gone and the other must not"
+    );
+    assert!(
+        workspace.resume(&deleted, "again").is_err(),
+        "and there is nothing left to pick back up"
+    );
+}
+
+#[tokio::test]
+async fn forgetting_a_conversation_that_was_never_there_is_not_an_error() {
+    // A caller deleting by an id it read from a list is racing anyone else
+    // holding the same store, and "it is gone" is the outcome both wanted.
+    let store_dir = tempfile::tempdir().expect("tempdir");
+
+    store::forget_in(store_dir.path(), "agent-nobody-ever-minted")
+        .expect("deleting nothing deletes nothing");
+}
+
 // ---------------------------------------------------------------------------
 // Harness
 // ---------------------------------------------------------------------------
