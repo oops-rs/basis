@@ -24,7 +24,11 @@ mod sink;
 mod turn;
 mod usage;
 
-use std::{path::PathBuf, sync::Arc, time::Duration};
+use std::{
+    path::{Path, PathBuf},
+    sync::Arc,
+    time::Duration,
+};
 
 use mentra::{BuiltinProvider, ModelSelector, Session};
 use thiserror::Error;
@@ -700,34 +704,43 @@ async fn mint_carrying_workspace(
 /// its own runtime — custom tools, its own store, a provider basis does not
 /// know — still gets basis's context discovery and event stream.
 ///
-/// The prompt in `config` may be empty. Once a session outlives a turn, a
-/// conversation with nothing said yet is a real state — it is what ACP's
-/// `session/new` opens — so the check belongs where a prompt is actually sent,
-/// which is [`PreparedRun::execute`] and [`PreparedRun::send`].
+/// The inputs are exactly what this path can honor. `spec` brings the prompt
+/// and the bounds; its prompt may be empty, because once a session outlives a
+/// turn a conversation with nothing said yet is a real state — it is what
+/// ACP's `session/new` opens — so the check belongs where a prompt is actually
+/// sent, which is [`PreparedRun::execute`] and [`PreparedRun::send`]. Its
+/// `session_name` and `effort` are *not* read, honestly: the session in hand
+/// was already minted, named and set by the caller. `context` says where
+/// discovery looks; templates are discovered with the default configuration,
+/// there being no caller that has ever wanted otherwise on this path.
 ///
 /// This is the one path that does not go through
 /// [`Workspace`], because there is no runtime for basis to
 /// build: the caller brought one. It still discovers what it can without
-/// touching that runtime.
+/// touching that runtime — skills and MCP registration stay the caller's, who
+/// owns the runtime they would register on.
 pub fn prepare_with_session(
     session: Session,
-    config: &RunConfig,
+    workspace: &Path,
+    spec: impl Into<RunSpec>,
+    context: &ContextConfig,
     provider: impl Into<String>,
     model: impl Into<String>,
 ) -> Result<PreparedRun, RunError> {
-    let context = WorkspaceContext::discover_with(&config.workspace, &config.context)?;
+    let spec = spec.into();
+    let discovered = WorkspaceContext::discover_with(workspace, context)?;
     // Unlike skills, templates are registered on nothing — so basis can discover
     // them here without touching a runtime it does not own.
-    let (templates_dirs, templates) = load_templates(&config.workspace, &config.templates)?;
+    let (templates_dirs, templates) = load_templates(workspace, &TemplatesConfig::default())?;
 
     Ok(PreparedRun::new(
         session,
         RunContext {
-            workspace: resolved_workspace(&config.workspace, &context),
-            prompt: config.prompt.clone(),
+            workspace: resolved_workspace(workspace, &discovered),
+            prompt: spec.prompt.clone(),
             provider: provider.into(),
             model: model.into(),
-            context,
+            context: discovered,
             // The caller owns the runtime, so it owns skill and MCP
             // registration too.
             skills_dirs: Vec::new(),
@@ -738,7 +751,7 @@ pub fn prepare_with_session(
             mcp_servers: Vec::new(),
         },
     )
-    .with_bounds(config.turn_options()))
+    .with_bounds(spec.turn_options()))
 }
 
 #[cfg(test)]

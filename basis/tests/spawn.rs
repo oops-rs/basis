@@ -27,8 +27,8 @@ use std::{
 use async_trait::async_trait;
 use basis::{
     AllowAll, ApprovalAnswer, ApprovalDecision, ApprovalRequest, Approver, Bound, CollectingSink,
-    EntryKind, Event, RunConfig, RunUsage, SpawnTool, TranscriptEntry, TurnOptions,
-    approval::ApprovalGate, run::prepare_with_session, tools::SPAWN,
+    EntryKind, Event, RunUsage, SpawnTool, TranscriptEntry, TurnOptions, approval::ApprovalGate,
+    run::prepare_with_session, tools::SPAWN,
 };
 use mentra::{
     BuiltinProvider, ContentBlock, ModelInfo, Role, Runtime, RuntimePolicy, Session, TokenUsage,
@@ -321,12 +321,12 @@ fn session(runtime: &Runtime, workspace: &Path, model: ModelInfo) -> Session {
         .expect("session")
 }
 
-fn config(workspace: &Path) -> RunConfig {
-    RunConfig::new(workspace, "do the thing").with_context(basis::ContextConfig {
+fn context() -> basis::ContextConfig {
+    basis::ContextConfig {
         file_name: "AGENTS.md".to_string(),
         global_dir: None,
         walk_parents: false,
-    })
+    }
 }
 
 /// Everything the scripted provider was sent, in order.
@@ -438,9 +438,15 @@ async fn drive<A: Approver>(workspace: &Path, script: Script, approver: A) -> Ru
     }
 
     let seen = Arc::new(Mutex::new(Vec::new()));
-    let mut prepared =
-        prepare_with_session(session, &config(workspace), "openai", "scripted-model")
-            .expect("prepared");
+    let mut prepared = prepare_with_session(
+        session,
+        workspace,
+        "do the thing",
+        &context(),
+        "openai",
+        "scripted-model",
+    )
+    .expect("prepared");
 
     let report = tokio::time::timeout(
         NOT_STUCK,

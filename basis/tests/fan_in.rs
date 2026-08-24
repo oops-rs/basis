@@ -19,7 +19,7 @@
 use std::{path::Path, time::Duration};
 
 use basis::{
-    ContextConfig, Event, EventFanIn, PreparedRun, RunConfig, RunOutcome, TaggedEvent,
+    ContextConfig, Event, EventFanIn, PreparedRun, RunOutcome, TaggedEvent,
     run::prepare_with_session,
 };
 use mentra::{RuntimePolicy, test::MockRuntime};
@@ -37,12 +37,12 @@ fn workspace_with_context(body: &str) -> tempfile::TempDir {
 
 /// Config pinned to the given workspace, with the parent walk and the global
 /// file switched off so a real `AGENTS.md` above the temp dir cannot leak in.
-fn config(workspace: &Path, prompt: &str) -> RunConfig {
-    RunConfig::new(workspace, prompt).with_context(ContextConfig {
+fn context() -> ContextConfig {
+    ContextConfig {
         file_name: "AGENTS.md".to_string(),
         global_dir: None,
         walk_parents: false,
-    })
+    }
 }
 
 /// A run of its own, with its own scripted runtime.
@@ -62,7 +62,7 @@ fn scripted_run(workspace: &Path, says: &[&str]) -> (MockRuntime, PreparedRun) {
         .runtime()
         .create_session("test", mock.model())
         .expect("session");
-    let run = prepare_with_session(session, &config(workspace, "go"), "openai", "mock-model")
+    let run = prepare_with_session(session, workspace, "go", &context(), "openai", "mock-model")
         .expect("prepared");
 
     (mock, run)

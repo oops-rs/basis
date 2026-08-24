@@ -9,11 +9,7 @@
 //!
 //! Scripted throughout: no provider, no network, no cost.
 
-use std::path::Path;
-
-use basis::{
-    AllowAll, BranchError, CollectingSink, EntryKind, Event, RunConfig, run::prepare_with_session,
-};
+use basis::{AllowAll, BranchError, CollectingSink, EntryKind, Event, run::prepare_with_session};
 use mentra::{
     Role, RuntimePolicy,
     test::{MockRuntime, MockToolCall},
@@ -27,12 +23,12 @@ fn workspace() -> tempfile::TempDir {
 
 /// Pinned to the workspace, so an `AGENTS.md` above the temp dir cannot leak
 /// in and change what the transcript contains.
-fn config(workspace: &Path, prompt: &str) -> RunConfig {
-    RunConfig::new(workspace, prompt).with_context(basis::ContextConfig {
+fn context() -> basis::ContextConfig {
+    basis::ContextConfig {
         file_name: "AGENTS.md".to_string(),
         global_dir: None,
         walk_parents: false,
-    })
+    }
 }
 
 fn mock(replies: &[&str]) -> MockRuntime {
@@ -67,9 +63,15 @@ async fn the_transcript_is_the_active_path_oldest_first() {
         .create_session("test", mock.model())
         .expect("session");
 
-    let config = config(workspace.path(), "hello");
-    let mut prepared =
-        prepare_with_session(session, &config, "openai", "mock-model").expect("prepared");
+    let mut prepared = prepare_with_session(
+        session,
+        workspace.path(),
+        "hello",
+        &context(),
+        "openai",
+        "mock-model",
+    )
+    .expect("prepared");
 
     assert!(
         prepared.transcript().is_empty() && prepared.leaf().is_none(),
@@ -114,9 +116,15 @@ async fn branching_back_takes_the_abandoned_exchange_out_of_the_next_request() {
         .create_session("test", mock.model())
         .expect("session");
 
-    let config = config(workspace.path(), "first");
-    let mut prepared =
-        prepare_with_session(session, &config, "openai", "mock-model").expect("prepared");
+    let mut prepared = prepare_with_session(
+        session,
+        workspace.path(),
+        "first",
+        &context(),
+        "openai",
+        "mock-model",
+    )
+    .expect("prepared");
 
     prepared
         .execute(CollectingSink::new())
@@ -169,9 +177,15 @@ async fn the_abandoned_path_stays_reachable() {
         .create_session("test", mock.model())
         .expect("session");
 
-    let config = config(workspace.path(), "first");
-    let mut prepared =
-        prepare_with_session(session, &config, "openai", "mock-model").expect("prepared");
+    let mut prepared = prepare_with_session(
+        session,
+        workspace.path(),
+        "first",
+        &context(),
+        "openai",
+        "mock-model",
+    )
+    .expect("prepared");
 
     prepared
         .execute(CollectingSink::new())
@@ -228,9 +242,15 @@ async fn an_entry_this_conversation_does_not_have_is_refused() {
         .create_session("test", mock.model())
         .expect("session");
 
-    let config = config(workspace.path(), "first");
-    let mut prepared =
-        prepare_with_session(session, &config, "openai", "mock-model").expect("prepared");
+    let mut prepared = prepare_with_session(
+        session,
+        workspace.path(),
+        "first",
+        &context(),
+        "openai",
+        "mock-model",
+    )
+    .expect("prepared");
 
     prepared
         .execute(CollectingSink::new())
@@ -266,9 +286,15 @@ async fn an_abandoned_entry_is_offered_and_accepted() {
         .create_session("test", mock.model())
         .expect("session");
 
-    let config = config(workspace.path(), "first");
-    let mut prepared =
-        prepare_with_session(session, &config, "openai", "mock-model").expect("prepared");
+    let mut prepared = prepare_with_session(
+        session,
+        workspace.path(),
+        "first",
+        &context(),
+        "openai",
+        "mock-model",
+    )
+    .expect("prepared");
 
     prepared
         .execute(CollectingSink::new())
@@ -308,9 +334,15 @@ async fn a_branch_announces_itself_on_the_session_stream() {
         .create_session("test", mock.model())
         .expect("session");
 
-    let config = config(workspace.path(), "first");
-    let mut prepared =
-        prepare_with_session(session, &config, "openai", "mock-model").expect("prepared");
+    let mut prepared = prepare_with_session(
+        session,
+        workspace.path(),
+        "first",
+        &context(),
+        "openai",
+        "mock-model",
+    )
+    .expect("prepared");
 
     prepared
         .execute(CollectingSink::new())
@@ -371,9 +403,15 @@ async fn a_tool_round_is_one_entry_per_exchange() {
         )
         .expect("session");
 
-    let config = config(workspace.path(), "list the files");
-    let mut prepared =
-        prepare_with_session(session, &config, "openai", "mock-model").expect("prepared");
+    let mut prepared = prepare_with_session(
+        session,
+        workspace.path(),
+        "list the files",
+        &context(),
+        "openai",
+        "mock-model",
+    )
+    .expect("prepared");
 
     prepared
         .execute(CollectingSink::new())
@@ -407,9 +445,15 @@ async fn a_conversation_can_return_to_an_abandoned_branch() {
         .create_session("test", mock.model())
         .expect("session");
 
-    let config = config(workspace.path(), "first");
-    let mut prepared =
-        prepare_with_session(session, &config, "openai", "mock-model").expect("prepared");
+    let mut prepared = prepare_with_session(
+        session,
+        workspace.path(),
+        "first",
+        &context(),
+        "openai",
+        "mock-model",
+    )
+    .expect("prepared");
 
     prepared
         .execute(CollectingSink::new())

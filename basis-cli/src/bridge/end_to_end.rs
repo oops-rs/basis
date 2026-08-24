@@ -24,7 +24,7 @@ use agent_client_protocol::{
         },
     },
 };
-use basis::{PreparedRun, RunConfig, RunError, run::prepare_with_session};
+use basis::{PreparedRun, RunError, run::prepare_with_session};
 use basis_acp::{ServeConfig, SessionSource};
 use mentra::{
     RuntimePolicy,
@@ -77,13 +77,20 @@ impl SessionSource for MockSource {
             )
             .expect("session");
 
-        let config = RunConfig::new(&self.workspace, "").with_context(basis::ContextConfig {
+        let context = basis::ContextConfig {
             file_name: "AGENTS.md".to_string(),
             global_dir: None,
             walk_parents: false,
-        });
+        };
 
-        prepare_with_session(session, &config, "openai", "mock-model")
+        prepare_with_session(
+            session,
+            &self.workspace,
+            "",
+            &context,
+            "openai",
+            "mock-model",
+        )
     }
 }
 

@@ -25,8 +25,7 @@ use std::{
 
 use async_trait::async_trait;
 use basis::{
-    Bound, CollectingSink, RunConfig, TurnOptions, approval::ApprovalGate,
-    run::prepare_with_session,
+    Bound, CollectingSink, TurnOptions, approval::ApprovalGate, run::prepare_with_session,
 };
 use mentra::{
     BuiltinProvider, ContentBlock, ModelInfo, Role, Runtime, RuntimePolicy, Session, TokenUsage,
@@ -154,12 +153,12 @@ fn workspace() -> tempfile::TempDir {
     dir
 }
 
-fn config(workspace: &Path) -> RunConfig {
-    RunConfig::new(workspace, "make a file").with_context(basis::ContextConfig {
+fn context() -> basis::ContextConfig {
+    basis::ContextConfig {
         file_name: "AGENTS.md".to_string(),
         global_dir: None,
         walk_parents: false,
-    })
+    }
 }
 
 #[tokio::test]
@@ -175,7 +174,9 @@ async fn a_run_stopped_by_its_token_budget_names_the_budget() {
     let (runtime, model, rounds) = scripted_write(dir.path());
     let mut prepared = prepare_with_session(
         session(&runtime, dir.path(), model),
-        &config(dir.path()),
+        dir.path(),
+        "make a file",
+        &context(),
         "openai",
         "scripted-model",
     )
@@ -236,7 +237,9 @@ async fn a_run_that_finishes_inside_its_budget_names_no_bound() {
     let (runtime, model, rounds) = scripted_write(dir.path());
     let mut prepared = prepare_with_session(
         session(&runtime, dir.path(), model),
-        &config(dir.path()),
+        dir.path(),
+        "make a file",
+        &context(),
         "openai",
         "scripted-model",
     )
@@ -275,7 +278,9 @@ async fn a_shared_allowance_drawn_dry_stops_the_run_the_same_way() {
     let (runtime, model, _rounds) = scripted_write(dir.path());
     let mut prepared = prepare_with_session(
         session(&runtime, dir.path(), model),
-        &config(dir.path()),
+        dir.path(),
+        "make a file",
+        &context(),
         "openai",
         "scripted-model",
     )

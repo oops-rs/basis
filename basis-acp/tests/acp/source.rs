@@ -9,8 +9,7 @@
 use std::{path::PathBuf, sync::Arc};
 
 use basis::{
-    PreparedRun, RunConfig, RunError, TurnOptions, approval::ApprovalGate,
-    run::prepare_with_session,
+    PreparedRun, RunError, TurnOptions, approval::ApprovalGate, run::prepare_with_session,
 };
 use basis_acp::SessionSource;
 use mentra::{
@@ -53,12 +52,12 @@ impl MockSource {
 
     /// The workspace is the temp dir rather than the client's cwd: the
     /// scripted runtime is what is under test, not path discovery.
-    fn config(&self) -> RunConfig {
-        RunConfig::new(&self.workspace, "").with_context(basis::ContextConfig {
+    fn context(&self) -> basis::ContextConfig {
+        basis::ContextConfig {
             file_name: "AGENTS.md".to_string(),
             global_dir: None,
             walk_parents: false,
-        })
+        }
     }
 }
 
@@ -85,10 +84,15 @@ impl SessionSource for MockSource {
             )
             .expect("session");
 
-        Ok(
-            prepare_with_session(session, &self.config(), "openai", "mock-model")?
-                .with_bounds(self.bounds.clone()),
-        )
+        Ok(prepare_with_session(
+            session,
+            &self.workspace,
+            "",
+            &self.context(),
+            "openai",
+            "mock-model",
+        )?
+        .with_bounds(self.bounds.clone()))
     }
 
     async fn resume(
@@ -101,10 +105,15 @@ impl SessionSource for MockSource {
         // second process would perform — which is what `session/load` is for.
         let session = self.mock.runtime().resume_session(agent_id)?;
 
-        Ok(
-            prepare_with_session(session, &self.config(), "openai", "mock-model")?
-                .with_bounds(self.bounds.clone()),
-        )
+        Ok(prepare_with_session(
+            session,
+            &self.workspace,
+            "",
+            &self.context(),
+            "openai",
+            "mock-model",
+        )?
+        .with_bounds(self.bounds.clone()))
     }
 
     fn lists_sessions(&self) -> bool {

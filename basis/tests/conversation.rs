@@ -11,11 +11,7 @@
 //! `MockRuntime::recorded_requests`, so a regression that quietly starts a fresh
 //! conversation fails here rather than looking fine.
 
-use std::path::Path;
-
-use basis::{
-    AllowAll, CollectingSink, Event, RunConfig, RunOutcome, TurnOptions, run::prepare_with_session,
-};
+use basis::{AllowAll, CollectingSink, Event, RunOutcome, TurnOptions, run::prepare_with_session};
 use mentra::{
     Role, RuntimePolicy,
     test::{MockRuntime, MockToolCall},
@@ -29,12 +25,12 @@ fn workspace() -> tempfile::TempDir {
 
 /// Pinned to the workspace, with the parent walk and global file off so an
 /// `AGENTS.md` above the temp dir cannot leak in.
-fn config(workspace: &Path, prompt: &str) -> RunConfig {
-    RunConfig::new(workspace, prompt).with_context(basis::ContextConfig {
+fn context() -> basis::ContextConfig {
+    basis::ContextConfig {
         file_name: "AGENTS.md".to_string(),
         global_dir: None,
         walk_parents: false,
-    })
+    }
 }
 
 /// A runtime that answers each turn with the next scripted reply.
@@ -70,9 +66,15 @@ async fn a_second_turn_sees_the_first() {
         .create_session("test", mock.model())
         .expect("session");
 
-    let config = config(workspace.path(), "hello");
-    let mut prepared =
-        prepare_with_session(session, &config, "openai", "mock-model").expect("prepared");
+    let mut prepared = prepare_with_session(
+        session,
+        workspace.path(),
+        "hello",
+        &context(),
+        "openai",
+        "mock-model",
+    )
+    .expect("prepared");
 
     let first = prepared
         .execute(CollectingSink::new())
@@ -106,9 +108,15 @@ async fn each_turn_gets_its_own_bookends() {
         .create_session("test", mock.model())
         .expect("session");
 
-    let config = config(workspace.path(), "first");
-    let mut prepared =
-        prepare_with_session(session, &config, "openai", "mock-model").expect("prepared");
+    let mut prepared = prepare_with_session(
+        session,
+        workspace.path(),
+        "first",
+        &context(),
+        "openai",
+        "mock-model",
+    )
+    .expect("prepared");
 
     let first = prepared
         .execute(CollectingSink::new())
@@ -158,9 +166,15 @@ async fn the_session_survives_and_reports_its_history() {
         .create_session("test", mock.model())
         .expect("session");
 
-    let config = config(workspace.path(), "first");
-    let mut prepared =
-        prepare_with_session(session, &config, "openai", "mock-model").expect("prepared");
+    let mut prepared = prepare_with_session(
+        session,
+        workspace.path(),
+        "first",
+        &context(),
+        "openai",
+        "mock-model",
+    )
+    .expect("prepared");
 
     assert!(
         prepared.history().is_empty(),
@@ -201,9 +215,15 @@ async fn an_empty_follow_up_prompt_is_refused() {
         .create_session("test", mock.model())
         .expect("session");
 
-    let config = config(workspace.path(), "first");
-    let mut prepared =
-        prepare_with_session(session, &config, "openai", "mock-model").expect("prepared");
+    let mut prepared = prepare_with_session(
+        session,
+        workspace.path(),
+        "first",
+        &context(),
+        "openai",
+        "mock-model",
+    )
+    .expect("prepared");
 
     prepared
         .execute(CollectingSink::new())
@@ -236,9 +256,15 @@ async fn a_failed_turn_does_not_end_the_conversation() {
         .create_session("test", mock.model())
         .expect("session");
 
-    let config = config(workspace.path(), "first");
-    let mut prepared =
-        prepare_with_session(session, &config, "openai", "mock-model").expect("prepared");
+    let mut prepared = prepare_with_session(
+        session,
+        workspace.path(),
+        "first",
+        &context(),
+        "openai",
+        "mock-model",
+    )
+    .expect("prepared");
 
     let failed = prepared
         .execute(CollectingSink::new())
@@ -267,9 +293,15 @@ async fn a_cancelled_turn_ends_rather_than_running() {
         .create_session("test", mock.model())
         .expect("session");
 
-    let config = config(workspace.path(), "go");
-    let mut prepared =
-        prepare_with_session(session, &config, "openai", "mock-model").expect("prepared");
+    let mut prepared = prepare_with_session(
+        session,
+        workspace.path(),
+        "go",
+        &context(),
+        "openai",
+        "mock-model",
+    )
+    .expect("prepared");
 
     // Tripped before the turn starts, so the outcome does not depend on
     // winning a race with the provider. This is the shape a protocol server's
@@ -321,9 +353,15 @@ async fn tool_calls_from_an_earlier_turn_stay_in_the_conversation() {
         )
         .expect("session");
 
-    let config = config(workspace.path(), "list the files");
-    let mut prepared =
-        prepare_with_session(session, &config, "openai", "mock-model").expect("prepared");
+    let mut prepared = prepare_with_session(
+        session,
+        workspace.path(),
+        "list the files",
+        &context(),
+        "openai",
+        "mock-model",
+    )
+    .expect("prepared");
 
     prepared
         .execute(CollectingSink::new())
