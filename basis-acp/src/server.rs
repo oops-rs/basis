@@ -332,10 +332,13 @@ fn initialize(request: &InitializeRequest, config: &ServeConfig) -> InitializeRe
                 // Sessions are mentra agents, and mentra persists them, so a
                 // client can reconnect to one this process never created.
                 .load_session(true)
-                // stdio is mandatory and needs no advertising. SSE does:
-                // a client that is not told basis speaks it will never offer an
-                // SSE server, and mentra has a client for that transport.
-                .mcp_capabilities(McpCapabilities::new().sse(true))
+                // stdio is mandatory and needs no advertising. The remote
+                // transports do: a client that is not told basis speaks one
+                // filters those servers out of `session/new`, so however well
+                // the translation behind it works, an unadvertised transport
+                // is an unreachable one. mentra has clients for both SSE and
+                // Streamable HTTP.
+                .mcp_capabilities(McpCapabilities::new().sse(true).http(true))
                 // Images, because every provider mentra serves carries inline
                 // image bytes and basis stopped being the layer that narrowed
                 // a prompt to text. Audio is still not claimed: mentra has no

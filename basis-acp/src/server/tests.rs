@@ -68,6 +68,25 @@ fn initialize_advertises_resumable_sessions() {
 }
 
 #[test]
+fn initialize_advertises_both_remote_mcp_transports() {
+    // A capability a client is not told about is a transport it never offers:
+    // the ACP schema defaults both flags to false, and a client filters
+    // unadvertised servers out of `session/new` before basis sees them.
+    let capabilities = initialize(
+        &InitializeRequest::new(ProtocolVersion::V1),
+        &ServeConfig::default(),
+    )
+    .agent_capabilities
+    .mcp_capabilities;
+
+    assert!(capabilities.sse, "mentra speaks HTTP+SSE");
+    assert!(
+        capabilities.http,
+        "without this flag the whole Streamable HTTP path is dead code in production"
+    );
+}
+
+#[test]
 fn initialize_advertises_only_the_session_methods_lan_answers() {
     let capabilities = capabilities(&ServeConfig::default());
 
