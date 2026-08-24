@@ -17,6 +17,7 @@
 //! A host that already owns a mentra runtime skips to [`prepare_with_session`]
 //! and keeps its own.
 
+mod bounds;
 mod output;
 mod prepared;
 mod sink;
@@ -46,6 +47,7 @@ use crate::{
     },
 };
 
+pub use bounds::Bounds;
 pub use output::{OutputReport, OutputSpec};
 pub use prepared::{Compacted, LoadedSkill, PreparedRun, PromptPart, RunContext};
 pub use sink::{
@@ -424,9 +426,11 @@ impl RunConfig {
             prompt: self.prompt.clone(),
             session_name: self.session_name.clone(),
             effort: self.effort,
-            deadline: self.deadline,
-            tool_budget: self.tool_budget,
-            token_budget: self.token_budget,
+            bounds: Bounds {
+                deadline: self.deadline,
+                tool_budget: self.tool_budget,
+                token_budget: self.token_budget,
+            },
             // A one-prompt run has no siblings to share an allowance with, so
             // there is nothing for a pool to do here. A caller who wants one
             // wants the `Workspace` shape (ADR-0010), where a pool is attached
@@ -842,9 +846,7 @@ mod tests {
         // deadline from, so bounding is explicit everywhere. An attended run
         // has a person, and a timer that interrupted someone mid-thought would
         // be a worse harness rather than a safer one.
-        assert_eq!(options.deadline, None);
-        assert_eq!(options.tool_budget, None);
-        assert_eq!(options.token_budget, None);
+        assert_eq!(options.bounds, Bounds::default());
     }
 
     #[test]
@@ -855,9 +857,9 @@ mod tests {
             .with_token_budget(50_000)
             .turn_options();
 
-        assert_eq!(options.deadline, Some(Duration::from_secs(3_600)));
-        assert_eq!(options.tool_budget, Some(12));
-        assert_eq!(options.token_budget, Some(50_000));
+        assert_eq!(options.bounds.deadline, Some(Duration::from_secs(3_600)));
+        assert_eq!(options.bounds.tool_budget, Some(12));
+        assert_eq!(options.bounds.token_budget, Some(50_000));
     }
 
     #[test]
@@ -895,9 +897,9 @@ mod tests {
         assert_eq!(spec.prompt, "prompt");
         assert_eq!(spec.session_name, "named");
         assert_eq!(spec.effort, Some(Effort::Max));
-        assert_eq!(spec.deadline, Some(Duration::from_secs(90)));
-        assert_eq!(spec.tool_budget, Some(7));
-        assert_eq!(spec.token_budget, Some(1_000));
+        assert_eq!(spec.bounds.deadline, Some(Duration::from_secs(90)));
+        assert_eq!(spec.bounds.tool_budget, Some(7));
+        assert_eq!(spec.bounds.token_budget, Some(1_000));
     }
 
     #[tokio::test]

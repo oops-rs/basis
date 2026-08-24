@@ -121,8 +121,8 @@ pub use mcp::{
     DEFAULT_GLOBAL_MCP_FILE, DEFAULT_WORKSPACE_MCP_FILE, McpConfig, McpError, McpServer, McpSource,
 };
 pub use run::{
-    Bound, CancellationToken, CollectingSink, Compacted, Effort, EventFanIn, EventSink, FnSink,
-    MergedEvents, NullSink, OutputReport, OutputSpec, PreparedRun, PromptPart, RunConfig,
+    Bound, Bounds, CancellationToken, CollectingSink, Compacted, Effort, EventFanIn, EventSink,
+    FnSink, MergedEvents, NullSink, OutputReport, OutputSpec, PreparedRun, PromptPart, RunConfig,
     RunContext, RunError, RunReport, RunUsage, TaggedEvent, TaggedSink, TurnOptions, resume, run,
     run_with_approver,
 };
