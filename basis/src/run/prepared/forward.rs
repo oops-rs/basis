@@ -138,11 +138,11 @@ async fn resolve_if_permission<A: Approver>(
             description: description.clone(),
             input: serde_json::from_str(preview)
                 .unwrap_or_else(|_| serde_json::Value::String(preview.clone())),
-            // Read straight off the event: since mentra#21 the request
-            // carries the call's classification, always `Some` on a live
-            // event. `None` is only a stream recorded before the field
-            // existed, which the approver is told to judge as the worst the
-            // call could be.
+            // Read straight off the event (mentra#21). mentra documents
+            // the classification as always present on a live request, but
+            // that is mentra's invariant to keep, not basis's to unwrap — a
+            // `None` reaches the approver as unknown, which it is told to
+            // judge as the worst the call could be.
             side_effect_level: classification.as_ref().map(|c| c.side_effect_level),
         })
         .await;

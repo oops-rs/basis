@@ -80,12 +80,13 @@ pub struct ApprovalRequest {
     /// [`External`](ToolSideEffectLevel::External) — judge it by the most it
     /// could be doing, the same rule the rest of this module runs on.
     ///
-    /// It is an `Option` because the level rides mentra's own event: since
-    /// [mentra#21](https://github.com/oops-rs/mentra/issues/21), a
-    /// `PermissionRequested` carries the call's classification and basis reads
-    /// the level straight off it. Every request a live session raises carries
-    /// one; `None` is only an event replayed from a stream recorded before
-    /// the field existed.
+    /// It is an `Option` because mentra types the classification as one:
+    /// since [mentra#21](https://github.com/oops-rs/mentra/issues/21) the
+    /// `PermissionRequested` event carries the call's classification, and
+    /// mentra documents it as always present on a live request — but that is
+    /// mentra's invariant to keep, not basis's to unwrap, so basis passes on
+    /// what the event says. An approver reads `None` by the rule above:
+    /// unknown, never harmless.
     pub side_effect_level: Option<ToolSideEffectLevel>,
 }
 
@@ -303,10 +304,9 @@ impl ApprovalGate {
     /// mentra applies this to the whole wait, so it bounds an approver that
     /// never answers as well as one that answers slowly — the fail-closed rule
     /// of [`Approver`], enforced from outside for approvers that forget it.
-    pub fn with_timeout(self, timeout: Duration) -> Self {
-        Self {
-            timeout: Some(timeout),
-        }
+    pub fn with_timeout(mut self, timeout: Duration) -> Self {
+        self.timeout = Some(timeout);
+        self
     }
 }
 
@@ -320,10 +320,6 @@ impl ToolAuthorizer for ApprovalGate {
             return Ok(ToolAuthorizationDecision::allow());
         }
 
-        // Nothing to relay: mentra puts the classification on the
-        // `PermissionRequested` event itself (mentra#21), and the forwarder
-        // reads the level straight off that.
-        //
         // The reason becomes the description the approver shows, so it says
         // what is being asked rather than that something is.
         Ok(ToolAuthorizationDecision::prompt(format!(

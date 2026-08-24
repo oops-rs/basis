@@ -122,8 +122,9 @@ pub struct RuntimeBuilder {
     /// after basis's own `spawn`. Stored as what they are: mentra implements
     /// the tool traits for `Box<T: ?Sized>` (mentra#22), so a boxed
     /// `dyn ExecutableTool` is itself an `ExecutableTool` and mentra's
-    /// by-value `with_tool` takes it whole.
-    host_tools: Vec<Box<dyn mentra::tool::ExecutableTool + Send + Sync>>,
+    /// by-value `with_tool` takes it whole. `Send + Sync` are not restated on
+    /// the box: `ToolDefinition` itself requires both.
+    host_tools: Vec<Box<dyn mentra::tool::ExecutableTool>>,
 }
 
 /// What a caller said about where this runtime's conversations go.
@@ -810,8 +811,6 @@ impl RuntimeBuilder {
 
         let dispatch = Arc::new(HookDispatch::new(self.interceptors));
 
-        let gate = ApprovalGate::new();
-
         let builder = mentra::Runtime::builder()
             // Which conversations belong where, which is the only question
             // `session/list` can honestly answer (see `crate::store`). Unset,
@@ -830,7 +829,7 @@ impl RuntimeBuilder {
             // and no permission request can ever be raised — so the gate goes
             // on even for a runtime whose runs approve everything (see
             // `crate::approval`).
-            .with_tool_authorizer(gate)
+            .with_tool_authorizer(ApprovalGate::new())
             // The one tool basis registers (ADR-0016). It has to be on the
             // runtime rather than on a session, because a subagent shares its
             // parent's runtime registry and `spawn` must reach the model at
