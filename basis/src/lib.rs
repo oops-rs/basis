@@ -67,7 +67,6 @@ pub mod event;
 mod expand;
 pub mod fingerprint;
 pub mod hooks;
-pub mod lifecycle;
 #[cfg(feature = "mcp")]
 pub mod mcp;
 mod paths;
@@ -116,9 +115,6 @@ pub use hooks::{
     HOOK_SCHEMA_VERSION, HookCall, HookConfigError, HookEvent, HookOutcome, HookRequest,
     HookResponse, HookRunner, HookSpec, HooksConfig, HooksSource, Interceptor, InterceptorError,
     OnFailure,
-};
-pub use lifecycle::{
-    Cancellation, LifecycleError, Supervisor, TaskContext, TaskHandle, TaskId, TaskState, WaitError,
 };
 #[cfg(feature = "mcp")]
 pub use mcp::{

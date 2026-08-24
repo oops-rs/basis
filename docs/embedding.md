@@ -459,10 +459,13 @@ turn even though nothing was discarded, because mentra still owes a final assist
 and the last committed one was a tool result. The work is kept either way; the report is
 what disagrees.
 
-In-process concurrent work is owned by `basis::Supervisor`, whose ownership rules —
-attached versus detached, downward cancellation, repeatable terminal observation, and a
-wait graph that rejects cycles — are [ADR-0017](adr/0017-structured-agent-concurrency.md)'s
-and are the same rules the CLI's durable handles obey across processes.
+In-process concurrent work is the host's own tokio: fan out on a
+`tokio::task::JoinSet`, wire the stop button through the `CancellationToken` a
+`TurnOptions` hands back, and let the bounds — deadline, tool budget, token budget — keep
+an unattended branch finite. `examples/review_workflow.rs` runs that shape live and is the
+reference. basis schedules nothing in process;
+[ADR-0017](adr/0017-structured-agent-concurrency.md)'s ownership rules are the CLI's
+durable-task contract across processes, where a handle is something any process can name.
 
 ## Getting a say over each tool call
 

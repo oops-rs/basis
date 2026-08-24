@@ -138,12 +138,14 @@ design: hold the answers, drop the reports.
 
 ### Structured concurrency
 
-`basis::Supervisor` owns concurrent work in process, under the same rules the CLI's durable
-handles obey below: `spawn` returns a `TaskHandle` immediately, `wait` observes a terminal state
-without rerunning anything, `cancel` flows downward to attached descendants, and detached work is a
-new root ([ADR-0017](docs/adr/0017-structured-agent-concurrency.md)). A wait-for cycle cannot be
-built in process at all, since the only handle there is to wait on is one you spawned yourself —
-across processes it is a handle anyone can name, which is what the wait rules below are for.
+In process, concurrency is the host's tokio: a fan-out is a `tokio::task::JoinSet`, a stop
+button is the `CancellationToken` a `TurnOptions` hands back, and what keeps an unattended branch
+finite is the bounds — deadline, tool budget, token budget — not a scheduler of basis's own
+(`examples/review_workflow.rs` runs that shape live). The four ADR-0017 rules — `spawn` returns a
+handle immediately, `wait` observes a terminal state without rerunning anything, `cancel` flows
+downward to attached descendants, detached work is a new root — are the CLI's durable-task
+contract below ([ADR-0017](docs/adr/0017-structured-agent-concurrency.md)), where a handle is
+something any process can name and the wait rules earn their keep.
 Stopping one turn is two signals:
 `TurnOptions::cancellable()` abandons the turn and rolls it back, which is a client's stop button;
 `TurnOptions::stoppable()` ends it at the next round boundary, keeping what the model committed.

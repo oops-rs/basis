@@ -119,8 +119,8 @@ what the attach lock guarantees. A first token of the form `/name` is resolved a
 `basis::templates::load` — the same discovery ACP hands its command list from — and the rendered
 text is what the task records; a first token with a second slash is a path and passes through.
 
-In-process concurrent work is owned by `basis::Supervisor`. The binary adds
-the same ownership rules across CLI processes, and since
+In-process concurrent work is the host's tokio — `JoinSet`, `CancellationToken`, the
+bounds. The binary owns ADR-0017's ownership rules across CLI processes, and since
 [ADR-0019](adr/0019-the-filesystem-is-the-coordination-surface.md) it adds them
 on files rather than on a service. An agent is a directory under one global,
 workspace-keyed data directory — `BASIS_DATA_DIR`, else `XDG_DATA_HOME`, else the

@@ -29,7 +29,6 @@ use crate::{
     approval::{AllowAll, Approver},
     context::WorkspaceContext,
     event::{ContextFile, EVENT_SCHEMA_VERSION, Event, RunOutcome, SkillSummary, TemplateSummary},
-    lifecycle::{LifecycleError, Supervisor, TaskHandle},
     templates::Template,
     workspace::Workspace,
 };
@@ -437,51 +436,6 @@ impl PreparedRun {
     ) -> Result<RunReport<S>, RunError> {
         let prompt = self.run.prompt.clone();
         self.turn(vec![PromptPart::Text(prompt)], sink, approver, options)
-            .await
-    }
-
-    /// Starts this one-shot run under a lifecycle [`Supervisor`].
-    ///
-    /// The handle is returned as soon as the supervisor accepts the work.
-    /// Waiting happens through [`TaskHandle::wait`], independently of the
-    /// event sink. A successful task's bytes are the assistant's UTF-8 final
-    /// message; a failed run becomes [`crate::TaskState::Failed`].
-    ///
-    /// Cancellation is cooperative: the supervisor trips the turn's own
-    /// cancellation token, then waits for the run to close its event stream
-    /// before publishing [`crate::TaskState::Cancelled`].
-    pub async fn spawn<S: EventSink, A: Approver>(
-        mut self,
-        supervisor: &Supervisor,
-        parent: Option<&TaskHandle>,
-        detached: bool,
-        sink: S,
-        approver: A,
-    ) -> Result<TaskHandle, LifecycleError> {
-        supervisor
-            .spawn_cooperative(parent, detached, move |context| async move {
-                let (options, cancel) = TurnOptions::cancellable();
-                let cancellation = context.cancellation();
-                let execution = self.execute_with_approver_and_options(sink, approver, options);
-                tokio::pin!(execution);
-
-                let report = tokio::select! {
-                    report = &mut execution => report,
-                    () = cancellation.cancelled() => {
-                        cancel.cancel();
-                        execution.await
-                    }
-                }
-                .map_err(|error| error.to_string())?;
-
-                match (report.outcome, report.final_message) {
-                    (RunOutcome::Ok, Some(message)) => Ok(message.into_bytes()),
-                    (RunOutcome::Ok, None) => {
-                        Err("run finished successfully without a final message".to_string())
-                    }
-                    (RunOutcome::Error { message }, _) => Err(message),
-                }
-            })
             .await
     }
 
