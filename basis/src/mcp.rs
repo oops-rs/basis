@@ -51,6 +51,12 @@
 //! [`McpServer::Http`]. One deliberate asymmetry survives in `.mcp.json`: a
 //! bare `url` with no `type` still means SSE, because files written before
 //! the third transport existed keep their meaning.
+//!
+//! mentra's `allow_plaintext_credentials` override is deliberately not a
+//! `.mcp.json` key. A committed file must not be able to grant its own
+//! headers plaintext passage to a non-loopback host — the same line drawn at
+//! `base_url` — so the refusal stays mentra's, checked at parse, and the
+//! override stays with hosts that construct the config in code.
 
 pub(crate) mod connections;
 mod file;

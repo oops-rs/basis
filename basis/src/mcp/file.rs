@@ -14,7 +14,10 @@ use std::{
     path::Path,
 };
 
-use mentra::{McpServerConfig, McpSseServerConfig, McpStreamableHttpServerConfig};
+use mentra::{
+    McpServerConfig, McpSseServerConfig, McpStreamableHttpConfigError,
+    McpStreamableHttpServerConfig,
+};
 use serde::Deserialize;
 
 use crate::expand::expand;
@@ -99,6 +102,24 @@ fn parse_with(
         .collect()
 }
 
+/// mentra's refusal, restated where it would echo a value.
+///
+/// `PlaintextCredentials` embeds the whole URL, whose query string may hold
+/// an expanded credential — and it suggests `allow_plaintext_credentials`, a
+/// knob this file deliberately does not offer (see the module docs on
+/// transports). Every other variant already names fields without their
+/// values.
+fn refused(error: &McpStreamableHttpConfigError) -> String {
+    match error {
+        McpStreamableHttpConfigError::PlaintextCredentials { .. } => {
+            "has headers that would travel over plaintext `http` to a \
+             non-loopback host; use `https` or a loopback address"
+                .to_string()
+        }
+        other => format!("is not a valid Streamable HTTP configuration: {other}"),
+    }
+}
+
 impl RawServer {
     fn into_server(
         self,
@@ -172,6 +193,13 @@ impl RawServer {
                     McpStreamableHttpServerConfig::new(name.clone(), url),
                     |config, (key, value)| config.with_header(key, value),
                 );
+
+                // Checked here, where a refused entry fails the workspace
+                // open loudly, rather than at connect — where a failure is a
+                // stderr warning an ACP client never sees.
+                config
+                    .validate()
+                    .map_err(|error| invalid(refused(&error)))?;
 
                 Ok(McpServer::Http(config))
             }
@@ -417,6 +445,40 @@ mod tests {
                 "the redaction must not hide where the server is: {rendered}"
             );
         }
+    }
+
+    #[test]
+    fn plaintext_credentials_to_a_remote_host_fail_at_parse() {
+        let error = parse_text(
+            r#"{"mcpServers":{"api":{"type":"http","url":"http://example.com/mcp","headers":{"authorization":"Bearer t"}}}}"#,
+        )
+        .expect_err("a connect-time warning is one an ACP client never sees");
+
+        let rendered = error.to_string();
+        assert!(matches!(error, McpError::Invalid { .. }), "{rendered}");
+        assert!(rendered.contains("api"), "{rendered}");
+        assert!(
+            !rendered.contains("example.com") && !rendered.contains("Bearer"),
+            "nothing read from the file returns in an error: {rendered}"
+        );
+    }
+
+    #[test]
+    fn loopback_plaintext_http_is_mentras_own_carve_out() {
+        let servers = parse_text(
+            r#"{"mcpServers":{"local":{"type":"http","url":"http://127.0.0.1:8080/mcp","headers":{"x-env":"dev"}}}}"#,
+        )
+        .expect("a local dev server needs no ceremony");
+
+        assert!(servers[0].as_http().is_some());
+    }
+
+    #[test]
+    fn a_malformed_http_url_fails_at_parse() {
+        let error = parse_text(r#"{"mcpServers":{"api":{"type":"http","url":"not a url"}}}"#)
+            .expect_err("validation happens at the boundary, not mid-handshake");
+
+        assert!(matches!(error, McpError::Invalid { .. }), "{error}");
     }
 
     #[test]

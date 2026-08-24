@@ -27,7 +27,10 @@ use std::collections::HashMap;
 use agent_client_protocol::schema::v1::{
     HttpHeader, McpServer as AcpServer, McpServerHttp, McpServerSse, McpServerStdio,
 };
-use mentra::{McpServerConfig, McpSseServerConfig, McpStreamableHttpServerConfig};
+use mentra::{
+    McpServerConfig, McpSseServerConfig, McpStreamableHttpConfigError,
+    McpStreamableHttpServerConfig,
+};
 
 use basis::mcp::{McpError, McpServer};
 
@@ -86,6 +89,8 @@ fn stdio_server(stdio: &McpServerStdio) -> Result<McpServer, McpError> {
 }
 
 fn sse_server(sse: &McpServerSse) -> Result<McpServer, McpError> {
+    reject_empty_url("sse", &sse.name, &sse.url)?;
+
     let config = with_headers(
         &sse.name,
         &sse.headers,
@@ -97,6 +102,8 @@ fn sse_server(sse: &McpServerSse) -> Result<McpServer, McpError> {
 }
 
 fn http_server(http: &McpServerHttp) -> Result<McpServer, McpError> {
+    reject_empty_url("http", &http.name, &http.url)?;
+
     let config = with_headers(
         &http.name,
         &http.headers,
@@ -104,7 +111,46 @@ fn http_server(http: &McpServerHttp) -> Result<McpServer, McpError> {
         |config, name, value| config.with_header(name, value),
     )?;
 
+    // The same check the `.mcp.json` reader runs at parse: a refused config
+    // fails `session/new` with a named error, not a stderr warning at connect
+    // that no ACP client ever sees.
+    config.validate().map_err(|error| McpError::Invalid {
+        origin: ORIGIN.to_string(),
+        name: http.name.clone(),
+        reason: refused(&error),
+    })?;
+
     Ok(McpServer::Http(config))
+}
+
+/// An empty `url` refused the way the file reader refuses one, so the two
+/// doors into a remote transport agree on what a mistake is.
+fn reject_empty_url(transport: &str, server: &str, url: &str) -> Result<(), McpError> {
+    if url.trim().is_empty() {
+        return Err(McpError::Invalid {
+            origin: ORIGIN.to_string(),
+            name: server.to_string(),
+            reason: format!("has no `url` to reach for its `{transport}` transport"),
+        });
+    }
+
+    Ok(())
+}
+
+/// mentra's refusal, restated where it would echo a value.
+///
+/// The same match the `.mcp.json` reader makes, for the same reason:
+/// `PlaintextCredentials` embeds the whole URL, whose query string may hold a
+/// credential, and suggests an override no client wire exposes.
+fn refused(error: &McpStreamableHttpConfigError) -> String {
+    match error {
+        McpStreamableHttpConfigError::PlaintextCredentials { .. } => {
+            "has headers that would travel over plaintext `http` to a \
+             non-loopback host; use `https` or a loopback address"
+                .to_string()
+        }
+        other => format!("is not a valid Streamable HTTP configuration: {other}"),
+    }
 }
 
 /// Folds the client's ordered headers into a remote config, refusing a
@@ -222,6 +268,36 @@ mod tests {
         )])
         .expect_err("both remote transports run the same fold");
         assert!(error.to_string().contains("x-key"), "{error}");
+    }
+
+    #[test]
+    fn an_empty_url_fails_session_new_on_either_remote_transport() {
+        for server in [
+            AcpServer::Sse(McpServerSse::new("obs", "  ")),
+            AcpServer::Http(McpServerHttp::new("api", "")),
+        ] {
+            let error = from_acp(&[server]).expect_err("nothing to reach");
+            assert!(
+                matches!(error, McpError::Invalid { .. }),
+                "an empty url must be refused, not connected to: {error}"
+            );
+        }
+    }
+
+    #[test]
+    fn plaintext_credentials_to_a_remote_host_fail_session_new() {
+        let error = from_acp(&[AcpServer::Http(
+            McpServerHttp::new("api", "http://example.com/mcp")
+                .headers(vec![HttpHeader::new("authorization", "Bearer t")]),
+        )])
+        .expect_err("mentra refuses headers over plaintext http, and loudly");
+
+        let rendered = error.to_string();
+        assert!(rendered.contains("api"), "{rendered}");
+        assert!(
+            !rendered.contains("example.com") && !rendered.contains("Bearer"),
+            "no value from the wire returns in the error: {rendered}"
+        );
     }
 
     #[test]
