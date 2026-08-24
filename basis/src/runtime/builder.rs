@@ -23,9 +23,9 @@ use super::credential::Credential;
 
 use crate::{
     approval::ApprovalGate,
+    error::RunError,
     hooks::Interceptor,
     provider,
-    run::RunError,
     shell::ShellAccess,
     store,
     tools::{

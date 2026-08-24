@@ -63,6 +63,7 @@ pub mod budget;
 pub mod compaction;
 pub mod config;
 pub mod context;
+pub mod error;
 pub mod event;
 mod expand;
 pub mod fingerprint;
@@ -103,6 +104,7 @@ pub use context::{
     ContextConfig, ContextDocument, ContextError, ContextScope, DEFAULT_CONTEXT_FALLBACK_FILE,
     DEFAULT_CONTEXT_FILE, SystemPrompt, WorkspaceContext,
 };
+pub use error::RunError;
 pub use event::{
     EVENT_SCHEMA_VERSION, Event, EventLine, JsonlWriter, Mutability, RunOutcome, SkillSummary,
     TemplateSummary,
@@ -123,7 +125,7 @@ pub use mcp::{
 pub use run::{
     Bound, Bounds, CancellationToken, CollectingSink, Compacted, Effort, EventFanIn, EventSink,
     FnSink, MergedEvents, NullSink, OutputReport, OutputSpec, PreparedRun, PromptPart, RunContext,
-    RunError, RunReport, RunUsage, TaggedEvent, TaggedSink, TurnOptions, run, run_with_approver,
+    RunReport, RunUsage, TaggedEvent, TaggedSink, TurnOptions, run, run_with_approver,
 };
 pub use runtime::{Runtime, RuntimeBuilder};
 pub use shell::ShellAccess;

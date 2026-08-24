@@ -63,9 +63,10 @@ use crate::mcp::connections::McpConnections;
 use crate::{
     config::Config,
     context::WorkspaceContext,
+    error::RunError,
     event::ContextFile,
     fingerprint::{self, Snapshot},
-    run::{Effort, LoadedSkill, PreparedRun, RunContext, RunError},
+    run::{Effort, LoadedSkill, PreparedRun, RunContext},
     runtime::{Runtime, dispatch::HookRegistration},
     templates::Template,
     tools::declared::DeclaredTools,
