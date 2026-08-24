@@ -118,15 +118,12 @@ pub struct RuntimeBuilder {
     /// Names are validated at [`build`](Self::build) rather than here, which
     /// is where this builder answers every other piece of bad input.
     command_targets: CommandTargets,
-    /// Registrars for host-supplied tools, applied in [`build_with`](Self::build_with)
-    /// after basis's own `spawn`. A closure rather than a stored tool value
-    /// because mentra's own `with_tool` is generic over the concrete tool type
-    /// — nothing upstream implements `ExecutableTool` for `Box` or `Arc` (see
-    /// `crate::tools`'s module doc) — so the concrete type has to be captured
-    /// at the call site, in [`with_tool`](Self::with_tool), and erased behind
-    /// `FnOnce` instead of behind the trait it can't yet be boxed as.
-    host_tools:
-        Vec<Box<dyn FnOnce(mentra::RuntimeBuilder) -> mentra::RuntimeBuilder + Send + Sync>>,
+    /// Host-supplied tools, applied in [`build_with`](Self::build_with)
+    /// after basis's own `spawn`. Stored as what they are: mentra implements
+    /// the tool traits for `Box<T: ?Sized>` (mentra#22), so a boxed
+    /// `dyn ExecutableTool` is itself an `ExecutableTool` and mentra's
+    /// by-value `with_tool` takes it whole.
+    host_tools: Vec<Box<dyn mentra::tool::ExecutableTool + Send + Sync>>,
 }
 
 /// What a caller said about where this runtime's conversations go.
@@ -645,7 +642,7 @@ impl RuntimeBuilder {
         Self {
             host_tools: {
                 let mut host_tools = self.host_tools;
-                host_tools.push(Box::new(move |builder| builder.with_tool(tool)));
+                host_tools.push(Box::new(tool));
                 host_tools
             },
             ..self
@@ -863,7 +860,7 @@ impl RuntimeBuilder {
         let builder = self
             .host_tools
             .into_iter()
-            .fold(builder, |builder, register| register(builder));
+            .fold(builder, |builder, tool| builder.with_tool(tool));
 
         // Installed whenever either half has something to say. With both
         // empty, mentra keeps its own local executor and basis adds no layer

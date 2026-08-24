@@ -860,6 +860,14 @@ exposes.
   both halves; the cost was a net deletion and the exposure is the full
   classification arriving on the event, of which basis reads the
   side-effect level and nothing else yet.
+- **mentra#22 is closed and the `with_tool` closure is retired.** Host tools
+  are stored as `Box<dyn ExecutableTool>`: mentra implements the tool traits
+  for `Box`/`Arc` (`T: ?Sized`) at the traits' owner, forwarding every method
+  explicitly, so the hand-forwarded shim ADR-0016 refused to write never gets
+  written anywhere. What it cost: nothing — the closure goes, the public
+  signature stands. What it newly exposes: a boxed or shared tool registers
+  as itself, which is the shape a per-workspace host-tool surface would need;
+  none is built, because no one has asked for one.
 
 ## 3. Phases
 

@@ -26,16 +26,15 @@
 //! Unlike [`declared`], nothing about the tool is data a repository reviews;
 //! the host's compiled code is the whole of what it does.
 //!
-//! This does *not* hand-forward `ToolExecutor`'s methods to some boxed
-//! `dyn ExecutableTool` basis stores — nothing upstream implements the trait
-//! for `Box` or `Arc`, so a stored trait object was never how this works, and
-//! [oops-rs/mentra#22](https://github.com/oops-rs/mentra/issues/22) (adding
-//! those forwarding impls at the trait's owner) stays open and unneeded. What
-//! `with_tool` actually stores is a closure that captures the caller's
-//! concrete tool by value and applies it to mentra's own by-value
-//! `RuntimeBuilder::with_tool` at [`build`](crate::RuntimeBuilder::build)
-//! time — the concrete type is erased behind `FnOnce`, not behind the trait,
-//! so there is no forwarding impl to get right or wrong.
+//! What `with_tool` stores is a `Box<dyn ExecutableTool>`, handed whole to
+//! mentra's own by-value `RuntimeBuilder::with_tool` at
+//! [`build`](crate::RuntimeBuilder::build) time.
+//! [oops-rs/mentra#22](https://github.com/oops-rs/mentra/issues/22) closed
+//! the gap that once made that impossible: mentra implements `ToolDefinition`
+//! and `ToolExecutor` for `Box<T>` and `Arc<T>` (`T: ?Sized`) at the traits'
+//! owner, forwarding every method explicitly — `authorization_preview`
+//! included, the method a hand-written shim could silently drop and thereby
+//! present a host's tool to the approver as its static descriptor.
 //!
 //! Registered on the runtime, like `spawn` (ADR-0018's host scope): visible to
 //! every workspace and subagent that runtime opens, not to one session.
