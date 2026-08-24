@@ -76,18 +76,20 @@ workspace opened and dropped around it — the binary is a thin shell over this:
 
 ```rust
 let report = basis::run(
-    basis::RunConfig::new("/repo", "summarize the recent changes"),
+    "/repo",
+    "summarize the recent changes",
     basis::CollectingSink::new(),
 ).await?;
 ```
 
-The bounds are builders on either shape — `RunConfig` for a one-shot, `RunSpec` for a run
-minted from a workspace — and `report.stopped_by` carries the distinction the exit code
+A path and a prompt are all they take; anything more — a model, an endpoint, a bound — is
+the same shape one call earlier, `Workspace::builder` and a `RunSpec`. The bounds are
+builders on `RunSpec`, and `report.stopped_by` carries the distinction the exit code
 makes: `Some(basis::Bound::Deadline)`, `Some(basis::Bound::ToolBudget)`,
 `Some(basis::Bound::TokenBudget)`, or `None` when the work is what ended the run:
 
 ```rust
-let config = basis::RunConfig::new("/repo", "bump the deps and fix the fallout")
+let spec = basis::RunSpec::new("bump the deps and fix the fallout")
     .with_deadline(Duration::from_secs(600))
     .with_tool_budget(40)
     .with_token_budget(200_000);
@@ -184,7 +186,7 @@ one server over many repositories gives each the model it chose.
 host whose own configuration is the only configuration. `Workspace::config()`
 and `Workspace::config_files()` report what took effect and which file said so.
 There is no `api_key` key and there will not be one: a credential belongs to
-the environment, which is the same ruling `RunConfig` makes.
+the environment, which is the same ruling the rest of the surface makes.
 [conventions.md](conventions.md) has the keys.
 
 ## What the host says on top of the workspace
@@ -227,10 +229,9 @@ One enum rather than two methods, because the two are alternatives and not layer
 field, last call wins, and *both at once* is unspellable. And it is a **workspace** knob, so
 a host serving many repositories off one shared `Runtime` can give each its own voice.
 
-`RunConfig::with_system_prompt` is the same seam for a one-prompt caller, carried through
-`split` to exactly that call — which is how `basis spawn --system-prompt` /
-`--append-system-prompt`, `basis serve --acp --append-system-prompt`, and `ServeConfig`'s
-template all reach it without a second implementation.
+`basis spawn --system-prompt` / `--append-system-prompt`,
+`basis serve --acp --append-system-prompt`, and `SessionTemplate::with_system_prompt` on
+`ServeConfig`'s template all reach exactly this call — one seam, no second implementation.
 
 ## How patiently a failing provider is waited out
 

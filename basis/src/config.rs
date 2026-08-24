@@ -42,9 +42,9 @@
 //! user already holds a key for, and fail when they do not.
 //!
 //! There is **no `api_key` key at all**, for the reason
-//! [`RunConfig`](crate::RunConfig) has no field for one: a credential belongs
-//! to the environment the process runs in, not to a file describing what to
-//! run.
+//! [`WorkspaceBuilder`](crate::WorkspaceBuilder) has no field for one: a
+//! credential belongs to the environment the process runs in, not to a file
+//! describing what to run.
 //!
 //! # Where each answer lands
 //!

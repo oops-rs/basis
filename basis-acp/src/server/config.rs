@@ -16,7 +16,10 @@ use std::{path::PathBuf, sync::Arc};
 
 use super::workspaces::ConfiguredSource;
 use crate::mode::ApprovalMode;
-use basis::{McpServer, PersistedSession, PreparedRun, RunConfig, RunError};
+use basis::{
+    BuiltinProvider, Effort, McpServer, ModelSelector, PersistedSession, PreparedRun, RunError,
+    ShellAccess, SystemPrompt,
+};
 
 /// Where an ACP session's [`PreparedRun`] comes from.
 ///
@@ -105,6 +108,82 @@ pub trait SessionSource: Send + Sync + 'static {
     }
 }
 
+/// What the operator said and a client cannot say for itself: which provider
+/// and endpoint, which model, whether commands are granted, the product's own
+/// voice, how hard to think, and what to call the sessions.
+///
+/// The workspace is deliberately absent. Every session brings its own `cwd`
+/// on `session/new`, so there is nothing here for it to replace — where the
+/// old one-shot config had to carry a placeholder path because its type
+/// demanded one.
+#[derive(Debug, Clone, Default)]
+pub struct SessionTemplate {
+    pub(super) provider: Option<BuiltinProvider>,
+    pub(super) base_url: Option<String>,
+    pub(super) model: Option<ModelSelector>,
+    pub(super) shell: ShellAccess,
+    pub(super) system_prompt: Option<SystemPrompt>,
+    pub(super) effort: Option<Effort>,
+    pub(super) session_name: Option<String>,
+}
+
+impl SessionTemplate {
+    pub fn new() -> Self {
+        Self::default()
+    }
+
+    /// Prefers `provider` over whichever API key the environment offers first.
+    pub fn with_provider(self, provider: BuiltinProvider) -> Self {
+        Self {
+            provider: Some(provider),
+            ..self
+        }
+    }
+
+    /// Points every session at an OpenAI-compatible endpoint.
+    pub fn with_base_url(self, base_url: impl Into<String>) -> Self {
+        Self {
+            base_url: Some(base_url.into()),
+            ..self
+        }
+    }
+
+    pub fn with_model(self, model: ModelSelector) -> Self {
+        Self {
+            model: Some(model),
+            ..self
+        }
+    }
+
+    /// Grants or denies command execution for every session (ADR-0013).
+    pub fn with_shell(self, shell: ShellAccess) -> Self {
+        Self { shell, ..self }
+    }
+
+    /// The host's say on top of each workspace's own context files.
+    pub fn with_system_prompt(self, system_prompt: SystemPrompt) -> Self {
+        Self {
+            system_prompt: Some(system_prompt),
+            ..self
+        }
+    }
+
+    /// How hard the model should think, where the provider supports it.
+    pub fn with_effort(self, effort: Effort) -> Self {
+        Self {
+            effort: Some(effort),
+            ..self
+        }
+    }
+
+    pub fn with_session_name(self, session_name: impl Into<String>) -> Self {
+        Self {
+            session_name: Some(session_name.into()),
+            ..self
+        }
+    }
+}
+
 /// How a served connection is configured.
 ///
 /// The client supplies the workspace per session (`cwd` on `session/new`), so
@@ -138,8 +217,8 @@ impl Default for ServeConfig {
 }
 
 impl ServeConfig {
-    /// Serves sessions built from `template`, whose workspace each session
-    /// replaces with the `cwd` its client sent.
+    /// Serves sessions built from `template`, each in the `cwd` its client
+    /// sent.
     ///
     /// The template's process half — provider, endpoint, model — becomes the
     /// recipe for the one [`Runtime`](basis::Runtime) every session runs on
@@ -151,10 +230,9 @@ impl ServeConfig {
     /// default of allowing everything: over ACP there is a client to ask, which
     /// is the whole reason the protocol carries a permission request. An
     /// operator who wants otherwise says so with
-    /// [`with_initial_mode`](Self::with_initial_mode) — the template cannot
-    /// carry it, because a [`RunConfig`] no longer has an opinion about
-    /// approval to carry (ADR-0010).
-    pub fn new(template: impl Into<Option<RunConfig>>) -> Self {
+    /// [`with_initial_mode`](Self::with_initial_mode) — the template carries
+    /// no opinion about approval at all (ADR-0010).
+    pub fn new(template: impl Into<Option<SessionTemplate>>) -> Self {
         Self {
             source: Arc::new(ConfiguredSource::new(template.into())),
             initial_mode: ApprovalMode::default(),

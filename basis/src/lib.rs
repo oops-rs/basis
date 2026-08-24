@@ -37,10 +37,10 @@
 //! # }
 //! ```
 //!
-//! [`run`](run()) and its neighbours are the one-prompt shape: a
-//! [`RunConfig`] in, a report out, with a workspace opened and dropped around
-//! it. They are wrappers over the same path — [`RunConfig::split`] is the seam
-//! — so nothing behaves differently for having gone through one.
+//! [`run`](run()) and [`run_with_approver`] are the one-prompt shape: a path
+//! and a prompt in, a report out, with a workspace opened and dropped around
+//! it. They are wrappers over the same open-and-prepare — so nothing behaves
+//! differently for having gone through one.
 //!
 //! [`Runtime`] is the process's shape (ADR-0018), and only the N-repository
 //! host sees it: what changes when the host changes — provider and credential,
@@ -122,9 +122,8 @@ pub use mcp::{
 };
 pub use run::{
     Bound, Bounds, CancellationToken, CollectingSink, Compacted, Effort, EventFanIn, EventSink,
-    FnSink, MergedEvents, NullSink, OutputReport, OutputSpec, PreparedRun, PromptPart, RunConfig,
-    RunContext, RunError, RunReport, RunUsage, TaggedEvent, TaggedSink, TurnOptions, resume, run,
-    run_with_approver,
+    FnSink, MergedEvents, NullSink, OutputReport, OutputSpec, PreparedRun, PromptPart, RunContext,
+    RunError, RunReport, RunUsage, TaggedEvent, TaggedSink, TurnOptions, run, run_with_approver,
 };
 pub use runtime::{Runtime, RuntimeBuilder};
 pub use shell::ShellAccess;

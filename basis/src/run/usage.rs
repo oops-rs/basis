@@ -75,7 +75,7 @@ pub struct RunUsage {
 }
 
 impl RunUsage {
-    /// Input plus output — what [`RunConfig::with_token_budget`](super::RunConfig) counts.
+    /// Input plus output — what [`RunSpec::with_token_budget`](crate::RunSpec) counts.
     ///
     /// Cache reads and cache writes are left out for the same reason mentra
     /// leaves them out of the budget it enforces: they are priced differently

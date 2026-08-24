@@ -5,22 +5,22 @@
 //! `tests/conversation.rs` proves against a mock: the second turn sees the
 //! first, because the session survives.
 
-use basis::{AllowAll, CollectingSink, NullSink, RunConfig};
+use basis::{AllowAll, CollectingSink, NullSink, Runtime, Workspace};
 use mentra::ModelSelector;
 
 #[tokio::main]
 async fn main() -> Result<(), Box<dyn std::error::Error>> {
-    let workspace = std::env::current_dir()?;
-
-    let mut config = RunConfig::new(workspace, "Remember the number 41. Just acknowledge.");
-    if let Ok(model) = std::env::var("BASIS_MODEL") {
-        config = config.with_model(ModelSelector::Id(model));
-    }
+    let mut runtime = Runtime::builder();
     if let Ok(base_url) = std::env::var("BASIS_BASE_URL") {
-        config = config.with_base_url(base_url);
+        runtime = runtime.with_base_url(base_url);
     }
+    let mut builder = Workspace::builder(std::env::current_dir()?).with_runtime_builder(runtime);
+    if let Ok(model) = std::env::var("BASIS_MODEL") {
+        builder = builder.with_model(ModelSelector::Id(model));
+    }
+    let workspace = builder.open().await?;
 
-    let mut run = basis::run::prepare(config).await?;
+    let mut run = workspace.prepare("Remember the number 41. Just acknowledge.")?;
     println!("session: {}", run.session_id());
     println!("agent:   {}", run.agent_id());
 

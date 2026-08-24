@@ -156,8 +156,8 @@ impl PreparedRun {
 
     /// Sets what every turn on this run may spend.
     ///
-    /// [`prepare`](super::prepare) installs [`RunConfig`](super::RunConfig)'s
-    /// bounds here; a host that built its own session says so itself. Only the
+    /// [`Workspace`](crate::Workspace) installs [`RunSpec`](crate::RunSpec)'s
+    /// bounds here at mint; a host that built its own session says so itself. Only the
     /// limits are read — a cancellation token belongs to one call, not to the
     /// run, and arrives through [`send_with_options`](Self::send_with_options).
     pub fn with_bounds(self, bounds: TurnOptions) -> Self {
@@ -247,7 +247,7 @@ impl PreparedRun {
     /// against right now. Known when the model was resolved through the
     /// provider's listing and that listing reports one — mentra looks a
     /// pinned id up there too (`bfe952b`), so `--model`, a repository's
-    /// `config.json` and `RunConfig::with_model` all get a window when the
+    /// `config.json` and `WorkspaceBuilder::with_model` all get a window when the
     /// provider publishes one. Gemini's listing does, as `inputTokenLimit`;
     /// Anthropic's and the OpenAI wires' do not, and neither does a server
     /// that cannot list. `None` for a run [`set_model`](Self::set_model) has

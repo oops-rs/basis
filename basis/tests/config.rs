@@ -21,7 +21,7 @@ use std::{
 };
 
 use basis::{
-    CollectingSink, Config, ContextConfig, Effort, RunConfig, Runtime, Workspace, WorkspaceBuilder,
+    CollectingSink, Config, ContextConfig, Effort, Runtime, Workspace, WorkspaceBuilder,
     hooks::HooksConfig, skills::SkillsConfig, templates::TemplatesConfig,
     tools::declared::ToolsConfig,
 };
@@ -116,45 +116,6 @@ async fn an_explicit_model_outranks_the_file() {
         .expect("opens offline");
 
     assert_eq!(workspace.model(), "from-the-caller");
-}
-
-#[tokio::test]
-async fn a_named_model_on_a_run_config_outranks_the_file() {
-    // The CLI's path: `--model` lands on a `RunConfig`, and `split` is the one
-    // mapping from that to a workspace builder.
-    let dir = tempfile::tempdir().expect("tempdir");
-    write_config(dir.path(), r#"{"schema": 1, "model": "from-the-file"}"#);
-
-    let config =
-        RunConfig::new(dir.path(), "hi").with_model(ModelSelector::Id("from-the-flag".to_string()));
-    let (builder, _) = config.split();
-
-    let workspace = pin(builder)
-        .with_runtime(offline())
-        .open()
-        .await
-        .expect("opens offline");
-
-    assert_eq!(workspace.model(), "from-the-flag");
-}
-
-#[tokio::test]
-async fn a_run_config_that_named_no_model_lets_the_file_decide() {
-    // `RunConfig::new` seeds `NewestAvailable` because the field is not an
-    // `Option` — so a caller that said nothing must not thereby outrank a file
-    // that said something. This is the assertion that keeps that true.
-    let dir = tempfile::tempdir().expect("tempdir");
-    write_config(dir.path(), r#"{"schema": 1, "model": "from-the-file"}"#);
-
-    let (builder, _) = RunConfig::new(dir.path(), "hi").split();
-
-    let workspace = pin(builder)
-        .with_runtime(offline())
-        .open()
-        .await
-        .expect("opens offline");
-
-    assert_eq!(workspace.model(), "from-the-file");
 }
 
 #[tokio::test]
@@ -457,31 +418,4 @@ fn read_http_request(stream: &mut TcpStream) -> String {
     }
 
     String::from_utf8(bytes).expect("request should be utf8")
-}
-
-/// `pinned`'s discovery choices, applied to a builder that came from
-/// [`RunConfig::split`] rather than being built here.
-fn pin(builder: WorkspaceBuilder) -> WorkspaceBuilder {
-    builder
-        .with_context(ContextConfig {
-            file_name: "AGENTS.md".to_string(),
-            global_dir: None,
-            walk_parents: false,
-        })
-        .with_skills(SkillsConfig {
-            workspace_subdir: PathBuf::from(".basis/skills"),
-            global_dir: None,
-        })
-        .with_templates(TemplatesConfig {
-            workspace_subdir: PathBuf::from(".basis/templates"),
-            global_dir: None,
-        })
-        .with_hooks(HooksConfig {
-            workspace_file: PathBuf::from(".basis/hooks.json"),
-            global_dir: None,
-        })
-        .with_tools(ToolsConfig {
-            workspace_file: PathBuf::from(".basis/tools.json"),
-            global_dir: None,
-        })
 }

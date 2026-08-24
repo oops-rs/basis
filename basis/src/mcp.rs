@@ -96,9 +96,8 @@ pub enum McpServer {
 /// Hand-written for the reason [`McpError`] reports so little: a stdio
 /// server's `env` holds credentials, and by the time one reaches this type basis
 /// has already expanded `${GITHUB_TOKEN}` into the real value. Deriving would
-/// put those in every `{:?}` of an [`McpConfig`], an [`McpSource`], or a
-/// [`RunConfig`](crate::RunConfig) — all of which do derive, and any of which
-/// a host may log.
+/// put those in every `{:?}` of an [`McpConfig`] or an [`McpSource`] — both
+/// of which do derive, and either of which a host may log.
 ///
 /// Variable *names* survive, because that is the same line the errors draw:
 /// naming `env.GITHUB_TOKEN` is what makes a misconfiguration fixable, and it
@@ -664,7 +663,7 @@ mod tests {
 
     #[test]
     fn a_configured_server_is_not_printed_by_whatever_holds_it() {
-        // `McpConfig` derives `Debug`, and `RunConfig` holds one — so the
+        // `McpConfig` derives `Debug`, and other configs hold one — so the
         // redaction has to survive being nested rather than being something a
         // caller has to remember to reach for.
         let config = McpConfig::default().with_supplied(vec![McpServer::Stdio(McpServerConfig {

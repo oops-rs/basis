@@ -71,8 +71,8 @@ Keep the run and send again for a conversation — `run.send("and which of those
 AllowAll)` — because the session survives the turn, and `run.agent_id()` is the handle
 `Workspace::resume` takes in a later process.
 
-Bounds are builders on either shape — `RunConfig` for a one-shot free function, `RunSpec` for a run
-minted from a workspace — and every bound ends the run *gracefully*: the stream closes the way it
+Bounds are builders on `RunSpec` — one shape, however the run is made — and every bound ends the
+run *gracefully*: the stream closes the way it
 always does and whatever the model committed is kept. `report.stopped_by` is
 `Some(Bound::Deadline | Bound::ToolBudget | Bound::TokenBudget)` when a bound ended the run rather
 than the work ([ADR-0014](docs/adr/0014-watch-retired-runs-are-boundable.md)).

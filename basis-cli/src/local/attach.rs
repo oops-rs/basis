@@ -25,7 +25,8 @@ use std::{
 
 use basis::{
     AllowAll, Approver, Bound, CancellationToken, DenyAll, Effort, Event, EventSink, ModelSelector,
-    RunConfig, RunOutcome, Runtime, RuntimeBuilder, ShellAccess, TurnOptions, provider,
+    RunOutcome, RunSpec, Runtime, RuntimeBuilder, ShellAccess, TurnOptions, Workspace,
+    WorkspaceBuilder, provider,
 };
 use serde_json::Value;
 use tokio::time::{self, Instant};
@@ -256,11 +257,10 @@ async fn run_model(
         Ok(runtime) => runtime,
         Err(error) => return record_failure(paths, meta, error, None),
     };
-    let config = match run_config(meta) {
-        Ok(config) => config,
+    let (builder, spec) = match run_parts(meta) {
+        Ok(parts) => parts,
         Err(error) => return record_failure(paths, meta, error, None),
     };
-    let (builder, spec) = config.split();
     let workspace = match builder.with_runtime_builder(runtime).open().await {
         Ok(workspace) => Arc::new(workspace),
         Err(error) => return record_failure(paths, meta, error.to_string(), None),
@@ -549,19 +549,19 @@ async fn settle_children(
     }
 }
 
-/// The per-run and per-workspace half of the recorded options.
+/// The per-workspace and per-run halves of the recorded options.
 ///
 /// The provider and the base URL are the other half — process facts since
 /// ADR-0018 — and are stated on [`task_runtime`]'s recipe instead. Saying them
 /// here as well would build a value that
 /// [`with_runtime_builder`](basis::WorkspaceBuilder::with_runtime_builder)
 /// then replaces.
-fn run_config(meta: &TaskMeta) -> Result<RunConfig, String> {
+fn run_parts(meta: &TaskMeta) -> Result<(WorkspaceBuilder, RunSpec), String> {
     let options = &meta.options;
-    let mut config = RunConfig::new(Path::new(&meta.workspace), meta.prompt.clone())
+    let mut builder = Workspace::builder(Path::new(&meta.workspace))
         .with_shell(ShellAccess::from_flag(!options.no_shell));
     if let Some(model) = &options.model {
-        config = config.with_model(ModelSelector::Id(model.clone()));
+        builder = builder.with_model(ModelSelector::Id(model.clone()));
     }
     // Reconstructed from the two recorded halves rather than one field: the
     // pair is how `spawn` spelled it, and clap refused both at once before
@@ -570,21 +570,23 @@ fn run_config(meta: &TaskMeta) -> Result<RunConfig, String> {
         options.system_prompt.clone(),
         options.append_system_prompt.clone(),
     ) {
-        config = config.with_system_prompt(system_prompt);
+        builder = builder.with_system_prompt(system_prompt);
     }
+
+    let mut spec = RunSpec::new(meta.prompt.clone());
     if let Some(effort) = options.effort.as_deref() {
-        config = config.with_effort(parse_effort(effort)?);
+        spec = spec.with_effort(parse_effort(effort)?);
     }
     if let Some(remaining) = remaining_deadline(meta.deadline_at_ms) {
-        config = config.with_deadline(remaining.max(Duration::from_millis(1)));
+        spec = spec.with_deadline(remaining.max(Duration::from_millis(1)));
     }
     if let Some(tool_budget) = options.tool_budget {
-        config = config.with_tool_budget(tool_budget);
+        spec = spec.with_tool_budget(tool_budget);
     }
     if let Some(token_budget) = options.token_budget {
-        config = config.with_token_budget(token_budget);
+        spec = spec.with_token_budget(token_budget);
     }
-    Ok(config)
+    Ok((builder, spec))
 }
 
 /// The recipe for this task's own runtime: the process half of the recorded

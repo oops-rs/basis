@@ -18,7 +18,7 @@ use std::{
     process::ExitCode,
 };
 
-use basis::{JsonlWriter, RunConfig, ShellAccess, provider};
+use basis::{JsonlWriter, RunSpec, Runtime, ShellAccess, Workspace, provider};
 use mentra::ModelSelector;
 
 use crate::{cli::RunArgs, exit::exit_code};
@@ -31,45 +31,56 @@ pub(crate) async fn execute_run(args: RunArgs) -> Result<ExitCode, String> {
         }
     };
 
-    let mut config = RunConfig::new(workspace, prompt_from(args.prompt)?);
-
+    // The process half seeds the private runtime the workspace builds
+    // (ADR-0018): which provider answers, and at which endpoint.
+    let mut runtime = Runtime::builder();
     if let Some(name) = &args.provider {
-        config = config.with_provider(provider::parse(name).map_err(|error| error.to_string())?);
+        runtime = runtime.with_provider(provider::parse(name).map_err(|error| error.to_string())?);
     }
     if let Some(base_url) = args.base_url {
-        config = config.with_base_url(base_url);
+        runtime = runtime.with_base_url(base_url);
     }
+
+    let mut builder = Workspace::builder(workspace)
+        .with_runtime_builder(runtime)
+        .with_shell(ShellAccess::from_flag(!args.no_shell));
     if let Some(model) = args.model {
-        config = config.with_model(ModelSelector::Id(model));
+        builder = builder.with_model(ModelSelector::Id(model));
     }
 
-    config = config.with_shell(ShellAccess::from_flag(!args.no_shell));
-
+    let mut spec = RunSpec::new(prompt_from(args.prompt)?);
     if let Some(effort) = args.effort {
-        config = config.with_effort(effort.into());
+        spec = spec.with_effort(effort.into());
     }
 
     // A bound that trips ends the run gracefully — the stream closes the way
     // it always does and committed work is kept — so setting one costs a
     // healthy run nothing.
     if let Some(deadline) = args.deadline {
-        config = config.with_deadline(deadline.duration());
+        spec = spec.with_deadline(deadline.duration());
     }
     if let Some(tool_budget) = args.tool_budget {
-        config = config.with_tool_budget(tool_budget);
+        spec = spec.with_tool_budget(tool_budget);
     }
     if let Some(token_budget) = args.token_budget {
-        config = config.with_token_budget(token_budget);
+        spec = spec.with_token_budget(token_budget);
     }
 
     // Every consequential call is put to this one, and nothing else decides:
     // `always` allows, `never` refuses, `prompt` asks the person.
     let approver = args.approve.approver();
 
+    // Held open past the mint: the workspace's hooks and MCP connections live
+    // exactly as long as it does, and the turn below still needs them.
+    let workspace = builder.open().await.map_err(|error| error.to_string())?;
+
     // The stream is the whole output: every fact a caller could want — the
     // outcome, the bound that tripped, the failure's words — is a line on it,
     // so there is nothing left for this function to say afterwards.
-    let report = basis::run_with_approver(config, JsonlWriter::new(io::stdout()), approver)
+    let report = workspace
+        .prepare(spec)
+        .map_err(|error| error.to_string())?
+        .execute_with_approver(JsonlWriter::new(io::stdout()), approver)
         .await
         .map_err(|error| error.to_string())?;
     Ok(ExitCode::from(exit_code(&report)))

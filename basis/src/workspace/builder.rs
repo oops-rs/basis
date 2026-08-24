@@ -52,7 +52,7 @@ use super::Workspace;
 /// `WorkspaceConfig` is a different thing entirely — the agent's base directory
 /// — and basis sets that from this one rather than exposing it.
 ///
-/// Fields are private, unlike [`RunConfig`](crate::RunConfig)'s, because the
+/// Fields are private because the
 /// embedded runtime recipe can hold a credential. `with_*` returns a new
 /// value, so a host can keep a half-configured builder and finish it
 /// differently per workspace.

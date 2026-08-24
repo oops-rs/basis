@@ -1,7 +1,7 @@
 //! A workspace opened once, minting runs cheaply.
 //!
-//! Everything a run needs but does not change divides in two, and until now basis
-//! kept both halves in one [`RunConfig`](crate::RunConfig) and re-resolved the
+//! Everything a run needs but does not change divides in two, and basis once
+//! kept both halves in one `RunConfig` and re-resolved the
 //! lot for every prompt. ADR-0010 named the cost: a twenty-agent fan-out read
 //! `AGENTS.md` twenty times, resolved the model twenty times, and opened twenty
 //! copies of every MCP server the workspace configures.
@@ -57,7 +57,6 @@ pub use builder::WorkspaceBuilder;
 pub use spec::RunSpec;
 
 pub(crate) use builder::{load_templates, resolved_workspace};
-pub(crate) use spec::DEFAULT_SESSION_NAME;
 
 #[cfg(feature = "mcp")]
 use crate::mcp::connections::McpConnections;

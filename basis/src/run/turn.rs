@@ -1,9 +1,8 @@
 //! What one turn may spend, and how it can be stopped.
 //!
-//! A sibling of [`RunConfig`](super::RunConfig) and [`RunSpec`](crate::RunSpec)
-//! rather than something owned by the run: those two say what a *run* may
-//! spend, this says what one call may, and [`bounded`] is the only place that
-//! distinction is resolved.
+//! A sibling of [`RunSpec`](crate::RunSpec) rather than something owned by
+//! the run: the spec says what a *run* may spend, this says what one call
+//! may, and [`bounded`] is the only place that distinction is resolved.
 
 use std::time::{Duration, SystemTime};
 

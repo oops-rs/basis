@@ -6,9 +6,8 @@
 //! handful of things that are actually per-run: what to ask, what to call the
 //! session, how hard to think, and what the run may spend.
 //!
-//! A spec is not a [`RunConfig`](crate::RunConfig) with fields removed. It is
-//! the per-run half of one, and every field it *lacks* is a field whose change
-//! would mean opening a different workspace.
+//! Every field a spec *lacks* is deliberate: a change there would mean
+//! opening a different workspace.
 //!
 //! [`Workspace`]: super::Workspace
 

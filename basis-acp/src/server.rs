@@ -62,7 +62,7 @@ mod lifecycle;
 mod turn;
 mod workspaces;
 
-pub use config::{ServeConfig, SessionSource};
+pub use config::{ServeConfig, SessionSource, SessionTemplate};
 
 use agent_client_protocol::{
     Agent, Client, ConnectionTo, Handled,

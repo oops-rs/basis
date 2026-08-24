@@ -255,7 +255,8 @@ async fn a_token_already_tripped_stops_the_turn_before_it_starts() {
 
 #[tokio::test]
 async fn a_second_turn_is_unaffected_by_the_first_turns_token() {
-    // A token belongs to one call, which is why it never lived on `RunConfig`.
+    // A token belongs to one call, which is why it never lived on the run's
+    // configuration.
     // If it leaked onto the run, the follow-up prompt would die on arrival.
     let dir = workspace();
     let (runtime, model) = scripted_write(dir.path());
