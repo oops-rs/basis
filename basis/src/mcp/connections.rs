@@ -89,6 +89,13 @@ impl McpConnections {
                         .await
                         .map_err(|e| e.to_string())
                 }
+                McpServer::Http(mut config) => {
+                    config.name = effective.clone();
+                    manager
+                        .connect_streamable_http(&config)
+                        .await
+                        .map_err(|e| e.to_string())
+                }
             };
 
             match outcome {

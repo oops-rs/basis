@@ -14,7 +14,7 @@ use std::{
     path::Path,
 };
 
-use mentra::{McpServerConfig, McpSseServerConfig};
+use mentra::{McpServerConfig, McpSseServerConfig, McpStreamableHttpServerConfig};
 use serde::Deserialize;
 
 use crate::expand::expand;
@@ -56,6 +56,7 @@ struct RawServer {
 enum Transport {
     Stdio,
     Sse,
+    Http,
 }
 
 /// Reads `text` as the file at `path`.
@@ -171,16 +172,29 @@ impl RawServer {
                     })
                     .map(McpServer::Sse)
             }
+            Transport::Http => {
+                let url = self
+                    .url
+                    .as_deref()
+                    .filter(|url| !url.trim().is_empty())
+                    .ok_or_else(|| invalid("has no `url` to reach".to_string()))?;
+
+                let config =
+                    McpStreamableHttpServerConfig::new(name.clone(), expanded("url", url)?);
+
+                self.headers
+                    .iter()
+                    .try_fold(config, |config, (key, value)| {
+                        Ok(config
+                            .with_header(key.clone(), expanded(&format!("headers.{key}"), value)?))
+                    })
+                    .map(McpServer::Http)
+            }
         }
     }
 
     /// Settles which transport the entry describes.
     fn transport(&self, origin: &str, name: &str) -> Result<Transport, McpError> {
-        let unsupported = |transport: &str| McpError::UnsupportedTransport {
-            origin: origin.to_string(),
-            name: name.to_string(),
-            transport: transport.to_string(),
-        };
         let invalid = |reason: String| McpError::Invalid {
             origin: origin.to_string(),
             name: name.to_string(),
@@ -190,14 +204,17 @@ impl RawServer {
         match self.transport.as_deref().map(str::trim) {
             Some("stdio") => Ok(Transport::Stdio),
             Some("sse") => Ok(Transport::Sse),
-            // mentra speaks the 2024-11-05 HTTP+SSE transport, not Streamable
-            // HTTP; naming the gap is the point of refusing here.
-            Some("http") | Some("streamable-http") => Err(unsupported("Streamable HTTP")),
+            // Both spellings are in the wild for the same transport.
+            Some("http") | Some("streamable-http") => Ok(Transport::Http),
             Some(other) => Err(invalid(format!("names an unknown transport `{other}`"))),
             // The original format had no `type` field at all, so an entry's
             // shape is the older way of saying the same thing.
             None => match (self.command.is_some(), self.url.is_some()) {
                 (true, false) => Ok(Transport::Stdio),
+                // Deliberately still SSE, never Streamable HTTP: a bare `url`
+                // has meant the 2024-11-05 HTTP+SSE transport since before the
+                // third one existed, and a file keeps its meaning. A
+                // Streamable HTTP server says `type: "http"`.
                 (false, true) => Ok(Transport::Sse),
                 (true, true) => Err(invalid(
                     "has both `command` and `url`; set `type` to say which is meant".to_string(),
@@ -322,13 +339,64 @@ mod tests {
     }
 
     #[test]
-    fn streamable_http_is_refused_by_name() {
-        let error = parse_text(r#"{"mcpServers":{"api":{"type":"http","url":"https://x/mcp"}}}"#)
-            .expect_err("basis cannot serve it");
+    fn an_http_type_is_a_streamable_http_server() {
+        let servers = parse_text(r#"{"mcpServers":{"api":{"type":"http","url":"https://x/mcp"}}}"#)
+            .expect("mentra speaks this transport");
 
+        let config = servers[0].as_http().expect("http");
+        assert_eq!(config.name, "api");
+        assert_eq!(config.url, "https://x/mcp");
+    }
+
+    #[test]
+    fn the_streamable_http_alias_names_the_same_transport() {
+        let servers = parse_text(
+            r#"{"mcpServers":{"api":{"type":"streamable-http","url":"https://x/mcp"}}}"#,
+        )
+        .expect("both spellings are in the wild");
+
+        assert!(servers[0].as_http().is_some());
+    }
+
+    #[test]
+    fn http_url_and_headers_are_expanded() {
+        let servers = parse_with(
+            Path::new("/repo/.mcp.json"),
+            r#"{"mcpServers":{"api":{"type":"http","url":"https://${HOST}/mcp","headers":{"authorization":"Bearer ${API_TOKEN}"}}}}"#,
+            &|name| match name {
+                "HOST" => Some("example.com".to_string()),
+                "API_TOKEN" => Some("secret".to_string()),
+                _ => None,
+            },
+        )
+        .expect("both are set");
+
+        let config = servers[0].as_http().expect("http");
+        assert_eq!(config.url, "https://example.com/mcp");
+        assert_eq!(
+            config
+                .headers
+                .get("authorization")
+                .map(mentra::mcp::SecretString::expose_secret),
+            Some("Bearer secret")
+        );
+    }
+
+    #[test]
+    fn an_http_servers_debug_does_not_print_an_expanded_credential() {
+        // The parser has already turned `${API_TOKEN}` into the real value by
+        // the time this type exists, and `McpConfig` derives Debug around it.
+        let servers = parse_with(
+            Path::new("/repo/.mcp.json"),
+            r#"{"mcpServers":{"api":{"type":"http","url":"https://x/mcp","headers":{"authorization":"${API_TOKEN}"}}}}"#,
+            &|name| (name == "API_TOKEN").then(|| "sk-live-do-not-print-me".to_string()),
+        )
+        .expect("the token is set");
+
+        let rendered = format!("{:?}", servers[0]);
         assert!(
-            matches!(error, McpError::UnsupportedTransport { .. }),
-            "a client must learn its server will not start: {error}"
+            !rendered.contains("sk-live-do-not-print-me"),
+            "an expanded credential reached Debug: {rendered}"
         );
     }
 

@@ -7,11 +7,11 @@
 //!
 //! # Nothing is dropped
 //!
-//! ACP's `McpServer` has variants for transports mentra has no client for, and
-//! is `#[non_exhaustive]` besides, so a wildcard arm is unavoidable. Every arm
-//! basis cannot serve returns an error naming the server and the transport,
-//! because a client that configured a server and got silence cannot tell that
-//! apart from a server that advertised no tools.
+//! ACP's three named transports — stdio, SSE, Streamable HTTP — all
+//! translate, but the enum is `#[non_exhaustive]`, so a wildcard arm is
+//! unavoidable. A variant this build has no name for returns an error rather
+//! than silence, because a client that configured a server and got silence
+//! cannot tell that apart from a server that advertised no tools.
 //!
 //! Placeholders are *not* expanded here. `${VAR}` in a `.mcp.json` is a
 //! convention for a file a human wrote; a value on the wire is one a client
@@ -19,8 +19,10 @@
 
 use std::collections::HashMap;
 
-use agent_client_protocol::schema::v1::{McpServer as AcpServer, McpServerSse, McpServerStdio};
-use mentra::{McpServerConfig, McpSseServerConfig};
+use agent_client_protocol::schema::v1::{
+    McpServer as AcpServer, McpServerHttp, McpServerSse, McpServerStdio,
+};
+use mentra::{McpServerConfig, McpSseServerConfig, McpStreamableHttpServerConfig};
 
 use basis::mcp::{McpError, McpServer};
 
@@ -40,11 +42,7 @@ fn from_one(server: &AcpServer) -> Result<McpServer, McpError> {
     match server {
         AcpServer::Stdio(stdio) => stdio_server(stdio),
         AcpServer::Sse(sse) => Ok(sse_server(sse)),
-        AcpServer::Http(http) => Err(McpError::UnsupportedTransport {
-            origin: ORIGIN.to_string(),
-            name: http.name.clone(),
-            transport: "Streamable HTTP".to_string(),
-        }),
+        AcpServer::Http(http) => Ok(http_server(http)),
         _ => Err(McpError::UnknownTransport {
             origin: ORIGIN.to_string(),
         }),
@@ -89,6 +87,15 @@ fn sse_server(sse: &McpServerSse) -> McpServer {
     );
 
     McpServer::Sse(config)
+}
+
+fn http_server(http: &McpServerHttp) -> McpServer {
+    let config = http.headers.iter().fold(
+        McpStreamableHttpServerConfig::new(http.name.clone(), http.url.clone()),
+        |config, header| config.with_header(header.name.clone(), header.value.clone()),
+    );
+
+    McpServer::Http(config)
 }
 
 #[cfg(test)]
@@ -137,33 +144,35 @@ mod tests {
     }
 
     #[test]
-    fn an_http_server_is_refused_rather_than_dropped() {
-        let error = from_acp(&[AcpServer::Http(McpServerHttp::new(
-            "api",
-            "https://example.com/mcp",
-        ))])
-        .expect_err("mentra has no Streamable HTTP client");
+    fn an_http_server_carries_its_url_and_headers() {
+        let servers = from_acp(&[AcpServer::Http(
+            McpServerHttp::new("api", "https://example.com/mcp")
+                .headers(vec![HttpHeader::new("authorization", "Bearer t")]),
+        )])
+        .expect("mentra speaks this transport");
 
-        let rendered = error.to_string();
-        assert!(
-            rendered.contains("api"),
-            "the server must be named: {rendered}"
+        let config = servers[0].as_http().expect("http");
+        assert_eq!(config.url, "https://example.com/mcp");
+        assert_eq!(
+            config
+                .headers
+                .get("authorization")
+                .map(mentra::mcp::SecretString::expose_secret),
+            Some("Bearer t")
         );
-        assert!(matches!(error, McpError::UnsupportedTransport { .. }));
     }
 
     #[test]
-    fn one_unserviceable_server_fails_the_whole_set() {
-        let error = from_acp(&[
+    fn a_mixed_set_translates_every_server() {
+        let servers = from_acp(&[
             AcpServer::Stdio(McpServerStdio::new("fs", "/usr/local/bin/mcp-fs")),
             AcpServer::Http(McpServerHttp::new("api", "https://example.com/mcp")),
         ])
-        .expect_err("a partly-configured session is worse than none");
+        .expect("every transport a client can name translates");
 
-        assert!(
-            matches!(error, McpError::UnsupportedTransport { .. }),
-            "{error}"
-        );
+        assert_eq!(servers.len(), 2);
+        assert!(servers[0].as_stdio().is_some());
+        assert!(servers[1].as_http().is_some());
     }
 
     #[test]

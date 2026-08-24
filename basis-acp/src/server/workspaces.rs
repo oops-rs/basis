@@ -344,8 +344,42 @@ fn digest(servers: &[McpServer]) -> u64 {
                     value.expose_secret().hash(&mut hasher);
                 }
             }
+            McpServer::Http(config) => {
+                // The discriminant is hashed like the values: two servers
+                // sharing a name and URL but not a transport are not asking
+                // for the same workspace.
+                "http".hash(&mut hasher);
+                config.name.hash(&mut hasher);
+                config.url.hash(&mut hasher);
+                for (name, value) in &config.headers {
+                    name.hash(&mut hasher);
+                    value.expose_secret().hash(&mut hasher);
+                }
+            }
         }
     }
 
     hasher.finish()
+}
+
+#[cfg(test)]
+mod tests {
+    use basis::McpServer;
+    use mentra::{McpSseServerConfig, McpStreamableHttpServerConfig};
+
+    use super::digest;
+
+    #[test]
+    fn two_servers_differing_only_in_transport_hash_apart() {
+        // Without the discriminant in the hash, an SSE server and a Streamable
+        // HTTP server sharing a name and URL would key one workspace, and the
+        // second client's transport would silently become the first's.
+        let sse = McpServer::Sse(McpSseServerConfig::new("api", "https://example.com/mcp"));
+        let http = McpServer::Http(McpStreamableHttpServerConfig::new(
+            "api",
+            "https://example.com/mcp",
+        ));
+
+        assert_ne!(digest(&[sse]), digest(&[http]));
+    }
 }

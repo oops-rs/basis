@@ -868,6 +868,22 @@ exposes.
   signature stands. What it newly exposes: a boxed or shared tool registers
   as itself, which is the shape a per-workspace host-tool surface would need;
   none is built, because no one has asked for one.
+- **mentra#20 is closed and Streamable HTTP connects.** The third transport
+  arrives as `McpServer::Http` over mentra's `connect_streamable_http`:
+  `.mcp.json` takes `type: "http"` (or `"streamable-http"`) with the same
+  `${VAR}` expansion as SSE, and an ACP client's `McpServerHttp` translates
+  instead of failing `session/new`. `McpError::UnsupportedTransport` is
+  deleted with its last two construction sites — pre-1.0, the variant goes
+  rather than lingers. Two decisions carry their own comments: a bare `url`
+  with no `type` still means SSE, because a file written before the third
+  transport existed keeps its meaning; and the ACP workspace digest hashes
+  the transport discriminant, without which two servers differing only in
+  transport would key one workspace. What it newly exposes: a workspace file
+  or a client can now point basis at any HTTP endpoint current MCP servers
+  ship. The `{:?}` line holds — Streamable HTTP headers are mentra
+  `SecretString`s and redact themselves — and recovery semantics are
+  mentra's: a request that died indeterminate is surfaced, never
+  auto-retried, and reconnection is one bounded re-handshake.
 
 ## 3. Phases
 

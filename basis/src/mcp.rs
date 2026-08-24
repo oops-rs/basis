@@ -45,21 +45,19 @@
 //!
 //! # Transports
 //!
-//! stdio and the legacy HTTP+SSE transport, which are the two mentra can
-//! reach. Streamable HTTP is neither — a configuration asking for it is
-//! refused by name rather than dropped, because a client that configured a
-//! server and got silence has no way to tell that from a server with no tools.
-//! The gap is upstream and filed
-//! ([oops-rs/mentra#20](https://github.com/oops-rs/mentra/issues/20)): the
-//! client half is mentra's, and once it can reach the transport the refusal
-//! here becomes a third variant.
+//! stdio, the legacy HTTP+SSE transport, and Streamable HTTP — the three
+//! mentra has clients for. Streamable HTTP is the transport current MCP
+//! servers ship; a server that answers `404` on a legacy `/sse` path wants
+//! [`McpServer::Http`]. One deliberate asymmetry survives in `.mcp.json`: a
+//! bare `url` with no `type` still means SSE, because files written before
+//! the third transport existed keep their meaning.
 
 pub(crate) mod connections;
 mod file;
 
 use std::path::{Path, PathBuf};
 
-use mentra::{McpServerConfig, McpSseServerConfig};
+use mentra::{McpServerConfig, McpSseServerConfig, McpStreamableHttpServerConfig};
 use thiserror::Error;
 
 use crate::context::ContextScope;
@@ -74,8 +72,8 @@ pub const DEFAULT_GLOBAL_MCP_FILE: &str = "mcp.json";
 
 /// One MCP server, as basis hands it to mentra.
 ///
-/// A thin sum over mentra's two transport configurations rather than a type of
-/// basis's own: mentra owns what a server *is*, and re-describing it here would
+/// A thin sum over mentra's three transport configurations rather than a type
+/// of basis's own: mentra owns what a server *is*, and re-describing it here would
 /// only create something to drift. The enum exists because mentra's own
 /// equivalent is private, so a caller holding a mixed list has nowhere to put
 /// it (see the module docs on transports).
@@ -85,6 +83,8 @@ pub enum McpServer {
     Stdio(McpServerConfig),
     /// The legacy HTTP+SSE transport from protocol revision 2024-11-05.
     Sse(McpSseServerConfig),
+    /// The Streamable HTTP transport, which current MCP servers ship.
+    Http(McpStreamableHttpServerConfig),
 }
 
 /// Hand-written for the reason [`McpError`] reports so little: a stdio
@@ -96,8 +96,9 @@ pub enum McpServer {
 ///
 /// Variable *names* survive, because that is the same line the errors draw:
 /// naming `env.GITHUB_TOKEN` is what makes a misconfiguration fixable, and it
-/// repeats nothing that was read. The SSE side needs no help — mentra types
-/// those headers as `SecretString`, which redacts itself.
+/// repeats nothing that was read. The remote transports need no help — mentra
+/// types SSE and Streamable HTTP headers alike as `SecretString`, which
+/// redacts itself.
 impl std::fmt::Debug for McpServer {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         match self {
@@ -117,6 +118,7 @@ impl std::fmt::Debug for McpServer {
                 )
                 .finish(),
             Self::Sse(config) => f.debug_tuple("Sse").field(config).finish(),
+            Self::Http(config) => f.debug_tuple("Http").field(config).finish(),
         }
     }
 }
@@ -127,6 +129,7 @@ impl McpServer {
         match self {
             Self::Stdio(config) => &config.name,
             Self::Sse(config) => &config.name,
+            Self::Http(config) => &config.name,
         }
     }
 
@@ -134,7 +137,7 @@ impl McpServer {
     pub fn as_stdio(&self) -> Option<&McpServerConfig> {
         match self {
             Self::Stdio(config) => Some(config),
-            Self::Sse(_) => None,
+            Self::Sse(_) | Self::Http(_) => None,
         }
     }
 
@@ -142,7 +145,16 @@ impl McpServer {
     pub fn as_sse(&self) -> Option<&McpSseServerConfig> {
         match self {
             Self::Sse(config) => Some(config),
-            Self::Stdio(_) => None,
+            Self::Stdio(_) | Self::Http(_) => None,
+        }
+    }
+
+    /// The Streamable HTTP configuration, for a caller that needs the concrete
+    /// type.
+    pub fn as_http(&self) -> Option<&McpStreamableHttpServerConfig> {
+        match self {
+            Self::Http(config) => Some(config),
+            Self::Stdio(_) | Self::Sse(_) => None,
         }
     }
 }
@@ -228,15 +240,6 @@ pub enum McpError {
         origin: String,
         name: String,
         reason: String,
-    },
-
-    #[error(
-        "{origin}: MCP server `{name}` needs the {transport} transport, which basis cannot serve"
-    )]
-    UnsupportedTransport {
-        origin: String,
-        name: String,
-        transport: String,
     },
 
     #[error("{origin}: an MCP server was configured over a transport basis does not recognize")]
