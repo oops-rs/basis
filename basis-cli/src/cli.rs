@@ -39,8 +39,8 @@ Shorthand:
   basis -- run                    a prompt that collides with a subcommand name
   basis spawn -                   read the prompt from stdin
   basis spawn \"task\" --await     wait for the task's terminal result
-  basis list                      this workspace's tasks, newest first
-  basis --continue \"and now …\"    continue the newest conversation here
+  basis list                      this workspace's tasks, last worked in first
+  basis --continue \"and now …\"    continue the conversation last worked in
   basis --session <TASK> \"…\"      continue the one that handle names
   basis wait <ID>                 wait again using the durable task handle
   basis wait <ID> --message <MID> retry a specific message reply
@@ -65,7 +65,7 @@ pub(crate) enum Command {
     /// Submit one prompt and return its durable task handle.
     #[command(name = "spawn", alias = "run")]
     Spawn(RunArgs),
-    /// List this workspace's tasks, newest first.
+    /// List this workspace's tasks, last worked in first.
     List(ListArgs),
     /// Print a hash of everything in the workspace a run could see.
     Fingerprint(FingerprintArgs),
@@ -92,7 +92,7 @@ pub(crate) struct ListArgs {
     #[arg(short = 'C', long, value_name = "DIR")]
     pub(crate) workspace: Option<PathBuf>,
 
-    /// List every task, not only the most recent ones.
+    /// List every task, not only the most recently worked in.
     #[arg(long)]
     pub(crate) all: bool,
 
@@ -308,7 +308,13 @@ pub(crate) struct RunArgs {
     #[arg(long)]
     pub(crate) detached: bool,
 
-    /// Continue the newest conversation in this workspace.
+    /// Continue the conversation this workspace was last worked in.
+    ///
+    /// Last worked in, not last started. A turn run in a task and a message
+    /// sent to it are both work there; reading one back — `watch`, or `wait`
+    /// on a task that has already settled — is not. `basis list` prints its
+    /// rows in exactly that order, so this picks up the conversation on the
+    /// first row that has one.
     ///
     /// A *new* task on the same conversation, not a message to the old one: a
     /// task that holds a terminal record accepts no further messages

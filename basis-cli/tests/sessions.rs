@@ -97,6 +97,14 @@ impl Fixture {
         let bytes = fs::read(self.agent_dir(task).join("meta.json")).expect("meta.json");
         serde_json::from_slice(&bytes).expect("meta is JSON")
     }
+
+    /// Rewrites a task's `meta.json`, which is how a record written by an
+    /// older basis is staged: drop a field this version writes and the loader
+    /// has to cope with exactly what an upgrade will hand it.
+    fn set_meta(&self, task: &str, meta: &Value) {
+        let bytes = serde_json::to_vec(meta).expect("meta is JSON");
+        fs::write(self.agent_dir(task).join("meta.json"), bytes).expect("rewrite meta.json");
+    }
 }
 
 fn run_bounded(mut command: Command) -> Output {
@@ -146,6 +154,15 @@ fn stdout(output: &Output) -> String {
     String::from_utf8_lossy(&output.stdout).into_owned()
 }
 
+/// The handle a `--resumable` spawn prints, which is its whole stdout.
+fn resumable_task(output: &Output) -> String {
+    stdout(output)
+        .lines()
+        .find_map(|line| line.strip_prefix("task "))
+        .and_then(|line| line.split_once(':').map(|(task, _)| task.to_string()))
+        .unwrap_or_else(|| panic!("no handle in: {}", stdout(output)))
+}
+
 /// The durable handle a settled run's hint names — the only place a shell
 /// invocation prints it, since stdout is the answer.
 fn task_in_hint(hints: &str) -> String {
@@ -187,11 +204,7 @@ fn list_reports_a_workspace_task_in_the_state_the_files_say_it_is_in() {
     let spawned =
         run_bounded(fixture.run(&fixture.workspace, &endpoint, &["hello", "--resumable"]));
     assert!(spawned.status.success(), "{}", stderr(&spawned));
-    let task = stdout(&spawned)
-        .lines()
-        .find_map(|line| line.strip_prefix("task "))
-        .and_then(|line| line.split_once(':').map(|(task, _)| task.to_string()))
-        .expect("a handle");
+    let task = resumable_task(&spawned);
 
     let listed = run_bounded(fixture.list(&fixture.workspace, &["--json"]));
     assert!(listed.status.success(), "{}", stderr(&listed));
@@ -287,6 +300,163 @@ fn continue_mints_a_new_task_whose_turn_carries_the_first_ones_conversation() {
     );
 }
 
+/// `--continue` means *the conversation I was just in*, and the task that
+/// started last is not always the one you were just in. Two tasks minted in
+/// order, then driven in the opposite order: the second handle is younger, the
+/// first handle is where the work happened, and the work is what wins.
+///
+/// `list` is asserted alongside it, because the two verbs share one scan: a
+/// listing whose top row is not the row `--continue` takes would be an index
+/// that disagrees with the command it exists to feed.
+#[test]
+fn continue_takes_the_conversation_last_worked_in_not_the_one_started_last() {
+    let fixture = Fixture::new();
+    let endpoint = ScriptedEndpoint::start(Vec::new());
+
+    let first = resumable_task(&run_bounded(fixture.run(
+        &fixture.workspace,
+        &endpoint,
+        &["remember the number 7", "--resumable"],
+    )));
+    let second = resumable_task(&run_bounded(fixture.run(
+        &fixture.workspace,
+        &endpoint,
+        &["remember the number 9", "--resumable"],
+    )));
+
+    // Driven youngest first, so the older handle is the one last worked in.
+    for task in [&second, &first] {
+        let driven = run_bounded(fixture.basis(&["wait", task, "--json"]));
+        assert!(driven.status.success(), "{}", stderr(&driven));
+    }
+
+    let listed = run_bounded(fixture.list(&fixture.workspace, &["--json"]));
+    let rows = rows(&listed);
+    assert_eq!(
+        rows[0]["task"],
+        first.as_str(),
+        "the workspace's index leads with the task last worked in: {rows:?}"
+    );
+
+    let continued = resumable_task(&run_bounded(fixture.run(
+        &fixture.workspace,
+        &endpoint,
+        &["--continue", "and then?", "--resumable"],
+    )));
+    assert_eq!(
+        fixture.meta(&continued)["continues"],
+        fixture.meta(&first)["agent_id"],
+        "the resumed conversation is the one last worked in, not the one started last"
+    );
+}
+
+/// A message is work in a conversation even when nothing was attached to run
+/// it. `send` reaches a task that has a dialogue and no terminal record —
+/// what an executor killed mid-turn leaves behind — and putting a message
+/// there is the person saying which conversation they are in.
+#[test]
+fn a_sent_message_is_activity_in_the_conversation_it_was_sent_to() {
+    let fixture = Fixture::new();
+    // One stalled turn: the abandoned executor, held open until it is killed.
+    let endpoint = ScriptedEndpoint::start(vec![Reply::Stall]);
+
+    let first = resumable_task(&run_bounded(fixture.run(
+        &fixture.workspace,
+        &endpoint,
+        &["remember the number 7", "--resumable"],
+    )));
+    let mut abandoned = fixture
+        .basis(&["wait", &first, "--json"])
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped())
+        .spawn()
+        .expect("start the executor");
+    wait_until("the executor to mint its conversation", || {
+        !endpoint.requests().is_empty()
+    });
+    abandoned.kill().expect("kill the executor");
+    let _ = abandoned.wait();
+    assert_ne!(
+        fixture.meta(&first)["agent_id"],
+        "",
+        "a killed executor leaves the conversation it opened"
+    );
+
+    // A younger task, driven to a terminal record: the row `--continue` used
+    // to take, because it started last.
+    let second = task_in_hint(&stderr(&run_bounded(fixture.run(
+        &fixture.workspace,
+        &endpoint,
+        &["remember the number 9"],
+    ))));
+
+    let sent = run_bounded(fixture.basis(&["send", &first, "keep going", "--json"]));
+    assert!(sent.status.success(), "{}", stderr(&sent));
+
+    let continued = resumable_task(&run_bounded(fixture.run(
+        &fixture.workspace,
+        &endpoint,
+        &["--continue", "and then?", "--resumable"],
+    )));
+    assert_eq!(
+        fixture.meta(&continued)["continues"],
+        fixture.meta(&first)["agent_id"],
+        "the message decided which conversation was live, not the younger handle"
+    );
+    assert_ne!(
+        fixture.meta(&continued)["continues"],
+        fixture.meta(&second)["agent_id"]
+    );
+}
+
+/// A `meta.json` written before this version records no activity at all. It
+/// has to load — a task that vanishes from `list` after an upgrade is worse
+/// than a task ordered by the wrong clock — and it has to resolve, which it
+/// does by falling back to when the task started.
+#[test]
+fn tasks_that_record_no_activity_resolve_by_when_they_started() {
+    let fixture = Fixture::new();
+    let endpoint = ScriptedEndpoint::start(Vec::new());
+
+    let first = task_in_hint(&stderr(&run_bounded(fixture.run(
+        &fixture.workspace,
+        &endpoint,
+        &["remember the number 7"],
+    ))));
+    let second = task_in_hint(&stderr(&run_bounded(fixture.run(
+        &fixture.workspace,
+        &endpoint,
+        &["remember the number 9"],
+    ))));
+
+    for task in [&first, &second] {
+        let mut meta = fixture.meta(task);
+        meta.as_object_mut()
+            .expect("an object")
+            .remove("updated_ms");
+        fixture.set_meta(task, &meta);
+    }
+
+    let listed = run_bounded(fixture.list(&fixture.workspace, &["--json"]));
+    assert_eq!(
+        rows(&listed).len(),
+        2,
+        "an upgrade hides nothing: {}",
+        stdout(&listed)
+    );
+
+    let continued = resumable_task(&run_bounded(fixture.run(
+        &fixture.workspace,
+        &endpoint,
+        &["--continue", "and then?", "--resumable"],
+    )));
+    assert_eq!(
+        fixture.meta(&continued)["continues"],
+        fixture.meta(&second)["agent_id"],
+        "with no activity recorded anywhere, the newest start is the best answer there is"
+    );
+}
+
 /// Two executors on one conversation is exactly what the attach lock exists
 /// to prevent, so `--session` naming a task something is driving is a
 /// refusal that names the state rather than a second resume of the same agent.
@@ -296,11 +466,7 @@ fn a_session_something_is_driving_is_refused_by_the_state_it_is_in() {
     let endpoint = ScriptedEndpoint::start(vec![Reply::Stall]);
 
     let spawned = run_bounded(fixture.run(&fixture.workspace, &endpoint, &["hold", "--resumable"]));
-    let task = stdout(&spawned)
-        .lines()
-        .find_map(|line| line.strip_prefix("task "))
-        .and_then(|line| line.split_once(':').map(|(task, _)| task.to_string()))
-        .expect("a handle");
+    let task = resumable_task(&spawned);
 
     // An attacher that reaches its model turn and stays there, holding the
     // lock, is the live executor this refusal is about.

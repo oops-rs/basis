@@ -145,6 +145,19 @@ pub(crate) struct TaskMeta {
     pub usage: RunUsage,
     pub deadline_at_ms: Option<u64>,
     pub created_ms: u64,
+    /// When this task last advanced, as its executor records it: the attach
+    /// that opened its conversation, every turn it banked, and the completion
+    /// it settled on. Each write to this record is a step the task took, which
+    /// is what lets one field carry both meanings — a bookkeeping rewrite that
+    /// is *not* a step would have to say so rather than borrow this one.
+    ///
+    /// Read by [`super::tasks`](mod@super::tasks) to answer "the conversation
+    /// I was just having", the question `--continue` asks. Defaulted for that
+    /// reason: a record that omits it must still load, because a task that
+    /// vanished from `basis list` after an upgrade would be a worse answer
+    /// than a task ordered by the wrong clock. The reader falls back to
+    /// `created_ms`.
+    #[serde(default)]
     pub updated_ms: u64,
 }
 

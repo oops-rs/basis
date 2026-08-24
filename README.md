@@ -251,9 +251,9 @@ basis "/<template> <args>"           # a prompt that is a `.basis/templates` com
 basis spawn "<prompt>"               # at a shell: run it here and print the answer
 basis spawn "<prompt>" --resumable   # mint the agent, print its handle, drive nothing
 basis spawn "<prompt>" --await       # inside a task: wait for the terminal result
-basis spawn "<prompt>" --continue    # a new task on this workspace's newest conversation
+basis spawn "<prompt>" --continue    # a new task on the conversation last worked in here
 basis spawn "<prompt>" --session <TASK>  # the same, on the one that handle names
-basis list                           # this workspace's tasks, newest first
+basis list                           # this workspace's tasks, last worked in first
 basis send <ID> "<message>"          # enqueue a later turn and print its message ID
 basis send <ID> "<message>" --await  # enqueue, then await that message's reply
 basis ask <ID> "<question>"          # send with the correlated reply wait implied
@@ -279,11 +279,13 @@ assistant's answer, streamed as it is produced; stderr is the work behind it** �
 tool call and how it ended, and the one `next:` line at the end. So `basis "summarize this" >
 notes.md` leaves a file holding the summary, and `2> progress.log` keeps the rest of it — with
 one compact `12.3k in · 1.2k out` at the end, the same counts `--json` carries as `usage`.
-Closing the terminal costs you nothing: `basis list` reads the same task directories back, newest
-first, and `--continue` starts a *new* task on the newest conversation there — a new handle over
-the same history, because a settled task accepts no messages at all, and this run's bounds and
-model are this run's. `--session <TASK>` names one instead, refusing a task something is already
-driving. A prompt whose first token is `/name` is one of the workspace's
+Closing the terminal costs you nothing: `basis list` reads the same task directories back, last
+worked in first, and `--continue` starts a *new* task on the conversation at the top of that list —
+a new handle over the same history, because a settled task accepts no messages at all, and this
+run's bounds and model are this run's. *Worked in* means a turn ran in the task or you sent it a
+message; reading a run back — `watch`, or `wait` on one that has settled — does not move it, so the
+list holds still while you read it. `--session <TASK>` names one instead, refusing a task something
+is already driving. A prompt whose first token is `/name` is one of the workspace's
 [`.basis/templates`](docs/ARCHITECTURE.md) commands, rendered with the rest of the line as its
 arguments — the same names an ACP client offers; a first token with a second slash is a path and
 passes through, and `basis spawn -` sends a literal one on stdin.

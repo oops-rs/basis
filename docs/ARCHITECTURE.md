@@ -81,9 +81,9 @@ basis "<prompt>"                     # shorthand: exactly `basis spawn "<prompt>
 basis "/<template> <args>"           # a first token naming a `.basis/templates` command
 basis spawn "<prompt>"               # at a shell: drive it here; in a task: return a handle
 basis spawn "<prompt>" --resumable   # return a durable handle without driving it
-basis spawn "<prompt>" --continue    # a new task on this workspace's newest conversation
+basis spawn "<prompt>" --continue    # a new task on the conversation last worked in here
 basis spawn "<prompt>" --session <TASK>  # the same, on the conversation that handle names
-basis list                           # this workspace's tasks, newest first
+basis list                           # this workspace's tasks, last worked in first
 basis send <ID> "<message>"          # enqueue a follow-up turn and return its message ID
 basis send <ID> "<message>" --await  # enqueue, then await that message's reply
 basis ask <ID> "<question>"          # send and await the correlated reply

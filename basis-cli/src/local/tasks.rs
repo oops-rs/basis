@@ -14,9 +14,16 @@
 //! its own answer wrong is not an observation.
 //!
 //! The scan answers a second question too. "The conversation I was just
-//! having" is the newest row here that has one, which is what
+//! having" is the first row here that has one, which is what
 //! `spawn --continue` resolves against — one implementation, so a handle
 //! `list` printed is a handle `--session` accepts.
+//!
+//! Which makes the row order load-bearing, and it is the order of last
+//! activity, not of birth: a task started this morning and worked in a minute
+//! ago is the conversation you are in, and the one spawned after lunch and
+//! abandoned is not. The age each row prints is that same activity, so the
+//! listing is ordered by a fact it shows — `--json` keeps `started_ms` for
+//! anyone who wanted the birthday. See [`last_activity_ms`] for what counts.
 
 use std::{path::Path, process::ExitCode};
 
@@ -28,9 +35,9 @@ use crate::{cli::ListArgs, exit::EXIT_OK};
 use super::{
     data_dir::{AgentPaths, DataDir, canonical_workspace, valid_task_handle, workspace_key},
     error::{ClientError, probe_state},
-    lock,
+    inbox, lock,
     render::print_hint,
-    state::{load_meta, now_ms, read_terminal},
+    state::{MessageRecord, TaskMeta, load_meta, now_ms, read_terminal},
 };
 
 /// How many rows a bare `basis list` prints.
@@ -52,6 +59,9 @@ pub(crate) struct TaskSummary {
     /// `running`, `resumable`, or whatever the terminal record settled on.
     pub state: String,
     pub started_ms: u64,
+    /// When this task was last worked in, per [`last_activity_ms`]. What the
+    /// rows are ordered and aged by, and what `--continue` picks by.
+    pub last_activity_ms: u64,
     /// The prompt's first line, bounded by [`PROMPT_BUDGET`].
     pub prompt: String,
     /// The mentra conversation this task minted or continued. Empty until a
@@ -67,6 +77,7 @@ impl TaskSummary {
             "task": self.task,
             "state": self.state,
             "started_ms": self.started_ms,
+            "last_activity_ms": self.last_activity_ms,
             "prompt": self.prompt,
             "continuable": !self.agent_id.is_empty(),
         });
@@ -83,7 +94,7 @@ impl TaskSummary {
             "{}  {:<9}  {:>8}  {}",
             self.task,
             self.state,
-            age(self.started_ms, now),
+            age(self.last_activity_ms, now),
             self.prompt
         )
     }
@@ -128,8 +139,8 @@ pub(crate) fn list(args: ListArgs) -> Result<ExitCode, ClientError> {
     Ok(ExitCode::from(EXIT_OK))
 }
 
-/// Every task recorded for `workspace`, newest first, or `None` when nothing
-/// has ever run there.
+/// Every task recorded for `workspace`, last worked in first, or `None` when
+/// nothing has ever run there.
 ///
 /// The digest is checked against the path it claims to describe before a
 /// single row is read: two workspaces sharing an FNV key would otherwise list
@@ -156,7 +167,7 @@ pub(crate) fn workspace_tasks(
     Ok(Some(scan(data, &key)?))
 }
 
-/// The agent directories under one workspace key, newest first.
+/// The agent directories under one workspace key, last worked in first.
 ///
 /// A directory whose metadata cannot be read is skipped rather than fatal: a
 /// half-written agent dir is what a `kill -9` during `spawn` leaves, and one
@@ -179,24 +190,62 @@ fn scan(data: &DataDir, key: &str) -> Result<Vec<TaskSummary>, String> {
         let Ok(meta) = load_meta(&paths) else {
             continue;
         };
+        // An unreadable inbox costs this row its messages, not its place: the
+        // executor's own clock is still a complete-enough answer, and the same
+        // rule the unreadable-neighbour skip above follows.
+        let messages = inbox::load(&paths).unwrap_or_default();
         summaries.push(TaskSummary {
             state: task_state(&paths)?,
             started_ms: meta.created_ms,
+            last_activity_ms: last_activity_ms(&meta, &messages),
             prompt: first_line(&meta.prompt),
             agent_id: meta.agent_id,
             usage: meta.usage,
             task,
         });
     }
-    // Newest first, ties broken by handle so two tasks minted in the same
-    // millisecond still list in a stable order rather than the directory's.
+    // Last worked in first, ties broken by handle so two tasks touched in the
+    // same millisecond still list in a stable order rather than the
+    // directory's.
     summaries.sort_by(|left, right| {
         right
-            .started_ms
-            .cmp(&left.started_ms)
+            .last_activity_ms
+            .cmp(&left.last_activity_ms)
             .then_with(|| left.task.cmp(&right.task))
     });
     Ok(summaries)
+}
+
+/// When anything last happened in a task, read off the two files that already
+/// record it: `meta.json`, which the executor rewrites as it attaches, banks a
+/// turn, and settles, and `inbox.json`, where a sender stamps the message it
+/// enqueued.
+///
+/// Derived rather than stored, so neither writer has to reach into the other's
+/// file. `send` runs under the inbox lock while an executor may be holding the
+/// attach lock, and a second writer on `meta.json` is a lost update waiting to
+/// happen — the banked usage of a turn that finished between that sender's
+/// read and its write. The two clocks already exist; the maximum of them is
+/// the fact, and nothing new has to be kept consistent (ADR-0019).
+///
+/// **Reading is not activity.** `watch`, `list`, and `wait` on a settled task
+/// write nothing here, and must not: looking at a run is not being in the
+/// conversation, and a `watch` left open in another terminal would otherwise
+/// decide what `--continue` picks up. `wait` on an *unsettled* task does
+/// count — it attaches and runs turns, which is the executor working rather
+/// than a reader looking.
+///
+/// Never earlier than the start. A record that carries no activity — one
+/// written before basis recorded any — resolves by `created_ms` rather than by
+/// zero, which would sort every task predating this field behind every task
+/// after it.
+fn last_activity_ms(meta: &TaskMeta, messages: &[MessageRecord]) -> u64 {
+    let sent = messages
+        .iter()
+        .map(|message| message.created_ms)
+        .max()
+        .unwrap_or_default();
+    meta.created_ms.max(meta.updated_ms).max(sent)
 }
 
 /// A task's state, derived exactly as `wait` and `watch` derive it: the
@@ -209,8 +258,14 @@ fn task_state(paths: &AgentPaths) -> Result<String, String> {
     }
 }
 
-/// The conversation `--continue` picks up: the newest task in this workspace
-/// that has one.
+/// The conversation `--continue` picks up: the task in this workspace last
+/// worked in that has one.
+///
+/// The first row, because `scan` has already put the summaries in that order —
+/// which is the whole reason the order is what it is. Picking by start time
+/// answers a different question, and answers it wrong the moment two
+/// conversations are open at once: the one you replied to is the one you are
+/// in, whatever the birthdays say.
 ///
 /// Tasks that never minted an agent are skipped rather than refused. A
 /// `--resumable` spawn nobody attached to is a perfectly ordinary thing to
@@ -268,9 +323,10 @@ fn first_line(prompt: &str) -> String {
 ///
 /// Relative rather than absolute because a list is read to find the run you
 /// remember, and "2h ago" answers that where a timestamp asks you to subtract.
-/// `--json` carries `started_ms` for anything that needs the arithmetic.
-fn age(started_ms: u64, now_ms: u64) -> String {
-    let seconds = now_ms.saturating_sub(started_ms) / 1_000;
+/// `--json` carries both `last_activity_ms` and `started_ms` for anything that
+/// needs the arithmetic, or the other clock.
+fn age(since_ms: u64, now_ms: u64) -> String {
+    let seconds = now_ms.saturating_sub(since_ms) / 1_000;
     if seconds < 60 {
         "just now".to_string()
     } else if seconds < 3_600 {
@@ -285,15 +341,44 @@ fn age(started_ms: u64, now_ms: u64) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::local::state::{MessageState, RunOptions};
 
+    /// A row that has been touched exactly once, when it started — the shape
+    /// every assertion below that is not about activity wants.
     fn summary(task: &str, state: &str, started_ms: u64, agent_id: &str) -> TaskSummary {
         TaskSummary {
             task: task.to_string(),
             state: state.to_string(),
             started_ms,
+            last_activity_ms: started_ms,
             prompt: "fix the failing test".to_string(),
             agent_id: agent_id.to_string(),
             usage: RunUsage::default(),
+        }
+    }
+
+    fn meta(created_ms: u64, updated_ms: u64) -> TaskMeta {
+        let mut meta = TaskMeta::new(
+            "w/t".to_string(),
+            None,
+            true,
+            "/repo".to_string(),
+            "fix the failing test".to_string(),
+            RunOptions::default(),
+            None,
+        );
+        meta.created_ms = created_ms;
+        meta.updated_ms = updated_ms;
+        meta
+    }
+
+    fn message(created_ms: u64) -> MessageRecord {
+        MessageRecord {
+            id: format!("m{created_ms}"),
+            body: "more".to_string(),
+            state: MessageState::Pending,
+            created_ms,
+            reply: None,
         }
     }
 
@@ -341,9 +426,9 @@ mod tests {
     /// `--continue` means "the conversation I was just having", and a
     /// `--resumable` agent nobody ever attached to is not one.
     #[test]
-    fn continue_takes_the_newest_task_that_has_a_conversation() {
+    fn continue_takes_the_first_task_in_the_list_that_has_a_conversation() {
         let summaries = vec![
-            summary("w/newest", "resumable", 300, ""),
+            summary("w/untouched", "resumable", 300, ""),
             summary("w/middle", "succeeded", 200, "agent-middle"),
             summary("w/oldest", "succeeded", 100, "agent-oldest"),
         ];
@@ -356,6 +441,53 @@ mod tests {
             latest_conversation(&summaries[..1]).is_none(),
             "a workspace whose only task never ran has nothing to continue"
         );
+    }
+
+    /// The rule `--continue` rides on. Both writers count and neither owns the
+    /// answer: the executor stamps `meta.json` as it works, a sender stamps
+    /// the message it enqueued, and the later of the two is when this task was
+    /// last a conversation somebody was in.
+    #[test]
+    fn activity_is_the_latest_thing_either_writer_recorded() {
+        assert_eq!(
+            last_activity_ms(&meta(100, 300), &[]),
+            300,
+            "a task nobody has written to since its last turn"
+        );
+        assert_eq!(
+            last_activity_ms(&meta(100, 300), &[message(200), message(700)]),
+            700,
+            "a message sent after the last turn is the newer fact"
+        );
+        assert_eq!(
+            last_activity_ms(&meta(100, 900), &[message(700)]),
+            900,
+            "and so is a turn run after the last message"
+        );
+        assert_eq!(
+            last_activity_ms(&meta(100, 0), &[]),
+            100,
+            "a record written before basis kept this clock falls back to its start"
+        );
+    }
+
+    /// The listing is ordered by activity, so the age it prints has to be that
+    /// same activity — a column measuring one clock beside an order following
+    /// another is a list that cannot be read.
+    #[test]
+    fn a_row_ages_by_when_it_was_last_worked_in() {
+        let mut worked = summary("w/t", "succeeded", 0, "agent-1");
+        worked.last_activity_ms = 7_140_000;
+
+        let row = worked.row(7_200_000);
+        assert!(
+            row.contains("1m ago"),
+            "not 2h, which is only how long ago it started: {row}"
+        );
+
+        let payload = worked.payload();
+        assert_eq!(payload["started_ms"], 0, "the birthday survives in --json");
+        assert_eq!(payload["last_activity_ms"], 7_140_000);
     }
 
     #[test]
