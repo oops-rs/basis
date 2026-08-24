@@ -377,12 +377,13 @@ pub(crate) async fn watch(args: WatchArgs) -> Result<ExitCode, ClientError> {
             .poll()
             .map_err(|error| format!("read task events: {error}"))?
         {
-            let record = serde_json::to_value(&record)
-                .map_err(|error| format!("encode task event: {error}"))?;
+            // One schema wherever the stream surfaces: the record is already
+            // the flat `EventLine` shape `basis --json` writes, whichever
+            // vintage of journal it came off disk from.
             if args.json {
                 println!("{record}");
             } else {
-                live.show(&record["event"])
+                live.show(&record)
                     .map_err(|error| format!("render task progress: {error}"))?;
             }
         }

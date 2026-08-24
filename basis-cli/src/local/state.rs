@@ -97,12 +97,6 @@ pub(crate) struct MessageRecord {
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
-pub(crate) struct EventRecord {
-    pub seq: u64,
-    pub event: Value,
-}
-
-#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub(crate) struct TaskMeta {
     pub id: String,
     pub parent: Option<String>,
