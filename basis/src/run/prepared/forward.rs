@@ -128,6 +128,7 @@ async fn resolve_if_permission<A: Approver>(
         tool_name,
         description,
         preview,
+        classification,
     } = event
     else {
         return;

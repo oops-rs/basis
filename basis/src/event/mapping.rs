@@ -89,6 +89,9 @@ pub(super) fn from_session_event(event: &SessionEvent) -> Option<Event> {
             tool_name,
             description,
             preview,
+            // Deliberately not carried onto basis's Event: adding it is a
+            // wire-format decision, deferred until a consumer needs it.
+            classification: _,
         } => Event::PermissionRequested {
             request_id: request_id.clone(),
             tool_call_id: tool_call_id.clone(),

@@ -1425,9 +1425,9 @@ checksum = "cf8baf1c55e62ffcace7a9f06f4bd9cd3f0c4beb022d3b367256b91b87513d98"
 
 [[package]]
 name = "mentra"
-version = "0.19.0"
+version = "0.20.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "4a77a5678b29060d8f707e40065d20eb2d94ae0e0cc8e655fcebafd2beafa92b"
+checksum = "61925419235215d2420657cbd6100056786456a6269df566f1bfa2222e428ab6"
 dependencies = [
  "async-trait",
  "base64",
