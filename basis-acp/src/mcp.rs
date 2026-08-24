@@ -300,6 +300,29 @@ mod tests {
         );
     }
 
+    #[cfg(unix)]
+    #[test]
+    fn one_unserviceable_server_still_fails_the_whole_set() {
+        use std::os::unix::ffi::OsStrExt;
+
+        // The refusal still constructable from safe input: a command path
+        // that is not UTF-8 cannot become mentra's `String` command, and one
+        // bad entry must sink the set — the collect contract the module doc
+        // promises.
+        let broken = std::path::PathBuf::from(std::ffi::OsStr::from_bytes(b"/bin/\xffsrv"));
+
+        let error = from_acp(&[
+            AcpServer::Http(McpServerHttp::new("api", "https://example.com/mcp")),
+            AcpServer::Stdio(McpServerStdio::new("fs", broken)),
+        ])
+        .expect_err("a partly-configured session is worse than none");
+
+        assert!(
+            error.to_string().contains("fs"),
+            "the failure names the server: {error}"
+        );
+    }
+
     #[test]
     fn a_mixed_set_translates_every_server() {
         let servers = from_acp(&[
