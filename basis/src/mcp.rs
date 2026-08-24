@@ -244,6 +244,28 @@ pub struct McpSource {
     pub servers: Vec<McpServer>,
 }
 
+/// One server as configured, with what basis decided along the way kept
+/// beside what it built.
+///
+/// `pub(crate)` plumbing rather than API: its one consumer is the connect
+/// loop, which wants to say *why* a transport was chosen when the choice
+/// then fails to connect.
+pub(crate) struct ConfiguredServer {
+    pub(crate) server: McpServer,
+    /// True when no `type` named a transport and the bare-`url` rule chose
+    /// SSE — the one inference worth diagnosing when the connection fails,
+    /// because the server may simply speak Streamable HTTP.
+    pub(crate) sse_inferred: bool,
+}
+
+/// A parsed file before the inference flags are stripped for the public
+/// report.
+struct ReadSource {
+    path: PathBuf,
+    scope: ContextScope,
+    configured: Vec<ConfiguredServer>,
+}
+
 /// Anything that can go wrong turning configuration into servers.
 ///
 /// These messages travel — into `basis spawn --json`, into an ACP client's error
@@ -299,6 +321,22 @@ pub enum McpError {
 /// file that exists and cannot be read or understood is, because the operator
 /// wrote it meaning something.
 pub fn discover(workspace: &Path, config: &McpConfig) -> Result<Vec<McpSource>, McpError> {
+    Ok(discovered(workspace, config)?
+        .into_iter()
+        .map(|source| McpSource {
+            path: source.path,
+            scope: source.scope,
+            servers: source
+                .configured
+                .into_iter()
+                .map(|configured| configured.server)
+                .collect(),
+        })
+        .collect())
+}
+
+/// [`discover`], with the inference flags still attached.
+fn discovered(workspace: &Path, config: &McpConfig) -> Result<Vec<ReadSource>, McpError> {
     let mut sources = Vec::new();
 
     let workspace_file = workspace.join(&config.workspace_file);
@@ -328,44 +366,65 @@ pub fn discover(workspace: &Path, config: &McpConfig) -> Result<Vec<McpSource>, 
 /// server came from, and this layers those reports into the one list a runtime
 /// is built from.
 pub fn servers(workspace: &Path, config: &McpConfig) -> Result<Vec<McpServer>, McpError> {
-    let discovered = discover(workspace, config)?;
+    Ok(configured(workspace, config)?
+        .into_iter()
+        .map(|configured| configured.server)
+        .collect())
+}
+
+/// [`servers`], with the inference flags still attached — what the workspace
+/// open hands the connect loop.
+pub(crate) fn configured(
+    workspace: &Path,
+    config: &McpConfig,
+) -> Result<Vec<ConfiguredServer>, McpError> {
+    let discovered = discovered(workspace, config)?;
 
     Ok(layer(
-        config.supplied.iter().cloned().chain(
-            discovered
-                .into_iter()
-                .flat_map(|source| source.servers.into_iter()),
-        ),
+        config
+            .supplied
+            .iter()
+            .cloned()
+            // A supplied server arrived in a typed variant; nothing about its
+            // transport was inferred.
+            .map(|server| ConfiguredServer {
+                server,
+                sse_inferred: false,
+            })
+            .chain(discovered.into_iter().flat_map(|source| source.configured)),
     ))
 }
 
 /// Keeps the first server seen under each name.
 ///
 /// Callers pass strongest-first, so "first wins" is "most specific wins".
-fn layer(servers: impl IntoIterator<Item = McpServer>) -> Vec<McpServer> {
-    let mut kept: Vec<McpServer> = Vec::new();
+fn layer(servers: impl IntoIterator<Item = ConfiguredServer>) -> Vec<ConfiguredServer> {
+    let mut kept: Vec<ConfiguredServer> = Vec::new();
 
-    for server in servers {
-        if !kept.iter().any(|seen| seen.name() == server.name()) {
-            kept.push(server);
+    for candidate in servers {
+        if !kept
+            .iter()
+            .any(|seen| seen.server.name() == candidate.server.name())
+        {
+            kept.push(candidate);
         }
     }
 
     kept
 }
 
-fn read(path: PathBuf, scope: ContextScope) -> Result<McpSource, McpError> {
+fn read(path: PathBuf, scope: ContextScope) -> Result<ReadSource, McpError> {
     let text = std::fs::read_to_string(&path).map_err(|source| McpError::Read {
         path: path.clone(),
         source,
     })?;
 
-    let servers = file::parse(&path, &text)?;
+    let configured = file::parse(&path, &text)?;
 
-    Ok(McpSource {
+    Ok(ReadSource {
         path,
         scope,
-        servers,
+        configured,
     })
 }
 
