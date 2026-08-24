@@ -11,7 +11,12 @@
 //! translate, but the enum is `#[non_exhaustive]`, so a wildcard arm is
 //! unavoidable. A variant this build has no name for returns an error rather
 //! than silence, because a client that configured a server and got silence
-//! cannot tell that apart from a server that advertised no tools.
+//! cannot tell that apart from a server that advertised no tools. The same
+//! rule covers a repeated header name: ACP hands headers as an ordered list,
+//! mentra stores them as a map, and folding a duplicate into the map would
+//! silently keep whichever came last — so a repeat is refused instead. Names
+//! differing only in case stay distinct here; deciding they are one header
+//! is the transport's business, not the translation's.
 //!
 //! Placeholders are *not* expanded here. `${VAR}` in a `.mcp.json` is a
 //! convention for a file a human wrote; a value on the wire is one a client
@@ -20,7 +25,7 @@
 use std::collections::HashMap;
 
 use agent_client_protocol::schema::v1::{
-    McpServer as AcpServer, McpServerHttp, McpServerSse, McpServerStdio,
+    HttpHeader, McpServer as AcpServer, McpServerHttp, McpServerSse, McpServerStdio,
 };
 use mentra::{McpServerConfig, McpSseServerConfig, McpStreamableHttpServerConfig};
 
@@ -41,8 +46,8 @@ pub fn from_acp(servers: &[AcpServer]) -> Result<Vec<McpServer>, McpError> {
 fn from_one(server: &AcpServer) -> Result<McpServer, McpError> {
     match server {
         AcpServer::Stdio(stdio) => stdio_server(stdio),
-        AcpServer::Sse(sse) => Ok(sse_server(sse)),
-        AcpServer::Http(http) => Ok(http_server(http)),
+        AcpServer::Sse(sse) => sse_server(sse),
+        AcpServer::Http(http) => http_server(http),
         _ => Err(McpError::UnknownTransport {
             origin: ORIGIN.to_string(),
         }),
@@ -80,28 +85,58 @@ fn stdio_server(stdio: &McpServerStdio) -> Result<McpServer, McpError> {
     }))
 }
 
-fn sse_server(sse: &McpServerSse) -> McpServer {
-    let config = sse.headers.iter().fold(
+fn sse_server(sse: &McpServerSse) -> Result<McpServer, McpError> {
+    let config = with_headers(
+        &sse.name,
+        &sse.headers,
         McpSseServerConfig::new(sse.name.clone(), sse.url.clone()),
-        |config, header| config.with_header(header.name.clone(), header.value.clone()),
-    );
+        |config, name, value| config.with_header(name, value),
+    )?;
 
-    McpServer::Sse(config)
+    Ok(McpServer::Sse(config))
 }
 
-fn http_server(http: &McpServerHttp) -> McpServer {
-    let config = http.headers.iter().fold(
+fn http_server(http: &McpServerHttp) -> Result<McpServer, McpError> {
+    let config = with_headers(
+        &http.name,
+        &http.headers,
         McpStreamableHttpServerConfig::new(http.name.clone(), http.url.clone()),
-        |config, header| config.with_header(header.name.clone(), header.value.clone()),
-    );
+        |config, name, value| config.with_header(name, value),
+    )?;
 
-    McpServer::Http(config)
+    Ok(McpServer::Http(config))
+}
+
+/// Folds the client's ordered headers into a remote config, refusing a
+/// repeated name rather than letting the map keep whichever came last.
+///
+/// The value stays out of the error for the usual reason: a header value is
+/// where the credential is.
+fn with_headers<C>(
+    server: &str,
+    headers: &[HttpHeader],
+    config: C,
+    add: impl Fn(C, String, String) -> C,
+) -> Result<C, McpError> {
+    let mut seen = std::collections::HashSet::with_capacity(headers.len());
+
+    headers.iter().try_fold(config, |config, header| {
+        if !seen.insert(header.name.as_str()) {
+            return Err(McpError::Invalid {
+                origin: ORIGIN.to_string(),
+                name: server.to_string(),
+                reason: format!("repeats the header `{}`", header.name),
+            });
+        }
+
+        Ok(add(config, header.name.clone(), header.value.clone()))
+    })
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
-    use agent_client_protocol::schema::v1::{EnvVariable, HttpHeader, McpServerHttp};
+    use agent_client_protocol::schema::v1::EnvVariable;
 
     #[test]
     fn no_servers_maps_to_no_servers() {
@@ -160,6 +195,33 @@ mod tests {
                 .map(mentra::mcp::SecretString::expose_secret),
             Some("Bearer t")
         );
+    }
+
+    #[test]
+    fn a_repeated_header_name_is_refused_not_last_wins() {
+        // Silently keeping the second `authorization` is a debugging session
+        // for whoever wrote the first; the module doc promises nothing is
+        // dropped.
+        let error = from_acp(&[AcpServer::Sse(
+            McpServerSse::new("obs", "https://example.com/sse").headers(vec![
+                HttpHeader::new("authorization", "Bearer one"),
+                HttpHeader::new("authorization", "Bearer two"),
+            ]),
+        )])
+        .expect_err("a duplicate must fail session/new");
+
+        let rendered = error.to_string();
+        assert!(rendered.contains("authorization"), "{rendered}");
+        assert!(!rendered.contains("Bearer"), "values stay out: {rendered}");
+
+        let error = from_acp(&[AcpServer::Http(
+            McpServerHttp::new("api", "https://example.com/mcp").headers(vec![
+                HttpHeader::new("x-key", "one"),
+                HttpHeader::new("x-key", "two"),
+            ]),
+        )])
+        .expect_err("both remote transports run the same fold");
+        assert!(error.to_string().contains("x-key"), "{error}");
     }
 
     #[test]

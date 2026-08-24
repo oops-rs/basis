@@ -156,41 +156,49 @@ impl RawServer {
                 }))
             }
             Transport::Sse => {
-                let url = self
-                    .url
-                    .as_deref()
-                    .filter(|url| !url.trim().is_empty())
-                    .ok_or_else(|| invalid("has no `url` to reach".to_string()))?;
+                let (url, headers) = self.remote_parts(&invalid, &expanded)?;
 
-                let config = McpSseServerConfig::new(name.clone(), expanded("url", url)?);
+                let config = headers.into_iter().fold(
+                    McpSseServerConfig::new(name.clone(), url),
+                    |config, (key, value)| config.with_header(key, value),
+                );
 
-                self.headers
-                    .iter()
-                    .try_fold(config, |config, (key, value)| {
-                        Ok(config
-                            .with_header(key.clone(), expanded(&format!("headers.{key}"), value)?))
-                    })
-                    .map(McpServer::Sse)
+                Ok(McpServer::Sse(config))
             }
             Transport::Http => {
-                let url = self
-                    .url
-                    .as_deref()
-                    .filter(|url| !url.trim().is_empty())
-                    .ok_or_else(|| invalid("has no `url` to reach".to_string()))?;
+                let (url, headers) = self.remote_parts(&invalid, &expanded)?;
 
-                let config =
-                    McpStreamableHttpServerConfig::new(name.clone(), expanded("url", url)?);
+                let config = headers.into_iter().fold(
+                    McpStreamableHttpServerConfig::new(name.clone(), url),
+                    |config, (key, value)| config.with_header(key, value),
+                );
 
-                self.headers
-                    .iter()
-                    .try_fold(config, |config, (key, value)| {
-                        Ok(config
-                            .with_header(key.clone(), expanded(&format!("headers.{key}"), value)?))
-                    })
-                    .map(McpServer::Http)
+                Ok(McpServer::Http(config))
             }
         }
+    }
+
+    /// The pieces both remote transports read the same way: a non-empty
+    /// `url`, and every header, all `${VAR}`-expanded, in file order.
+    fn remote_parts(
+        &self,
+        invalid: &dyn Fn(String) -> McpError,
+        expanded: &dyn Fn(&str, &str) -> Result<String, McpError>,
+    ) -> Result<(String, Vec<(String, String)>), McpError> {
+        let url = self
+            .url
+            .as_deref()
+            .filter(|url| !url.trim().is_empty())
+            .ok_or_else(|| invalid("has no `url` to reach".to_string()))?;
+        let url = expanded("url", url)?;
+
+        let headers = self
+            .headers
+            .iter()
+            .map(|(key, value)| Ok((key.clone(), expanded(&format!("headers.{key}"), value)?)))
+            .collect::<Result<Vec<_>, McpError>>()?;
+
+        Ok((url, headers))
     }
 
     /// Settles which transport the entry describes.
