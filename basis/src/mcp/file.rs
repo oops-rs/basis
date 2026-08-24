@@ -383,21 +383,32 @@ mod tests {
     }
 
     #[test]
-    fn an_http_servers_debug_does_not_print_an_expanded_credential() {
+    fn a_remote_servers_debug_does_not_print_an_expanded_credential() {
         // The parser has already turned `${API_TOKEN}` into the real value by
         // the time this type exists, and `McpConfig` derives Debug around it.
+        // The query string matters as much as the headers: mentra types only
+        // the headers as `SecretString`, so the URL is basis's to redact.
         let servers = parse_with(
             Path::new("/repo/.mcp.json"),
-            r#"{"mcpServers":{"api":{"type":"http","url":"https://x/mcp","headers":{"authorization":"${API_TOKEN}"}}}}"#,
+            r#"{"mcpServers":{
+                "api":{"type":"http","url":"https://x/mcp?key=${API_TOKEN}","headers":{"authorization":"${API_TOKEN}"}},
+                "obs":{"type":"sse","url":"https://x/sse?key=${API_TOKEN}","headers":{"authorization":"${API_TOKEN}"}}
+            }}"#,
             &|name| (name == "API_TOKEN").then(|| "sk-live-do-not-print-me".to_string()),
         )
         .expect("the token is set");
 
-        let rendered = format!("{:?}", servers[0]);
-        assert!(
-            !rendered.contains("sk-live-do-not-print-me"),
-            "an expanded credential reached Debug: {rendered}"
-        );
+        for server in &servers {
+            let rendered = format!("{server:?}");
+            assert!(
+                !rendered.contains("sk-live-do-not-print-me"),
+                "an expanded credential reached Debug: {rendered}"
+            );
+            assert!(
+                rendered.contains("https://x"),
+                "the redaction must not hide where the server is: {rendered}"
+            );
+        }
     }
 
     #[test]
