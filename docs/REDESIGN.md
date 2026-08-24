@@ -745,14 +745,17 @@ unwritable rather than merely awkward.
   `ToolAuthorizationPreview` it is read from. So a host that wanted the policy
   had to re-derive levels from tool names, which is a policy that silently stops
   covering the next MCP server a workspace connects. Filed as
-  [mentra#21](https://github.com/oops-rs/mentra/issues/21). The
+  [mentra#21](https://github.com/oops-rs/mentra/issues/21); **closed** by
+  mentra 0.20.0, which puts `classification: Option<ToolClassification>` on
+  the event itself — always `Some` on a live request, `None` only on a stream
+  recorded before the field existed. The
   `ToolQueued`-correlation route is not an alternative and was checked: mentra
   hardcodes that event's `mutability` to `Unknown`, and even wired it would
   collapse `Process` and `External`, which is the distinction the policy turns
   on.
   **The interim, under ADR-0005's one exemption** — "basis may carry a temporary
-  workaround only with a linked mentra issue and a removal note" — is
-  `basis/src/approval/levels.rs`, and it is a side channel through basis's own
+  workaround only with a linked mentra issue and a removal note" — was
+  `basis/src/approval/levels.rs`, a side channel through basis's own
   gate: `ApprovalGate::authorize` sees the whole preview and runs strictly
   before mentra emits the event, so it writes `tool_call_id → level` into a
   handle the forwarder takes it back out of when it builds the
@@ -763,11 +766,17 @@ unwritable rather than merely awkward.
   entry nobody comes for and a `Runtime` lives as long as the process. Every way
   it can miss — an unwired host, an evicted entry, two runs colliding on one
   provider-assigned id — reads as `None`, which the approver is told to judge as
-  `External`. `ApprovalRequest::side_effect_level` is the part that survives the
-  fix, since `Option` is also the honest shape for a fact the event may not
-  carry; `SideEffectLevels`, `ApprovalGate::levels`,
-  `PreparedRun::with_side_effect_levels` and the `Runtime` field between them
-  are deleted with the file the day mentra#21 lands.
+  `External`. `ApprovalRequest::side_effect_level` is the part that survived
+  the fix, since `Option` is also the honest shape for an event replayed from
+  a stream recorded before the field existed; `SideEffectLevels`,
+  `ApprovalGate::levels`, `PreparedRun::with_side_effect_levels` and the
+  `Runtime` field between them went with the file the day it landed — ~360
+  lines, the eviction cap's false-`None`, and the four tests whose subject
+  was the channel itself. What it newly exposes: the whole classification —
+  capabilities, durability, the execution and approval categories — now
+  reaches the forwarder, and basis reads exactly one field of it. basis's own
+  `Event` still does not carry the classification, deliberately: putting it
+  there is a wire-format decision this bump does not make.
 
 **And wiring compaction put two more in it**, found the way the last five were:
 by being the first caller that needed the thing. Neither was filed, and
@@ -842,6 +851,15 @@ to `"unknown"` — the answer `task_state` already gives a terminal whose
 stay loud, because asking about one task is a different question from
 surveying them all. What remains open here is the two named above: ACP
 template expansion, and skills as commands.
+
+**The third upstream wave — mentra 0.20.0.** Taken as one version bump, no
+`[patch.crates-io]`; each row says what the fix cost here and what it newly
+exposes.
+
+- **mentra#21 is closed and the relay is deleted.** The row above records
+  both halves; the cost was a net deletion and the exposure is the full
+  classification arriving on the event, of which basis reads the
+  side-effect level and nothing else yet.
 
 ## 3. Phases
 

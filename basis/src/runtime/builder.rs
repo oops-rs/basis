@@ -813,13 +813,7 @@ impl RuntimeBuilder {
 
         let dispatch = Arc::new(HookDispatch::new(self.interceptors));
 
-        // Cloned into mentra below rather than moved, because the gate is the
-        // only thing that sees a call's side-effect level and mentra never
-        // hands an authorizer back. The kept half is what puts that level on
-        // the `ApprovalRequest` an approver reads — interim, and mentra#21 is
-        // where it ends (`crate::approval::SideEffectLevels`).
         let gate = ApprovalGate::new();
-        let levels = gate.levels();
 
         let builder = mentra::Runtime::builder()
             // Which conversations belong where, which is the only question
@@ -953,7 +947,6 @@ impl RuntimeBuilder {
             provider_retry_budget: self.provider_retry_budget,
             transcripts,
             dispatch,
-            levels,
             #[cfg(feature = "mcp")]
             mcp_claims: Mutex::new(HashMap::new()),
             declared_claims: Mutex::new(HashMap::new()),

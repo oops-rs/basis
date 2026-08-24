@@ -22,7 +22,7 @@ use async_trait::async_trait;
 use basis::{
     AllowAll, ApprovalAnswer, ApprovalDecision, ApprovalRequest, Approver, CollectingSink, DenyAll,
     Event, RunConfig, ToolSideEffectLevel,
-    approval::{ApprovalGate, SideEffectLevels},
+    approval::ApprovalGate,
     run::prepare_with_session,
     tools::declared::{DeclaredTool, DeclaredToolSpec, SideEffect},
 };
@@ -86,13 +86,7 @@ impl Provider for ScriptedProvider {
 
 /// A runtime whose first turn reads something and writes a file — one call the
 /// gate lets through and one it must put to the approver.
-///
-/// The [`SideEffectLevels`] handle comes back beside the runtime because mentra
-/// takes the gate by value and never gives it back, so this is the only moment
-/// it can be kept; a host on this path hands it to
-/// [`PreparedRun::with_side_effect_levels`] and its approver learns how far
-/// each call reaches.
-fn runtime_writing_a_file(workspace: &Path) -> (Runtime, ModelInfo, SideEffectLevels) {
+fn runtime_writing_a_file(workspace: &Path) -> (Runtime, ModelInfo) {
     let model = ModelInfo::new("scripted-model", BuiltinProvider::OpenAI);
     let provider = ScriptedProvider::new(
         model.clone(),
@@ -118,7 +112,6 @@ fn runtime_writing_a_file(workspace: &Path) -> (Runtime, ModelInfo, SideEffectLe
     );
 
     let gate = ApprovalGate::new();
-    let levels = gate.levels();
     let runtime = Runtime::builder()
         .with_provider_instance(provider)
         // Nothing here reads a conversation back, so the history has nowhere
@@ -130,7 +123,7 @@ fn runtime_writing_a_file(workspace: &Path) -> (Runtime, ModelInfo, SideEffectLe
         .build()
         .expect("runtime builds");
 
-    (runtime, model, levels)
+    (runtime, model)
 }
 
 fn session(runtime: &Runtime, workspace: &Path, model: ModelInfo) -> Session {
@@ -180,24 +173,13 @@ async fn run_with<A: Approver>(
     workspace: &Path,
     approver: A,
 ) -> (Vec<Event>, Vec<ApprovalRequest>) {
-    let (events, asked, _levels) = run_reporting_levels(workspace, approver).await;
-    (events, asked)
-}
-
-/// The same run, handing back the side channel too, for the tests that are
-/// about the channel rather than about the answer.
-async fn run_reporting_levels<A: Approver>(
-    workspace: &Path,
-    approver: A,
-) -> (Vec<Event>, Vec<ApprovalRequest>, SideEffectLevels) {
-    let (runtime, model, levels) = runtime_writing_a_file(workspace);
+    let (runtime, model) = runtime_writing_a_file(workspace);
     let session = session(&runtime, workspace, model);
     let seen = Arc::new(Mutex::new(Vec::new()));
 
     let mut prepared =
         prepare_with_session(session, &config(workspace), "openai", "scripted-model")
-            .expect("prepared")
-            .with_side_effect_levels(levels.clone());
+            .expect("prepared");
 
     let report = tokio::time::timeout(
         NOT_STUCK,
@@ -214,7 +196,7 @@ async fn run_reporting_levels<A: Approver>(
     .expect("the run completes");
 
     let asked = seen.lock().expect("not poisoned").clone();
-    (report.sink.into_events(), asked, levels)
+    (report.sink.into_events(), asked)
 }
 
 /// Whether the named tool reported an error, or `None` if it never completed.
@@ -367,7 +349,7 @@ async fn a_run_with_no_approver_of_its_own_allows_what_it_cannot_ask_about() {
     // What `run` gives a headless caller: nobody to ask, so nothing is refused
     // for want of an answer. `execute` is `execute_with_approver(_, AllowAll)`.
     let workspace = tempfile::tempdir().expect("tempdir");
-    let (runtime, model, _levels) = runtime_writing_a_file(workspace.path());
+    let (runtime, model) = runtime_writing_a_file(workspace.path());
     let session = session(&runtime, workspace.path(), model);
 
     let mut prepared = prepare_with_session(
@@ -397,7 +379,7 @@ async fn a_broken_sink_stops_the_narration_and_not_the_turn() {
     // up on the first failed write would leave the turn blocked on a permission
     // nobody was left to answer.
     let workspace = tempfile::tempdir().expect("tempdir");
-    let (runtime, model, _levels) = runtime_writing_a_file(workspace.path());
+    let (runtime, model) = runtime_writing_a_file(workspace.path());
     let session = session(&runtime, workspace.path(), model);
 
     let mut written = 0;
@@ -492,7 +474,7 @@ fn external_tool(workspace: &Path) -> DeclaredTool {
 
 /// A turn that edits the checkout and then tries to leave the machine: one
 /// `LocalState` call and one `External` one, with a read in front of both.
-fn runtime_editing_then_publishing(workspace: &Path) -> (Runtime, ModelInfo, SideEffectLevels) {
+fn runtime_editing_then_publishing(workspace: &Path) -> (Runtime, ModelInfo) {
     let model = ModelInfo::new("scripted-model", BuiltinProvider::OpenAI);
     let provider = ScriptedProvider::new(
         model.clone(),
@@ -518,7 +500,6 @@ fn runtime_editing_then_publishing(workspace: &Path) -> (Runtime, ModelInfo, Sid
     );
 
     let gate = ApprovalGate::new();
-    let levels = gate.levels();
     let runtime = Runtime::builder()
         .with_provider_instance(provider)
         .with_store(VolatileRuntimeStore::new())
@@ -528,7 +509,7 @@ fn runtime_editing_then_publishing(workspace: &Path) -> (Runtime, ModelInfo, Sid
         .build()
         .expect("runtime builds");
 
-    (runtime, model, levels)
+    (runtime, model)
 }
 
 #[tokio::test]
@@ -555,7 +536,7 @@ async fn an_approver_can_allow_edits_and_deny_the_network_without_naming_a_tool(
     }
 
     let workspace = tempfile::tempdir().expect("tempdir");
-    let (runtime, model, levels) = runtime_editing_then_publishing(workspace.path());
+    let (runtime, model) = runtime_editing_then_publishing(workspace.path());
     let session = session(&runtime, workspace.path(), model);
 
     let mut prepared = prepare_with_session(
@@ -564,8 +545,7 @@ async fn an_approver_can_allow_edits_and_deny_the_network_without_naming_a_tool(
         "openai",
         "scripted-model",
     )
-    .expect("prepared")
-    .with_side_effect_levels(levels);
+    .expect("prepared");
 
     let report = tokio::time::timeout(
         NOT_STUCK,
@@ -598,72 +578,5 @@ async fn an_approver_can_allow_edits_and_deny_the_network_without_naming_a_tool(
              and nothing beyond it"
         ),
         "refused by the approver, not by a program that failed to start"
-    );
-}
-
-#[tokio::test]
-async fn a_request_whose_level_never_arrived_still_reaches_the_approver() {
-    // A host that built its own mentra runtime and never wired the channel
-    // through — the shape `prepare_with_session` allows, and the shape every
-    // basis release before this one had. The level is missing; nothing else is,
-    // and the run behaves exactly as it always did.
-    let workspace = tempfile::tempdir().expect("tempdir");
-    let (runtime, model, levels) = runtime_writing_a_file(workspace.path());
-    drop(levels);
-
-    let session = session(&runtime, workspace.path(), model);
-    let seen = Arc::new(Mutex::new(Vec::new()));
-
-    let mut prepared = prepare_with_session(
-        session,
-        &config(workspace.path()),
-        "openai",
-        "scripted-model",
-    )
-    .expect("prepared");
-
-    let report = tokio::time::timeout(
-        NOT_STUCK,
-        prepared.execute_with_approver(
-            CollectingSink::new(),
-            Recording {
-                inner: AllowAll,
-                seen: Arc::clone(&seen),
-            },
-        ),
-    )
-    .await
-    .expect("an unwired channel must not hang the run")
-    .expect("the run completes");
-
-    let asked = seen.lock().expect("not poisoned").clone();
-
-    assert_eq!(asked_about(&asked), vec!["files"]);
-    assert_eq!(
-        asked[0].side_effect_level, None,
-        "an unwired channel reports unknown rather than guessing"
-    );
-    assert_eq!(
-        tool_failed(&report.sink.into_events(), "files"),
-        Some(false),
-        "and the run is otherwise exactly the run it always was"
-    );
-}
-
-#[tokio::test]
-async fn a_resolved_request_leaves_nothing_behind_in_the_channel() {
-    // A permission request is resolved exactly once, so the level is taken
-    // rather than read. Without that, a runtime that outlives its runs — which
-    // is what a `Runtime` shared across workspaces is — would accumulate one
-    // entry per approval for the life of the process.
-    let workspace = tempfile::tempdir().expect("tempdir");
-
-    let (_events, asked, levels) = run_reporting_levels(workspace.path(), AllowAll).await;
-
-    assert_eq!(asked.len(), 1, "one request was raised and answered");
-    assert_eq!(
-        levels.pending(),
-        0,
-        "and its entry went with it, along with the read that was never recorded"
     );
 }
