@@ -820,11 +820,25 @@ command is that `SKILL.md` carries no argument convention — adding one beside
 it waits for a case that wants it. `basis-acp` advertises templates as
 commands and does not expand them — a client sending `/review the diff` has
 the literal text forwarded — which was invisible until `/compact` started
-working and is now an inconsistency a reader can see. And `--continue` picks
-the newest task by *start* time, so `basis spawn A; basis spawn B; basis send
-A …; basis --continue` resolves to B; the ADR-0019-consistent fix is for the
-executor to touch its own `meta.json` on activity, not to read mentra's store
-for a different fact than the column the row displays.
+working and is now an inconsistency a reader can see. The third — `--continue`
+picked the newest task by *start* time, so `basis spawn A; basis spawn B;
+basis send A …; basis --continue` resolved to B — is **fixed** (`a4257e7`),
+and more cheaply than the fix sketched here: no new field and no second
+writer on `meta.json`, because both clocks already existed on disk —
+`meta.updated_ms` (written at every executor step, previously write-only) and
+each inbox message's `created_ms` — so the listing derives activity as the
+`max()` of the two, with `#[serde(default)]` and a `created_ms` floor so a
+pre-0.5.1 task still parses and still resolves. `basis list` orders *and
+ages* by the same clock, so the top continuable row is exactly the one
+`--continue` takes, and `--json` carries `last_activity_ms` beside the
+unchanged `started_ms`. Reads (`watch`, `wait`, `list`) are not activity, so
+a tail left open in another terminal never steals the flag. Writing that
+test-first found a fourth candidate, which replaces it on this list:
+`scan()` propagates a JSON *decode* error from `read_terminal`
+(`basis-cli/src/local/tasks.rs`, the `task_state(&paths)?` in the row loop),
+so one task with a corrupt `terminal.json` fails the whole of `basis list` —
+directly against that function's own doc comment, which the adjacent
+`load_meta` failure honours by skipping the row.
 
 ## 3. Phases
 
