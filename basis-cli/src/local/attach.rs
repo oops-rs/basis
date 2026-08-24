@@ -426,6 +426,17 @@ async fn run_model(
                 last_result = result;
                 last_stopped_by = stopped_by;
             }
+            // An outcome this build does not know — the enum is
+            // `#[non_exhaustive]` — is recorded as the failure it is rather
+            // than guessed into a success.
+            outcome => {
+                return record_failure(
+                    paths,
+                    meta,
+                    format!("unrecognized run outcome: {outcome:?}"),
+                    stopped_by,
+                );
+            }
         }
     }
 }

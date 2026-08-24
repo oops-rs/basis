@@ -107,6 +107,7 @@ pub enum TaskStatus {
 /// How a run ended.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(tag = "status", rename_all = "snake_case")]
+#[non_exhaustive]
 pub enum RunOutcome {
     /// The turn completed and the assistant produced a final message.
     Ok,
@@ -153,6 +154,7 @@ pub struct ContextFile {
 /// normalized from mentra's [`SessionEvent`](mentra::SessionEvent).
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[serde(tag = "type", rename_all = "snake_case")]
+#[non_exhaustive]
 pub enum Event {
     /// Always the first line. Carries the schema version.
     RunStarted {
@@ -364,6 +366,46 @@ fn is_zero(count: &usize) -> bool {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// The compile-time tripwire behind `#[non_exhaustive]`.
+    ///
+    /// Same-crate, so this match is still allowed to be exhaustive — and must
+    /// stay exactly that, with no wildcard: a variant landing on [`Event`]
+    /// fails this build first, which is the prompt to revisit the sibling
+    /// crates whose wildcard arms would otherwise swallow it silently —
+    /// `basis-acp/src/update.rs` (it surfaces unknowns as thought chunks) and
+    /// the CLI renderer's verbose path.
+    #[test]
+    fn every_event_variant_is_named_here() {
+        let named = |event: &Event| match event {
+            Event::RunStarted { .. } => "run_started",
+            Event::UserMessage { .. } => "user_message",
+            Event::AssistantDelta { .. } => "assistant_delta",
+            Event::AssistantReasoningDelta { .. } => "assistant_reasoning_delta",
+            Event::AssistantMessage { .. } => "assistant_message",
+            Event::ToolQueued { .. } => "tool_queued",
+            Event::ToolStarted { .. } => "tool_started",
+            Event::ToolProgress { .. } => "tool_progress",
+            Event::ToolCompleted { .. } => "tool_completed",
+            Event::PermissionRequested { .. } => "permission_requested",
+            Event::PermissionResolved { .. } => "permission_resolved",
+            Event::TaskUpdated { .. } => "task_updated",
+            Event::CompactionStarted { .. } => "compaction_started",
+            Event::CompactionCompleted { .. } => "compaction_completed",
+            Event::MemoryUpdated { .. } => "memory_updated",
+            Event::Usage { .. } => "usage",
+            Event::Notice { .. } => "notice",
+            Event::Retry { .. } => "retry",
+            Event::Error { .. } => "error",
+            Event::Branched { .. } => "branched",
+            Event::RunFinished { .. } => "run_finished",
+        };
+
+        let example = Event::AssistantDelta {
+            text: "hi".to_string(),
+        };
+        assert_eq!(named(&example), "assistant_delta");
+    }
 
     #[test]
     fn a_line_is_one_flat_object() {

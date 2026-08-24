@@ -22,6 +22,7 @@ use crate::{context::ContextError, provider::ProviderError};
 /// opening a workspace exists to prepare runs, and every failure listed here is
 /// a failure a caller of [`run`] has always been able to receive.
 #[derive(Debug, Error)]
+#[non_exhaustive]
 pub enum RunError {
     #[error("prompt is empty")]
     EmptyPrompt,

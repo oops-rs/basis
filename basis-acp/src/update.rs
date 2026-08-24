@@ -5,9 +5,11 @@
 //! whatever comes next — maps from basis's own shape. Nothing here touches
 //! mentra.
 //!
-//! The match is exhaustive with no wildcard, for the same reason the mentra
-//! mapping is: a new [`Event`] variant should break this build rather than
-//! quietly stop reaching ACP clients.
+//! [`Event`] is `#[non_exhaustive]`, so from this crate the match below must
+//! end in a wildcard — but the wildcard does not swallow: an unmapped variant
+//! is surfaced as a thought chunk naming its wire tag, the same place every
+//! other basis aside goes. The exhaustive match that breaks the build when a
+//! variant lands lives in basis itself, beside the mentra mapping.
 
 use agent_client_protocol::schema::v1::{
     ContentBlock, ContentChunk, SessionUpdate, TextContent, ToolCall, ToolCallStatus,
@@ -156,9 +158,31 @@ pub fn session_update(event: &Event) -> Option<SessionUpdate> {
         Event::Error { message, .. } => {
             SessionUpdate::AgentThoughtChunk(chunk(&format!("error: {message}")))
         }
+
+        // A variant this build has no mapping for yet — the enum is
+        // `#[non_exhaustive]`. Said where every other basis aside is said
+        // rather than silently dropped; the wire tag is the honest name to
+        // surface, and the payload, which could be arbitrarily large, is not.
+        unknown => SessionUpdate::AgentThoughtChunk(chunk(&format!(
+            "unmapped event: {}",
+            event_tag(unknown)
+        ))),
     };
 
     Some(update)
+}
+
+/// The serde tag of an event this build cannot name.
+fn event_tag(event: &Event) -> String {
+    serde_json::to_value(event)
+        .ok()
+        .and_then(|value| {
+            value
+                .get("type")
+                .and_then(Value::as_str)
+                .map(str::to_string)
+        })
+        .unwrap_or_else(|| "unknown".to_string())
 }
 
 /// One line for the client to show, in the same place every other "the

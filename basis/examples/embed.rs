@@ -73,5 +73,6 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     match report.outcome {
         RunOutcome::Ok => Ok(()),
         RunOutcome::Error { message } => Err(message.into()),
+        outcome => Err(format!("unrecognized outcome: {outcome:?}").into()),
     }
 }

@@ -516,6 +516,16 @@ fn digest(servers: &[McpServer]) -> u64 {
                 )
                     .hash(&mut hasher);
             }
+            // A transport this build does not know — the enum is
+            // `#[non_exhaustive]`. The name is the one field every variant
+            // offers, so it is what keeps two differently named unknown
+            // servers from keying one workspace; two unknown servers
+            // differing only below the name will collide until this match
+            // learns the variant, which the basis-side canary forces.
+            server => {
+                "unknown-transport".hash(&mut hasher);
+                server.name().hash(&mut hasher);
+            }
         }
     }
 

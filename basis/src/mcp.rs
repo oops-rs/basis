@@ -84,6 +84,7 @@ pub const DEFAULT_GLOBAL_MCP_FILE: &str = "mcp.json";
 /// equivalent is private, so a caller holding a mixed list has nowhere to put
 /// it (see the module docs on transports).
 #[derive(Clone)]
+#[non_exhaustive]
 pub enum McpServer {
     /// A child process speaking JSON-RPC over its standard streams.
     Stdio(McpServerConfig),
@@ -284,6 +285,7 @@ struct ReadSource {
 /// drops the message — including as a `source`, which `Debug` would print.
 /// Line and column are what an operator needs anyway.
 #[derive(Debug, Error)]
+#[non_exhaustive]
 pub enum McpError {
     #[error("failed to read MCP configuration {path}: {source}")]
     Read {

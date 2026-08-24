@@ -113,7 +113,10 @@ pub(super) async fn prompt(
             None if report.succeeded() => Ok(PromptResponse::new(StopReason::EndTurn)),
             None => Err(Error::internal_error().data(match report.outcome {
                 basis::RunOutcome::Error { message } => message,
-                basis::RunOutcome::Ok => "the turn failed".to_string(),
+                // `Ok` without a final message — or an outcome this build
+                // does not know — either way the turn failed without words
+                // of its own.
+                _ => "the turn failed".to_string(),
             })),
         },
         Err(error) => Err(Error::internal_error().data(error.to_string())),
