@@ -194,8 +194,15 @@ fn scan(data: &DataDir, key: &str) -> Result<Vec<TaskSummary>, String> {
         // executor's own clock is still a complete-enough answer, and the same
         // rule the unreadable-neighbour skip above follows.
         let messages = inbox::load(&paths).unwrap_or_default();
+        // And an unreadable terminal record costs this row its state, not the
+        // list its rows: `task_state` already answers "unknown" for a terminal
+        // whose `state` field is not a string, and a record that does not
+        // parse is the same fact one level down. Only in the survey — `wait`
+        // and `watch` on the damaged task itself still fail loudly, because
+        // asking about one task is a different question from listing them all.
+        let state = task_state(&paths).unwrap_or_else(|_| "unknown".to_string());
         summaries.push(TaskSummary {
-            state: task_state(&paths)?,
+            state,
             started_ms: meta.created_ms,
             last_activity_ms: last_activity_ms(&meta, &messages),
             prompt: first_line(&meta.prompt),

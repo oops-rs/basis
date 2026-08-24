@@ -457,6 +457,57 @@ fn tasks_that_record_no_activity_resolve_by_when_they_started() {
     );
 }
 
+/// One neighbour's corrupt `terminal.json` — a `kill -9` mid-write is enough —
+/// must cost that row its state and nothing more. The row itself survives,
+/// because its `meta.json` still answers everything else a row says, and the
+/// rest of the list survives with it: `scan`'s own rule is that one unreadable
+/// neighbour never costs a person the list of everything else. `wait` and
+/// `watch` on the damaged task stay loud — asking about that task is a
+/// different question from surveying the workspace.
+#[test]
+fn a_corrupt_terminal_record_costs_its_row_a_state_and_not_the_list() {
+    let fixture = Fixture::new();
+    let endpoint = ScriptedEndpoint::start(Vec::new());
+
+    let damaged = task_in_hint(&stderr(&run_bounded(fixture.run(
+        &fixture.workspace,
+        &endpoint,
+        &["remember the number 7"],
+    ))));
+    let healthy = task_in_hint(&stderr(&run_bounded(fixture.run(
+        &fixture.workspace,
+        &endpoint,
+        &["remember the number 9"],
+    ))));
+
+    fs::write(
+        fixture.agent_dir(&damaged).join("terminal.json"),
+        b"{ not json",
+    )
+    .expect("corrupt the terminal record");
+
+    let listed = run_bounded(fixture.list(&fixture.workspace, &["--json"]));
+    let rows = rows(&listed);
+    assert_eq!(
+        rows.len(),
+        2,
+        "one bad neighbour hides nothing: {}",
+        stdout(&listed)
+    );
+    let state_of = |task: &str| {
+        rows.iter()
+            .find(|row| row["task"] == *task)
+            .unwrap_or_else(|| panic!("{task} is listed"))["state"]
+            .clone()
+    };
+    assert_eq!(
+        state_of(&damaged),
+        "unknown",
+        "a record that does not parse is the same fact as a state field that is not a string"
+    );
+    assert_eq!(state_of(&healthy), "succeeded");
+}
+
 /// Two executors on one conversation is exactly what the attach lock exists
 /// to prevent, so `--session` naming a task something is driving is a
 /// refusal that names the state rather than a second resume of the same agent.
