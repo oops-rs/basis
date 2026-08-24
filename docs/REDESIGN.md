@@ -833,12 +833,15 @@ ages* by the same clock, so the top continuable row is exactly the one
 `--continue` takes, and `--json` carries `last_activity_ms` beside the
 unchanged `started_ms`. Reads (`watch`, `wait`, `list`) are not activity, so
 a tail left open in another terminal never steals the flag. Writing that
-test-first found a fourth candidate, which replaces it on this list:
-`scan()` propagates a JSON *decode* error from `read_terminal`
-(`basis-cli/src/local/tasks.rs`, the `task_state(&paths)?` in the row loop),
-so one task with a corrupt `terminal.json` fails the whole of `basis list` —
-directly against that function's own doc comment, which the adjacent
-`load_meta` failure honours by skipping the row.
+test-first found a fourth candidate, **fixed the same session** (the commit
+after `a4257e7`): `scan()` propagated the JSON decode error from one task's
+`terminal.json`, so a single half-written record failed the whole of
+`basis list`, against that function's own doc comment. The row now degrades
+to `"unknown"` — the answer `task_state` already gives a terminal whose
+`state` field is not a string — while `wait` and `watch` on the damaged task
+stay loud, because asking about one task is a different question from
+surveying them all. What remains open here is the two named above: ACP
+template expansion, and skills as commands.
 
 ## 3. Phases
 
