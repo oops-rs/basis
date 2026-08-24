@@ -408,11 +408,6 @@ impl Workspace {
             },
         )
         .with_bounds(bounds)
-        // What lets an approver on this run judge a call by how far it reaches
-        // rather than by its name. Attached here, at the one place both
-        // `prepare` and `resume` go through, so the two cannot disagree about
-        // whether a run's requests carry it.
-        .with_side_effect_levels(self.runtime.side_effect_levels())
         // The runtime's answer to how patiently a failing provider is waited
         // out, for the same reason and in the same place: it describes the
         // provider connection this workspace borrows (ADR-0018), and mentra

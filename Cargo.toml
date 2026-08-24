@@ -19,24 +19,28 @@ homepage = "https://github.com/oops-rs/basis"
 basis = { version = "0.5", path = "basis" }
 basis-acp = { version = "0.5", path = "basis-acp" }
 
-# Mentra 0.19 is the runtime contract basis targets, and the floor is hard:
-# the wave that became 0.19.0 / mentra-provider 0.6.0 is what half of basis's
-# own surface is built on — the chat/completions wire `with_wire` defaults a
-# base URL to (and the keyless door behind it), the post-execution hook that
-# `post_tool_use` entries in `.basis/hooks.json` bind to, window-relative
-# compaction and `Session::context_window`, `Session::compact`/`set_name` and
-# the per-session persist identifier, `try_register_tool`/`unregister_tool`,
-# and the delegation relay `spawn`'s accounting depends on. Earlier floors'
-# reasons (ADR-0021's command targets and pattern-as-data at 0.18.2, the
-# provider-retry and Responses-transport knobs at 0.18.3) all still hold
-# beneath it.
+# Mentra 0.20 is the runtime contract basis targets, and the floor is hard:
+# three of basis's own surfaces stand on APIs that exist nowhere below it —
+# `PermissionRequested.classification`, which is where every
+# `ApprovalRequest`'s side-effect level comes from since the relay was
+# deleted; the `Box`/`Arc` implementations of the tool traits, which are how
+# `RuntimeBuilder` stores host tools; and
+# `McpManager::connect_streamable_http`, which is the whole of
+# `McpServer::Http`. The 0.19 floor's reasons still hold beneath it — the
+# chat/completions wire `with_wire` defaults a base URL to (and the keyless
+# door behind it), the post-execution hook `post_tool_use` entries bind to,
+# window-relative compaction and `Session::context_window`,
+# `Session::compact`/`set_name` and the per-session persist identifier,
+# `try_register_tool`/`unregister_tool`, and the delegation relay — as do the
+# older floors' (ADR-0021's command targets and pattern-as-data at 0.18.2,
+# the provider-retry and Responses-transport knobs at 0.18.3).
 #
 # `default-features = false` drops exactly one thing: mentra's Responses
 # websocket transport. `basis` re-offers it as a `responses-websocket` feature
 # for an embedder who wants it (see its manifest), which is also the feature
 # `with_responses_transport` needs before it can select that wire; the binary
 # and `basis-acp` do not, because neither has a surface that would ask for it.
-mentra = { version = "0.19.0", default-features = false }
+mentra = { version = "0.20.0", default-features = false }
 
 async-trait = "0.1"
 # ACP carries an image in a prompt as base64; basis's `PromptPart` carries the

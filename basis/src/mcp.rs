@@ -45,21 +45,25 @@
 //!
 //! # Transports
 //!
-//! stdio and the legacy HTTP+SSE transport, which are the two mentra can
-//! reach. Streamable HTTP is neither — a configuration asking for it is
-//! refused by name rather than dropped, because a client that configured a
-//! server and got silence has no way to tell that from a server with no tools.
-//! The gap is upstream and filed
-//! ([oops-rs/mentra#20](https://github.com/oops-rs/mentra/issues/20)): the
-//! client half is mentra's, and once it can reach the transport the refusal
-//! here becomes a third variant.
+//! stdio, the legacy HTTP+SSE transport, and Streamable HTTP — the three
+//! mentra has clients for. Streamable HTTP is the transport current MCP
+//! servers ship; a server that answers `404` on a legacy `/sse` path wants
+//! [`McpServer::Http`]. One deliberate asymmetry survives in `.mcp.json`: a
+//! bare `url` with no `type` still means SSE, because files written before
+//! the third transport existed keep their meaning.
+//!
+//! mentra's `allow_plaintext_credentials` override is deliberately not a
+//! `.mcp.json` key. A committed file must not be able to grant its own
+//! headers plaintext passage to a non-loopback host — the same line drawn at
+//! `base_url` — so the refusal stays mentra's, checked at parse, and the
+//! override stays with hosts that construct the config in code.
 
 pub(crate) mod connections;
 mod file;
 
 use std::path::{Path, PathBuf};
 
-use mentra::{McpServerConfig, McpSseServerConfig};
+use mentra::{McpServerConfig, McpSseServerConfig, McpStreamableHttpServerConfig};
 use thiserror::Error;
 
 use crate::context::ContextScope;
@@ -74,8 +78,8 @@ pub const DEFAULT_GLOBAL_MCP_FILE: &str = "mcp.json";
 
 /// One MCP server, as basis hands it to mentra.
 ///
-/// A thin sum over mentra's two transport configurations rather than a type of
-/// basis's own: mentra owns what a server *is*, and re-describing it here would
+/// A thin sum over mentra's three transport configurations rather than a type
+/// of basis's own: mentra owns what a server *is*, and re-describing it here would
 /// only create something to drift. The enum exists because mentra's own
 /// equivalent is private, so a caller holding a mixed list has nowhere to put
 /// it (see the module docs on transports).
@@ -85,6 +89,8 @@ pub enum McpServer {
     Stdio(McpServerConfig),
     /// The legacy HTTP+SSE transport from protocol revision 2024-11-05.
     Sse(McpSseServerConfig),
+    /// The Streamable HTTP transport, which current MCP servers ship.
+    Http(McpStreamableHttpServerConfig),
 }
 
 /// Hand-written for the reason [`McpError`] reports so little: a stdio
@@ -96,8 +102,11 @@ pub enum McpServer {
 ///
 /// Variable *names* survive, because that is the same line the errors draw:
 /// naming `env.GITHUB_TOKEN` is what makes a misconfiguration fixable, and it
-/// repeats nothing that was read. The SSE side needs no help — mentra types
-/// those headers as `SecretString`, which redacts itself.
+/// repeats nothing that was read. The remote transports' headers need no help
+/// — mentra types SSE and Streamable HTTP headers alike as `SecretString`,
+/// which redacts itself — but their `url` is a plain `String`, and a query
+/// string is where an expanded credential sits (`?key=…`), so both remote
+/// arms print it through [`redacted_url`].
 impl std::fmt::Debug for McpServer {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         match self {
@@ -116,9 +125,49 @@ impl std::fmt::Debug for McpServer {
                         .collect::<std::collections::BTreeMap<_, _>>(),
                 )
                 .finish(),
-            Self::Sse(config) => f.debug_tuple("Sse").field(config).finish(),
+            Self::Sse(config) => f
+                .debug_struct("Sse")
+                .field("name", &config.name)
+                .field("url", &redacted_url(&config.url))
+                .field("headers", &config.headers)
+                .finish(),
+            Self::Http(config) => f
+                .debug_struct("Http")
+                .field("name", &config.name)
+                .field("url", &redacted_url(&config.url))
+                .field("headers", &config.headers)
+                .finish(),
         }
     }
+}
+
+/// A URL fit to print: scheme, host and path survive; userinfo and the query
+/// string do not.
+///
+/// String surgery rather than a URL parser, deliberately: this must never
+/// fail, because `Debug` is exactly where a malformed configuration goes to
+/// be looked at, and a parse error here would trade one leak for another
+/// (printing the raw string) or hide the field entirely.
+fn redacted_url(url: &str) -> String {
+    let (base, query) = match url.split_once('?') {
+        Some((base, _)) => (base, "?[redacted]"),
+        None => (url, ""),
+    };
+
+    // Userinfo sits between the scheme separator and the first `@` of the
+    // authority, which ends at the first `/` after `://`.
+    let base = match base.split_once("://") {
+        Some((scheme, rest)) => {
+            let authority_end = rest.find('/').unwrap_or(rest.len());
+            match rest[..authority_end].rfind('@') {
+                Some(at) => format!("{scheme}://[redacted]@{}", &rest[at + 1..]),
+                None => base.to_string(),
+            }
+        }
+        None => base.to_string(),
+    };
+
+    format!("{base}{query}")
 }
 
 impl McpServer {
@@ -127,6 +176,7 @@ impl McpServer {
         match self {
             Self::Stdio(config) => &config.name,
             Self::Sse(config) => &config.name,
+            Self::Http(config) => &config.name,
         }
     }
 
@@ -134,7 +184,7 @@ impl McpServer {
     pub fn as_stdio(&self) -> Option<&McpServerConfig> {
         match self {
             Self::Stdio(config) => Some(config),
-            Self::Sse(_) => None,
+            Self::Sse(_) | Self::Http(_) => None,
         }
     }
 
@@ -142,7 +192,16 @@ impl McpServer {
     pub fn as_sse(&self) -> Option<&McpSseServerConfig> {
         match self {
             Self::Sse(config) => Some(config),
-            Self::Stdio(_) => None,
+            Self::Stdio(_) | Self::Http(_) => None,
+        }
+    }
+
+    /// The Streamable HTTP configuration, for a caller that needs the concrete
+    /// type.
+    pub fn as_http(&self) -> Option<&McpStreamableHttpServerConfig> {
+        match self {
+            Self::Http(config) => Some(config),
+            Self::Stdio(_) | Self::Sse(_) => None,
         }
     }
 }
@@ -183,6 +242,28 @@ pub struct McpSource {
     pub path: PathBuf,
     pub scope: ContextScope,
     pub servers: Vec<McpServer>,
+}
+
+/// One server as configured, with what basis decided along the way kept
+/// beside what it built.
+///
+/// `pub(crate)` plumbing rather than API: its one consumer is the connect
+/// loop, which wants to say *why* a transport was chosen when the choice
+/// then fails to connect.
+pub(crate) struct ConfiguredServer {
+    pub(crate) server: McpServer,
+    /// True when no `type` named a transport and the bare-`url` rule chose
+    /// SSE — the one inference worth diagnosing when the connection fails,
+    /// because the server may simply speak Streamable HTTP.
+    pub(crate) sse_inferred: bool,
+}
+
+/// A parsed file before the inference flags are stripped for the public
+/// report.
+struct ReadSource {
+    path: PathBuf,
+    scope: ContextScope,
+    configured: Vec<ConfiguredServer>,
 }
 
 /// Anything that can go wrong turning configuration into servers.
@@ -230,15 +311,6 @@ pub enum McpError {
         reason: String,
     },
 
-    #[error(
-        "{origin}: MCP server `{name}` needs the {transport} transport, which basis cannot serve"
-    )]
-    UnsupportedTransport {
-        origin: String,
-        name: String,
-        transport: String,
-    },
-
     #[error("{origin}: an MCP server was configured over a transport basis does not recognize")]
     UnknownTransport { origin: String },
 }
@@ -249,6 +321,22 @@ pub enum McpError {
 /// file that exists and cannot be read or understood is, because the operator
 /// wrote it meaning something.
 pub fn discover(workspace: &Path, config: &McpConfig) -> Result<Vec<McpSource>, McpError> {
+    Ok(discovered(workspace, config)?
+        .into_iter()
+        .map(|source| McpSource {
+            path: source.path,
+            scope: source.scope,
+            servers: source
+                .configured
+                .into_iter()
+                .map(|configured| configured.server)
+                .collect(),
+        })
+        .collect())
+}
+
+/// [`discover`], with the inference flags still attached.
+fn discovered(workspace: &Path, config: &McpConfig) -> Result<Vec<ReadSource>, McpError> {
     let mut sources = Vec::new();
 
     let workspace_file = workspace.join(&config.workspace_file);
@@ -278,44 +366,65 @@ pub fn discover(workspace: &Path, config: &McpConfig) -> Result<Vec<McpSource>, 
 /// server came from, and this layers those reports into the one list a runtime
 /// is built from.
 pub fn servers(workspace: &Path, config: &McpConfig) -> Result<Vec<McpServer>, McpError> {
-    let discovered = discover(workspace, config)?;
+    Ok(configured(workspace, config)?
+        .into_iter()
+        .map(|configured| configured.server)
+        .collect())
+}
+
+/// [`servers`], with the inference flags still attached — what the workspace
+/// open hands the connect loop.
+pub(crate) fn configured(
+    workspace: &Path,
+    config: &McpConfig,
+) -> Result<Vec<ConfiguredServer>, McpError> {
+    let discovered = discovered(workspace, config)?;
 
     Ok(layer(
-        config.supplied.iter().cloned().chain(
-            discovered
-                .into_iter()
-                .flat_map(|source| source.servers.into_iter()),
-        ),
+        config
+            .supplied
+            .iter()
+            .cloned()
+            // A supplied server arrived in a typed variant; nothing about its
+            // transport was inferred.
+            .map(|server| ConfiguredServer {
+                server,
+                sse_inferred: false,
+            })
+            .chain(discovered.into_iter().flat_map(|source| source.configured)),
     ))
 }
 
 /// Keeps the first server seen under each name.
 ///
 /// Callers pass strongest-first, so "first wins" is "most specific wins".
-fn layer(servers: impl IntoIterator<Item = McpServer>) -> Vec<McpServer> {
-    let mut kept: Vec<McpServer> = Vec::new();
+fn layer(servers: impl IntoIterator<Item = ConfiguredServer>) -> Vec<ConfiguredServer> {
+    let mut kept: Vec<ConfiguredServer> = Vec::new();
 
-    for server in servers {
-        if !kept.iter().any(|seen| seen.name() == server.name()) {
-            kept.push(server);
+    for candidate in servers {
+        if !kept
+            .iter()
+            .any(|seen| seen.server.name() == candidate.server.name())
+        {
+            kept.push(candidate);
         }
     }
 
     kept
 }
 
-fn read(path: PathBuf, scope: ContextScope) -> Result<McpSource, McpError> {
+fn read(path: PathBuf, scope: ContextScope) -> Result<ReadSource, McpError> {
     let text = std::fs::read_to_string(&path).map_err(|source| McpError::Read {
         path: path.clone(),
         source,
     })?;
 
-    let servers = file::parse(&path, &text)?;
+    let configured = file::parse(&path, &text)?;
 
-    Ok(McpSource {
+    Ok(ReadSource {
         path,
         scope,
-        servers,
+        configured,
     })
 }
 
@@ -338,6 +447,24 @@ mod tests {
 
     fn one_stdio(name: &str, command: &str) -> String {
         format!(r#"{{"mcpServers":{{"{name}":{{"command":"{command}"}}}}}}"#)
+    }
+
+    #[test]
+    fn a_redacted_url_keeps_the_address_and_drops_the_secrets() {
+        assert_eq!(
+            redacted_url("https://user:pass@example.com/mcp?key=sk-live"),
+            "https://[redacted]@example.com/mcp?[redacted]"
+        );
+        assert_eq!(
+            redacted_url("https://example.com/mcp"),
+            "https://example.com/mcp",
+            "an innocent URL passes through recognizably"
+        );
+        assert_eq!(
+            redacted_url("not a url?token=x"),
+            "not a url?[redacted]",
+            "surgery must survive what a parser would refuse"
+        );
     }
 
     #[test]

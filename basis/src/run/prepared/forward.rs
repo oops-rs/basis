@@ -17,7 +17,7 @@ use tokio::sync::{
 };
 
 use crate::{
-    approval::{ApprovalAnswer, ApprovalDecision, ApprovalRequest, Approver, SideEffectLevels},
+    approval::{ApprovalAnswer, ApprovalDecision, ApprovalRequest, Approver},
     event::{Event, NoticeSeverity},
     run::{EventSink, RunUsage},
 };
@@ -37,7 +37,6 @@ pub(super) async fn forward_events<S: EventSink, A: Approver>(
     done: oneshot::Receiver<()>,
     mut approver: A,
     permissions: SessionPermissionHandle,
-    levels: SideEffectLevels,
 ) -> (S, RunUsage) {
     tokio::pin!(done);
     // Cleared by the first failed write, and never set again: a sink that
@@ -55,7 +54,7 @@ pub(super) async fn forward_events<S: EventSink, A: Approver>(
                 match received {
                     Ok(event) => {
                         usage = usage.recording(&event);
-                        resolve_if_permission(&event, &mut approver, &permissions, &levels).await;
+                        resolve_if_permission(&event, &mut approver, &permissions).await;
                         writing = writing && emit_session_event(&mut sink, &event);
                     }
                     // Lagging is recoverable — the receiver keeps working, it
@@ -76,7 +75,6 @@ pub(super) async fn forward_events<S: EventSink, A: Approver>(
                     &mut sink,
                     &mut approver,
                     &permissions,
-                    &levels,
                     writing,
                     usage,
                 )
@@ -93,7 +91,6 @@ async fn drain<S: EventSink, A: Approver>(
     sink: &mut S,
     approver: &mut A,
     permissions: &SessionPermissionHandle,
-    levels: &SideEffectLevels,
     mut writing: bool,
     mut usage: RunUsage,
 ) -> RunUsage {
@@ -101,7 +98,7 @@ async fn drain<S: EventSink, A: Approver>(
         match receiver.try_recv() {
             Ok(event) => {
                 usage = usage.recording(&event);
-                resolve_if_permission(&event, approver, permissions, levels).await;
+                resolve_if_permission(&event, approver, permissions).await;
                 writing = writing && emit_session_event(sink, &event);
             }
             Err(TryRecvError::Lagged(dropped)) => {
@@ -120,7 +117,6 @@ async fn resolve_if_permission<A: Approver>(
     event: &SessionEvent,
     approver: &mut A,
     permissions: &SessionPermissionHandle,
-    levels: &SideEffectLevels,
 ) {
     let SessionEvent::PermissionRequested {
         request_id,
@@ -128,6 +124,7 @@ async fn resolve_if_permission<A: Approver>(
         tool_name,
         description,
         preview,
+        classification,
     } = event
     else {
         return;
@@ -141,11 +138,12 @@ async fn resolve_if_permission<A: Approver>(
             description: description.clone(),
             input: serde_json::from_str(preview)
                 .unwrap_or_else(|_| serde_json::Value::String(preview.clone())),
-            // Taken, not read: this request is about to be resolved and never
-            // comes round again, so an entry left behind is a leak. `None` —
-            // an unwired host, an evicted entry — reaches the approver as
-            // unknown, which it is told to judge as the worst it could be.
-            side_effect_level: levels.take(tool_call_id),
+            // Read straight off the event (mentra#21). mentra documents
+            // the classification as always present on a live request, but
+            // that is mentra's invariant to keep, not basis's to unwrap — a
+            // `None` reaches the approver as unknown, which it is told to
+            // judge as the worst the call could be.
+            side_effect_level: classification.as_ref().map(|c| c.side_effect_level),
         })
         .await;
 

@@ -35,7 +35,7 @@ use mentra::mcp::McpManager;
 
 use crate::runtime::Runtime;
 
-use super::McpServer;
+use super::{ConfiguredServer, McpServer};
 
 /// One workspace's live MCP servers: the manager holding the child processes
 /// and HTTP clients, and the names claimed on the shared registry.
@@ -64,14 +64,18 @@ impl McpConnections {
     pub(crate) async fn connect(
         runtime: Arc<Runtime>,
         root: &Path,
-        servers: Vec<McpServer>,
+        servers: Vec<ConfiguredServer>,
     ) -> Self {
         let mut manager = McpManager::new();
         let mut claimed = Vec::new();
         let mut bridged = Vec::new();
         let mut names = Vec::new();
 
-        for server in servers {
+        for ConfiguredServer {
+            server,
+            sse_inferred,
+        } in servers
+        {
             let effective = runtime.claim_mcp_server(server.name(), root);
             claimed.push(effective.clone());
 
@@ -89,6 +93,13 @@ impl McpConnections {
                         .await
                         .map_err(|e| e.to_string())
                 }
+                McpServer::Http(mut config) => {
+                    config.name = effective.clone();
+                    manager
+                        .connect_streamable_http(&config)
+                        .await
+                        .map_err(|e| e.to_string())
+                }
             };
 
             match outcome {
@@ -96,7 +107,7 @@ impl McpConnections {
                 // Degraded mode, mentra's own wording: one unreachable server
                 // must not sink the open.
                 Err(error) => {
-                    eprintln!("Warning: MCP server '{effective}' failed to connect: {error}");
+                    eprintln!("{}", connect_warning(&effective, &error, sse_inferred));
                 }
             }
 
@@ -117,6 +128,27 @@ impl McpConnections {
     pub(crate) fn names(&self) -> &[String] {
         &self.names
     }
+}
+
+/// The degraded-mode warning, and — when basis chose the transport itself —
+/// the diagnosis.
+///
+/// A bare `url` means SSE for back-compat (see the module docs on
+/// transports), so a server that actually speaks Streamable HTTP fails here
+/// with an opaque HTTP error. The operator who never wrote `type` is told
+/// what was chosen for them and which word fixes it. Recovery stays mentra's
+/// business: a failed connect is reported once, never retried from here.
+fn connect_warning(name: &str, error: &str, sse_inferred: bool) -> String {
+    let mut warning = format!("Warning: MCP server '{name}' failed to connect: {error}");
+
+    if sse_inferred {
+        warning.push_str(
+            "; basis inferred the HTTP+SSE transport from a bare `url` — if this server \
+             speaks Streamable HTTP, say `type: \"http\"`",
+        );
+    }
+
+    warning
 }
 
 /// Puts one server's tools on the shared registry, reporting the names that
@@ -223,6 +255,23 @@ mod tests {
             .tools()
             .iter()
             .any(|tool| tool.provider.name == name)
+    }
+
+    #[test]
+    fn a_failed_inferred_transport_names_the_inference_and_the_fix() {
+        let warning = connect_warning("api", "404 Not Found", true);
+        assert!(
+            warning.contains("failed to connect: 404 Not Found"),
+            "{warning}"
+        );
+        assert!(warning.contains("bare `url`"), "{warning}");
+        assert!(warning.contains("type: \"http\""), "{warning}");
+
+        let explicit = connect_warning("api", "404 Not Found", false);
+        assert!(
+            !explicit.contains("inferred"),
+            "an explicit choice gets no lecture: {explicit}"
+        );
     }
 
     #[test]

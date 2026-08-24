@@ -7,11 +7,16 @@
 //!
 //! # Nothing is dropped
 //!
-//! ACP's `McpServer` has variants for transports mentra has no client for, and
-//! is `#[non_exhaustive]` besides, so a wildcard arm is unavoidable. Every arm
-//! basis cannot serve returns an error naming the server and the transport,
-//! because a client that configured a server and got silence cannot tell that
-//! apart from a server that advertised no tools.
+//! ACP's three named transports — stdio, SSE, Streamable HTTP — all
+//! translate, but the enum is `#[non_exhaustive]`, so a wildcard arm is
+//! unavoidable. A variant this build has no name for returns an error rather
+//! than silence, because a client that configured a server and got silence
+//! cannot tell that apart from a server that advertised no tools. The same
+//! rule covers a repeated header name: ACP hands headers as an ordered list,
+//! mentra stores them as a map, and folding a duplicate into the map would
+//! silently keep whichever came last — so a repeat is refused instead. Names
+//! differing only in case stay distinct here; deciding they are one header
+//! is the transport's business, not the translation's.
 //!
 //! Placeholders are *not* expanded here. `${VAR}` in a `.mcp.json` is a
 //! convention for a file a human wrote; a value on the wire is one a client
@@ -19,8 +24,13 @@
 
 use std::collections::HashMap;
 
-use agent_client_protocol::schema::v1::{McpServer as AcpServer, McpServerSse, McpServerStdio};
-use mentra::{McpServerConfig, McpSseServerConfig};
+use agent_client_protocol::schema::v1::{
+    HttpHeader, McpServer as AcpServer, McpServerHttp, McpServerSse, McpServerStdio,
+};
+use mentra::{
+    McpServerConfig, McpSseServerConfig, McpStreamableHttpConfigError,
+    McpStreamableHttpServerConfig,
+};
 
 use basis::mcp::{McpError, McpServer};
 
@@ -39,12 +49,8 @@ pub fn from_acp(servers: &[AcpServer]) -> Result<Vec<McpServer>, McpError> {
 fn from_one(server: &AcpServer) -> Result<McpServer, McpError> {
     match server {
         AcpServer::Stdio(stdio) => stdio_server(stdio),
-        AcpServer::Sse(sse) => Ok(sse_server(sse)),
-        AcpServer::Http(http) => Err(McpError::UnsupportedTransport {
-            origin: ORIGIN.to_string(),
-            name: http.name.clone(),
-            transport: "Streamable HTTP".to_string(),
-        }),
+        AcpServer::Sse(sse) => sse_server(sse),
+        AcpServer::Http(http) => http_server(http),
         _ => Err(McpError::UnknownTransport {
             origin: ORIGIN.to_string(),
         }),
@@ -82,19 +88,101 @@ fn stdio_server(stdio: &McpServerStdio) -> Result<McpServer, McpError> {
     }))
 }
 
-fn sse_server(sse: &McpServerSse) -> McpServer {
-    let config = sse.headers.iter().fold(
-        McpSseServerConfig::new(sse.name.clone(), sse.url.clone()),
-        |config, header| config.with_header(header.name.clone(), header.value.clone()),
-    );
+fn sse_server(sse: &McpServerSse) -> Result<McpServer, McpError> {
+    reject_empty_url("sse", &sse.name, &sse.url)?;
 
-    McpServer::Sse(config)
+    let config = with_headers(
+        &sse.name,
+        &sse.headers,
+        McpSseServerConfig::new(sse.name.clone(), sse.url.clone()),
+        |config, name, value| config.with_header(name, value),
+    )?;
+
+    Ok(McpServer::Sse(config))
+}
+
+fn http_server(http: &McpServerHttp) -> Result<McpServer, McpError> {
+    reject_empty_url("http", &http.name, &http.url)?;
+
+    let config = with_headers(
+        &http.name,
+        &http.headers,
+        McpStreamableHttpServerConfig::new(http.name.clone(), http.url.clone()),
+        |config, name, value| config.with_header(name, value),
+    )?;
+
+    // The same check the `.mcp.json` reader runs at parse: a refused config
+    // fails `session/new` with a named error, not a stderr warning at connect
+    // that no ACP client ever sees.
+    config.validate().map_err(|error| McpError::Invalid {
+        origin: ORIGIN.to_string(),
+        name: http.name.clone(),
+        reason: refused(&error),
+    })?;
+
+    Ok(McpServer::Http(config))
+}
+
+/// An empty `url` refused the way the file reader refuses one, so the two
+/// doors into a remote transport agree on what a mistake is.
+fn reject_empty_url(transport: &str, server: &str, url: &str) -> Result<(), McpError> {
+    if url.trim().is_empty() {
+        return Err(McpError::Invalid {
+            origin: ORIGIN.to_string(),
+            name: server.to_string(),
+            reason: format!("has no `url` to reach for its `{transport}` transport"),
+        });
+    }
+
+    Ok(())
+}
+
+/// mentra's refusal, restated where it would echo a value.
+///
+/// The same match the `.mcp.json` reader makes, for the same reason:
+/// `PlaintextCredentials` embeds the whole URL, whose query string may hold a
+/// credential, and suggests an override no client wire exposes.
+fn refused(error: &McpStreamableHttpConfigError) -> String {
+    match error {
+        McpStreamableHttpConfigError::PlaintextCredentials { .. } => {
+            "has headers that would travel over plaintext `http` to a \
+             non-loopback host; use `https` or a loopback address"
+                .to_string()
+        }
+        other => format!("is not a valid Streamable HTTP configuration: {other}"),
+    }
+}
+
+/// Folds the client's ordered headers into a remote config, refusing a
+/// repeated name rather than letting the map keep whichever came last.
+///
+/// The value stays out of the error for the usual reason: a header value is
+/// where the credential is.
+fn with_headers<C>(
+    server: &str,
+    headers: &[HttpHeader],
+    config: C,
+    add: impl Fn(C, String, String) -> C,
+) -> Result<C, McpError> {
+    let mut seen = std::collections::HashSet::with_capacity(headers.len());
+
+    headers.iter().try_fold(config, |config, header| {
+        if !seen.insert(header.name.as_str()) {
+            return Err(McpError::Invalid {
+                origin: ORIGIN.to_string(),
+                name: server.to_string(),
+                reason: format!("repeats the header `{}`", header.name),
+            });
+        }
+
+        Ok(add(config, header.name.clone(), header.value.clone()))
+    })
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
-    use agent_client_protocol::schema::v1::{EnvVariable, HttpHeader, McpServerHttp};
+    use agent_client_protocol::schema::v1::EnvVariable;
 
     #[test]
     fn no_servers_maps_to_no_servers() {
@@ -137,33 +225,115 @@ mod tests {
     }
 
     #[test]
-    fn an_http_server_is_refused_rather_than_dropped() {
-        let error = from_acp(&[AcpServer::Http(McpServerHttp::new(
-            "api",
-            "https://example.com/mcp",
-        ))])
-        .expect_err("mentra has no Streamable HTTP client");
+    fn an_http_server_carries_its_url_and_headers() {
+        let servers = from_acp(&[AcpServer::Http(
+            McpServerHttp::new("api", "https://example.com/mcp")
+                .headers(vec![HttpHeader::new("authorization", "Bearer t")]),
+        )])
+        .expect("mentra speaks this transport");
 
-        let rendered = error.to_string();
-        assert!(
-            rendered.contains("api"),
-            "the server must be named: {rendered}"
+        let config = servers[0].as_http().expect("http");
+        assert_eq!(config.url, "https://example.com/mcp");
+        assert_eq!(
+            config
+                .headers
+                .get("authorization")
+                .map(mentra::mcp::SecretString::expose_secret),
+            Some("Bearer t")
         );
-        assert!(matches!(error, McpError::UnsupportedTransport { .. }));
     }
 
     #[test]
-    fn one_unserviceable_server_fails_the_whole_set() {
+    fn a_repeated_header_name_is_refused_not_last_wins() {
+        // Silently keeping the second `authorization` is a debugging session
+        // for whoever wrote the first; the module doc promises nothing is
+        // dropped.
+        let error = from_acp(&[AcpServer::Sse(
+            McpServerSse::new("obs", "https://example.com/sse").headers(vec![
+                HttpHeader::new("authorization", "Bearer one"),
+                HttpHeader::new("authorization", "Bearer two"),
+            ]),
+        )])
+        .expect_err("a duplicate must fail session/new");
+
+        let rendered = error.to_string();
+        assert!(rendered.contains("authorization"), "{rendered}");
+        assert!(!rendered.contains("Bearer"), "values stay out: {rendered}");
+
+        let error = from_acp(&[AcpServer::Http(
+            McpServerHttp::new("api", "https://example.com/mcp").headers(vec![
+                HttpHeader::new("x-key", "one"),
+                HttpHeader::new("x-key", "two"),
+            ]),
+        )])
+        .expect_err("both remote transports run the same fold");
+        assert!(error.to_string().contains("x-key"), "{error}");
+    }
+
+    #[test]
+    fn an_empty_url_fails_session_new_on_either_remote_transport() {
+        for server in [
+            AcpServer::Sse(McpServerSse::new("obs", "  ")),
+            AcpServer::Http(McpServerHttp::new("api", "")),
+        ] {
+            let error = from_acp(&[server]).expect_err("nothing to reach");
+            assert!(
+                matches!(error, McpError::Invalid { .. }),
+                "an empty url must be refused, not connected to: {error}"
+            );
+        }
+    }
+
+    #[test]
+    fn plaintext_credentials_to_a_remote_host_fail_session_new() {
+        let error = from_acp(&[AcpServer::Http(
+            McpServerHttp::new("api", "http://example.com/mcp")
+                .headers(vec![HttpHeader::new("authorization", "Bearer t")]),
+        )])
+        .expect_err("mentra refuses headers over plaintext http, and loudly");
+
+        let rendered = error.to_string();
+        assert!(rendered.contains("api"), "{rendered}");
+        assert!(
+            !rendered.contains("example.com") && !rendered.contains("Bearer"),
+            "no value from the wire returns in the error: {rendered}"
+        );
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn one_unserviceable_server_still_fails_the_whole_set() {
+        use std::os::unix::ffi::OsStrExt;
+
+        // The refusal still constructable from safe input: a command path
+        // that is not UTF-8 cannot become mentra's `String` command, and one
+        // bad entry must sink the set — the collect contract the module doc
+        // promises.
+        let broken = std::path::PathBuf::from(std::ffi::OsStr::from_bytes(b"/bin/\xffsrv"));
+
         let error = from_acp(&[
-            AcpServer::Stdio(McpServerStdio::new("fs", "/usr/local/bin/mcp-fs")),
             AcpServer::Http(McpServerHttp::new("api", "https://example.com/mcp")),
+            AcpServer::Stdio(McpServerStdio::new("fs", broken)),
         ])
         .expect_err("a partly-configured session is worse than none");
 
         assert!(
-            matches!(error, McpError::UnsupportedTransport { .. }),
-            "{error}"
+            error.to_string().contains("fs"),
+            "the failure names the server: {error}"
         );
+    }
+
+    #[test]
+    fn a_mixed_set_translates_every_server() {
+        let servers = from_acp(&[
+            AcpServer::Stdio(McpServerStdio::new("fs", "/usr/local/bin/mcp-fs")),
+            AcpServer::Http(McpServerHttp::new("api", "https://example.com/mcp")),
+        ])
+        .expect("every transport a client can name translates");
+
+        assert_eq!(servers.len(), 2);
+        assert!(servers[0].as_stdio().is_some());
+        assert!(servers[1].as_http().is_some());
     }
 
     #[test]

@@ -33,10 +33,15 @@
 //! open.
 
 use std::{
-    collections::HashMap,
+    collections::{BTreeMap, HashMap},
     hash::{DefaultHasher, Hash, Hasher},
     path::PathBuf,
     sync::{Arc, Mutex},
+};
+
+use mentra::{
+    McpSseLimits, McpSseServerConfig, McpStreamableHttpLimits, McpStreamableHttpServerConfig,
+    mcp::SecretString,
 };
 
 use basis::{
@@ -334,18 +339,159 @@ fn digest(servers: &[McpServer]) -> u64 {
                 env.sort_unstable();
                 env.hash(&mut hasher);
             }
+            // Both remote arms destructure exhaustively — config and limits —
+            // so a field mentra adds upstream is a compile error here rather
+            // than a value two different sessions silently share a workspace
+            // over. The discriminant is hashed like the values: two servers
+            // sharing a name and URL but not a transport are not asking for
+            // the same workspace.
             McpServer::Sse(config) => {
-                "sse".hash(&mut hasher);
-                config.name.hash(&mut hasher);
-                config.url.hash(&mut hasher);
-                // Already ordered: mentra types these as a `BTreeMap`.
-                for (name, value) in &config.headers {
-                    name.hash(&mut hasher);
-                    value.expose_secret().hash(&mut hasher);
-                }
+                let McpSseServerConfig {
+                    name,
+                    url,
+                    headers,
+                    allow_plaintext_credentials,
+                    limits,
+                } = config;
+                hash_remote(
+                    &mut hasher,
+                    "sse",
+                    name,
+                    url,
+                    headers,
+                    *allow_plaintext_credentials,
+                );
+
+                let McpSseLimits {
+                    connect_timeout,
+                    initialize_timeout,
+                    list_tools_timeout,
+                    call_tool_timeout,
+                    stream_idle_timeout,
+                    max_event_bytes,
+                    max_endpoint_bytes,
+                    max_tool_pages,
+                    max_tools,
+                } = limits;
+                (
+                    connect_timeout,
+                    initialize_timeout,
+                    list_tools_timeout,
+                    call_tool_timeout,
+                    stream_idle_timeout,
+                )
+                    .hash(&mut hasher);
+                (
+                    max_event_bytes,
+                    max_endpoint_bytes,
+                    max_tool_pages,
+                    max_tools,
+                )
+                    .hash(&mut hasher);
+            }
+            McpServer::Http(config) => {
+                let McpStreamableHttpServerConfig {
+                    name,
+                    url,
+                    headers,
+                    allow_plaintext_credentials,
+                    limits,
+                } = config;
+                hash_remote(
+                    &mut hasher,
+                    "http",
+                    name,
+                    url,
+                    headers,
+                    *allow_plaintext_credentials,
+                );
+
+                let McpStreamableHttpLimits {
+                    connect_timeout,
+                    initialize_timeout,
+                    list_tools_timeout,
+                    call_tool_timeout,
+                    stream_idle_timeout,
+                    max_event_bytes,
+                    max_response_bytes,
+                    max_tool_pages,
+                    max_tools,
+                } = limits;
+                (
+                    connect_timeout,
+                    initialize_timeout,
+                    list_tools_timeout,
+                    call_tool_timeout,
+                    stream_idle_timeout,
+                )
+                    .hash(&mut hasher);
+                (
+                    max_event_bytes,
+                    max_response_bytes,
+                    max_tool_pages,
+                    max_tools,
+                )
+                    .hash(&mut hasher);
             }
         }
     }
 
     hasher.finish()
+}
+
+/// The remote transports' shared shape: discriminant tag, name, URL, ordered
+/// headers with their secrets fed into the hash, and the plaintext override —
+/// which decides where a credential may travel, so two configs differing only
+/// there are not the same authority.
+fn hash_remote(
+    hasher: &mut DefaultHasher,
+    transport: &str,
+    name: &str,
+    url: &str,
+    headers: &BTreeMap<String, SecretString>,
+    allow_plaintext_credentials: bool,
+) {
+    transport.hash(hasher);
+    name.hash(hasher);
+    url.hash(hasher);
+    // Already ordered: mentra types these as a `BTreeMap`.
+    for (header, value) in headers {
+        header.hash(hasher);
+        value.expose_secret().hash(hasher);
+    }
+    allow_plaintext_credentials.hash(hasher);
+}
+
+#[cfg(test)]
+mod tests {
+    use basis::McpServer;
+    use mentra::{McpSseServerConfig, McpStreamableHttpServerConfig};
+
+    use super::digest;
+
+    #[test]
+    fn two_servers_differing_only_in_transport_hash_apart() {
+        // Without the discriminant in the hash, an SSE server and a Streamable
+        // HTTP server sharing a name and URL would key one workspace, and the
+        // second client's transport would silently become the first's.
+        let sse = McpServer::Sse(McpSseServerConfig::new("api", "https://example.com/mcp"));
+        let http = McpServer::Http(McpStreamableHttpServerConfig::new(
+            "api",
+            "https://example.com/mcp",
+        ));
+
+        assert_ne!(digest(&[sse]), digest(&[http]));
+    }
+
+    #[test]
+    fn the_plaintext_override_reaches_the_digest() {
+        // Latent until basis exposes the knob, armed now: two configs that
+        // differ in where a credential may travel are two authorities.
+        let base = || McpStreamableHttpServerConfig::new("api", "http://127.0.0.1/mcp");
+
+        assert_ne!(
+            digest(&[McpServer::Http(base())]),
+            digest(&[McpServer::Http(base().allowing_plaintext_credentials())]),
+        );
+    }
 }

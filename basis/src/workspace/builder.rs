@@ -532,7 +532,7 @@ fn sourced(sources: &[declared::ToolsSource]) -> Vec<ContextFile> {
 fn discovered_mcp(
     workspace: &Path,
     config: &McpConfig,
-) -> Result<(Vec<ContextFile>, Vec<mcp::McpServer>), RunError> {
+) -> Result<(Vec<ContextFile>, Vec<mcp::ConfiguredServer>), RunError> {
     let files: Vec<ContextFile> = mcp::discover(workspace, config)?
         .iter()
         .map(|source| ContextFile {
@@ -541,7 +541,7 @@ fn discovered_mcp(
         })
         .collect();
 
-    Ok((files, mcp::servers(workspace, config)?))
+    Ok((files, mcp::configured(workspace, config)?))
 }
 
 /// Registers every skills directory that exists, most specific first.

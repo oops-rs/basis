@@ -229,3 +229,82 @@ fn a_run_config_carries_discovery_settings_and_returns_new_values() {
         PathBuf::from(DEFAULT_WORKSPACE_MCP_FILE)
     );
 }
+
+#[test]
+fn a_workspace_http_server_shadows_a_global_one_and_the_rest_layer_in() {
+    let tmp = tempfile::tempdir().expect("tempdir");
+    let global = tmp.path().join("global");
+    write(
+        &tmp.path().join(DEFAULT_WORKSPACE_MCP_FILE),
+        r#"{"mcpServers":{"api":{"type":"http","url":"https://workspace.example/mcp"}}}"#,
+    );
+    write(
+        &global.join(DEFAULT_GLOBAL_MCP_FILE),
+        r#"{"mcpServers":{
+            "api":{"type":"http","url":"https://global.example/mcp"},
+            "docs":{"type":"streamable-http","url":"https://docs.example/mcp"}
+        }}"#,
+    );
+
+    let found = servers(tmp.path(), &config(Some(global))).expect("layering succeeds");
+
+    let names: Vec<&str> = found.iter().map(McpServer::name).collect();
+    assert_eq!(names, vec!["api", "docs"]);
+    assert_eq!(
+        found[0].as_http().expect("http").url,
+        "https://workspace.example/mcp",
+        "the workspace answers for its own repository"
+    );
+    assert!(
+        found[1].as_http().is_some(),
+        "a global server of another name still layers in"
+    );
+}
+
+#[cfg(unix)]
+#[test]
+fn url_placeholders_expand_through_discovery() {
+    // Through the same `std::env` lookup production uses. `HOME` because it
+    // is set on every unix and a test must not mutate this process's shared
+    // environment; the SSE arm, because it takes any expansion result where
+    // the validated HTTP arm would refuse an exotic value.
+    let home = std::env::var("HOME").expect("HOME is set on unix");
+
+    let tmp = tempfile::tempdir().expect("tempdir");
+    write(
+        &tmp.path().join(DEFAULT_WORKSPACE_MCP_FILE),
+        r#"{"mcpServers":{"obs":{"type":"sse","url":"https://example.com/sse?home=${HOME}"}}}"#,
+    );
+
+    let found = servers(tmp.path(), &config(None)).expect("HOME is set");
+
+    assert_eq!(
+        found[0].as_sse().expect("sse").url,
+        format!("https://example.com/sse?home={home}")
+    );
+}
+
+#[test]
+fn http_header_placeholders_expand_through_discovery() {
+    // The same path, on the transport this branch added; `PATH` is the one
+    // variable every test environment sets.
+    let path_value = std::env::var("PATH").expect("PATH is set");
+
+    let tmp = tempfile::tempdir().expect("tempdir");
+    write(
+        &tmp.path().join(DEFAULT_WORKSPACE_MCP_FILE),
+        r#"{"mcpServers":{"api":{"type":"http","url":"https://example.com/mcp","headers":{"x-path":"${PATH}"}}}}"#,
+    );
+
+    let found = servers(tmp.path(), &config(None)).expect("PATH is set");
+
+    assert_eq!(
+        found[0]
+            .as_http()
+            .expect("http")
+            .headers
+            .get("x-path")
+            .map(mentra::mcp::SecretString::expose_secret),
+        Some(path_value.as_str())
+    );
+}

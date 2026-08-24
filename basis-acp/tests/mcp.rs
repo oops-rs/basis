@@ -2,8 +2,8 @@
 //!
 //! The unit tests beside the mapping cover each transport in isolation. What is
 //! worth checking from outside is the join: a server the client sent has to
-//! outrank the same name in a `.mcp.json`, and a transport basis cannot serve has
-//! to stop `session/new` rather than quietly shrink the roster.
+//! outrank the same name in a `.mcp.json`, and every transport a client can
+//! name — stdio, SSE, Streamable HTTP — has to survive it untouched.
 //!
 //! Every server here is fictional and nothing connects.
 
@@ -52,15 +52,21 @@ fn a_client_supplied_server_wins_over_the_workspaces_own() {
 }
 
 #[test]
-fn a_client_transport_lan_cannot_serve_is_refused_not_ignored() {
-    let error = from_acp(&[AcpServer::Http(McpServerHttp::new(
+fn a_client_supplied_http_server_survives_the_join() {
+    let tmp = tempfile::tempdir().expect("tempdir");
+
+    let supplied = from_acp(&[AcpServer::Http(McpServerHttp::new(
         "api",
         "https://example.com/mcp",
     ))])
-    .expect_err("mentra has no Streamable HTTP client");
+    .expect("mentra speaks Streamable HTTP");
 
-    assert!(
-        error.to_string().contains("api"),
-        "session/new must fail loudly enough to name the server: {error}"
+    let found = servers(tmp.path(), &config().with_supplied(supplied)).expect("layering");
+
+    assert_eq!(found.len(), 1);
+    assert_eq!(
+        found[0].as_http().expect("http").url,
+        "https://example.com/mcp",
+        "the transport rides the join untouched"
     );
 }

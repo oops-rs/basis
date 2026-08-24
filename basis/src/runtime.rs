@@ -128,7 +128,7 @@ pub enum Wire {
     Responses,
 }
 
-use crate::{approval::SideEffectLevels, run::RunError};
+use crate::run::RunError;
 
 use dispatch::{HookDispatch, HookRegistration, WorkspaceGuardEntry};
 
@@ -186,16 +186,6 @@ pub struct Runtime {
     transcripts: PathBuf,
     /// The one pre-hook basis registered, and the registry workspaces join.
     dispatch: Arc<HookDispatch>,
-    /// The reading end of the approval gate's side channel, handed to every run
-    /// minted on this runtime so an [`ApprovalRequest`](crate::ApprovalRequest)
-    /// can say how far the call reaches.
-    ///
-    /// Held here because the gate is fixed when mentra's runtime is built and
-    /// mentra never hands it back, so this is the only moment the handle can be
-    /// kept. **Interim**; see
-    /// [`SideEffectLevels`](crate::approval::SideEffectLevels) and
-    /// [mentra#21](https://github.com/oops-rs/mentra/issues/21).
-    levels: SideEffectLevels,
     /// Which workspace owns each MCP server name on this runtime's single tool
     /// registry — bridged tools are namespaced by server, so two workspaces
     /// configuring one name must be told apart here.
@@ -327,12 +317,6 @@ impl Runtime {
             .iter()
             .map(|(name, value)| (name.clone(), value.clone()))
             .collect()
-    }
-
-    /// The side channel this runtime's approval gate writes to, for the mint
-    /// that attaches it to a run.
-    pub(crate) fn side_effect_levels(&self) -> SideEffectLevels {
-        self.levels.clone()
     }
 
     /// The host interceptors this runtime was built with, for the workspace

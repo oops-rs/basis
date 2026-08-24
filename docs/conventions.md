@@ -219,8 +219,10 @@ inventing a spelling:
 ```
 
 `command` means stdio, `url` means the HTTP+SSE transport; `type` says which
-when the shape is ambiguous. Streamable HTTP is refused by name. Unknown keys
-are tolerated — the file is shared with other agents. `${VAR}` expands. A file
+when the shape is ambiguous, and `"http"` (or `"streamable-http"`) selects
+Streamable HTTP. A bare `url` with no `type` still means SSE, deliberately: a
+file written before the third transport existed keeps its meaning. Unknown
+keys are tolerated — the file is shared with other agents. `${VAR}` expands. A file
 that exists but names no `mcpServers` is an error, because a typo would
 otherwise disable every server silently. An ACP client's `session/new` servers
 outrank both files.

@@ -86,8 +86,6 @@ pub mod workspace;
 // as `CancellationToken` below: `is_consequential` and
 // `ApprovalRequest::side_effect_level` both make a caller name it, and a policy
 // written against it should not cost the host a mentra dependency of its own.
-// `SideEffectLevels` deliberately stays behind `approval::` — it is the interim
-// relay that mentra#21 deletes, and the root is for what basis intends to keep.
 pub use approval::{
     AllowAll, ApprovalAnswer, ApprovalDecision, ApprovalGate, ApprovalRequest, Approver, DenyAll,
     ToolSideEffectLevel,

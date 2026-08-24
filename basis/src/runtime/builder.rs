@@ -118,15 +118,13 @@ pub struct RuntimeBuilder {
     /// Names are validated at [`build`](Self::build) rather than here, which
     /// is where this builder answers every other piece of bad input.
     command_targets: CommandTargets,
-    /// Registrars for host-supplied tools, applied in [`build_with`](Self::build_with)
-    /// after basis's own `spawn`. A closure rather than a stored tool value
-    /// because mentra's own `with_tool` is generic over the concrete tool type
-    /// — nothing upstream implements `ExecutableTool` for `Box` or `Arc` (see
-    /// `crate::tools`'s module doc) — so the concrete type has to be captured
-    /// at the call site, in [`with_tool`](Self::with_tool), and erased behind
-    /// `FnOnce` instead of behind the trait it can't yet be boxed as.
-    host_tools:
-        Vec<Box<dyn FnOnce(mentra::RuntimeBuilder) -> mentra::RuntimeBuilder + Send + Sync>>,
+    /// Host-supplied tools, applied in [`build_with`](Self::build_with)
+    /// after basis's own `spawn`. Stored as what they are: mentra implements
+    /// the tool traits for `Box<T: ?Sized>` (mentra#22), so a boxed
+    /// `dyn ExecutableTool` is itself an `ExecutableTool` and mentra's
+    /// by-value `with_tool` takes it whole. `Send + Sync` are not restated on
+    /// the box: `ToolDefinition` itself requires both.
+    host_tools: Vec<Box<dyn mentra::tool::ExecutableTool>>,
 }
 
 /// What a caller said about where this runtime's conversations go.
@@ -645,7 +643,7 @@ impl RuntimeBuilder {
         Self {
             host_tools: {
                 let mut host_tools = self.host_tools;
-                host_tools.push(Box::new(move |builder| builder.with_tool(tool)));
+                host_tools.push(Box::new(tool));
                 host_tools
             },
             ..self
@@ -813,14 +811,6 @@ impl RuntimeBuilder {
 
         let dispatch = Arc::new(HookDispatch::new(self.interceptors));
 
-        // Cloned into mentra below rather than moved, because the gate is the
-        // only thing that sees a call's side-effect level and mentra never
-        // hands an authorizer back. The kept half is what puts that level on
-        // the `ApprovalRequest` an approver reads — interim, and mentra#21 is
-        // where it ends (`crate::approval::SideEffectLevels`).
-        let gate = ApprovalGate::new();
-        let levels = gate.levels();
-
         let builder = mentra::Runtime::builder()
             // Which conversations belong where, which is the only question
             // `session/list` can honestly answer (see `crate::store`). Unset,
@@ -839,7 +829,7 @@ impl RuntimeBuilder {
             // and no permission request can ever be raised — so the gate goes
             // on even for a runtime whose runs approve everything (see
             // `crate::approval`).
-            .with_tool_authorizer(gate)
+            .with_tool_authorizer(ApprovalGate::new())
             // The one tool basis registers (ADR-0016). It has to be on the
             // runtime rather than on a session, because a subagent shares its
             // parent's runtime registry and `spawn` must reach the model at
@@ -869,7 +859,7 @@ impl RuntimeBuilder {
         let builder = self
             .host_tools
             .into_iter()
-            .fold(builder, |builder, register| register(builder));
+            .fold(builder, |builder, tool| builder.with_tool(tool));
 
         // Installed whenever either half has something to say. With both
         // empty, mentra keeps its own local executor and basis adds no layer
@@ -953,7 +943,6 @@ impl RuntimeBuilder {
             provider_retry_budget: self.provider_retry_budget,
             transcripts,
             dispatch,
-            levels,
             #[cfg(feature = "mcp")]
             mcp_claims: Mutex::new(HashMap::new()),
             declared_claims: Mutex::new(HashMap::new()),
