@@ -163,8 +163,11 @@ pub use store::PersistedSession;
 pub use templates::{Template, TemplateError, TemplateSource, TemplatesConfig};
 // `tools::spawn` keeps its module: `SpawnTool` at the crate root would sit
 // beside a dozen types that are not tools, and the name an operator writes in a
-// rule or a hook is only meaningful next to the tool it names.
-pub use tools::SpawnTool;
+// rule or a hook is only meaningful next to the tool it names. `ChildContext`
+// and `ChildSpec` come to the root anyway, because the caller that names them
+// is not writing a tool — `RuntimeBuilder::with_child_policy` is a builder
+// knob like every other, and its vocabulary belongs beside the builder's.
+pub use tools::{ChildContext, ChildSpec, SpawnTool};
 // The declared binding's *configuration* comes to the root, beside its
 // siblings `HooksConfig`, `SkillsConfig` and `TemplatesConfig` — a host
 // pointing basis at a different manifest is doing the same thing it does for

@@ -25,8 +25,8 @@ use crate::{
     shell::ShellAccess,
     store,
     tools::{
-        SpawnTool,
-        spawn::{LOCAL_TARGET, is_target_name},
+        ChildContext, ChildSpec, SpawnTool,
+        spawn::{ChildPolicy, LOCAL_TARGET, is_target_name},
     },
 };
 
@@ -129,6 +129,10 @@ pub struct RuntimeBuilder {
     /// How many levels of delegation `spawn` will start before refusing
     /// ([`with_delegation_depth`](Self::with_delegation_depth), decision D9).
     delegation_depth: usize,
+    /// Who a delegated child is ([`with_child_policy`](Self::with_child_policy),
+    /// decision D4). `None` — the default — is inherit-everything, on the code
+    /// path every runtime has always used.
+    child_policy: Option<ChildPolicy>,
     /// A provider the host constructed itself
     /// ([`with_provider_instance`](Self::with_provider_instance)). When set,
     /// the provider question is answered: resolution never runs, the
@@ -181,6 +185,11 @@ impl std::fmt::Debug for RuntimeBuilder {
             .field("wire", &self.wire)
             .field("file_tools", &self.file_tools)
             .field("delegation_depth", &self.delegation_depth)
+            // Presence is all a `dyn` policy can honestly print.
+            .field(
+                "child_policy",
+                &self.child_policy.as_ref().map(|_| "<child policy>"),
+            )
             .field(
                 "command_environment",
                 &self.command_environment.keys().collect::<Vec<_>>(),
@@ -215,6 +224,7 @@ impl Default for RuntimeBuilder {
             command_targets: CommandTargets::new(),
             host_tools: Vec::new(),
             delegation_depth: crate::tools::DEFAULT_DELEGATION_DEPTH,
+            child_policy: None,
             host_provider: None,
         }
     }
@@ -793,6 +803,53 @@ impl RuntimeBuilder {
         }
     }
 
+    /// Decides who a delegated child is, per delegation (decision D4).
+    ///
+    /// `spawn` has always minted a subagent as an exact clone of its parent —
+    /// same roster, same model, same system prompt — and unset, it still
+    /// does, byte for byte. A policy makes the clone a *default* instead of
+    /// the only shape: consulted with what `spawn` knows about the delegation
+    /// ([`ChildContext`] — the child's prompt, the parent's agent id, the
+    /// workspace directory), it answers which of those three inherited facts
+    /// to override ([`ChildSpec`]), and [`ChildSpec::inherit`] is today's
+    /// behavior exactly. Cheap triage beside a full fixer is the shape this
+    /// exists for: a prompt-prefix convention routed to a narrowed roster and
+    /// a cheaper model, with everything else inherited —
+    /// `examples/child_policy.rs` runs it.
+    ///
+    /// Runtime-scoped, like the depth floor above and for the same reason:
+    /// `spawn` is registered on the runtime, every workspace and every
+    /// subagent on it shares the one instance, so the policy is consulted at
+    /// every depth — a child's own delegations answer to it too, which is how
+    /// a host confines a whole chain rather than one generation.
+    ///
+    /// Three facts and no more travel through a spec, deliberately. Bounds
+    /// stay on the run options a child already inherits (deadline, budgets,
+    /// cancellation, the shared token counter) — a second spelling here would
+    /// be a second bounds system. The depth floor is checked before the
+    /// policy runs, so no override lifts it. And the approver sees what the
+    /// policy decided: a delegation with overrides carries an additive
+    /// `child` key in its preview, so a remembered rule can match on what the
+    /// child will be, while an inherit answer leaves the preview byte-
+    /// identical to a policy-free runtime's. [`ChildSpec`]'s module docs
+    /// carry the rest, including why a system-prompt override is
+    /// replace-wholesale with no append.
+    ///
+    /// The policy should be a pure function of its context: it is consulted
+    /// once for the preview and once at execution, and one that answers
+    /// differently between the two shows the approver a child it will not
+    /// spawn.
+    #[must_use]
+    pub fn with_child_policy<F>(self, policy: F) -> Self
+    where
+        F: Fn(&ChildContext<'_>) -> ChildSpec + Send + Sync + 'static,
+    {
+        Self {
+            child_policy: Some(Arc::new(policy)),
+            ..self
+        }
+    }
+
     /// How long a command may run before it is killed.
     ///
     /// Two minutes by default, which suits the commands a harness usually runs
@@ -998,18 +1055,22 @@ impl RuntimeBuilder {
             // The one tool basis registers (ADR-0016). It has to be on the
             // runtime rather than on a session, because a subagent shares its
             // parent's runtime registry and `spawn` must reach the model at
-            // every depth — the uniformity the ADR calls recursive.
+            // every depth — the uniformity the ADR calls recursive, and the
+            // reason the child policy below reaches every depth too (D4).
             //
             // Told the target names, and only the names: the tool needs them to
             // teach the `!@` prefix and to refuse one nothing registered, while
             // *which executor* a name resolves to stays the runtime's business
-            // (ADR-0021). With none registered and the default depth this is
-            // `SpawnTool::new()` in every observable respect, including that
-            // the model is never told the prefix exists.
-            .with_tool(SpawnTool::with_targets_and_depth(
-                target_names,
-                self.delegation_depth,
-            ))
+            // (ADR-0021). With none registered, the default depth and no child
+            // policy this is `SpawnTool::new()` in every observable respect,
+            // including that the model is never told the prefix exists.
+            .with_tool(match self.child_policy {
+                Some(policy) => {
+                    SpawnTool::with_targets_and_depth(target_names, self.delegation_depth)
+                        .with_child_policy(move |child: &ChildContext<'_>| policy(child))
+                }
+                None => SpawnTool::with_targets_and_depth(target_names, self.delegation_depth),
+            })
             // The one pre-hook basis registers, always: mentra takes hooks at
             // build time only, and workspaces arrive later, through the
             // dispatcher (see `runtime::dispatch`).

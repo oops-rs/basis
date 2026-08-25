@@ -24,6 +24,10 @@ fn refusal(input: &str) -> String {
 }
 
 fn preview_of(input: &str) -> ToolAuthorizationPreview {
+    preview_with_child(input, None)
+}
+
+fn preview_with_child(input: &str, child: Option<Value>) -> ToolAuthorizationPreview {
     let spawn = parsed(input);
     let tool = SpawnTool::new();
     preview(
@@ -31,6 +35,7 @@ fn preview_of(input: &str) -> ToolAuthorizationPreview {
         PathBuf::from("/repo"),
         &tool.descriptor(),
         &call(input),
+        child,
     )
 }
 
@@ -222,6 +227,41 @@ fn the_preview_carries_the_parsed_call_and_not_the_string() {
         delegation.structured_input,
         json!({ "mode": "agent", "body": "!literally bang", "cwd": "/repo", "target": "local" }),
         "an escaped prompt reaches the approver as a prompt, escape already spent"
+    );
+}
+
+#[test]
+fn a_child_the_policy_shaped_is_in_front_of_the_approver() {
+    // D4's additive key: with an override in hand, the preview says what the
+    // child will be, and the four established keys keep their exact spellings
+    // and values around it.
+    let child = ChildSpec::inherit()
+        .with_model(mentra::ModelInfo::new("cheap-model", "openai"))
+        .preview_value();
+    let preview = preview_with_child("triage: is this real?", child);
+
+    assert_eq!(
+        preview.structured_input,
+        json!({
+            "mode": "agent",
+            "body": "triage: is this real?",
+            "child": { "model": "cheap-model" },
+            "cwd": "/repo",
+            "target": "local",
+        })
+    );
+}
+
+#[test]
+fn an_inherited_child_leaves_the_preview_exactly_as_it_was() {
+    // The other half of additive: inherit — every delegation on a policy-free
+    // runtime — must present the four-key shape byte for byte, because
+    // `child` sorts between `body` and `cwd` and an always-present key would
+    // move under every rule already written.
+    assert_eq!(
+        preview_with_child("summarise the diff", ChildSpec::inherit().preview_value())
+            .structured_input,
+        json!({ "mode": "agent", "body": "summarise the diff", "cwd": "/repo", "target": "local" })
     );
 }
 

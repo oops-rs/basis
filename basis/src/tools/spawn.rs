@@ -35,7 +35,11 @@
 //! `structured_input` is the parsed `{mode, body, cwd, target}` — the thing an
 //! approver renders, and the thing mentra globs a remembered rule's pattern against
 //! (`RuleStore::matching_rule`). A `RuleKey { tool_name: "spawn", pattern }` is
-//! therefore a command allowlist expressible as data.
+//! therefore a command allowlist expressible as data. A delegation whose child
+//! policy ([`ChildSpec`], D4) overrode something adds a `child` key describing
+//! what the child will be — roster, model, whether the system prompt is
+//! replaced — and only then, so the four-key shape every existing rule was
+//! written against is untouched on a runtime with no policy.
 //!
 //! Order matters and is mentra's, not basis's: the orchestrator builds this
 //! preview and puts it to the authorizer *before* it calls `execute_mut`
@@ -54,6 +58,7 @@
 //! the same path `spawn` calls — after this tool has been authorized, before
 //! anything executes.
 
+mod child;
 mod depth;
 mod execute;
 mod parse;
@@ -76,7 +81,10 @@ use parse::{INPUT_FIELD, Mode, Spawn, parse};
 // so the dispatcher asks this parser rather than becoming a second reader.
 pub(crate) use parse::{LOCAL_TARGET, Mode as SpawnMode, is_target_name, parse as parse_spawn};
 
+pub use child::{ChildContext, ChildSpec};
 pub use depth::DEFAULT_DELEGATION_DEPTH;
+
+pub(crate) use child::ChildPolicy;
 
 /// The name the model calls, an operator writes in a rule, and a
 /// `.basis/hooks.json` entry matches on.
@@ -132,8 +140,9 @@ fn listed(targets: &[String]) -> String {
 ///
 /// One instance serves a whole runtime: mentra's registry holds it behind an
 /// `Arc` and every subagent shares its parent's runtime handle, which is what
-/// lets the delegation depth ledger inside see the whole tree.
-#[derive(Debug, Default)]
+/// lets the delegation depth ledger inside see the whole tree — and what makes
+/// the child policy apply at every depth, including to a child's own children.
+#[derive(Default)]
 pub struct SpawnTool {
     depth: depth::Depth,
     /// The command targets this runtime can route to, sorted and deduplicated
@@ -141,6 +150,22 @@ pub struct SpawnTool {
     /// Empty is the ordinary case, and the one in which the model is never
     /// told the routing prefix exists.
     targets: Vec<String>,
+    /// Who a delegated child is (D4, [`child`]'s module docs). `None` — the
+    /// ordinary case — is inherit-everything on the exact code path this tool
+    /// has always used.
+    policy: Option<ChildPolicy>,
+}
+
+/// Hand-written for the policy field: a `dyn Fn` has no `Debug`, and presence
+/// is all it can honestly print.
+impl std::fmt::Debug for SpawnTool {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("SpawnTool")
+            .field("depth", &self.depth)
+            .field("targets", &self.targets)
+            .field("policy", &self.policy.as_ref().map(|_| "<child policy>"))
+            .finish()
+    }
 }
 
 impl SpawnTool {
@@ -190,6 +215,45 @@ impl SpawnTool {
                 .collect::<BTreeSet<_>>()
                 .into_iter()
                 .collect(),
+            policy: None,
+        }
+    }
+
+    /// Gives this tool's delegations a child policy (D4): consulted per
+    /// delegation with what `spawn` knows ([`ChildContext`]), answering which
+    /// of the child's inherited facts to override ([`ChildSpec`]).
+    ///
+    /// [`ChildSpec`]'s module docs carry the contract — inherit is the
+    /// default and byte-identical to no policy, bounds are not the spec's to
+    /// carry, the depth floor is checked before the policy runs, and the
+    /// policy is consulted both for the approver's preview and at execution,
+    /// so it should be a pure function of its context. A host driving mentra
+    /// directly calls this where basis's own builder calls it for
+    /// [`RuntimeBuilder::with_child_policy`](crate::RuntimeBuilder::with_child_policy).
+    #[must_use]
+    pub fn with_child_policy<F>(self, policy: F) -> Self
+    where
+        F: Fn(&ChildContext<'_>) -> ChildSpec + Send + Sync + 'static,
+    {
+        Self {
+            policy: Some(std::sync::Arc::new(policy)),
+            ..self
+        }
+    }
+
+    /// What the policy says this delegation's child is — asked identically on
+    /// the two paths that need it, the preview and the execution, so the
+    /// approver reads the child that will actually be spawned.
+    /// [`ChildSpec::inherit`] whenever there is no policy to ask.
+    fn child_spec(
+        &self,
+        prompt: &str,
+        parent_agent_id: &str,
+        workspace_dir: &std::path::Path,
+    ) -> ChildSpec {
+        match &self.policy {
+            Some(policy) => policy(&ChildContext::new(prompt, parent_agent_id, workspace_dir)),
+            None => ChildSpec::inherit(),
         }
     }
 
@@ -293,14 +357,25 @@ impl ToolExecutor for SpawnTool {
         // the floor cannot be lifted by an answer or by a remembered rule. A
         // routing destination nothing registered is the same kind of fact as
         // the depth floor: not a judgement call, so not a question for a
-        // person (ADR-0021).
+        // person (ADR-0021). Both checks run before the child policy is
+        // consulted, so no host policy runs for a call the floor refuses.
         self.authorize_target(&spawn)?;
         if spawn.mode() == Mode::Agent {
             self.depth.authorize_delegation(&ctx.agent_id)?;
         }
         let cwd = ctx.resolve_working_directory(None)?;
 
-        Ok(preview(&spawn, cwd, &self.descriptor(), input))
+        // What the child will be, for a delegation under a policy that says
+        // so — the additive `child` key the preview's docs describe. Never
+        // for a command, and never when the answer is inherit.
+        let child = match spawn.mode() {
+            Mode::Agent => self
+                .child_spec(spawn.body(), &ctx.agent_id, &cwd)
+                .preview_value(),
+            Mode::Command => None,
+        };
+
+        Ok(preview(&spawn, cwd, &self.descriptor(), input, child))
     }
 
     /// Both modes run in the exclusive lane — a command mutates the workspace
@@ -329,7 +404,17 @@ impl ToolExecutor for SpawnTool {
                 // is only reached when an authorizer is installed, and a floor
                 // that a missing authorizer removes is not a floor.
                 let depth = self.depth.authorize_delegation(&ctx.agent_id)?;
-                execute::delegate(&self.depth, &mut ctx, spawn.body(), depth).await
+                // The policy too is asked again, for the same reason — and the
+                // working directory it reads is resolved only when there is a
+                // policy to read it, so the policy-free path stays exactly the
+                // path it has always been.
+                let spec = if self.policy.is_none() {
+                    ChildSpec::inherit()
+                } else {
+                    let cwd = ctx.resolve_working_directory(None)?;
+                    self.child_spec(spawn.body(), &ctx.agent_id, &cwd)
+                };
+                execute::delegate(&self.depth, &mut ctx, spawn.body(), depth, spec).await
             }
         }
     }
@@ -342,6 +427,7 @@ fn preview(
     cwd: std::path::PathBuf,
     descriptor: &RuntimeToolDescriptor,
     raw_input: &Value,
+    child: Option<Value>,
 ) -> ToolAuthorizationPreview {
     // The wire contract of ADR-0016, widened by ADR-0021 to
     // `{mode, body, cwd, target}`, and still never the string the model wrote.
@@ -355,12 +441,27 @@ fn preview(
     // than `null` when no target was named, because *here* is a value an
     // operator will want to write a rule about and a glob against a JSON null
     // is a spelling nobody notices missing.
-    let structured_input = json!({
+    //
+    // `child` (D4) is additive in a narrower sense than `target` could be: it
+    // sorts *between* `body` and `cwd`, so it appears only when a child
+    // policy actually overrode something — a delegation whose answer is
+    // inherit, which is every delegation on a policy-free runtime, presents
+    // the four-key shape byte for byte and every rule written against it
+    // keeps matching. On a runtime whose policy does override, the key is the
+    // point: a remembered rule about delegation can match on what the child
+    // will be — `ChildSpec::preview_value` has the shape.
+    let mut structured_input = json!({
         "mode": spawn.mode().as_str(),
         "body": spawn.body(),
         "cwd": cwd,
         "target": spawn.target().unwrap_or(LOCAL_TARGET),
     });
+    if let Some(child) = child {
+        structured_input
+            .as_object_mut()
+            .expect("built as an object two lines up")
+            .insert("child".to_string(), child);
+    }
 
     ToolAuthorizationPreview {
         working_directory: cwd,

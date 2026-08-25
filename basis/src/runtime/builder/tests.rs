@@ -277,7 +277,9 @@ fn command_environment_is_scoped_and_redacted() {
     );
     let printed = format!("{builder:?}");
     assert!(printed.contains("BASIS_TASK_ID"), "{printed}");
-    assert!(!printed.contains("child"), "{printed}");
+    // The value would print as a quoted string; the bare word also appears in
+    // the `child_policy` field's own name, which is not a leak.
+    assert!(!printed.contains("\"child\""), "{printed}");
 }
 
 struct Named(&'static str);

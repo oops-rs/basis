@@ -13,7 +13,7 @@ use mentra::{
     tool::{ToolContext, ToolResult},
 };
 
-use super::depth::Depth;
+use super::{child::ChildSpec, depth::Depth};
 
 /// Runs a command on mentra's own execution path, at the place it named.
 ///
@@ -138,9 +138,10 @@ pub(super) async fn delegate(
     ctx: &mut ToolContext<'_>,
     prompt: &str,
     depth: usize,
+    spec: ChildSpec,
 ) -> ToolResult {
-    let mut child = ctx
-        .spawn_subagent()
+    let mut child = spawn_child(ctx, spec)
+        .await
         .map_err(|error| format!("spawn could not start a subagent: {error}"))?;
     let child_id = child.id().to_string();
 
@@ -213,6 +214,52 @@ pub(super) async fn delegate(
     })?;
 
     outcome.map_err(|error| format!("the delegated run failed: {error}"))
+}
+
+/// Mints the child the spec describes: the parent's plain clone on the path
+/// this tool has always used, or mentra's disposable template with the
+/// policy's overrides applied (D4 — `super::child` has the contract).
+///
+/// The template is taken from and spawned through *one* `ToolContext`, so
+/// mentra's source binding — `RuntimeError::SubagentTemplateMismatch`, the
+/// named refusal for a template that crossed to a different agent or runtime
+/// — is structurally unreachable from here; if an upstream change ever made
+/// it reachable, the error would arrive at the model through the same
+/// "spawn could not start a subagent" wrapping as every other spawn failure,
+/// mentra's naming intact. A model override naming an unregistered provider
+/// arrives the same way (`ProviderNotFound`, at spawn, before anything runs).
+async fn spawn_child(
+    ctx: &ToolContext<'_>,
+    spec: ChildSpec,
+) -> Result<mentra::agent::Agent, mentra::error::RuntimeError> {
+    if spec.is_inherit() {
+        // Deliberately not the template path with zero overrides, though
+        // mentra documents the two as equivalent: this is the line every
+        // policy-free runtime has always run, and "byte-identical default"
+        // should be a fact about the code rather than a claim about upstream.
+        return ctx.spawn_subagent();
+    }
+
+    let ChildSpec {
+        roster,
+        model,
+        system,
+    } = spec;
+    let mut template = ctx.disposable_subagent_template();
+    if let Some(roster) = roster {
+        // The same mapping the workspace's own roster resolves through
+        // (`ToolRoster::into_profile`), so a policy narrows a child with the
+        // exact vocabulary a host narrows a workspace with.
+        template = template.with_tool_profile(roster.into_profile());
+    }
+    if let Some(model) = model {
+        template = template.with_model(model);
+    }
+    if let Some(system) = system {
+        template = template.with_system(system);
+    }
+
+    ctx.spawn_subagent_from(template).await
 }
 
 /// What the model reads back, with a name for the case where a subagent
