@@ -68,6 +68,7 @@ impl EventLog {
         } else {
             serde_json::json!({
                 "type": "notice",
+                "severity": "warning",
                 "message": format!("event omitted because it exceeded {MAX_EVENT_BYTES} bytes"),
             })
         };
@@ -76,6 +77,7 @@ impl EventLog {
             self.capped = true;
             self.write_line(serde_json::json!({
                 "type": "notice",
+                "severity": "warning",
                 "message": format!(
                     "event journal reached {MAX_EVENTS_BYTES} bytes; further events are not recorded"
                 ),
@@ -119,14 +121,20 @@ impl EventLog {
 fn normalized(line: &[u8]) -> Option<(u64, Value)> {
     let value: Value = serde_json::from_slice(line).ok()?;
     let seq = value.get("seq")?.as_u64()?;
-    match (value.get("type").is_some(), value.get("event")) {
-        (false, Some(nested)) => {
-            let mut object = nested.as_object()?.clone();
-            object.insert("seq".to_string(), Value::from(seq));
-            Some((seq, Value::Object(object)))
-        }
-        _ => Some((seq, value)),
+    if value.get("type").is_none()
+        && let Some(nested) = value.get("event").and_then(Value::as_object)
+    {
+        // The pre-0.6 nested wrapper, unfolded to the flat shape.
+        let mut object = nested.clone();
+        object.insert("seq".to_string(), Value::from(seq));
+        return Some((seq, Value::Object(object)));
     }
+    // Flat lines — and the wrapped non-object `write_line` kept rather than
+    // lost. That one passes through as-is, seq intact, so the tailer still
+    // sees it, `last_seq` still counts it, and a reopened log never reuses
+    // its number; the renderer degrades to an `unrecognized event` line,
+    // which is the honest rendering of a line nothing can type.
+    Some((seq, value))
 }
 
 fn last_seq(path: &PathBuf) -> io::Result<Option<u64>> {
@@ -277,6 +285,35 @@ mod tests {
         let records = EventTail::new(&paths, 0).poll().unwrap();
         assert_eq!(records.len(), 1);
         assert_eq!(records[0]["type"], "notice");
+        assert_eq!(
+            records[0]["severity"], "warning",
+            "a synthetic notice states its severity — `Event::Notice` requires one"
+        );
+    }
+
+    /// The defensive wrap in `write_line` must stay visible to the reader: a
+    /// kept line holds a seq the next writer must not reuse, and a tailer
+    /// that skipped it would hide that something was appended at all.
+    #[test]
+    fn a_wrapped_non_object_event_keeps_its_seq_and_reaches_the_tailer() {
+        let dir = tempfile::tempdir().unwrap();
+        let paths = agent(&dir);
+        {
+            let mut log = EventLog::open(&paths).unwrap();
+            log.append(serde_json::json!(42)).unwrap();
+        }
+        let mut log = EventLog::open(&paths).unwrap();
+        log.append(serde_json::json!({"type": "notice", "severity": "info", "message": "next"}))
+            .unwrap();
+
+        let records = EventTail::new(&paths, 0).poll().unwrap();
+        assert_eq!(records.len(), 2, "the kept line is not invisible");
+        assert_eq!(records[0]["seq"], 1);
+        assert_eq!(records[0]["event"], 42);
+        assert_eq!(
+            records[1]["seq"], 2,
+            "a reopened log continues past the wrapped line's number"
+        );
     }
 
     #[test]

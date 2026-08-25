@@ -78,9 +78,13 @@ pub enum RuleScope {
 }
 
 /// Severity of an out-of-band notice.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+///
+/// `Info` is the default, and deliberately the quiet one: a reader defaulting
+/// a missing severity must not invent an alarm nobody raised.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum NoticeSeverity {
+    #[default]
     Info,
     Warning,
 }
@@ -297,6 +301,11 @@ pub enum Event {
         thoughts_tokens: u64,
     },
     Notice {
+        /// Defaulted on read — leniency for the reader only, the writer
+        /// always states it: journals written before 0.6.0 hold the CLI's
+        /// synthetic notices with no severity at all, and the message is the
+        /// part a person needs.
+        #[serde(default)]
         severity: NoticeSeverity,
         message: String,
     },

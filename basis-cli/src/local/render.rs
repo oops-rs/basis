@@ -702,6 +702,28 @@ mod tests {
         );
     }
 
+    /// Journals from before 0.6.0 hold the CLI's synthetic notices with no
+    /// `severity`; the message is the part a person needs, and the reader's
+    /// `#[serde(default)]` is what keeps it reachable.
+    #[test]
+    fn a_notice_without_a_severity_still_renders_its_message() {
+        let live = Live::when(true);
+        let (mut out, mut err) = (Vec::new(), Vec::new());
+
+        live.show_to(
+            &json!({"type": "notice", "message": "event omitted because it exceeded 32768 bytes", "seq": 4}),
+            &mut out,
+            &mut err,
+        )
+        .expect("writing to a vector");
+
+        assert!(out.is_empty(), "a notice is never the answer");
+        assert_eq!(
+            String::from_utf8(err).expect("utf8"),
+            "basis: event omitted because it exceeded 32768 bytes\n"
+        );
+    }
+
     /// A journal written by a newer basis can hold a type this build cannot
     /// name. The old string-matching renderer fell into `_ => {}` and showed
     /// nothing; saying so is the whole point of matching typed variants.
