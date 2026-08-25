@@ -194,11 +194,16 @@ impl Drop for McpConnections {
         }
 
         if let Some(mut manager) = self.manager.take() {
-            // Shutdown is async (it sends each stdio server a farewell) and
-            // `Drop` is not. Inside a tokio context the farewell runs on a
-            // task; outside one, dropping the manager still ends every child —
-            // mentra's stdio client kills its process when the handle drops —
-            // it just skips the polite goodbye.
+            // Shutdown is async (it sends each stdio server a farewell, and a
+            // Streamable HTTP session its ending DELETE) and `Drop` is not.
+            // Inside a tokio context the farewell runs on a task; outside
+            // one, dropping the manager still cleans up what a drop can —
+            // mentra's stdio client kills its process when the handle drops,
+            // and since 0.21 (upstream 37ff807) its Streamable HTTP client
+            // spawns its DELETE best-effort on drop too — but best-effort is
+            // the word: nothing sends outside a tokio context, and a task
+            // spawned during runtime teardown may never be polled, so
+            // `shutdown_all` here remains the only path that waits.
             if let Ok(handle) = tokio::runtime::Handle::try_current() {
                 handle.spawn(async move {
                     manager.shutdown_all().await;
