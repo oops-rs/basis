@@ -39,7 +39,7 @@ use basis::{
     templates::TemplatesConfig, tools::declared::ToolsConfig,
 };
 use mentra::{
-    BuiltinProvider, ContentBlock, ModelSelector, agent::AgentConfig, runtime::SqliteRuntimeStore,
+    BuiltinProvider, ContentBlock, ModelSelector, agent::AgentConfig, runtime::FileRuntimeStore,
     test::MockRuntime,
 };
 
@@ -558,13 +558,13 @@ async fn one_workspace_does_not_list_anothers_conversations() {
 /// joins its workspace's list the first time it is used.
 ///
 /// The back-compat question the tag raised, answered forward-only: nothing
-/// migrates old rows, because nothing has to. mentra loads an agent by id alone
-/// (`RuntimeStore::load_agent` is `WHERE id = ?1`), so the identifier never
-/// gated resuming; and it re-derives the tag from the live runtime every time
-/// it persists (`Agent::persisted_record`, and the upsert's
-/// `runtime_identifier = excluded.runtime_identifier`), so using an old
-/// conversation is what files it. Since listing never worked, no client has
-/// ever seen these rows to miss them in the meantime.
+/// migrates old records, because nothing has to. mentra loads an agent by id
+/// alone (`RuntimeStore::load_agent` reads that agent's own `agent.json`), so
+/// the identifier never gated resuming; and it re-derives the tag from the
+/// live runtime every time it persists (`Agent::persisted_record`, rewritten
+/// whole into the record on every save), so using an old conversation is what
+/// files it. Since listing never worked, no client has ever seen these
+/// records to miss them in the meantime.
 #[tokio::test]
 async fn a_conversation_tagged_before_workspaces_were_is_resumable_and_files_itself() {
     let dir = tempfile::tempdir().expect("tempdir");
@@ -576,9 +576,7 @@ async fn a_conversation_tagged_before_workspaces_were_is_resumable_and_files_its
         let mock = MockRuntime::builder()
             .model("test-model", BuiltinProvider::OpenAI)
             .runtime_identifier("default")
-            .with_store(SqliteRuntimeStore::new(
-                store_dir.path().join(store_filename()),
-            ))
+            .with_store(FileRuntimeStore::new(store_dir.path()))
             .text("from before")
             .build()
             .expect("the mock runtime builds");
@@ -630,18 +628,41 @@ async fn a_conversation_tagged_before_workspaces_were_is_resumable_and_files_its
     );
 }
 
-/// The filename basis puts inside a store directory.
-///
-/// Taken from mentra's default rather than spelled out, because basis chooses
-/// mentra's own name (`store::store_in`) precisely so that pointing a workspace
-/// at the default directory is a no-op — a literal here would be a second place
-/// to keep that true.
-fn store_filename() -> PathBuf {
-    SqliteRuntimeStore::default()
-        .path()
-        .file_name()
-        .expect("mentra's default store is a file")
-        .into()
+/// Opening a workspace over a basis ≤0.6 store — `runtime.sqlite` in the
+/// directory `with_store_dir` names — is refused in basis's words, before any
+/// empty file store appears beside the database (ADR-0023: files, no
+/// migration). The CLI reads this exact message off `Workspace::open`, so the
+/// operator-facing wording is pinned here once for every surface.
+#[tokio::test]
+async fn a_workspace_over_a_pre_07_store_is_refused_in_basis_words() {
+    let dir = tempfile::tempdir().expect("tempdir");
+    write(&dir.path().join("AGENTS.md"), "house rules");
+    let store = tempfile::tempdir().expect("tempdir");
+    write_bytes(&store.path().join("runtime.sqlite"), b"SQLite format 3\0");
+
+    let error = offline(dir.path())
+        .with_runtime_builder(offline_runtime().with_store_dir(store.path()))
+        .open()
+        .await
+        .expect_err("a database this build cannot read must be named, not shadowed");
+
+    let message = error.to_string();
+    assert!(message.contains("basis 0.6 or earlier"), "{message}");
+    assert!(message.contains("runtime.sqlite"), "{message}");
+    assert!(message.contains("not migrated"), "{message}");
+    assert!(
+        message.contains("BASIS_DATA_DIR"),
+        "the CLI operator's way forward is named: {message}"
+    );
+    assert!(
+        !store.path().join("agents").exists(),
+        "a refused directory must not gain an empty store beside the database"
+    );
+}
+
+fn write_bytes(path: &Path, body: &[u8]) {
+    std::fs::create_dir_all(path.parent().expect("a parent")).expect("create dir");
+    std::fs::write(path, body).expect("write file");
 }
 
 #[tokio::test]

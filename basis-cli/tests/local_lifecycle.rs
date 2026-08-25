@@ -29,6 +29,67 @@ fn bare_usage_ends_with_an_actionable_hint() {
     );
 }
 
+/// The upgrade path stated as a test: a workspace whose store directory still
+/// holds basis ≤0.6's `runtime.sqlite` is refused with basis words on stderr —
+/// what happened, that nothing is migrated (ADR-0023), and that
+/// `BASIS_DATA_DIR` is the way to start fresh — never an empty file store
+/// beside a database the operator would read as their history vanishing.
+#[test]
+fn a_pre_07_store_is_refused_on_stderr_in_basis_words() {
+    let root = tempfile::tempdir().expect("tempdir");
+    let workspace = root.path().join("workspace");
+    let data = root.path().join("data");
+    fs::create_dir_all(&workspace).expect("workspace");
+
+    // First run: resolves (and creates) this workspace's per-key store
+    // directory before the bogus provider name stops anything else from
+    // happening — which is how the test finds the directory without
+    // re-deriving the CLI's key scheme.
+    let resolved = run_bounded(
+        Command::new(env!("CARGO_BIN_EXE_basis"))
+            .env("BASIS_DATA_DIR", &data)
+            .env_remove("BASIS_TASK_ID")
+            .args(["spawn", "irrelevant", "--json", "-C"])
+            .arg(&workspace)
+            .args(["--provider", "not-a-provider"]),
+    );
+    assert!(
+        !resolved.status.success(),
+        "a bogus provider must not run: {}",
+        stderr(&resolved)
+    );
+
+    // What every pre-0.7 basis left in that directory. The `store/` subdir is
+    // created here because 0.6 created it on first write, which is exactly
+    // the state an upgrade finds.
+    let workspaces = data.join("workspaces");
+    let store = fs::read_dir(&workspaces)
+        .expect("the first run created the data layout")
+        .next()
+        .expect("one workspace key")
+        .expect("entry")
+        .path()
+        .join("store");
+    fs::create_dir_all(&store).expect("the old store directory");
+    fs::write(store.join("runtime.sqlite"), b"SQLite format 3\0").expect("plant the old database");
+
+    // Second run: keyless custom endpoint, so nothing needs a credential and
+    // nothing reaches a network — the refusal happens at workspace open.
+    let refused = run_bounded(
+        Command::new(env!("CARGO_BIN_EXE_basis"))
+            .env("BASIS_DATA_DIR", &data)
+            .env_remove("BASIS_TASK_ID")
+            .args(["spawn", "irrelevant", "--json", "-C"])
+            .arg(&workspace)
+            .args(["--base-url", "http://127.0.0.1:9/v1"]),
+    );
+    assert_eq!(refused.status.code(), Some(1), "{}", stderr(&refused));
+    let message = stderr(&refused);
+    assert!(message.contains("basis 0.6 or earlier"), "{message}");
+    assert!(message.contains("not migrated"), "{message}");
+    assert!(message.contains("BASIS_DATA_DIR"), "{message}");
+}
+
 #[test]
 fn task_handles_survive_clients_and_terminal_waits_are_repeatable() {
     let root = tempfile::tempdir().expect("tempdir");

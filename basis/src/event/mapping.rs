@@ -170,10 +170,29 @@ pub(super) fn from_session_event(event: &SessionEvent) -> Option<Event> {
             reasoning_tokens: *reasoning_tokens,
             thoughts_tokens: *thoughts_tokens,
         },
-        SessionEvent::Notice { severity, message } => Event::Notice {
-            severity: severity_of(*severity),
-            message: message.clone(),
-        },
+        SessionEvent::Notice { severity, message } => {
+            // One notice is dropped by decision rather than mapped, and it is
+            // the only one: the file store's refusal of a long-term-memory
+            // write (mentra `runtime/file_store/delegated.rs`), which reaches
+            // here after every compaction ingests its summary. basis switched
+            // mentra's memory engine off (D2) — nothing recalls from that
+            // store and no tool reaches it — so under SQLite the same write
+            // "succeeded" into a table nothing ever read, invisibly. A
+            // warning that the unused write now fails is a fact about a
+            // decision, not about the run, and its advice (enable a mentra
+            // cargo feature) is addressed to a mentra embedder, which a basis
+            // operator is not. Matched on the message because mentra gives
+            // the notice no structure to match on; if the wording moves, this
+            // fails open and the warning reappears — visible, not dangerous.
+            if message.contains("does not persist long-term memory") {
+                return None;
+            }
+
+            Event::Notice {
+                severity: severity_of(*severity),
+                message: message.clone(),
+            }
+        }
         SessionEvent::RetryAttempt {
             agent_id,
             error_message,
@@ -271,6 +290,34 @@ mod tests {
         };
 
         assert_eq!(from_session_event(&event), None);
+    }
+
+    #[test]
+    fn the_refused_memory_write_is_a_decision_not_a_run_fact() {
+        // The file store refuses long-term-memory writes and mentra reports
+        // it after every compaction's summary ingest. basis switched that
+        // engine off (D2), so the warning describes a write nothing would
+        // ever have read — dropped by decision, see the mapping arm.
+        let refused = SessionEvent::Notice {
+            severity: MentraNoticeSeverity::Warning,
+            message: "agent 'a-1': runtime store error: FileRuntimeStore does not persist \
+                      long-term memory; enable mentra's `store-sqlite` feature"
+                .to_string(),
+        };
+        assert_eq!(from_session_event(&refused), None);
+
+        // Every other notice still reaches the stream untouched.
+        let ordinary = SessionEvent::Notice {
+            severity: MentraNoticeSeverity::Warning,
+            message: "something else worth hearing".to_string(),
+        };
+        assert_eq!(
+            from_session_event(&ordinary),
+            Some(Event::Notice {
+                severity: NoticeSeverity::Warning,
+                message: "something else worth hearing".to_string(),
+            })
+        );
     }
 
     #[test]

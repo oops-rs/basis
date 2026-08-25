@@ -23,28 +23,33 @@ basis-acp = { version = "0.6", path = "basis-acp" }
 # that is now merely their first client.
 basis-tasks = { version = "0.6", path = "basis-tasks" }
 
-# Mentra 0.20 is the runtime contract basis targets, and the floor is hard:
-# three of basis's own surfaces stand on APIs that exist nowhere below it —
-# `PermissionRequested.classification`, which is where every
-# `ApprovalRequest`'s side-effect level comes from since the relay was
-# deleted; the `Box`/`Arc` implementations of the tool traits, which are how
-# `RuntimeBuilder` stores host tools; and
-# `McpManager::connect_streamable_http`, which is the whole of
-# `McpServer::Http`. The 0.19 floor's reasons still hold beneath it — the
-# chat/completions wire `with_wire` defaults a base URL to (and the keyless
-# door behind it), the post-execution hook `post_tool_use` entries bind to,
-# window-relative compaction and `Session::context_window`,
-# `Session::compact`/`set_name` and the per-session persist identifier,
-# `try_register_tool`/`unregister_tool`, and the delegation relay — as do the
-# older floors' (ADR-0021's command targets and pattern-as-data at 0.18.2,
-# the provider-retry and Responses-transport knobs at 0.18.3).
+# Mentra 0.21 is the runtime contract basis targets, and the floor is hard:
+# two of basis's surfaces stand on APIs that exist nowhere below it —
+# `FileRuntimeStore`, which is what `with_store_dir` opens now that basis
+# links no database (ADR-0023, D1), and the `DisposableSubagentTemplate` /
+# `spawn_subagent_from` family, which is how a child policy overrides a
+# subagent's roster, model or system prompt (D4). The 0.20 floor's reasons
+# still hold beneath it — `PermissionRequested.classification`, the
+# `Box`/`Arc` implementations of the tool traits,
+# `McpManager::connect_streamable_http` — as do the 0.19 floor's (the
+# chat/completions wire `with_wire` defaults a base URL to and the keyless
+# door behind it, `post_tool_use`, window-relative compaction and
+# `Session::context_window`, `Session::compact`/`set_name` and the
+# per-session persist identifier, `try_register_tool`/`unregister_tool`, and
+# the delegation relay) and the older floors' (ADR-0021's command targets and
+# pattern-as-data at 0.18.2, the provider-retry and Responses-transport knobs
+# at 0.18.3).
 #
-# `default-features = false` drops exactly one thing: mentra's Responses
-# websocket transport. `basis` re-offers it as a `responses-websocket` feature
-# for an embedder who wants it (see its manifest), which is also the feature
-# `with_responses_transport` needs before it can select that wire; the binary
-# and `basis-acp` do not, because neither has a surface that would ask for it.
-mentra = { version = "0.20.0", default-features = false }
+# `default-features = false` drops exactly two things. mentra's Responses
+# websocket transport: `basis` re-offers it as a `responses-websocket`
+# feature for an embedder who wants it (see its manifest), which is also the
+# feature `with_responses_transport` needs before it can select that wire;
+# the binary and `basis-acp` do not, because neither has a surface that would
+# ask for it. And mentra's `store-sqlite` feature: with it off the default
+# persistent store is the file-backed one, which is exactly ADR-0023's
+# posture — basis persists to files and links no database — so nothing
+# re-offers it.
+mentra = { version = "0.21.0", default-features = false }
 
 async-trait = "0.1"
 # ACP carries an image in a prompt as base64; basis's `PromptPart` carries the

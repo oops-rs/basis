@@ -934,6 +934,24 @@ impl RuntimeBuilder {
     }
 
     fn build_with(self, identifier: String, policy: RuntimePolicy) -> Result<Runtime, RunError> {
+        // First, before even the credential is looked up: a store directory
+        // that still holds a basis ≤0.6 SQLite database is refused in basis's
+        // words (ADR-0023's no-migration ruling), never quietly shadowed with
+        // an empty file store that would read as every conversation being
+        // lost. First because it is the most fundamental fact an upgrade can
+        // trip over — a missing key is fixable in the environment, this needs
+        // a decision about the data — and checked by basis rather than left
+        // to mentra because mentra's own detection is swallowed by its
+        // best-effort recovery path and worded for a mentra embedder (see
+        // `store::refuse_legacy_store`). The default arm checks the directory
+        // mentra will choose, which is where a 0.6 host that never named one
+        // kept its history.
+        match &self.history {
+            Some(History::Directory(dir)) => store::refuse_legacy_store(dir)?,
+            Some(History::Ephemeral) => {}
+            None => store::refuse_legacy_store(&store::default_directory())?,
+        }
+
         // Before anything is resolved or assembled, because a name that cannot
         // be routed on is a configuration mistake and not a runtime condition.
         validate_target_names(&self.command_targets)?;
@@ -1023,7 +1041,7 @@ impl RuntimeBuilder {
         };
 
         // Left alone unless the caller said something, because mentra's default
-        // is a real database a host may already have history in — moving it, or
+        // is a real store a host may already have history in — moving it, or
         // dropping it on the floor, is a thing to be asked for and never a
         // thing to happen by upgrade.
         let builder = match &self.history {

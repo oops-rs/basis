@@ -1,6 +1,8 @@
 //! Where basis's conversations are persisted, and how they are scoped.
 //!
-//! mentra persists every agent to SQLite and tags each row with a **runtime
+//! mentra persists every agent to its runtime store — since basis 0.7 the
+//! **file-backed** one, plain files under one root, no database (ADR-0023;
+//! upstream `mentra#28`) — and tags each record with a **runtime
 //! identifier**. basis uses that tag to answer one question: *which
 //! conversations belong to this workspace?* — which is what ACP's
 //! `session/list` asks and the only reading of "my sessions" that is both
@@ -10,24 +12,24 @@
 //! # Why the workspace path, verbatim
 //!
 //! mentra's default identifier is the literal string `"default"`, and its
-//! default store is one shared `runtime.sqlite`. Listing under `"default"`
-//! would therefore enumerate the agents of *every* mentra program on the
-//! machine — worse than returning nothing, because a client would offer a user
+//! default store is one shared root. Listing under `"default"` would
+//! therefore enumerate the agents of *every* mentra program on the machine —
+//! worse than returning nothing, because a client would offer a user
 //! conversations that are not theirs.
 //!
 //! The identifier is the canonicalized workspace path with a `basis:` prefix. No
-//! hash: mentra hex-encodes identifiers wherever they reach a filename
-//! (`SqliteRuntimeStore::path_for_runtime_identifier`), so every character
-//! survives, and a readable value is one that can be understood in the
-//! database by a person debugging it. The prefix keeps basis's rows from ever
-//! colliding with another program's `"default"`.
+//! hash: the identifier never becomes a filename — mentra keeps it as a field
+//! of each agent's `agent.json` and filters listings by comparing it — so
+//! every character survives, and a readable value is one a person debugging
+//! the store can understand by opening the file. The prefix keeps basis's
+//! records from ever colliding with another program's `"default"`.
 //!
 //! Changing the identifier does not move the store — mentra's default path is
-//! independent of it — so nothing already written is lost. Rows created before
-//! this scheme carry `"default"` and do not appear in any workspace's list,
-//! which is the correct answer for a conversation whose workspace was never
-//! recorded. They are not stranded either: mentra loads an agent by id alone,
-//! so resuming one still works, and it re-tags itself the next time it
+//! independent of it — so nothing already written is lost. Records created
+//! before this scheme carry `"default"` and do not appear in any workspace's
+//! list, which is the correct answer for a conversation whose workspace was
+//! never recorded. They are not stranded either: mentra loads an agent by id
+//! alone, so resuming one still works, and it re-tags itself the next time it
 //! persists. [`WorkspaceBuilder::open`](crate::WorkspaceBuilder::open) is where
 //! the tag is set, and where that ruling is written down.
 //!
@@ -41,18 +43,29 @@
 //! runtime that knows their workspace. [`Runtime`](crate::Runtime)'s `mint` is
 //! the one line that changes when the override lands.
 //!
-//! # Where the file goes
+//! # Where the files go
 //!
 //! mentra's default directory is keyed by the *process's* current directory,
 //! not by the workspace basis opened, so every program started from one place
-//! shares one database whatever workspace it went on to open — including every
-//! test binary in one `cargo test`.
+//! shares one store root whatever workspace it went on to open — including
+//! every test binary in one `cargo test`.
 //! [`RuntimeBuilder::with_store_dir`](crate::RuntimeBuilder::with_store_dir)
 //! is how a caller says otherwise, and [`list_in`] is how the same caller reads
-//! back what it wrote. The filename inside that directory is chosen in exactly
-//! one place, `store_in`, because two places would eventually disagree and a
-//! conversation written to one file and looked for in another is simply
-//! missing.
+//! back what it wrote. The directory the caller names **is** the store's root
+//! — mentra lays `agents/`, `rules.json` and `runs.jsonl` inside it — and the
+//! root is bound to the store in exactly one place, `store_in`, because two
+//! places would eventually disagree and a conversation written under one root
+//! and looked for under another is simply missing.
+//!
+//! # When the directory holds a database instead
+//!
+//! basis 0.6 and earlier kept conversations in `runtime.sqlite` under the
+//! same directory. This build links no SQLite and does not migrate
+//! (ADR-0023's E2 precedent): opening, listing or deleting against a
+//! directory that holds one is refused with [`RunError::LegacyStore`], which
+//! names the two ways forward, rather than starting an empty file store
+//! beside data it cannot see — the refusal is `refuse_legacy_store`, and
+//! every path that opens a store the caller pointed somewhere runs it.
 //!
 //! # When there is no file
 //!
@@ -73,28 +86,30 @@ use std::{
 
 use mentra::{
     BuiltinProvider, Runtime,
-    runtime::{SqliteRuntimeStore, VolatileRuntimeStore},
+    runtime::{FileRuntimeStore, VolatileRuntimeStore},
 };
 
 use crate::error::RunError;
 
-/// Distinguishes basis's rows from every other mentra program sharing the store.
+/// Distinguishes basis's records from every other mentra program sharing the
+/// store.
 const IDENTIFIER_PREFIX: &str = "basis:";
 
-/// What basis's conversations are kept in, inside whichever directory holds them.
+/// What basis 0.6 and earlier kept conversations in — mentra's SQLite
+/// database, which this build can no longer read (ADR-0023).
 ///
-/// mentra's own default filename, so a workspace pointed at
-/// [`default_directory`] lands on precisely the file it would have used had
-/// nobody said anything.
-const STORE_FILENAME: &str = "runtime.sqlite";
+/// Named so `refuse_legacy_store` can look for exactly the file the old
+/// layout put where the file store's root now goes, and refuse by name
+/// instead of shadowing it with an empty store.
+const LEGACY_SQLITE_FILENAME: &str = "runtime.sqlite";
 
 /// What basis calls the directory of compaction snapshots inside whichever
 /// directory holds the store.
 ///
-/// mentra's own name for it, for the reason [`STORE_FILENAME`] is mentra's:
-/// the pair `runtime.sqlite` + `transcripts/` is the layout mentra lays down
-/// under its default root, so a workspace pointed at [`default_directory`]
-/// lands on exactly the paths it would have used had nobody said anything.
+/// mentra's own name for it: `transcripts/` beside the store's own entries is
+/// the layout mentra lays down under its default root, so a workspace pointed
+/// at [`default_directory`] lands on exactly the paths it would have used had
+/// nobody said anything.
 const TRANSCRIPTS_DIRNAME: &str = "transcripts";
 
 /// The runtime identifier for conversations in `workspace`.
@@ -270,6 +285,8 @@ pub fn forget_in(dir: &Path, agent_id: &str) -> Result<(), RunError> {
 /// read and write one file. The identifier is the other thing that has to
 /// agree, and it comes from [`runtime_identifier`] on both sides.
 fn enumerating_runtime(identifier: &str, dir: &Path) -> Result<Runtime, RunError> {
+    refuse_legacy_store(dir)?;
+
     Ok(Runtime::empty_builder()
         .with_runtime_identifier(identifier.to_string())
         .with_store(store_in(dir))
@@ -279,16 +296,42 @@ fn enumerating_runtime(identifier: &str, dir: &Path) -> Result<Runtime, RunError
 
 /// The store basis keeps a workspace's conversations in, under `dir`.
 ///
-/// The one place the filename is chosen: `RuntimeBuilder` writes through
-/// this and [`list_in`] reads through it, so the two cannot drift.
+/// The one place the directory becomes a store root: `RuntimeBuilder` writes
+/// through this and [`list_in`] reads through it, so the two cannot drift.
+/// `dir` itself is the root — mentra lays `agents/`, `rules.json` and
+/// `runs.jsonl` inside it — which is what makes 0.7's layout land in exactly
+/// the directory 0.6's database sat in, and [`refuse_legacy_store`] the
+/// necessary guard beside it.
 ///
 /// Neither this store type nor [`volatile`]'s reaches basis's surface. A caller
 /// picks a *posture* — history in a directory, or history nowhere — and basis
 /// picks the backend that is it, rather than re-exporting `RuntimeStore` and
 /// the nine traits it composes (see
 /// [`RuntimeBuilder::with_store_dir`](crate::RuntimeBuilder::with_store_dir)).
-pub(crate) fn store_in(dir: &Path) -> SqliteRuntimeStore {
-    SqliteRuntimeStore::new(dir.join(STORE_FILENAME))
+pub(crate) fn store_in(dir: &Path) -> FileRuntimeStore {
+    FileRuntimeStore::new(dir)
+}
+
+/// Refuses a store directory that holds a basis ≤0.6 conversation database.
+///
+/// mentra's own file store makes the same check at build time and errors in
+/// mentra's words — naming its `store-sqlite` cargo feature, which is a fix
+/// for a mentra embedder and not for a basis operator — and the runtime's
+/// recovery path treats that error as best-effort, so nothing legible ever
+/// reaches the person whose history is sitting right there. basis therefore
+/// checks for itself, at every surface that opens a store in a directory:
+/// [`RuntimeBuilder::build`](crate::RuntimeBuilder::build) for a workspace
+/// opening or a task attaching, and [`enumerating_runtime`] for `list`/
+/// `forget`. Starting an empty file store beside the database would look
+/// exactly like every conversation being lost; the error says what actually
+/// happened and names both ways forward instead.
+pub(crate) fn refuse_legacy_store(dir: &Path) -> Result<(), RunError> {
+    let database = dir.join(LEGACY_SQLITE_FILENAME);
+    if database.exists() {
+        return Err(RunError::LegacyStore { dir: dir.into() });
+    }
+
+    Ok(())
 }
 
 /// The store that keeps a workspace's conversations nowhere.
@@ -365,10 +408,10 @@ pub(crate) fn volatile_transcripts() -> PathBuf {
 /// to say where the history lives.
 ///
 /// Keyed by the process's current directory, which is why it is worth naming
-/// rather than assuming: a host that changes directory changes which database
+/// rather than assuming: a host that changes directory changes which store
 /// this answers with.
 pub fn default_directory() -> PathBuf {
-    SqliteRuntimeStore::default_directory()
+    FileRuntimeStore::default_root()
 }
 
 #[cfg(test)]
@@ -496,15 +539,15 @@ mod tests {
     }
 
     #[test]
-    fn a_chosen_directory_holds_the_file_the_default_one_would_have() {
+    fn a_chosen_directory_holds_the_layout_the_default_one_would_have() {
         // The identity that makes `with_store_dir` a relocation rather than a
         // second scheme: pointing it at the default directory is a no-op.
         let store = store_in(&default_directory());
 
         assert_eq!(
-            store.path(),
-            mentra::runtime::SqliteRuntimeStore::default().path(),
-            "basis's filename must be mentra's, or moving the store would rename it"
+            store.root(),
+            mentra::runtime::FileRuntimeStore::default().root(),
+            "basis's root must be mentra's, or moving the store would relocate it"
         );
     }
 
@@ -519,8 +562,51 @@ mod tests {
         list_in(store.path(), workspace.path()).expect("listing is not an error");
 
         assert!(
-            store.path().join(STORE_FILENAME).exists(),
+            store.path().join("agents").is_dir(),
             "the store basis was told to read is the store it opened"
         );
+    }
+
+    #[test]
+    fn a_directory_holding_a_pre_07_database_is_refused_by_name() {
+        // basis ≤0.6 kept this workspace's conversations in `runtime.sqlite`
+        // under exactly this directory. Listing nothing over it would look
+        // like every conversation being lost; the refusal has to say what
+        // actually happened and name the ways forward, in basis's words.
+        let workspace = tempfile::tempdir().expect("tempdir");
+        let store = tempfile::tempdir().expect("tempdir");
+        std::fs::write(
+            store.path().join(LEGACY_SQLITE_FILENAME),
+            b"SQLite format 3\0",
+        )
+        .expect("plant the old database");
+
+        let error = list_in(store.path(), workspace.path())
+            .expect_err("an unreadable existing store must be named, not shadowed");
+
+        let message = error.to_string();
+        assert!(message.contains("0.6"), "{message}");
+        assert!(message.contains("runtime.sqlite"), "{message}");
+        assert!(
+            message.contains("not migrated"),
+            "the no-migration ruling (ADR-0023) is part of the message: {message}"
+        );
+        assert!(
+            !store.path().join("agents").exists(),
+            "a refused directory must not gain an empty store beside the database"
+        );
+    }
+
+    #[test]
+    fn forgetting_refuses_the_same_directory_listing_does() {
+        let store = tempfile::tempdir().expect("tempdir");
+        std::fs::write(
+            store.path().join(LEGACY_SQLITE_FILENAME),
+            b"SQLite format 3\0",
+        )
+        .expect("plant the old database");
+
+        forget_in(store.path(), "some-agent")
+            .expect_err("deleting from a database this build cannot read is not a no-op");
     }
 }
