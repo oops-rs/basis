@@ -24,7 +24,7 @@ use std::{
 use serde_json::Value;
 
 use crate::{
-    Error,
+    Error, Hint,
     approve::PromptHost,
     attach,
     data_dir::{self, DataDir, canonical_workspace},
@@ -204,7 +204,8 @@ impl Tasks {
             return Err(Error::new(format!(
                 "current task {caller} belongs to another workspace; spawn a detached task to \
                  start work here"
-            )));
+            ))
+            .with_hint(Hint::SpawnDetached));
         }
         let parent = if detached { None } else { caller };
 
@@ -311,6 +312,7 @@ impl Tasks {
             }
             None => tasks::latest_conversation(&summaries).ok_or_else(|| {
                 Error::new("no task in this workspace has a conversation to continue")
+                    .with_hint(Hint::SpawnFresh)
             })?,
         };
         if chosen.state == "running" {
@@ -318,13 +320,15 @@ impl Tasks {
                 "task {} is running; its attach lock is what keeps one conversation to one \
                  executor",
                 chosen.task
-            )));
+            ))
+            .with_hint(Hint::Wait(TaskHandle::parse(chosen.task.clone())?)));
         }
         if chosen.agent_id.is_empty() {
             return Err(Error::new(format!(
                 "task {} has no conversation yet: nothing has attached to it",
                 chosen.task
-            )));
+            ))
+            .with_hint(Hint::Wait(TaskHandle::parse(chosen.task.clone())?)));
         }
         Ok(Some(chosen.agent_id.clone()))
     }

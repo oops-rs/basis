@@ -120,19 +120,30 @@ impl From<&str> for ClientError {
     }
 }
 
-/// `basis-tasks`'s errors carry no exit code or hint of their own — that
-/// mapping is ADR-0015's, and it lives here. Most become an ordinary
-/// [`ClientError`] by their message alone; one fact does cross the boundary,
-/// because it changes the code: an invalid reference (a handle from another
-/// workspace, a malformed one) is an argument no amount of waiting fixes, the
-/// same distinction [`ClientError::usage`] exists for. A call site that knows
-/// more still (a timeout) builds its own instead of routing through this.
+/// `basis-tasks`'s errors carry no exit code or hint *text* of their own —
+/// that mapping is ADR-0015's, and it lives here. Two facts do cross the
+/// boundary, because this is where they become one: `is_invalid_reference`
+/// changes the code (a handle from another workspace, a malformed one, is an
+/// argument no amount of waiting fixes, the same distinction
+/// [`ClientError::usage`] exists for), and `hint` — when the error names a
+/// next step unambiguously — becomes the `next:` line
+/// [`ClientError::pointing_at`] carries. A call site that knows more still (a
+/// timeout) builds its own instead of routing through this.
 impl From<basis_tasks::Error> for ClientError {
     fn from(error: basis_tasks::Error) -> Self {
-        if error.is_invalid_reference() {
+        let hint = error.hint().map(|hint| match hint {
+            basis_tasks::Hint::SpawnDetached => "basis spawn --detached <PROMPT>".to_string(),
+            basis_tasks::Hint::SpawnFresh => "basis spawn <PROMPT>".to_string(),
+            basis_tasks::Hint::Wait(task) => format!("basis wait {task}"),
+        });
+        let base = if error.is_invalid_reference() {
             Self::usage(error.to_string())
         } else {
             Self::new(error.to_string())
+        };
+        match hint {
+            Some(next) => base.pointing_at(next),
+            None => base,
         }
     }
 }

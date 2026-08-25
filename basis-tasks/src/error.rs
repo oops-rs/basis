@@ -6,17 +6,42 @@
 //! nothing about becoming a library changes it. What changes is the type: a
 //! `Result<_, String>` is an implementation detail a caller should not have
 //! to `.to_string()` their way around, so the public surface returns this
-//! instead. `basis-cli`'s exit-code and hint mapping — which of these are a
-//! timeout, which are a usage error — stays exactly where ADR-0015 puts it,
-//! in the CLI's own `ClientError`; this type carries no opinion about either.
+//! instead. `basis-cli`'s exit-code and hint *text* — which of these are a
+//! timeout, which are a usage error, what a `next:` line reads — stays
+//! exactly where ADR-0015 puts it, in the CLI's own `ClientError`; this type
+//! carries no opinion about either. What it does carry, for the handful of
+//! errors that name one unambiguously, is [`hint`](Error::hint) — a fact a
+//! host builds its own hint text from, not the text itself.
 
 use std::fmt;
+
+use crate::handle::TaskHandle;
+
+/// A next step this error names unambiguously enough for a host to build its
+/// own hint text from, without parsing this error's message. Not every
+/// error carries one: an ordinary operational failure has no next step this
+/// crate can name from here, and stays [`None`](Error::hint).
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum Hint {
+    /// The caller is itself a task in a different workspace; spawning here
+    /// needs the detached escape — `basis spawn --detached <PROMPT>`, in
+    /// `basis-cli`'s words.
+    SpawnDetached,
+    /// No task in the target workspace has a conversation to continue yet —
+    /// `basis spawn <PROMPT>`, in `basis-cli`'s words.
+    SpawnFresh,
+    /// The conversation named exists but cannot be continued right now —
+    /// still running (one executor per conversation), or never attached —
+    /// so the next step is the task itself: `basis wait <task>`.
+    Wait(TaskHandle),
+}
 
 /// An error from a `basis-tasks` operation: what went wrong, in one line.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Error {
     message: String,
     invalid_reference: bool,
+    hint: Option<Hint>,
 }
 
 impl Error {
@@ -24,6 +49,7 @@ impl Error {
         Self {
             message: message.into(),
             invalid_reference: false,
+            hint: None,
         }
     }
 
@@ -36,6 +62,17 @@ impl Error {
         Self {
             message: message.into(),
             invalid_reference: true,
+            hint: None,
+        }
+    }
+
+    /// Attaches the next step this error names, for a host that wants to
+    /// build a hint from it.
+    #[must_use]
+    pub(crate) fn with_hint(self, hint: Hint) -> Self {
+        Self {
+            hint: Some(hint),
+            ..self
         }
     }
 
@@ -46,6 +83,12 @@ impl Error {
     /// text.
     pub fn is_invalid_reference(&self) -> bool {
         self.invalid_reference
+    }
+
+    /// The next step this error names, when it names one unambiguously —
+    /// see [`Hint`].
+    pub fn hint(&self) -> Option<&Hint> {
+        self.hint.as_ref()
     }
 }
 

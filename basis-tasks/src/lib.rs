@@ -58,7 +58,7 @@ mod watch;
 pub use approve::{Approve, PromptHost, validate_approval};
 pub use attach::POLL;
 pub use client::{Reply, Tasks, WaitOutcome};
-pub use error::Error;
+pub use error::{Error, Hint};
 pub use handle::TaskHandle;
 pub use live::LiveSink;
 pub use spec::{Continuation, DEFAULT_DEADLINE, RunSpec};
