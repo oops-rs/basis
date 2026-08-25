@@ -511,6 +511,133 @@ fn a_local_preset_builds_without_a_key() {
     assert_eq!(runtime.provider(), "ollama");
 }
 
+/// The smallest provider a host could hand to
+/// [`RuntimeBuilder::with_provider_instance`]. Its stream is never driven
+/// here — what these tests pin is selection, refusal and identity; the
+/// end-to-end streaming case is `tests/provider_instance.rs`, written against
+/// `basis` alone so the authoring re-exports are enforced by compilation.
+struct StubProvider;
+
+#[crate::async_trait]
+impl Provider for StubProvider {
+    fn descriptor(&self) -> mentra::ProviderDescriptor {
+        mentra::ProviderDescriptor::new("stub")
+    }
+
+    async fn list_models(&self) -> Result<Vec<mentra::ModelInfo>, mentra::ProviderError> {
+        Ok(vec![mentra::ModelInfo::new("stub-model", "stub")])
+    }
+
+    async fn stream(
+        &self,
+        _request: mentra::Request<'_>,
+    ) -> Result<mentra::ProviderEventStream, mentra::ProviderError> {
+        Err(mentra::ProviderError::UnsupportedCapability(
+            "this stub is never streamed".to_string(),
+        ))
+    }
+}
+
+/// An instance is an answer: nothing is resolved, nothing is read from the
+/// environment, and the runtime is registered — and reported — under the id
+/// the instance's own descriptor chose.
+#[test]
+fn a_supplied_instance_builds_offline_and_answers_to_its_own_id() {
+    let runtime = RuntimeBuilder::default()
+        .with_provider_instance(StubProvider)
+        .with_ephemeral_history()
+        .build()
+        .expect("no credential, no environment, no network");
+
+    assert_eq!(runtime.provider(), "stub");
+    let registered: Vec<String> = runtime
+        .mentra_runtime()
+        .providers()
+        .iter()
+        .map(|descriptor| descriptor.id.to_string())
+        .collect();
+    assert!(
+        registered.contains(&"stub".to_string()),
+        "the instance must be filed where models are looked up: {registered:?}"
+    );
+}
+
+/// The refusal, once per knob resolution reads, and not all in one call
+/// order: which was said first must not matter, because both are still in
+/// force when `build` runs.
+#[test]
+fn an_instance_beside_a_resolution_knob_is_refused_by_name() {
+    let cases: Vec<(RuntimeBuilder, &str)> = vec![
+        (
+            RuntimeBuilder::default()
+                .with_provider_instance(StubProvider)
+                .with_provider(BuiltinProvider::OpenAI),
+            "with_provider",
+        ),
+        (
+            RuntimeBuilder::default()
+                .with_base_url("http://127.0.0.1:1/v1")
+                .with_provider_instance(StubProvider),
+            "with_base_url",
+        ),
+        (
+            RuntimeBuilder::default()
+                .with_provider_instance(StubProvider)
+                .with_api_key("sk-unattributable"),
+            "with_api_key",
+        ),
+    ];
+
+    for (told_twice, knob) in cases {
+        let error = told_twice
+            .with_ephemeral_history()
+            .build()
+            .expect_err("two answers to one question must not rank silently");
+        match error {
+            RunError::Provider(provider::ProviderError::AmbiguousProviderSource {
+                knob: named,
+            }) => assert_eq!(named, knob),
+            other => panic!("the refusal must name the knob, got: {other:?}"),
+        }
+    }
+}
+
+/// A file yields where an explicit call is refused: `with_config` fills
+/// emptiness, and an instance means the provider question is not empty. The
+/// model policy still arrives — which model is asked for is orthogonal to
+/// who answers.
+#[test]
+fn a_config_files_provider_yields_to_a_supplied_instance() {
+    let (_dir, config) = config_saying(EVERY_KEY);
+
+    let filled = RuntimeBuilder::default()
+        .with_provider_instance(StubProvider)
+        .with_config(&config);
+
+    assert_eq!(filled.provider, None, "the file's provider goes unread");
+    assert_eq!(filled.base_url, None, "and so does its base URL");
+    assert_eq!(
+        filled.model,
+        Some(ModelSelector::Id("from-the-file".to_string()))
+    );
+
+    let runtime = filled
+        .with_ephemeral_history()
+        .build()
+        .expect("a yielded file is not a conflict");
+    assert_eq!(runtime.provider(), "stub");
+}
+
+#[test]
+fn a_supplied_instance_is_named_in_the_debug_view() {
+    let printed = format!(
+        "{:?}",
+        RuntimeBuilder::default().with_provider_instance(StubProvider)
+    );
+
+    assert!(printed.contains("stub"), "{printed}");
+}
+
 /// An executor that reaches nothing, standing in for whatever a host actually
 /// writes: what is under test is the routing table, not the transport.
 ///

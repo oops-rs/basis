@@ -255,7 +255,13 @@ Provider credentials are read by the names the ecosystem already uses, in this
 order when several are exported: `ANTHROPIC_API_KEY`, `OPENAI_API_KEY`,
 `GEMINI_API_KEY`, `OPENROUTER_API_KEY`. A variable set to whitespace counts as
 unset. A base URL — passed, configured, or exported — outranks auto-detection,
-because pointing at an endpoint is always deliberate.
+because pointing at an endpoint is always deliberate. A host-supplied provider
+instance (`RuntimeBuilder::with_provider_instance`) reads none of them:
+resolution is skipped whole, and a provider, base URL or key named beside the
+instance is refused rather than outranked. A host-supplied provider
+instance (`RuntimeBuilder::with_provider_instance`) reads none of them:
+resolution is skipped whole, and a provider, base URL or key named beside the
+instance is refused rather than outranked.
 
 `XDG_CONFIG_HOME`, `XDG_DATA_HOME` and `HOME` are consulted only as the
 fallbacks named above.

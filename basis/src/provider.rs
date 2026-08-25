@@ -112,6 +112,17 @@ pub enum ProviderError {
 
     #[error("an API key was supplied with no provider and no base URL to attribute it to")]
     UnattributedCredential,
+
+    /// [`RuntimeBuilder::with_provider_instance`](crate::RuntimeBuilder::with_provider_instance)
+    /// beside a knob this module's resolution reads. The instance would win,
+    /// but a silent priority is a knob that silently stopped meaning anything
+    /// — so the pair is refused the way an unattributed credential is, naming
+    /// the knob to drop.
+    #[error(
+        "a provider instance was supplied beside `{knob}`; the instance already answers what \
+         {knob} decides, so state one or the other"
+    )]
+    AmbiguousProviderSource { knob: &'static str },
 }
 
 /// Trims a base URL to what mentra's transports expect.

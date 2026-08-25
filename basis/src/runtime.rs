@@ -41,9 +41,7 @@ use std::collections::HashMap;
 use std::path::{Path, PathBuf};
 use std::sync::{Arc, Mutex};
 
-use mentra::{
-    BuiltinProvider, ModelInfo, ModelSelector, Session, agent::AgentConfig, runtime::SessionOptions,
-};
+use mentra::{ModelSelector, Session, agent::AgentConfig, runtime::SessionOptions};
 
 pub use builder::RuntimeBuilder;
 
@@ -100,6 +98,31 @@ pub use mentra::provider::ResponsesTransport;
 /// for why, and for who would want the other.
 pub use mentra::FileToolProfile;
 
+/// The types a **host-supplied provider** is written with.
+///
+/// [`RuntimeBuilder::with_provider_instance`] takes an `impl Provider` — the
+/// trait itself is re-exported at the crate root, beside the other types
+/// basis's surface makes a caller name — and implementing it touches exactly
+/// this set: [`ProviderDescriptor`] (naming itself by [`ProviderId`]) and
+/// [`ProviderCapabilities`] to say who and what, [`ModelInfo`] to list
+/// models, [`Request`] to receive, mentra's [`ProviderError`] to fail with,
+/// and a [`ProviderEventStream`] to answer with — assembled whole from a
+/// [`Response`] (content in [`ContentBlock`]s, spoken in a [`Role`], costed
+/// in [`TokenUsage`]) via [`provider_event_stream_from_response`], or event
+/// by event from [`ProviderEvent`] ([`ContentBlockStart`],
+/// [`ContentBlockDelta`]). Re-exported beside the executor types above and
+/// under their rule: the builder makes a host *name* these, so basis
+/// re-exports them rather than costing the host a mentra dependency and a
+/// version pin that can skew. Mind the name: this `ProviderError` is
+/// mentra's — the one a `Provider` implementation answers with — not
+/// [`crate::provider::ProviderError`], which is how basis's own *resolution*
+/// refuses.
+pub use mentra::provider::{
+    ContentBlock, ContentBlockDelta, ContentBlockStart, ModelInfo, ProviderCapabilities,
+    ProviderDescriptor, ProviderError, ProviderEvent, ProviderEventStream, ProviderId, Request,
+    Response, Role, TokenUsage, provider_event_stream_from_response,
+};
+
 /// Which request format a custom endpoint is spoken to in, as
 /// [`RuntimeBuilder::with_wire`] takes it.
 ///
@@ -152,10 +175,11 @@ pub struct Runtime {
     /// borrows it from. Shared with the executor rather than copied, so there
     /// is one statement and not two.
     command_environment: Arc<std::collections::BTreeMap<String, String>>,
-    /// The resolved choice, kept for model resolution at workspace open.
-    provider: BuiltinProvider,
-    /// The `ProviderId` string workspaces copy into their run headers.
-    provider_label: String,
+    /// The id this runtime's provider is registered under — resolution's
+    /// answer, or a host-supplied instance's own descriptor. Models resolve
+    /// against it at workspace open, and its string is what workspaces copy
+    /// into their run headers.
+    provider: ProviderId,
     /// The default model *policy*; a workspace may override the selector, and
     /// the resolved id is always the workspace's own fact.
     model: ModelSelector,
@@ -213,7 +237,7 @@ struct DeclaredClaim {
 impl std::fmt::Debug for Runtime {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         f.debug_struct("Runtime")
-            .field("provider", &self.provider_label)
+            .field("provider", &self.provider.as_str())
             .field("model", &self.model)
             .finish_non_exhaustive()
     }
@@ -238,7 +262,7 @@ impl Runtime {
     /// The provider this runtime resolves models against, as its `ProviderId`
     /// string — what every run from every workspace on it reports.
     pub fn provider(&self) -> &str {
-        &self.provider_label
+        self.provider.as_str()
     }
 
     /// Where compaction files this runtime's transcript snapshots.
@@ -271,7 +295,10 @@ impl Runtime {
     ) -> Result<ModelInfo, RunError> {
         let selector = selector.unwrap_or_else(|| self.model.clone());
 
-        Ok(self.mentra.resolve_model(self.provider, selector).await?)
+        Ok(self
+            .mentra
+            .resolve_model(self.provider.clone(), selector)
+            .await?)
     }
 
     /// The one place a workspace's sessions are created.
