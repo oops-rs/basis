@@ -423,10 +423,48 @@ impl Tasks {
         }
         policy::validate_wait_edge(&self.data, caller.map(TaskHandle::as_str), handle.as_str())
             .map_err(Error::new)?;
+        self.wait_unvalidated(handle, timeout, live).await
+    }
+
+    /// [`wait`](Self::wait) minus the edge check — never exposed on its own,
+    /// since any caller could reach it for any handle and there would be
+    /// nothing left of the wait-edge policy. [`spawn_and_wait`](Self::spawn_and_wait)
+    /// is the one legitimate skip: the edge between a call's own caller and
+    /// the task it just minted is exactly the one [`spawn`](Self::spawn)
+    /// established a moment ago (a fresh descendant, or an independent root
+    /// when detached), and re-deriving it through a `caller` a host is free
+    /// to pass differently here would recompute what that call already
+    /// knows — against a value that, if stale, could strand a task nobody
+    /// is left validated to drive.
+    async fn wait_unvalidated(
+        &self,
+        handle: &TaskHandle,
+        timeout: Duration,
+        live: Option<Arc<dyn LiveSink>>,
+    ) -> Result<WaitOutcome, Error> {
+        let paths = attach::resolve(&self.data, handle.as_str()).map_err(Error::new)?;
+        if let Some(terminal) = state::read_terminal(&paths).map_err(Error::new)? {
+            return Ok(WaitOutcome::Terminal(terminal));
+        }
         let ctx = self.ctx(live);
         attach::wait_for_terminal(&self.data, handle.as_str(), timeout, &ctx)
             .await
             .map_err(Error::new)
+    }
+
+    /// Mints a task and immediately attaches to drive it to a terminal
+    /// result — `spawn --await`'s shape, and the one place a wait skips edge
+    /// validation: see [`wait_unvalidated`](Self::wait_unvalidated) for why
+    /// that is safe only here.
+    pub async fn spawn_and_wait(
+        &self,
+        spec: RunSpec,
+        timeout: Duration,
+        live: Option<Arc<dyn LiveSink>>,
+    ) -> Result<(TaskHandle, WaitOutcome), Error> {
+        let handle = self.spawn(spec)?;
+        let outcome = self.wait_unvalidated(&handle, timeout, live).await?;
+        Ok((handle, outcome))
     }
 
     /// Whether `caller` (or nobody, for a host outside any task) may
@@ -536,6 +574,56 @@ mod tests {
         let workspace = tempfile::tempdir().unwrap();
         let tasks = Tasks::open_at(data_dir.path(), workspace.path()).unwrap();
         (data_dir, workspace, tasks)
+    }
+
+    /// The general hazard `spawn_and_wait` exists to route around: an
+    /// ordinary `wait` refuses a caller that does not exist to validate the
+    /// edge against — the shape a stale `BASIS_TASK_ID` takes once its own
+    /// task directory is gone (archived, or simply never real).
+    #[tokio::test]
+    async fn wait_refuses_a_caller_that_does_not_exist() {
+        let (_data_dir, _workspace, tasks) = tasks();
+        let stale_caller = TaskHandle::parse(format!("{:016x}/{:032x}", 1, 1)).unwrap();
+        let handle = tasks
+            .spawn(
+                RunSpec::new("hello")
+                    .with_approve(Approve::Always)
+                    .detached(),
+            )
+            .expect("spawns");
+
+        let refused = tasks
+            .wait(&handle, Some(&stale_caller), Duration::from_secs(1), None)
+            .await
+            .expect_err("a caller that does not exist cannot be validated against");
+        assert!(refused.to_string().contains("does not exist"), "{refused}");
+    }
+
+    /// `spawn_and_wait` never asks the wait-edge question at all, so a stale
+    /// `BASIS_TASK_ID` — one naming a caller task that no longer exists —
+    /// cannot strand the task this same call just minted, the way routing a
+    /// `spawn --await` through the ordinary edge-validated `wait` used to.
+    #[tokio::test]
+    async fn spawn_and_wait_does_not_edge_validate_the_task_it_just_minted() {
+        let (_data_dir, _workspace, tasks) = tasks();
+        // A deadline so tight it has certainly passed by the time the attach
+        // that follows runs: `run_model` bails on it before ever opening a
+        // workspace or touching a provider, which is what keeps this test
+        // fast and network-free while still exercising a real attach.
+        let spec = RunSpec::new("hello")
+            .with_approve(Approve::Always)
+            .with_deadline(Duration::from_nanos(1))
+            .detached();
+
+        let (_handle, outcome) = tasks
+            .spawn_and_wait(spec, Duration::from_secs(5), None)
+            .await
+            .expect("spawn_and_wait never asks the wait-edge question at all");
+        let WaitOutcome::Terminal(payload) = outcome else {
+            panic!("a tight deadline settles immediately rather than timing the wait out");
+        };
+        assert_eq!(payload["state"], "failed");
+        assert_eq!(payload["stopped_by"], "deadline");
     }
 
     /// `Approve::Prompt` names a question nobody can answer without a

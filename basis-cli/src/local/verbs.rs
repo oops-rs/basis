@@ -46,9 +46,9 @@ pub(crate) async fn spawn(args: RunArgs, attach: bool) -> Result<ExitCode, Clien
     let spec = run_spec(&args, prompt, approve)?;
 
     let tasks = open_tasks(workspace)?;
-    let handle = tasks.spawn(spec)?;
 
     if !attach {
+        let handle = tasks.spawn(spec)?;
         let payload = json!({
             "task": handle,
             "state": "resumable",
@@ -58,16 +58,14 @@ pub(crate) async fn spawn(args: RunArgs, attach: bool) -> Result<ExitCode, Clien
     }
     let timeout = bounded_wait(args.timeout);
     let live = Live::when(!args.json);
-    let caller = basis_tasks::current_task();
-    match tasks
-        .wait(
-            &handle,
-            caller.as_ref(),
-            timeout,
-            Some(live_sink(live.clone())),
-        )
-        .await?
-    {
+    // Not `Tasks::wait`: the edge between this call and the task it just
+    // minted is the one `spawn` established a moment ago, not one to
+    // re-derive from `BASIS_TASK_ID` a second time — see
+    // `Tasks::spawn_and_wait`.
+    let (handle, outcome) = tasks
+        .spawn_and_wait(spec, timeout, Some(live_sink(live.clone())))
+        .await?;
+    match outcome {
         WaitOutcome::Terminal(terminal) => {
             live.settled(&decorate_terminal(handle.as_ref(), terminal), args.json)
         }
