@@ -482,3 +482,50 @@ async fn a_call_that_does_not_fit_the_manifests_schema_never_starts_the_program(
         "a call that cannot fit the declaration must not reach the program"
     );
 }
+
+#[tokio::test]
+async fn a_non_object_call_under_a_typeless_schema_is_refused_upstream() {
+    // The residue basis's own guard used to cover, now mentra's (0.21,
+    // upstream `5e16092`, moved there by this binding's report): a manifest
+    // may leave `type` off its schema, and `required` constrains only
+    // objects, so a bare string used to pass every keyword the validator
+    // implements and reach the program's stdin. The schema's `properties`
+    // and `required` are object intent, and the validator refuses the root
+    // for not being one — legibly, before authorization, before the program.
+    let fixture = Fixture::new();
+    let ran = fixture.path().join("it-ran");
+    let program = fixture.program("jenkins", &format!("touch {}", ran.display()));
+    fixture.manifest(&format!(
+        r#"{{
+            "schema": 1,
+            "tools": {{
+                "jenkins_job": {{
+                    "description": "Trigger a job and return its build number.",
+                    "input_schema": {{
+                        "properties": {{"job": {{"type": "string"}}}},
+                        "required": ["job"]
+                    }},
+                    "command": ["{program}"]
+                }}
+            }}
+        }}"#
+    ));
+
+    let mock = runtime_calling(json!("nightly"));
+    for tool in fixture.tools() {
+        mock.runtime().register_tool(tool);
+    }
+    let mut session = session_in(&mock, fixture.path());
+
+    let _ = session.append_turn(vec![ContentBlock::text("go")]).await;
+
+    let results = tool_results(&session);
+    assert!(
+        results.contains("object"),
+        "the model is told the input has to be an object: {results}"
+    );
+    assert!(
+        !ran.exists(),
+        "an input the schema never described must not reach the program"
+    );
+}

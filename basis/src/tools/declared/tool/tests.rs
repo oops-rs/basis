@@ -123,36 +123,12 @@ fn no_credential_reaches_the_approver_or_the_rule_it_writes() {
     assert!(!rendered.contains("CI_TOKEN"), "{rendered}");
 }
 
-#[test]
-fn an_input_that_is_not_an_object_is_refused_by_name() {
-    // The residue mentra's validator cannot see: a manifest may leave `type`
-    // off its schema, and with no `type` there is no keyword saying an input
-    // has to be an object. This binding writes that input to a program's
-    // stdin, so the refusal names the tool.
-    let loose = DeclaredToolSpec {
-        input_schema: json!({"properties": {"job": {"type": "string"}}}),
-        ..spec(vec!["./x"])
-    };
-
-    let refused = check_input(&loose, &json!("nightly")).expect_err("not an object");
-
-    assert!(refused.contains("jenkins_job"), "{refused}");
-}
-
-#[test]
-fn a_call_that_fits_is_not_second_guessed_here() {
-    // `required` is mentra's now, checked before authorization and with the
-    // missing field named. What is left here says nothing about a call that
-    // is an object — including the empty one, which a schema requiring
-    // nothing accepts.
-    let declared = DeclaredToolSpec {
-        input_schema: json!({"type": "object", "properties": {}}),
-        ..spec(vec!["./x"])
-    };
-
-    check_input(&declared, &json!({})).expect("nothing is required");
-    check_input(&spec(vec!["./x"]), &json!({"job": "nightly"})).expect("a call that fits");
-}
+// The is-an-object guard that lived here is deleted, not merely untested:
+// mentra 0.21's validator refuses a non-object root whenever a schema shows
+// object intent (`properties`/`required` without `type`, upstream `5e16092`) —
+// the exact residue the guard covered, found through this binding's report.
+// That the upstream refusal reaches the model legibly, and the program never
+// starts, is pinned end to end in `tests/declared_tools.rs`.
 
 #[test]
 fn the_manifest_wins_over_the_runtime_for_the_same_name() {

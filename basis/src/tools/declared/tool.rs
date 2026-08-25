@@ -192,11 +192,6 @@ fn preview(
     descriptor: &RuntimeToolDescriptor,
     input: &Value,
 ) -> Result<ToolAuthorizationPreview, String> {
-    // Refused here, ahead of the approver: a call that cannot run is not worth
-    // a person's attention, and asking about one teaches them that approving is
-    // what makes errors go away.
-    check_input(spec, input)?;
-
     let cwd = spec.working_directory(workspace);
 
     Ok(ToolAuthorizationPreview {
@@ -223,11 +218,6 @@ async fn run(
     runtime_environment: &[(String, String)],
     input: Value,
 ) -> ToolResult {
-    // Asked again rather than trusted from the preview: the preview is only
-    // reached when an authorizer is installed, and a check that a missing
-    // authorizer removes is not a check.
-    check_input(&spec, &input)?;
-
     let payload = serde_json::to_string(&input).map_err(|error| {
         format!(
             "{} was called with input basis could not serialize: {error}",
@@ -358,32 +348,16 @@ fn failed(spec: &DeclaredToolSpec, code: i32, stdout: &str, stderr: &str) -> Str
     format!("{} exited {code}: {explanation}", spec.name)
 }
 
-/// The one thing left for this binding to check after mentra validates the
-/// call.
-///
-/// mentra reads a call against the `input_schema` its tool published before it
-/// authorizes anything, so `required`, scalar types, `enum` and a misspelled
-/// property are answered upstream now — with the field named, which is what a
-/// model can act on. basis re-implemented the `required` half while that was
-/// missing; keeping it would be two validators disagreeing about wording over
-/// a call the first one already refused.
-///
-/// What survives is the case mentra's validator cannot see: a manifest may
-/// leave `type` off its schema ([`check_schema`](super::manifest)), and with
-/// no `type` to check, an input that is not an object at all passes every
-/// keyword the validator implements. This binding writes that input to a
-/// program's stdin, so it is worth naming the tool before a program is handed
-/// something its schema never described.
-fn check_input(spec: &DeclaredToolSpec, input: &Value) -> Result<(), String> {
-    if input.is_object() {
-        return Ok(());
-    }
-
-    Err(format!(
-        "{} takes a JSON object matching its input schema",
-        spec.name
-    ))
-}
+// Nothing is left for this binding to check before running: mentra reads a
+// call against the `input_schema` its tool published before it authorizes
+// anything — `required`, scalar types, `enum`, a misspelled property, and,
+// since 0.21 (upstream `5e16092`), a root that is not an object under a schema
+// that declares `properties` or `required` without saying `type`. That last
+// case was the one residue a hand-written guard covered here, and it was this
+// binding's report that moved it upstream; keeping the guard would be two
+// validators disagreeing about wording over a call the first one already
+// refused. `tests/declared_tools.rs` pins that the upstream refusal reaches
+// the model legibly and the program never starts.
 
 #[cfg(test)]
 mod tests;
