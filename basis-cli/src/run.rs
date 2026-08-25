@@ -41,17 +41,16 @@ pub(crate) async fn execute_run(args: RunArgs) -> Result<ExitCode, String> {
     };
 
     // The same per-workspace store dir `basis spawn`'s attach path resolves
-    // (`local::data_dir::DataDir::resolve_store_dir`, G4 of the whole-wave
-    // review) — without it this route fell back to mentra's process-cwd
-    // default, so a `basis "<prompt>"` and a `basis spawn ...` against the
-    // same repository saw two conversation stores and two memory roots
-    // instead of one. Resolved before the runtime is built for the same
-    // reason `Workspace::open` resolves memory before acquiring one: a
-    // directory a run's history depends on should fail loudly if it cannot
-    // be established, not be silently substituted.
-    let store_dir = crate::local::DataDir::discover()
-        .map_err(|error| format!("open data directory: {error}"))?
-        .resolve_store_dir(&workspace)?;
+    // (`basis_tasks::Tasks::store_dir`, G4 of the whole-wave review before the
+    // task layer's extraction into its own crate) — without it this route
+    // fell back to mentra's process-cwd default, so a `basis "<prompt>"` and a
+    // `basis spawn ...` against the same repository saw two conversation
+    // stores and two memory roots instead of one. Resolved before the runtime
+    // is built for the same reason `Workspace::open` resolves memory before
+    // acquiring one: a directory a run's history depends on should fail
+    // loudly if it cannot be established, not be silently substituted.
+    let store_dir = basis_tasks::Tasks::store_dir(&workspace)
+        .map_err(|error| format!("open data directory: {error}"))?;
 
     // The process half seeds the private runtime the workspace builds
     // (ADR-0018): which provider answers, and at which endpoint.

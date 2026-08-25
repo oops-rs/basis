@@ -58,13 +58,6 @@ impl Live {
         }
     }
 
-    /// A run this process drives without showing: nobody asked this process
-    /// for it, which is the case for a child driven by its parent's settle
-    /// pass.
-    pub(crate) fn hidden() -> Self {
-        Self::when(false)
-    }
-
     /// Renders one event on this process's streams.
     ///
     /// Errors are the caller's to ignore, the way journal errors are: a
@@ -116,6 +109,15 @@ impl Live {
     /// Whether rendering `payload` would say the answer a second time.
     fn repeats(&self, payload: &Value, structured: bool) -> bool {
         !structured && self.answered() && payload["state"] == "succeeded"
+    }
+}
+
+/// The seam `basis_tasks::Tasks::wait` shows progress through while this
+/// process is the one driving a task: `basis-tasks` has no terminal of its
+/// own (ADR-0011), so it is handed this rather than deciding how to render.
+impl basis_tasks::LiveSink for Live {
+    fn on_event(&self, event: &Value) {
+        let _ = self.show(event);
     }
 }
 
@@ -671,7 +673,7 @@ mod tests {
     /// but no renderer stands between them and a parser.
     #[test]
     fn a_run_nobody_is_watching_renders_nothing() {
-        let live = Live::hidden();
+        let live = Live::when(false);
         let (mut out, mut err) = (Vec::new(), Vec::new());
 
         for event in [
