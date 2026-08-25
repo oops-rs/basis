@@ -4,7 +4,7 @@
 
 use super::*;
 use crate::approve::{Approve, validate_approval};
-use crate::state::RunOptions;
+use crate::state::{MessageState, RunOptions};
 use serde_json::{Value, json};
 
 fn handle(index: u8) -> String {
@@ -239,6 +239,63 @@ async fn terminal_failure_resolves_unanswered_messages() {
         assert_eq!(payload["state"], "failed");
         assert_eq!(payload["message"], id);
     }
+}
+
+/// T1: the settle pass's two writes are ordered so a crash between them
+/// leaves a *resumable* task, never a settled one with a message it can no
+/// longer re-sweep. Reconstructed directly as the crash window itself —
+/// `finish_unanswered_durably` returns before the terminal write it is
+/// supposed to precede — rather than by actually killing a process.
+#[tokio::test]
+async fn a_crash_between_the_settle_pass_writes_recovers_on_the_next_attach() {
+    let (_dir, data) = data();
+    let task = handle(1);
+    let paths = record(&data, &task, None, true, None);
+    let stranded = inbox::enqueue(&paths, &task, "are you there".to_string()).unwrap();
+
+    // What run_model has already done by the time settle is ever reached:
+    // pending_terminal recorded, durably, before either of settle's writes.
+    let mut meta = load_meta(&paths).unwrap();
+    meta.pending_terminal = Some(PendingTerminal::Succeeded {
+        result: "done".to_string(),
+    });
+    save_meta(&paths, &meta).unwrap();
+
+    // The crash window: only the inbox write lands. Dropping the guard
+    // without writing the terminal is the "process died right here" this
+    // test stands in for.
+    drop(inbox::finish_unanswered_durably(&paths).unwrap());
+    assert!(
+        read_terminal(&paths).unwrap().is_none(),
+        "no terminal record crossed the crash — the task is still resumable"
+    );
+    let swept = inbox::load(&paths).unwrap();
+    assert_eq!(
+        swept
+            .iter()
+            .find(|message| message.id == stranded)
+            .unwrap()
+            .state,
+        MessageState::Delivered,
+        "the inbox write landed before the crash"
+    );
+
+    // The next attach recovers without a model turn: pending_terminal
+    // survived, so run_model is skipped and settle simply finishes what it
+    // started — re-sweeping (idempotent) and completing the terminal write.
+    let payload = drive_attached(&data, &task).await;
+    assert_eq!(payload, json!({"state": "succeeded", "result": "done"}));
+
+    // And the message the crash stranded resolves — terminal-tagged, since
+    // it was never individually replied to.
+    let terminal = read_terminal(&paths).unwrap().unwrap();
+    let messages = inbox::load(&paths).unwrap();
+    let resolved =
+        inbox::message_payload_for_dispatch(&task, &messages, &stranded, Some(&terminal))
+            .unwrap()
+            .expect("no longer stranded");
+    assert_eq!(resolved["state"], "succeeded");
+    assert_eq!(resolved["message"], stranded);
 }
 
 #[test]

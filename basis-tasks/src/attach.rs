@@ -488,10 +488,15 @@ fn record_failure(
     record_pending(paths, meta, PendingTerminal::Failed { error }, stopped_by)
 }
 
-/// The settle pass: parent scope as one ordering constraint, then the
-/// terminal record. The terminal write happens under the inbox lock so a
-/// concurrent enqueue either lands before the unanswered sweep or is refused
-/// by the terminal record it would otherwise miss.
+/// The settle pass: parent scope as one ordering constraint, then two writes
+/// under one hold of the inbox lock — the unanswered sweep, then the
+/// terminal record, in that order and no other. A concurrent enqueue either
+/// lands before the sweep or is refused by the terminal record it would
+/// otherwise miss; a crash between the two writes leaves the sweep durable
+/// and no terminal record, so the task is still resumable and the next
+/// attach's `meta.pending_terminal` sends it straight back here — see
+/// [`inbox::finish_unanswered_durably`] for why the order is the other way
+/// round from how it reads.
 async fn settle(
     data: &DataDir,
     paths: &AgentPaths,
@@ -511,10 +516,8 @@ async fn settle(
     let payload = meta
         .terminal_payload()
         .expect("a completion was recorded before settling");
-    inbox::update(paths, |messages| {
-        inbox::finish_unanswered(messages);
-        write_terminal(paths, &payload)
-    })?;
+    let _inbox_lock = inbox::finish_unanswered_durably(paths)?;
+    write_terminal(paths, &payload)?;
     Ok(payload)
 }
 
