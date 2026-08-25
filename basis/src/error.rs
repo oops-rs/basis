@@ -101,4 +101,17 @@ pub enum RunError {
     /// bad setting, instead of losing the process to it.
     #[error("`{name}` cannot be a command target name: {reason}")]
     CommandTarget { name: String, reason: String },
+
+    /// A host tool ([`RuntimeBuilder::with_tool`](crate::RuntimeBuilder::with_tool))
+    /// whose name collides with one basis already registered — `spawn`, a
+    /// mentra builtin, or an earlier host tool on the same builder (decision
+    /// D5d).
+    ///
+    /// mentra's registry is a map and its plain `with_tool` *replaces*, so
+    /// without this a host tool named `spawn` would silently take over the
+    /// name and inherit every rule an operator ever wrote about commands and
+    /// delegation. Raised by `build`, after basis's own registrations exist to
+    /// collide against, rather than a silent swap.
+    #[error("a host tool could not be registered: {0}")]
+    HostTool(#[from] mentra::tool::ToolNameCollision),
 }
