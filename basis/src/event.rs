@@ -365,28 +365,17 @@ impl Event {
     pub fn from_session_event(event: &mentra::SessionEvent) -> Option<Self> {
         mapping::from_session_event(event)
     }
-}
 
-/// `skip_serializing_if` for a count that is only news when it is not zero.
-fn is_zero(count: &usize) -> bool {
-    *count == 0
-}
-
-#[cfg(test)]
-mod tests {
-    use super::*;
-
-    /// The compile-time tripwire behind `#[non_exhaustive]`.
+    /// The wire tag `#[serde(tag = "type")]` writes for this variant, without
+    /// serializing anything to ask.
     ///
-    /// Same-crate, so this match is still allowed to be exhaustive — and must
-    /// stay exactly that, with no wildcard: a variant landing on [`Event`]
-    /// fails this build first, which is the prompt to revisit the sibling
-    /// crates whose wildcard arms would otherwise swallow it silently —
-    /// `basis-acp/src/update.rs` (it surfaces unknowns as thought chunks) and
-    /// the CLI renderer's verbose path.
-    #[test]
-    fn every_event_variant_is_named_here() {
-        let named = |event: &Event| match event {
+    /// Same-crate, exhaustive, no wildcard — deliberately, and always
+    /// compiled: a variant landing on this enum fails this match first, which
+    /// is the tripwire that forces the sibling crates' wildcard arms
+    /// (`basis-acp/src/update.rs`, the CLI renderer's `progress_line`) to be
+    /// revisited before the new variant can be silently eaten.
+    pub fn type_tag(&self) -> &'static str {
+        match self {
             Event::RunStarted { .. } => "run_started",
             Event::UserMessage { .. } => "user_message",
             Event::AssistantDelta { .. } => "assistant_delta",
@@ -408,12 +397,44 @@ mod tests {
             Event::Error { .. } => "error",
             Event::Branched { .. } => "branched",
             Event::RunFinished { .. } => "run_finished",
-        };
+        }
+    }
+}
 
-        let example = Event::AssistantDelta {
-            text: "hi".to_string(),
-        };
-        assert_eq!(named(&example), "assistant_delta");
+/// `skip_serializing_if` for a count that is only news when it is not zero.
+fn is_zero(count: &usize) -> bool {
+    *count == 0
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// [`Event::type_tag`] is the compile-time tripwire behind
+    /// `#[non_exhaustive]` — the same-crate exhaustive match with no
+    /// wildcard, compiled in every build. What a test can add is honesty:
+    /// the hand-written tags must be the tags serde actually writes, or the
+    /// unknown-event lines downstream would name events by names that never
+    /// appear on the wire.
+    #[test]
+    fn the_type_tag_is_the_tag_serde_writes() {
+        for event in [
+            Event::AssistantDelta {
+                text: "hi".to_string(),
+            },
+            Event::Notice {
+                severity: NoticeSeverity::Info,
+                message: "m".to_string(),
+            },
+            Event::RunFinished {
+                outcome: RunOutcome::Ok,
+                stopped_by: None,
+                usage: None,
+            },
+        ] {
+            let written = serde_json::to_value(&event).expect("serializes");
+            assert_eq!(written["type"].as_str().expect("tagged"), event.type_tag());
+        }
     }
 
     #[test]

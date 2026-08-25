@@ -165,24 +165,11 @@ pub fn session_update(event: &Event) -> Option<SessionUpdate> {
         // surface, and the payload, which could be arbitrarily large, is not.
         unknown => SessionUpdate::AgentThoughtChunk(chunk(&format!(
             "unmapped event: {}",
-            event_tag(unknown)
+            unknown.type_tag()
         ))),
     };
 
     Some(update)
-}
-
-/// The serde tag of an event this build cannot name.
-fn event_tag(event: &Event) -> String {
-    serde_json::to_value(event)
-        .ok()
-        .and_then(|value| {
-            value
-                .get("type")
-                .and_then(Value::as_str)
-                .map(str::to_string)
-        })
-        .unwrap_or_else(|| "unknown".to_string())
 }
 
 /// One line for the client to show, in the same place every other "the
