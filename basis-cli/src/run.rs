@@ -24,6 +24,15 @@ use mentra::ModelSelector;
 use crate::{cli::RunArgs, exit::exit_code};
 
 pub(crate) async fn execute_run(args: RunArgs) -> Result<ExitCode, String> {
+    let prompt = prompt_from(args.prompt)?;
+    // Refused before anything else happens: `Workspace::open` resolves a
+    // provider and spawns every server `.mcp.json` names, and a refusal that
+    // has already spawned processes is not a refusal. The free functions make
+    // the same check first, for the same reason.
+    if prompt.trim().is_empty() {
+        return Err("prompt is empty".to_string());
+    }
+
     let workspace = match args.workspace {
         Some(path) => path,
         None => {
@@ -48,7 +57,7 @@ pub(crate) async fn execute_run(args: RunArgs) -> Result<ExitCode, String> {
         builder = builder.with_model(ModelSelector::Id(model));
     }
 
-    let mut spec = RunSpec::new(prompt_from(args.prompt)?);
+    let mut spec = RunSpec::new(prompt);
     if let Some(effort) = args.effort {
         spec = spec.with_effort(effort.into());
     }
