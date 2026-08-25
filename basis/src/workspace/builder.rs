@@ -414,6 +414,10 @@ impl WorkspaceBuilder {
         };
         let memory_sources = memory::roots(&self.memory, store_dir.as_deref());
         let memories = memory::load(&memory_sources)?;
+        let memory_roots: Vec<PathBuf> = memory_sources
+            .iter()
+            .map(|source| source.path.clone())
+            .collect();
 
         let shared = matches!(self.runtime, RuntimeSource::Shared(_));
         let runtime = match self.runtime {
@@ -425,11 +429,11 @@ impl WorkspaceBuilder {
             // itself if it wants a file to speak for it. What still applies is
             // `model`, below, which ADR-0018 already makes a workspace override.
             RuntimeSource::Shared(runtime) => runtime,
-            RuntimeSource::Private(recipe) => Arc::new(
-                recipe
-                    .with_config(&config)
-                    .build_for(&self.path, self.shell)?,
-            ),
+            RuntimeSource::Private(recipe) => Arc::new(recipe.with_config(&config).build_for(
+                &self.path,
+                self.shell,
+                &memory_roots,
+            )?),
         };
 
         // The workspace's own override first, then the file, then the runtime's

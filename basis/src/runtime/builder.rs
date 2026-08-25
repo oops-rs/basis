@@ -790,14 +790,12 @@ impl RuntimeBuilder {
         self,
         workspace: &Path,
         shell: ShellAccess,
+        memory_roots: &[PathBuf],
     ) -> Result<Runtime, RunError> {
-        // Path roots are hygiene, not a boundary: per ADR-0004 that is the
-        // kernel's job, and per ADR-0013 basis ships no instance of one. What
-        // the caller said about commands is passed through as written.
-        let policy = git_protected(RuntimePolicy::workspace_bounded(workspace), workspace)
-            .allow_shell_commands(shell.is_granted())
-            .allow_background_commands(shell.is_granted());
-        let policy = with_command_patience(policy, self.command_timeout);
+        let policy = with_command_patience(
+            workspace_policy(workspace, shell, memory_roots),
+            self.command_timeout,
+        );
 
         self.build_with(store::runtime_identifier(workspace), policy)
     }
@@ -997,6 +995,39 @@ fn validate_target_names(targets: &CommandTargets) -> Result<(), RunError> {
     }
 
     Ok(())
+}
+
+/// The policy a private runtime bakes for one workspace:
+/// `git_protected(workspace_bounded(path))`, the caller's shell posture as a
+/// second belt beside the dispatcher's guard, and the memory roots.
+///
+/// Path roots are hygiene, not a boundary: per ADR-0004 that is the kernel's
+/// job, and per ADR-0013 basis ships no instance of one. What the caller said
+/// about commands is passed through as written.
+///
+/// The memory roots ([`crate::memory`]) sit outside the workspace — that is
+/// what makes them memory rather than working files — so recall (`read`,
+/// `grep`) and writing a memory (`write`, `edit`) need them stated here, on
+/// both the read and the write lists. Stated whether or not a directory
+/// exists yet: the first memory is written by exactly the run that finds none
+/// to read. The shared policy deliberately gets none of this — it is fixed
+/// before any workspace exists and a per-workspace root added there could not
+/// be unsaid — so on a shared runtime the index renders and these writes are
+/// refused, a recorded cost of sharing beside the others.
+pub(crate) fn workspace_policy(
+    workspace: &Path,
+    shell: ShellAccess,
+    memory_roots: &[PathBuf],
+) -> RuntimePolicy {
+    let policy = git_protected(RuntimePolicy::workspace_bounded(workspace), workspace)
+        .allow_shell_commands(shell.is_granted())
+        .allow_background_commands(shell.is_granted());
+
+    memory_roots.iter().fold(policy, |policy, root| {
+        policy
+            .with_allowed_read_root(root.clone())
+            .with_allowed_write_root(root.clone())
+    })
 }
 
 /// The command posture a shared runtime grants: shell and background on, with
