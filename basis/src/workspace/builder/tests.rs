@@ -216,16 +216,13 @@ async fn the_default_roster_is_exactly_this() {
     assert_eq!(
         offered,
         [
-            // mentra's compaction intrinsic, and its three memory intrinsics.
+            // mentra's compaction intrinsic.
             "compact",
             // mentra's split file tools (`RuntimeBuilder::with_file_tools`).
             "edit",
             "glob",
             "grep",
             "ls",
-            "memory_forget",
-            "memory_pin",
-            "memory_search",
             "read",
             // basis's own, and ADR-0016's one door.
             crate::tools::SPAWN,
@@ -270,6 +267,11 @@ fn the_doors_basis_does_not_surface_stay_shut() {
         "task_get",
         // Reports on `background_run`, which ADR-0016 hid.
         "check_background",
+        // A store basis decided against (D2): recall is off, and a tool
+        // writing where nothing reads would report success into a void.
+        "memory_pin",
+        "memory_forget",
+        "memory_search",
     ] {
         assert!(
             !agent.tool_profile.allows(shut),

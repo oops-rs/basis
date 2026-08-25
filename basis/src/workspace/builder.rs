@@ -658,6 +658,18 @@ fn agent_config(
             ..Default::default()
         },
         compaction: compaction.into_mentra(transcripts),
+        // D2 (wave 1): mentra's memory engine is off. basis's memory is a
+        // file convention arriving in a later wave, and mentra's is a store —
+        // auto-recall would put that store's content into the prompt with
+        // nothing visible saying so, which is exactly the kind of silent
+        // input basis exists to remove. Recall off here, the three memory
+        // tools hidden in [`UNSURFACED_TOOLS`], and the write tools refused
+        // at execution too, so no unhidden path can reach the store either.
+        memory: mentra::agent::MemoryConfig {
+            auto_recall_enabled: false,
+            write_tools_enabled: false,
+            ..Default::default()
+        },
         ..Default::default()
     }
 }
@@ -704,15 +716,20 @@ const REPLACED_TOOLS: [&str; 3] = ["shell", "background_run", "task"];
 /// - **`check_background` reports on a tool that is hidden.** The only thing it
 ///   can report on is `background_run`, which left the roster with ADR-0016's
 ///   two other doors, so it can answer nothing but "no such task".
+/// - **`memory_pin`, `memory_forget` and `memory_search` reach a store basis
+///   has decided against (D2, wave 1).** basis's memory is a file convention
+///   arriving in a later wave; mentra's engine — recall injection included,
+///   switched off in `agent_config` beside this list — is not it. A model
+///   pinning facts into a store nothing surfaces is the task-board failure
+///   again: plausible success, and nothing the person running the agent can
+///   see.
 ///
 /// Deliberately still offered, and each for a reason: `load_skill`, because
 /// on-demand skills are basis's own convention and that tool is how a skill is
-/// loaded; `compact`, because a model that can see its context filling should
-/// be able to act on it (that the *user* has no matching control is a separate
-/// gap, and hiding this would not close it); and `memory_pin` / `memory_forget`
-/// / `memory_search`, which are out of scope here — mentra persists what they
-/// write and basis has not yet decided what it wants that to mean.
-const UNSURFACED_TOOLS: [&str; 14] = [
+/// loaded; and `compact`, because a model that can see its context filling
+/// should be able to act on it (that the *user* has no matching control is a
+/// separate gap, and hiding this would not close it).
+const UNSURFACED_TOOLS: [&str; 17] = [
     "check_background",
     "idle",
     "task_create",
@@ -727,6 +744,9 @@ const UNSURFACED_TOOLS: [&str; 14] = [
     "team_request",
     "team_respond",
     "team_list_requests",
+    "memory_pin",
+    "memory_forget",
+    "memory_search",
 ];
 
 #[cfg(test)]
