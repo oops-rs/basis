@@ -460,12 +460,18 @@ fn digest(servers: &[McpServer]) -> u64 {
                     .hash(&mut hasher);
             }
             // A transport this build does not know — the enum is
-            // `#[non_exhaustive]`. The name is the one field every variant
-            // offers, so it is what keeps two differently named unknown
-            // servers from keying one workspace; two unknown servers
-            // differing only below the name will collide until this match
-            // learns the variant, which the basis-side canary forces.
+            // `#[non_exhaustive]`. The discriminant separates two unknown
+            // *variants*; the name separates servers within one. What neither
+            // separates — two unknown servers of one variant differing only
+            // below the name — will key one workspace until this match learns
+            // the variant, and the consequence is bounded: the second session
+            // inherits the first one's connections rather than being handed a
+            // credential. basis's own same-crate matches (`McpServer::name`,
+            // its hand-written `Debug`) fail to compile the moment the
+            // variant lands, which is what forces this arm to become a real
+            // one.
             server => {
+                std::mem::discriminant(server).hash(&mut hasher);
                 "unknown-transport".hash(&mut hasher);
                 server.name().hash(&mut hasher);
             }
