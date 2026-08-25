@@ -417,6 +417,40 @@ fn host_tools_register_in_the_order_they_were_added() {
 }
 
 #[test]
+fn a_host_tool_named_spawn_fails_build_naming_the_collision() {
+    // Decision D5d: mentra's plain `with_tool` replaces on a name collision,
+    // which would hand a host tool named `spawn` every rule an operator ever
+    // wrote about commands and delegation, silently. `build` refuses instead.
+    let error = RuntimeBuilder::default()
+        .with_base_url("http://127.0.0.1:1/v1")
+        .with_api_key("test-key")
+        .with_ephemeral_history()
+        .with_tool(Echo(SPAWN))
+        .build()
+        .expect_err("a host tool named spawn must not silently replace basis's own");
+
+    let message = error.to_string();
+    assert!(message.contains(SPAWN), "{message}");
+}
+
+#[test]
+fn two_host_tools_sharing_a_name_also_collide() {
+    // The claim is against the live registry, one tool at a time, so the
+    // second of two host tools sharing a name loses exactly as it would
+    // against one of basis's own.
+    let error = RuntimeBuilder::default()
+        .with_base_url("http://127.0.0.1:1/v1")
+        .with_api_key("test-key")
+        .with_ephemeral_history()
+        .with_tool(Echo("duplicate"))
+        .with_tool(Echo("duplicate"))
+        .build()
+        .expect_err("the second host tool named `duplicate` must not replace the first");
+
+    assert!(error.to_string().contains("duplicate"), "{error}");
+}
+
+#[test]
 fn a_shared_runtime_resolves_its_provider_without_the_network() {
     // `build` is sync, so everything it does must be local: credential
     // lookup, assembly, nothing else. A closed port proves nothing is
@@ -880,8 +914,10 @@ async fn workspace_on(runtime: std::sync::Arc<Runtime>, root: &Path) -> crate::W
             walk_parents: false,
         })
         .with_skills(crate::SkillsConfig {
-            workspace_subdir: PathBuf::from(".basis/skills"),
+            workspace_subdir: Some(PathBuf::from(".basis/skills")),
+            shared_workspace_dir: true,
             global_dir: None,
+            shared_home_dir: false,
         })
         .with_templates(crate::TemplatesConfig {
             workspace_subdir: PathBuf::from(".basis/templates"),

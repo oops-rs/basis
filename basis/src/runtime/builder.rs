@@ -118,13 +118,19 @@ pub struct RuntimeBuilder {
     /// Names are validated at [`build`](Self::build) rather than here, which
     /// is where this builder answers every other piece of bad input.
     command_targets: CommandTargets,
-    /// Host-supplied tools, applied in [`build_with`](Self::build_with)
-    /// after basis's own `spawn`. Stored as what they are: mentra implements
-    /// the tool traits for `Box<T: ?Sized>` (mentra#22), so a boxed
-    /// `dyn ExecutableTool` is itself an `ExecutableTool` and mentra's
-    /// by-value `with_tool` takes it whole. `Send + Sync` are not restated on
-    /// the box: `ToolDefinition` itself requires both.
+    /// Host-supplied tools, claimed by name in
+    /// [`build_with`](Self::build_with) after the runtime is built and
+    /// already carries basis's own registrations — see the claim loop there
+    /// for why a name collision refuses rather than replacing (decision
+    /// D5d). Stored as what they are: mentra implements the tool traits for
+    /// `Box<T: ?Sized>` (mentra#22), so a boxed `dyn ExecutableTool` is
+    /// itself an `ExecutableTool` and mentra's by-value `try_register_tool`
+    /// takes it whole. `Send + Sync` are not restated on the box:
+    /// `ToolDefinition` itself requires both.
     host_tools: Vec<Box<dyn mentra::tool::ExecutableTool>>,
+    /// How many levels of delegation `spawn` will start before refusing
+    /// ([`with_delegation_depth`](Self::with_delegation_depth), decision D9).
+    delegation_depth: usize,
     /// A provider the host constructed itself
     /// ([`with_provider_instance`](Self::with_provider_instance)). When set,
     /// the provider question is answered: resolution never runs, the
@@ -200,6 +206,7 @@ impl std::fmt::Debug for RuntimeBuilder {
             .field("responses_transport", &self.responses_transport)
             .field("wire", &self.wire)
             .field("file_tools", &self.file_tools)
+            .field("delegation_depth", &self.delegation_depth)
             .field(
                 "command_environment",
                 &self.command_environment.keys().collect::<Vec<_>>(),
@@ -233,6 +240,7 @@ impl Default for RuntimeBuilder {
             command_environment: BTreeMap::new(),
             command_targets: CommandTargets::new(),
             host_tools: Vec::new(),
+            delegation_depth: crate::tools::DEFAULT_DELEGATION_DEPTH,
             host_provider: None,
         }
     }
@@ -765,6 +773,16 @@ impl RuntimeBuilder {
     /// not to one session. A host that wants a tool visible to only *some*
     /// workspaces still needs one runtime per audience; there is no per-
     /// workspace host-tool registration yet.
+    ///
+    /// **A name basis or an earlier host tool already answers to is refused,
+    /// not replaced** (decision D5d). [`build`](Self::build) claims host
+    /// tools only after `spawn`, the builtins, and everything else basis
+    /// registers unconditionally already exist on the runtime, with mentra's
+    /// `try_register_tool` rather than its plain `with_tool` — a host tool
+    /// named `spawn` fails the build naming the collision
+    /// ([`RunError::HostTool`](crate::RunError::HostTool)) instead of quietly
+    /// taking over the name and every rule an operator ever wrote about
+    /// commands and delegation.
     pub fn with_tool<T>(self, tool: T) -> Self
     where
         T: mentra::tool::ExecutableTool + 'static,
@@ -775,6 +793,28 @@ impl RuntimeBuilder {
                 host_tools.push(Box::new(tool));
                 host_tools
             },
+            ..self
+        }
+    }
+
+    /// How many levels of delegation `spawn` will start before refusing, on
+    /// every workspace this runtime carries (decision D9).
+    ///
+    /// [`crate::tools::DEFAULT_DELEGATION_DEPTH`] (two) unless a caller says
+    /// otherwise here — the smallest bound that leaves delegation
+    /// compositional (a subagent may split its own work once) while keeping
+    /// runaway recursion structurally impossible rather than merely unlikely.
+    /// The root run is depth 0, so the deepest agent that can still delegate
+    /// is one less than this value.
+    ///
+    /// The guard's shape does not move with the number: it is still basis's
+    /// own ledger (mentra's floor is name-specific and does not fire for a
+    /// registered tool), and it still refuses *in the preview*, so a
+    /// remembered allow-rule cannot lift whatever floor is set here.
+    #[must_use]
+    pub fn with_delegation_depth(self, depth: usize) -> Self {
+        Self {
+            delegation_depth: depth,
             ..self
         }
     }
@@ -929,6 +969,9 @@ impl RuntimeBuilder {
         // are the host's statement about *every* process this runtime spawns —
         // each declared tool's subprocess (`crate::tools::declared`).
         let command_environment = Arc::new(self.command_environment);
+        // Taken out here and claimed after the runtime is built (decision
+        // D5d) — see the loop beside `Ok(Runtime { .. })` below for why.
+        let host_tools = self.host_tools;
 
         // Which provider this runtime runs on, settled before assembly. A
         // host-supplied instance is an answer rather than a preference:
@@ -987,10 +1030,13 @@ impl RuntimeBuilder {
             // Told the target names, and only the names: the tool needs them to
             // teach the `!@` prefix and to refuse one nothing registered, while
             // *which executor* a name resolves to stays the runtime's business
-            // (ADR-0021). With none registered this is `SpawnTool::new()` in
-            // every observable respect, including that the model is never told
-            // the prefix exists.
-            .with_tool(SpawnTool::with_targets(target_names))
+            // (ADR-0021). With none registered and the default depth this is
+            // `SpawnTool::new()` in every observable respect, including that
+            // the model is never told the prefix exists.
+            .with_tool(SpawnTool::with_targets_and_depth(
+                target_names,
+                self.delegation_depth,
+            ))
             // The one pre-hook basis registers, always: mentra takes hooks at
             // build time only, and workspaces arrive later, through the
             // dispatcher (see `runtime::dispatch`).
@@ -1000,15 +1046,6 @@ impl RuntimeBuilder {
             // are two registrations. Always, again: whether a workspace will
             // declare a `post_tool_use` hook is not knowable from here.
             .with_post_hook(DispatchHook(Arc::clone(&dispatch)));
-
-        // Host tools registered via `with_tool`, applied after basis's own
-        // `spawn` — order that matches every other builder chain above, where
-        // basis's fixed registrations run first and a caller's own choices
-        // build on top of them.
-        let builder = self
-            .host_tools
-            .into_iter()
-            .fold(builder, |builder, tool| builder.with_tool(tool));
 
         // Installed whenever either half has something to say. With both
         // empty, mentra keeps its own local executor and basis adds no layer
@@ -1087,6 +1124,23 @@ impl RuntimeBuilder {
                 (assembled.build()?, ProviderId::from(choice.provider))
             }
         };
+
+        // Claimed one at a time, now that the runtime exists and already
+        // carries every registration basis makes unconditionally — `spawn`,
+        // mentra's own builtins, whatever a host-supplied provider's
+        // `install` added (decision D5d). mentra's plain `with_tool` on the
+        // builder chain above *replaces* on a name collision, which is the
+        // right behavior for deliberately overriding a builtin and the wrong
+        // one for a host tool that did not mean to shadow `spawn` and inherit
+        // every rule an operator ever wrote about commands and delegation.
+        // `try_register_tool` refuses instead, and does it against the live
+        // registry, so the second host tool sharing an earlier one's name
+        // collides too — the same claim posture
+        // `Runtime::claim_declared_tool` holds for a declared tool naming
+        // one basis or a workspace already answers to.
+        for tool in host_tools {
+            mentra.try_register_tool(tool)?;
+        }
 
         Ok(Runtime {
             mentra,

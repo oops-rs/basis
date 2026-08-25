@@ -326,6 +326,27 @@ async fn mint_carrying_workspace(
 /// build: the caller brought one. It still discovers what it can without
 /// touching that runtime — skills and MCP registration stay the caller's, who
 /// owns the runtime they would register on.
+///
+/// **`#[doc(hidden)]`, not private.** This existed because `Workspace` could
+/// not yet be handed a runtime, a provider, a tool roster, or a round
+/// strategy — every knob a bring-your-own-runtime caller actually wanted was
+/// missing from the assembler, so bypassing it was the only way to get one.
+/// The assembler is open now: [`WorkspaceBuilder::with_runtime`] and
+/// [`with_runtime_builder`](WorkspaceBuilder::with_runtime_builder) accept a
+/// caller's own [`Runtime`](crate::Runtime) or recipe (ADR-0018, including a
+/// [`RuntimeBuilder::with_provider_instance`](crate::RuntimeBuilder::with_provider_instance)
+/// the host constructed itself), [`WorkspaceBuilder::with_tool_roster`] states
+/// the model's roster (D3), and [`TurnOptions::with_round_strategy`] reaches a
+/// live turn. Every caller with a real host to write against should reach for
+/// those instead — the discovery this function does by hand
+/// (`WorkspaceContext::discover_with`, default-only templates, no skills, no
+/// MCP) is exactly what `WorkspaceBuilder::open` already does more completely,
+/// once a workspace exists to open. What remains behind this name is the test
+/// harness this crate's own suite drives sessions through — `basis-cli`'s
+/// bridge tests among them — where a scripted [`Session`] needs basis's event
+/// stream and context discovery without a real runtime underneath it, and the
+/// signature this wave found already fits every caller that still needs it.
+#[doc(hidden)]
 pub fn prepare_with_session(
     session: Session,
     workspace: &Path,

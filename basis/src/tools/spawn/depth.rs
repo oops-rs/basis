@@ -27,24 +27,45 @@ use std::{
     sync::{Arc, Mutex},
 };
 
-/// How many levels of delegation `spawn` will start.
+/// How many levels of delegation `spawn` will start, absent a
+/// [`RuntimeBuilder::with_delegation_depth`](crate::RuntimeBuilder::with_delegation_depth)
+/// override.
 ///
 /// Zero would be mentra's answer for `task` — a subagent that cannot delegate
 /// at all. Two is the smallest bound that leaves delegation compositional (a
 /// subagent may split its own work once) while keeping runaway recursion
 /// structurally impossible rather than merely unlikely. The root run is depth
 /// 0, so the deepest agent that can still delegate is depth 1.
-pub const MAX_DEPTH: usize = 2;
+pub const DEFAULT_DELEGATION_DEPTH: usize = 2;
 
-/// The delegation depth of every agent with a delegation in flight.
+/// The delegation depth of every agent with a delegation in flight, and the
+/// floor it is checked against.
 ///
-/// Absent means depth 0: a root run has never been recorded by anything.
-#[derive(Debug, Default, Clone)]
+/// Absent from the map means depth 0: a root run has never been recorded by
+/// anything.
+#[derive(Debug, Clone)]
 pub(crate) struct Depth {
     by_agent: Arc<Mutex<HashMap<String, usize>>>,
+    /// How deep this tool will let a delegation go before refusing (decision
+    /// D9): `RuntimeBuilder::with_delegation_depth`'s value, threaded in at
+    /// [`SpawnTool::with_targets_and_depth`](super::SpawnTool::with_targets_and_depth).
+    max: usize,
+}
+
+impl Default for Depth {
+    fn default() -> Self {
+        Self::new(DEFAULT_DELEGATION_DEPTH)
+    }
 }
 
 impl Depth {
+    pub(crate) fn new(max: usize) -> Self {
+        Self {
+            by_agent: Arc::new(Mutex::new(HashMap::new())),
+            max,
+        }
+    }
+
     /// The caller's own depth, or the refusal the model should read instead.
     ///
     /// Asked before a delegation and never before a command: depth bounds
@@ -52,8 +73,8 @@ impl Depth {
     /// itself, which is exactly what running a command is.
     pub(crate) fn authorize_delegation(&self, agent_id: &str) -> Result<usize, String> {
         let depth = self.of(agent_id);
-        if depth >= MAX_DEPTH {
-            return Err(refusal(depth));
+        if depth >= self.max {
+            return Err(refusal(depth, self.max));
         }
 
         Ok(depth)
@@ -99,9 +120,9 @@ impl Drop for Entered {
 ///
 /// It names the floor and says what to do instead, because a refusal that only
 /// says no is one the model answers by trying again.
-fn refusal(depth: usize) -> String {
+fn refusal(depth: usize, max: usize) -> String {
     format!(
         "this work is already {depth} levels of delegation deep and spawn goes no deeper than \
-         {MAX_DEPTH}; do it here rather than handing it on"
+         {max}; do it here rather than handing it on"
     )
 }

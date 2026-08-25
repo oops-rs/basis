@@ -22,7 +22,7 @@ configuration would be hiding it from the person who put it there.
 | --- | --- | --- | --- |
 | Instructions | `AGENTS.md`, else `CLAUDE.md` | `AGENTS.md`, else `CLAUDE.md` | global → each ancestor outermost-inward → workspace root; **all are used**, later is more specific |
 | Model choice | `.basis/config.json` | `config.json` | workspace over global, key by key |
-| Skills | `.basis/skills/`, `.agents/skills/` | `<config dir>/skills/`, `$HOME/.agents/skills/` | all four layer, most specific first; a nearer root shadows a *name* |
+| Skills | `.basis/skills/`, `.agents/skills/` | `<config dir>/skills/`, `$HOME/.agents/skills/` | all four layer, most specific first; a nearer root shadows a *name*; each disables independently on `SkillsConfig` |
 | Prompt templates | `.basis/templates/*.md` | `<config dir>/templates/*.md` | workspace shadows global by name |
 | Declared tools | `.basis/tools.json` | `tools.json` | workspace shadows global by tool name |
 | Subprocess hooks | `.basis/hooks.json` | `hooks.json` | both run, global first; the first refusal wins; each entry names its event |
@@ -46,7 +46,9 @@ read only in a directory that has no `AGENTS.md` — *present* decides, not
 *non-empty*, so which file is in effect never depends on its contents. Named in
 `run_started`. A host can replace or append to the rendered result with
 `WorkspaceBuilder::with_system_prompt`, or with `--system-prompt` /
-`--append-system-prompt` on `spawn` and `serve`.
+`--append-system-prompt` on `spawn` and `serve`. `ContextConfig::none()` turns
+discovery off entirely — neither name is read, in the workspace, an ancestor,
+or the global directory — while workspace path validation still runs.
 
 ### `.basis/config.json`
 
@@ -86,9 +88,12 @@ session after this ladder has already settled what it opened with.
 ### `.basis/skills/`, `.agents/skills/`
 
 `SKILL.md` per directory; loaded by name on demand, so only descriptions cost
-context. The `.agents` spellings are what other harnesses read and are not
-configurable — a fixed path is what makes a shared convention shared. Within a
-scope the basis-specific root comes first.
+context. The `.agents` spellings are what other harnesses read and their
+*path* is not configurable — a fixed path is what makes a shared convention
+shared — but every one of the four roots switches off independently on
+`SkillsConfig`: `workspace_subdir` and `global_dir` also say *where* (`None`
+disables), `shared_workspace_dir` and `shared_home_dir` are on/off only. Within
+a scope the basis-specific root comes first.
 
 Frontmatter `disable-model-invocation: true` (or `disable_model_invocation`)
 keeps a skill out of the list the model is shown and makes `load_skill` refuse

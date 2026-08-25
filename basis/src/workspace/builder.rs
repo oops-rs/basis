@@ -45,7 +45,7 @@ use crate::{
     tools::declared::{self, DeclaredTools, ToolsConfig},
 };
 
-use super::Workspace;
+use super::{Workspace, roster::ToolRoster};
 
 /// How a workspace is opened.
 ///
@@ -71,6 +71,9 @@ pub struct WorkspaceBuilder {
     system_prompt: Option<SystemPrompt>,
     skills: SkillsConfig,
     memory: MemoryConfig,
+    /// Which tools the model is offered (decision D3). `ToolRoster::default()`
+    /// unless a caller says otherwise.
+    roster: ToolRoster,
     #[cfg(feature = "mcp")]
     mcp: McpConfig,
     templates: TemplatesConfig,
@@ -112,6 +115,7 @@ impl std::fmt::Debug for WorkspaceBuilder {
             .field("system_prompt", &self.system_prompt)
             .field("skills", &self.skills)
             .field("memory", &self.memory)
+            .field("roster", &self.roster)
             .field("templates", &self.templates)
             .field("hooks", &self.hooks)
             .field("tools", &self.tools)
@@ -140,6 +144,9 @@ impl WorkspaceBuilder {
             system_prompt: None,
             skills: SkillsConfig::default(),
             memory: MemoryConfig::default(),
+            // D3: today's exact hidden set, so `Workspace::open(path)` offers
+            // precisely what it always has.
+            roster: ToolRoster::default(),
             #[cfg(feature = "mcp")]
             mcp: McpConfig::default(),
             templates: TemplatesConfig::default(),
@@ -262,6 +269,20 @@ impl WorkspaceBuilder {
     /// named one. [`MemoryConfig::disabled`] reads nothing at all.
     pub fn with_memory(self, memory: MemoryConfig) -> Self {
         Self { memory, ..self }
+    }
+
+    /// Sets which tools the model is offered, for every run this workspace
+    /// mints (decision D3).
+    ///
+    /// Unset, [`ToolRoster::default`] applies: exactly what every workspace
+    /// has offered — `spawn`'s replaced doors and basis's never-surfaced
+    /// intrinsics hidden, everything else offered. Neither constructor on
+    /// [`ToolRoster`] changes what is *registered* on the runtime; see its
+    /// module docs for the two things that still apply on top of whatever
+    /// roster is set here — a per-mint hide of a sibling workspace's tools,
+    /// and the rendered prompt, which has no opinion about the roster at all.
+    pub fn with_tool_roster(self, roster: ToolRoster) -> Self {
+        Self { roster, ..self }
     }
 
     /// Sets which MCP servers this workspace connects.
@@ -519,6 +540,7 @@ impl WorkspaceBuilder {
                 &context,
                 self.system_prompt.as_ref(),
                 memory::index_block(&memories).as_deref(),
+                self.roster,
                 self.compaction,
                 runtime.transcripts_dir().to_path_buf(),
             ),
@@ -659,27 +681,25 @@ pub(crate) fn resolved_workspace(requested: &Path, context: &WorkspaceContext) -
 /// fields of its `CompactionConfig` are still inherited — only what basis has
 /// a reason to state is stated.
 ///
-/// # Why tools leave the roster
+/// # Which tools the model is offered
 ///
-/// ADR-0016 gives the model one door for *do something I cannot do by
-/// thinking*: [`spawn`](crate::tools::spawn). `shell`, `background_run` and
-/// `task` are the doors it replaces, and leaving them alongside it would
-/// restore exactly what the ADR removed — three names at the approval gate, and
-/// three rule namespaces, for one question. [`UNSURFACED_TOOLS`] is the other
-/// half of the same argument, applied to intrinsics that were never a decision
-/// at all: they are on the roster because mentra registers everything it has
-/// and basis never said otherwise, which is not the same as basis offering
-/// them.
+/// `roster` is [`ToolRoster`] (decision D3), a workspace's own knob over
+/// mentra's `ToolProfile` — see its module docs for what each constructor
+/// does and does not change, and for the two things (a sibling workspace's
+/// hidden tools, the rendered prompt) that apply on top of whatever roster is
+/// set here regardless.
 ///
-/// **Hidden is a roster fact, not a capability fact.** Every one of them stays
-/// registered on the runtime, which is precisely why `spawn` can still reach
-/// the command executor underneath. What a caller said about commands is still
-/// decided by [`ShellAccess`] — baked into policy on a private runtime,
-/// enforced by the hook dispatcher on a shared one — on the path `spawn` uses:
-/// `--no-shell` shuts commands off for `spawn` exactly as it did for `shell`.
+/// **Hidden is a roster fact, not a capability fact.** Every tool a roster
+/// hides stays registered on the runtime, which is precisely why `spawn` can
+/// still reach the command executor underneath even though
+/// [`ToolRoster::default`] hides it by name. What a caller said about
+/// commands is still decided by [`ShellAccess`] — baked into policy on a
+/// private runtime, enforced by the hook dispatcher on a shared one — on the
+/// path `spawn` uses: `--no-shell` shuts commands off for `spawn` exactly as
+/// it did for `shell`.
 ///
-/// The hidden set travels: `DisposableSubagentTemplate::from_agent` clones this
-/// whole config, so a subagent of a subagent is offered the same one door.
+/// The roster travels: `DisposableSubagentTemplate::from_agent` clones this
+/// whole config, so a subagent of a subagent is offered the same roster.
 ///
 /// Built once and cloned per run, because none of its inputs are per-run —
 /// the per-mint extension (hiding other workspaces' MCP tools) happens in
@@ -690,27 +710,30 @@ fn agent_config(
     context: &WorkspaceContext,
     system_prompt: Option<&SystemPrompt>,
     memory_index: Option<&str>,
+    roster: ToolRoster,
     compaction: Compaction,
     transcripts: PathBuf,
 ) -> mentra::agent::AgentConfig {
     mentra::agent::AgentConfig {
         // The memory index rides the context's own render path — after the
         // documents, before a host's `Append`, gone under `Replace` — so it
-        // obeys the same rules as everything else in the prompt.
+        // obeys the same rules as everything else in the prompt, and none of
+        // them consult `roster` at all (item d of D3).
         system: context.render_with_appendix(system_prompt, memory_index),
-        tool_profile: mentra::agent::ToolProfile::hide(hidden_tools()),
+        tool_profile: roster.into_profile(),
         workspace: mentra::agent::WorkspaceConfig {
             base_dir: workspace.to_path_buf(),
             ..Default::default()
         },
         compaction: compaction.into_mentra(transcripts),
         // D2 (wave 1): mentra's memory engine is off. basis's memory is a
-        // file convention arriving in a later wave, and mentra's is a store —
+        // file convention (`crate::memory`), and mentra's is a store —
         // auto-recall would put that store's content into the prompt with
         // nothing visible saying so, which is exactly the kind of silent
         // input basis exists to remove. Recall off here, the three memory
-        // tools hidden in [`UNSURFACED_TOOLS`], and the write tools refused
-        // at execution too, so no unhidden path can reach the store either.
+        // tools hidden in `ToolRoster`'s default set, and the write tools
+        // refused at execution too, so no unhidden path can reach the store
+        // either.
         memory: mentra::agent::MemoryConfig {
             auto_recall_enabled: false,
             write_tools_enabled: false,
@@ -719,81 +742,6 @@ fn agent_config(
         ..Default::default()
     }
 }
-
-/// Every name basis takes off the model's roster: what `spawn` replaced, and
-/// what basis has never surfaced.
-///
-/// Two constants rather than one list because the two carry different
-/// arguments and a reader deserves to know which applies to a given name.
-fn hidden_tools() -> impl Iterator<Item = &'static str> {
-    REPLACED_TOOLS.into_iter().chain(UNSURFACED_TOOLS)
-}
-
-/// The tools `spawn` replaces, by the names mentra registers them under.
-const REPLACED_TOOLS: [&str; 3] = ["shell", "background_run", "task"];
-
-/// What mentra registers that basis has never deliberately offered.
-///
-/// Registration is mentra's default posture — `register_tools` walks every
-/// intrinsic variant it has — so a name reaching the model here is the absence
-/// of a decision rather than one. Each of these fails a different way, and none
-/// of the failures is visible to the person running the agent:
-///
-/// - **`team_spawn` and its six siblings are delegation by another name.** A
-///   second door for *hand work to something else, read back a summary* is
-///   exactly what ADR-0016 removed `task` for: two names arriving at one
-///   approval gate, and two namespaces of remembered rules, for a question an
-///   operator asks once. Nothing in basis mints a team, reads a teammate inbox,
-///   or renders a `team_request`, so the door does not even lead where its
-///   description says. `docs/REDESIGN.md` has recorded these as awaiting a
-///   concrete use case since Phase D; reachable-by-accident is not the
-///   deliberate surfacing that row is waiting for.
-/// - **`idle` is that surface's exit.** Its whole effect is
-///   `Agent::request_idle`, which mentra's orchestrator reads as
-///   `should_end_turn` — a yield *back to the teammate loop* basis never
-///   starts. On a basis run the model calling it ends its own turn mid-task
-///   and the caller reads a short answer with no error in it.
-/// - **`task_create` and the other four write a board nothing reads.** basis
-///   surfaces no task board — not on the event stream, not over ACP, not in
-///   the CLI — so a model that files, claims and updates work items gets
-///   plausible success back from every call and nothing observable happens.
-///   Confident bookkeeping into a void is worse than no bookkeeping, because
-///   it reads to the model as coordination.
-/// - **`check_background` reports on a tool that is hidden.** The only thing it
-///   can report on is `background_run`, which left the roster with ADR-0016's
-///   two other doors, so it can answer nothing but "no such task".
-/// - **`memory_pin`, `memory_forget` and `memory_search` reach a store basis
-///   has decided against (D2, wave 1).** basis's memory is a file convention
-///   arriving in a later wave; mentra's engine — recall injection included,
-///   switched off in `agent_config` beside this list — is not it. A model
-///   pinning facts into a store nothing surfaces is the task-board failure
-///   again: plausible success, and nothing the person running the agent can
-///   see.
-///
-/// Deliberately still offered, and each for a reason: `load_skill`, because
-/// on-demand skills are basis's own convention and that tool is how a skill is
-/// loaded; and `compact`, because a model that can see its context filling
-/// should be able to act on it (that the *user* has no matching control is a
-/// separate gap, and hiding this would not close it).
-const UNSURFACED_TOOLS: [&str; 17] = [
-    "check_background",
-    "idle",
-    "task_create",
-    "task_claim",
-    "task_update",
-    "task_list",
-    "task_get",
-    "team_spawn",
-    "team_send",
-    "team_read_inbox",
-    "team_broadcast",
-    "team_request",
-    "team_respond",
-    "team_list_requests",
-    "memory_pin",
-    "memory_forget",
-    "memory_search",
-];
 
 #[cfg(test)]
 mod tests;
