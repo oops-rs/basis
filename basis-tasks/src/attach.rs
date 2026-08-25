@@ -57,7 +57,7 @@ pub const POLL: Duration = Duration::from_millis(100);
 #[derive(Debug, Clone, PartialEq)]
 pub enum WaitOutcome {
     /// The raw terminal payload, as `terminal.json` holds it — or, for
-    /// [`wait_for_message`], the correlated reply or terminal-tagged payload
+    /// `wait_for_message`, the correlated reply or terminal-tagged payload
     /// `message_payload_for_dispatch` resolved.
     Terminal(Value),
     /// The bounded wait elapsed; `attached` reports whether a live executor

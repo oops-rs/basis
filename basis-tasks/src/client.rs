@@ -454,8 +454,8 @@ impl Tasks {
 
     /// Mints a task and immediately attaches to drive it to a terminal
     /// result — `spawn --await`'s shape, and the one place a wait skips edge
-    /// validation: see [`wait_unvalidated`](Self::wait_unvalidated) for why
-    /// that is safe only here.
+    /// validation: see this crate's private `wait_unvalidated` for why that
+    /// is safe only here.
     pub async fn spawn_and_wait(
         &self,
         spec: RunSpec,

@@ -15,9 +15,8 @@ use crate::{Error, data_dir::valid_task_handle};
 ///
 /// Never becomes a filesystem path outside the data directory root — every
 /// place one is turned into a path validates the grammar first
-/// ([`DataDir::agent_dir`](crate::DataDir::agent_dir)) — and is stable for the
-/// task's whole life: `spawn` mints it once, and every other verb takes it
-/// back unchanged.
+/// (`DataDir::agent_dir`) — and is stable for the task's whole life: `spawn`
+/// mints it once, and every other verb takes it back unchanged.
 #[derive(Debug, Clone, PartialEq, Eq, Hash, PartialOrd, Ord)]
 pub struct TaskHandle(String);
 
@@ -27,10 +26,10 @@ impl TaskHandle {
     /// The refusal is deliberately generic — "not a task handle" rather than
     /// a byte-by-byte diagnosis — because the grammar is opaque by design:
     /// there is nothing more specific a caller should learn about *why* a
-    /// string is not one. The error is [`Error::invalid_reference`]: a
+    /// string is not one. The error carries `Error::invalid_reference`: a
     /// malformed handle was never going to resolve, whatever else settles —
-    /// the same fact [`crate::tasks::named`] reports for a handle from
-    /// another workspace.
+    /// the same fact this crate reports for a handle from another
+    /// workspace.
     pub fn parse(handle: impl Into<String>) -> Result<Self, Error> {
         let handle = handle.into();
         if valid_task_handle(&handle).is_some() {

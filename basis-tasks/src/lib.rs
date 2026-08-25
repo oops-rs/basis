@@ -30,8 +30,8 @@
 //! - [`BASIS_DATA_DIR`] — the data directory root [`Tasks::open`] would
 //!   resolve to on its own, named explicitly so a recursive `basis` (or any
 //!   other binary built on this crate) invoked from inside a turn resolves
-//!   the same [`DataDir`](data_dir) its parent did, rather than
-//!   rediscovering one from a possibly different environment.
+//!   the same data directory its parent did, rather than rediscovering one
+//!   from a possibly different environment.
 //! - [`BASIS_PARENT_TASK_ID`] — the parent's handle, present only when the
 //!   task has one. What lets a deeply nested spawn still name its whole
 //!   ownership chain without walking `meta.json` files to find it.

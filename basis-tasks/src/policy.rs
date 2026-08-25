@@ -7,8 +7,9 @@
 //!
 //! What next command a caller should be told to run instead — `basis inbox`
 //! rather than an impossible `basis wait` — is not this module's business:
-//! that is a hint, and hints are `basis-cli`'s (ADR-0015). [`Tasks::can_await`](crate::Tasks::can_await)
-//! is the fact a host builds one from.
+//! that is a hint, and hints are `basis-cli`'s (ADR-0015).
+//! [`Tasks::validate_wait_edge`](crate::Tasks::validate_wait_edge) is the
+//! fact a host builds one from.
 
 use super::{
     data_dir::DataDir,

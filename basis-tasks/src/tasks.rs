@@ -48,10 +48,11 @@ pub struct TaskSummary {
     /// `running`, `resumable`, or whatever the terminal record settled on.
     pub state: String,
     pub started_ms: u64,
-    /// When this task was last worked in, per [`last_activity_ms`]. What the
-    /// list is ordered by, and what a continuation picks by.
+    /// When this task was last worked in, per this crate's own
+    /// `last_activity_ms`. What the list is ordered by, and what a
+    /// continuation picks by.
     pub last_activity_ms: u64,
-    /// The prompt's first line, bounded by [`PROMPT_BUDGET`].
+    /// The prompt's first line, bounded by `PROMPT_BUDGET`.
     pub prompt: String,
     /// The mentra conversation this task minted or continued. Empty until a
     /// first attach prepares one, which is why a never-attached task cannot be
