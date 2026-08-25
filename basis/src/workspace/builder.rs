@@ -446,8 +446,23 @@ impl WorkspaceBuilder {
             RuntimeSource::Shared(_) => None,
             RuntimeSource::Private(recipe) => recipe.named_store_dir().map(Path::to_path_buf),
         };
-        let memory_sources = memory::roots(&self.memory, store_dir.as_deref());
-        let memories = memory::load(&memory_sources)?;
+        // This wave's own I/O — `roots`, the per-file reads `load` does, and
+        // the `canonicalize` inside `crate::paths::same_dir` — goes to a
+        // blocking thread (whole-wave review, G7): `basis-acp` cold-opens
+        // workspaces on its shared runtime, and this is genuinely blocking
+        // work the way `spawn_blocking`'s other callers already are
+        // (`hooks/runner.rs`, `tools/declared/tool.rs`). The context, hooks
+        // and declared-tools discovery just above stay sync on purpose —
+        // they predate this wave and are not what it added, so smoothing the
+        // asymmetry away here would be a second refactor nobody asked for.
+        let memory_config = self.memory;
+        let (memory_sources, memories) = tokio::task::spawn_blocking(move || {
+            let memory_sources = memory::roots(&memory_config, store_dir.as_deref());
+            let memories = memory::load(&memory_sources)?;
+            Ok::<_, memory::MemoryError>((memory_sources, memories))
+        })
+        .await
+        .map_err(RunError::MemoryDiscovery)??;
         let memory_roots: Vec<PathBuf> = memory_sources
             .iter()
             .map(|source| source.path.clone())

@@ -83,6 +83,17 @@ pub enum RunError {
     #[error("failed to load memories: {0}")]
     Memory(#[from] crate::memory::MemoryError),
 
+    /// The blocking thread [`WorkspaceBuilder::open`](crate::WorkspaceBuilder::open)
+    /// runs memory discovery on (roots, per-file reads, `canonicalize`)
+    /// panicked or was cancelled before it returned (whole-wave review, G7).
+    ///
+    /// Not `#[from]`: [`Forwarder`](Self::Forwarder) already claims
+    /// `tokio::task::JoinError` for the event-forwarding task, and thiserror
+    /// cannot generate two `From` impls for one source type on one enum — so
+    /// this is built by hand at the one call site that needs it.
+    #[error("memory discovery failed: {0}")]
+    MemoryDiscovery(#[source] tokio::task::JoinError),
+
     #[error("failed to load hooks: {0}")]
     Hooks(#[from] crate::hooks::HookConfigError),
 
