@@ -632,3 +632,28 @@ async fn a_write_into_git_hooks_is_refused() {
         "and must not reach the disk"
     );
 }
+
+/// The seam honors the whole spec it is handed: an effort asked for on the
+/// spec reaches the session rather than the void. (The free-function path
+/// applies it at mint; this path has only the session in hand.)
+#[tokio::test]
+async fn the_seam_applies_the_specs_effort_to_the_session() {
+    let workspace = workspace_with_context("rules");
+    let mock = mock(&["ok"]);
+    let session = mock
+        .runtime()
+        .create_session("test", mock.model())
+        .expect("session");
+
+    let prepared = prepare_with_session(
+        session,
+        workspace.path(),
+        RunSpec::new("go").with_effort(basis::Effort::High),
+        &context(),
+        "openai",
+        "mock-model",
+    )
+    .expect("prepared");
+
+    assert_eq!(prepared.effort(), Some(basis::Effort::High));
+}

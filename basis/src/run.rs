@@ -36,7 +36,10 @@ use crate::{
     context::{ContextConfig, WorkspaceContext},
     event::RunOutcome,
     templates::TemplatesConfig,
-    workspace::{RunSpec, Workspace, WorkspaceBuilder, load_templates, resolved_workspace},
+    workspace::{
+        DEFAULT_SESSION_NAME, RunSpec, Workspace, WorkspaceBuilder, load_templates,
+        resolved_workspace,
+    },
 };
 
 pub use bounds::Bounds;
@@ -278,15 +281,18 @@ async fn mint_carrying_workspace(
 /// its own runtime — custom tools, its own store, a provider basis does not
 /// know — still gets basis's context discovery and event stream.
 ///
-/// The inputs are exactly what this path can honor. `spec` brings the prompt
-/// and the bounds; its prompt may be empty, because once a session outlives a
+/// The inputs are exactly what this path can honor, and every field of `spec`
+/// is honored. The prompt may be empty, because once a session outlives a
 /// turn a conversation with nothing said yet is a real state — it is what
-/// ACP's `session/new` opens — so the check belongs where a prompt is actually
-/// sent, which is [`PreparedRun::execute`] and [`PreparedRun::send`]. Its
-/// `session_name` and `effort` are *not* read, honestly: the session in hand
-/// was already minted, named and set by the caller. `context` says where
-/// discovery looks; templates are discovered with the default configuration,
-/// there being no caller that has ever wanted otherwise on this path.
+/// ACP's `session/new` opens — so the check belongs where a prompt is
+/// actually sent, which is [`PreparedRun::execute`] and [`PreparedRun::send`].
+/// The bounds become the run's configured limits; an `effort` is applied to
+/// the session in hand; a `session_name` renames it — unless it is the
+/// default, which is left alone, because the caller named the session at mint
+/// and asking for the default and saying nothing are the same request.
+/// `context` says where discovery looks; templates are discovered with the
+/// default configuration, there being no caller that has ever wanted
+/// otherwise on this path.
 ///
 /// This is the one path that does not go through
 /// [`Workspace`], because there is no runtime for basis to
@@ -302,12 +308,17 @@ pub fn prepare_with_session(
     model: impl Into<String>,
 ) -> Result<PreparedRun, RunError> {
     let spec = spec.into();
+    let mut session = session;
+    if spec.session_name != DEFAULT_SESSION_NAME {
+        session.set_name(spec.session_name.clone())?;
+    }
+
     let discovered = WorkspaceContext::discover_with(workspace, context)?;
     // Unlike skills, templates are registered on nothing — so basis can discover
     // them here without touching a runtime it does not own.
     let (templates_dirs, templates) = load_templates(workspace, &TemplatesConfig::default())?;
 
-    Ok(PreparedRun::new(
+    let mut prepared = PreparedRun::new(
         session,
         RunContext {
             workspace: resolved_workspace(workspace, &discovered),
@@ -325,7 +336,13 @@ pub fn prepare_with_session(
             mcp_servers: Vec::new(),
         },
     )
-    .with_bounds(spec.turn_options()))
+    .with_bounds(spec.turn_options());
+
+    if let Some(effort) = spec.effort {
+        prepared.set_effort(Some(effort))?;
+    }
+
+    Ok(prepared)
 }
 
 #[cfg(test)]

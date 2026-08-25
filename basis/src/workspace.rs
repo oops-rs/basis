@@ -54,6 +54,7 @@ use std::sync::Arc;
 use mentra::{ModelInfo, Session, agent::AgentConfig, provider::ReasoningOptions};
 
 pub use builder::WorkspaceBuilder;
+pub(crate) use spec::DEFAULT_SESSION_NAME;
 pub use spec::RunSpec;
 
 pub(crate) use builder::{load_templates, resolved_workspace};
