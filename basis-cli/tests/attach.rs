@@ -312,6 +312,69 @@ fn cancel_before_any_attach_settles_without_a_model_turn() {
     assert_eq!(again["state"], "cancelled");
 }
 
+/// The policy refusal wins over the idempotent-observation fast path: a
+/// caller with no cancellation authority over an already-*settled* task
+/// hears the refusal, not the settled record — otherwise cancellation would
+/// silently look like it worked for a caller who never had standing to ask.
+#[test]
+fn a_settled_peer_refuses_cancellation_before_it_is_ever_observed() {
+    let fixture = Fixture::new();
+    let endpoint = ScriptedEndpoint::start(Vec::new());
+    let root = fixture.spawn_agent(&endpoint, "5m");
+
+    // Two children of `root`, so neither is the other's ancestor: one driven
+    // to settle, the other left resumable — its own state does not matter,
+    // only that it has no authority over its peer.
+    let mut settle = fixture.basis(&["spawn", "settle please", "--await", "--json", "-C"]);
+    settle.arg(&fixture.workspace).args([
+        "--base-url",
+        &endpoint.base_url,
+        "--model",
+        "test-model",
+        "--deadline",
+        "5m",
+    ]);
+    settle.env("BASIS_TASK_ID", &root);
+    let settled_output = run_bounded(settle);
+    assert!(
+        settled_output.status.success(),
+        "{}",
+        stderr(&settled_output)
+    );
+    let peer = json_stdout(&settled_output)["task"]
+        .as_str()
+        .expect("task handle")
+        .to_string();
+
+    let mut stand_by = fixture.basis(&["spawn", "stand by", "--resumable", "--json", "-C"]);
+    stand_by.arg(&fixture.workspace).args([
+        "--base-url",
+        &endpoint.base_url,
+        "--model",
+        "test-model",
+        "--deadline",
+        "5m",
+    ]);
+    stand_by.env("BASIS_TASK_ID", &root);
+    let caller_output = run_bounded(stand_by);
+    assert!(caller_output.status.success(), "{}", stderr(&caller_output));
+    let caller = json_stdout(&caller_output)["task"]
+        .as_str()
+        .expect("task handle")
+        .to_string();
+
+    let mut cancel = fixture.basis(&["cancel", &peer]);
+    cancel.env("BASIS_TASK_ID", &caller);
+    let refused = run_bounded(cancel);
+
+    assert_eq!(refused.status.code(), Some(1), "{}", stderr(&refused));
+    assert!(
+        stderr(&refused).contains("peer"),
+        "the policy refusal must reach the caller, not the settled record: {}",
+        stderr(&refused)
+    );
+}
+
 /// Spec acceptance: the kill window between a child's terminal and its
 /// parent's. Reconstructed directly as the on-disk state that window leaves —
 /// both completions recorded, neither terminal written — the next attach

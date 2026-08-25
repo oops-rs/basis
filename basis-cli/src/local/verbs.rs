@@ -257,11 +257,16 @@ pub(crate) async fn wait(args: WaitArgs) -> Result<ExitCode, ClientError> {
 pub(crate) async fn cancel(args: CancelArgs) -> Result<ExitCode, ClientError> {
     let handle = TaskHandle::parse(args.task.clone())?;
     let tasks = open_tasks(current_dir()?)?;
-    // Cancelling a settled task is an idempotent observation.
+    let caller = basis_tasks::current_task();
+    // The policy refusal wins over idempotent observation: a caller with no
+    // authority over the target hears about that even when it has already
+    // settled, rather than being shown the settled record as if the
+    // cancellation it had no standing to ask for had happened.
+    tasks.validate_cancel_target(caller.as_ref(), &handle)?;
     if let Some(terminal) = tasks.terminal(&handle)? {
         return render_result(&decorate_terminal(&args.task, terminal), args.json);
     }
-    tasks.cancel(&handle, basis_tasks::current_task().as_ref())?;
+    tasks.cancel(&handle, caller.as_ref())?;
     let payload = json!({
         "task": args.task,
         "state": "cancel_requested",

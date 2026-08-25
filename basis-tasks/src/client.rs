@@ -439,6 +439,21 @@ impl Tasks {
             .map_err(Error::new)
     }
 
+    /// Whether `caller` (or nobody, for a host outside any task) may
+    /// [`cancel`](Self::cancel) `target` — downward-only, ADR-0017's rule:
+    /// itself or a descendant, never an ancestor or a peer. `Err` names which
+    /// rule the target breaks; a caller that wants the refusal to win over an
+    /// idempotent observation of an already-settled target checks this
+    /// first, the way `basis cancel` does.
+    pub fn validate_cancel_target(
+        &self,
+        caller: Option<&TaskHandle>,
+        target: &TaskHandle,
+    ) -> Result<(), Error> {
+        policy::validate_cancel_target(&self.data, caller.map(TaskHandle::as_str), target.as_str())
+            .map_err(Error::new)
+    }
+
     /// Requests downward cancellation of `target` and every attached,
     /// non-terminal descendant. Idempotent: cancelling an already-settled
     /// task is a no-op, and this call never blocks on one settling.
