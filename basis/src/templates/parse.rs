@@ -10,6 +10,7 @@ use std::path::Path;
 use serde::Deserialize;
 
 use super::TemplateError;
+use crate::frontmatter;
 
 /// The keys basis reads. Unknown keys are left alone — a template written for a
 /// newer basis, or for another harness, should still load here.
@@ -29,36 +30,21 @@ pub struct Frontmatter {
 /// that is *usable* is the caller's question, since it is the caller that needs
 /// a description.
 pub fn split(path: &Path, raw: &str) -> Result<(Frontmatter, String), TemplateError> {
-    // A byte-order mark would keep the `---` from starting the file, turning
-    // frontmatter into prose and the failure into a confusing one.
-    let raw = raw.strip_prefix('\u{feff}').unwrap_or(raw);
+    // The delimiter scanning — BOM, CRLF, the unterminated case — is shared
+    // with the other frontmatter convention; see [`crate::frontmatter`].
+    let scanned = frontmatter::scan(raw).map_err(|frontmatter::Unterminated| {
+        TemplateError::InvalidFrontmatter {
+            path: path.to_path_buf(),
+            message: "missing closing frontmatter delimiter".to_string(),
+        }
+    })?;
 
-    let Some(opening) = raw
-        .strip_prefix("---\r\n")
-        .or_else(|| raw.strip_prefix("---\n"))
-    else {
-        return Ok((Frontmatter::default(), raw.to_string()));
+    let meta = match scanned.frontmatter {
+        None => Frontmatter::default(),
+        Some(block) => parse(path, block)?,
     };
 
-    let mut cursor = 0usize;
-    for segment in opening.split_inclusive('\n') {
-        if segment.trim_end_matches(['\n', '\r']) == "---" {
-            let meta = parse(path, &opening[..cursor])?;
-            return Ok((meta, opening[cursor + segment.len()..].to_string()));
-        }
-        cursor += segment.len();
-    }
-
-    // The closing delimiter can also be the last line, with no newline after
-    // it; then the prompt is empty rather than missing.
-    if opening[cursor..].trim_end_matches('\r') == "---" {
-        return Ok((parse(path, &opening[..cursor])?, String::new()));
-    }
-
-    Err(TemplateError::InvalidFrontmatter {
-        path: path.to_path_buf(),
-        message: "missing closing frontmatter delimiter".to_string(),
-    })
+    Ok((meta, scanned.body.to_string()))
 }
 
 fn parse(path: &Path, frontmatter: &str) -> Result<Frontmatter, TemplateError> {

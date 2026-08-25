@@ -67,6 +67,7 @@ pub mod error;
 pub mod event;
 mod expand;
 pub mod fingerprint;
+mod frontmatter;
 pub mod hooks;
 #[cfg(feature = "mcp")]
 pub mod mcp;
