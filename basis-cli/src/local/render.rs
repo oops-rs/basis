@@ -21,6 +21,7 @@ use std::{
 };
 
 use basis::{Event, RunUsage};
+use serde::Deserialize;
 use serde_json::Value;
 
 use crate::exit::{EXIT_BOUNDED, EXIT_FAILED, EXIT_OK};
@@ -135,20 +136,8 @@ fn write_event(
     out: &mut impl Write,
     err: &mut impl Write,
 ) -> io::Result<bool> {
-    // Typed, so a new `Event` variant is a compile-time question here rather
-    // than a string that quietly stops matching. An event this build cannot
-    // name — a journal written by a newer basis — is said on the progress
-    // stream instead of rendering as nothing.
-    let event: Event = match serde_json::from_value(event.clone()) {
-        Ok(event) => event,
-        Err(_) => {
-            writeln!(
-                err,
-                "basis: unrecognized event `{}`",
-                label(text(event, "type"), "untyped")
-            )?;
-            return Ok(false);
-        }
+    let Some(event) = typed(event, err)? else {
+        return Ok(false);
     };
 
     match event {
@@ -156,64 +145,6 @@ fn write_event(
             write!(out, "{text}")?;
             out.flush()?;
             return Ok(!text.is_empty());
-        }
-        Event::RunStarted {
-            model,
-            context_files,
-            ..
-        } => writeln!(
-            err,
-            "basis: {}, {} context file(s)",
-            label(&model, "unknown model"),
-            context_files.len()
-        )?,
-        // The queue event, not the start: it is the one that carries what the
-        // call is *for*, and a person reading progress wants the command, not
-        // the second announcement of the same call.
-        Event::ToolQueued {
-            tool_name, summary, ..
-        } => writeln!(
-            err,
-            "  · {}",
-            one_line(label(&summary, &tool_name), SUMMARY_BUDGET)
-        )?,
-        // Completions are what separate "the tool is still running" from "the
-        // model is thinking again", which is the question a silent terminal
-        // raises. A failing one is usually why the run went as it did, so it
-        // keeps its words.
-        //
-        // The name normally arrives; it is empty only for a result whose call
-        // this session never saw. Fall back to the id rather than printing a
-        // blank label.
-        Event::ToolCompleted {
-            tool_call_id,
-            tool_name,
-            summary,
-            is_error,
-        } => {
-            let name = label(&tool_name, &tool_call_id);
-            if is_error {
-                let summary = one_line(&summary, SUMMARY_BUDGET);
-                writeln!(err, "  ! {name}: {summary}")?;
-            } else {
-                writeln!(err, "  ✓ {name}")?;
-            }
-        }
-        // Both are pauses with a reason, and a terminal that does not name
-        // them looks stuck for as long as they last.
-        Event::CompactionStarted { .. } => writeln!(err, "basis: compacting the conversation")?,
-        Event::Retry {
-            error,
-            attempt,
-            max_attempts,
-            ..
-        } => writeln!(
-            err,
-            "basis: {} (retry {attempt}/{max_attempts})",
-            one_line(&error, SUMMARY_BUDGET)
-        )?,
-        Event::Notice { message, .. } | Event::Error { message, .. } => {
-            writeln!(err, "basis: {}", label(&message, "task event"))?;
         }
         // Two things at the finish line, on the two streams they belong to:
         // the newline that closes a streamed answer, and what the run spent.
@@ -225,14 +156,96 @@ fn write_event(
                 writeln!(err, "basis: {spent}")?;
             }
         }
-        // Deliberately silent at a terminal — reasoning deltas, per-round
-        // usage, permission bookkeeping — and, with the enum
-        // `#[non_exhaustive]`, the arm a future variant lands in. basis's own
-        // event.rs canary is the exhaustive match that forces this list to be
-        // revisited when one does.
-        _ => {}
+        event => {
+            if let Some(line) = progress_line(&event) {
+                writeln!(err, "{line}")?;
+            }
+        }
     }
     Ok(false)
+}
+
+/// The typed event, or `None` after saying why on the progress stream.
+///
+/// Typed, so a new `Event` variant is a compile-time question in
+/// [`progress_line`] rather than a string that quietly stops matching — and
+/// deserialized from the borrowed `Value` directly, because this runs once
+/// per streamed delta and a clone per token chunk would be pure overhead. An
+/// event this build cannot name — a journal written by a newer basis — is
+/// said instead of rendered as nothing.
+fn typed(event: &Value, err: &mut impl Write) -> io::Result<Option<Event>> {
+    match Event::deserialize(event) {
+        Ok(event) => Ok(Some(event)),
+        Err(_) => {
+            writeln!(
+                err,
+                "basis: unrecognized event `{}`",
+                label(text(event, "type"), "untyped")
+            )?;
+            Ok(None)
+        }
+    }
+}
+
+/// One progress line for stderr, or `None` for the events deliberately
+/// silent at a terminal — reasoning deltas, per-round usage, permission
+/// bookkeeping — and, with the enum `#[non_exhaustive]`, the arm a future
+/// variant lands in; [`Event::type_tag`] is the exhaustive match that forces
+/// this list to be revisited when one does.
+fn progress_line(event: &Event) -> Option<String> {
+    Some(match event {
+        Event::RunStarted {
+            model,
+            context_files,
+            ..
+        } => format!(
+            "basis: {}, {} context file(s)",
+            label(model, "unknown model"),
+            context_files.len()
+        ),
+        // The queue event, not the start: it is the one that carries what the
+        // call is *for*, and a person reading progress wants the command, not
+        // the second announcement of the same call.
+        Event::ToolQueued {
+            tool_name, summary, ..
+        } => format!(
+            "  · {}",
+            one_line(label(summary, tool_name), SUMMARY_BUDGET)
+        ),
+        // Completions separate "the tool is still running" from "the model is
+        // thinking again". A failing one is usually why the run went as it
+        // did, so it keeps its words; the name is empty only for a result
+        // whose call this session never saw, so the id stands in.
+        Event::ToolCompleted {
+            tool_call_id,
+            tool_name,
+            summary,
+            is_error,
+        } => {
+            let name = label(tool_name, tool_call_id);
+            if *is_error {
+                format!("  ! {name}: {}", one_line(summary, SUMMARY_BUDGET))
+            } else {
+                format!("  ✓ {name}")
+            }
+        }
+        // Both are pauses with a reason, and a terminal that does not name
+        // them looks stuck for as long as they last.
+        Event::CompactionStarted { .. } => "basis: compacting the conversation".to_string(),
+        Event::Retry {
+            error,
+            attempt,
+            max_attempts,
+            ..
+        } => format!(
+            "basis: {} (retry {attempt}/{max_attempts})",
+            one_line(error, SUMMARY_BUDGET)
+        ),
+        Event::Notice { message, .. } | Event::Error { message, .. } => {
+            format!("basis: {}", label(message, "task event"))
+        }
+        _ => return None,
+    })
 }
 
 /// What the run reported spending, in one line, or `None` when it reported
