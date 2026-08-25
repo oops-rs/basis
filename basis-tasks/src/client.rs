@@ -293,10 +293,16 @@ impl Tasks {
             .map_err(Error::new)?
             .unwrap_or_default();
         let chosen = match &requested {
-            // `named` refuses a handle from another workspace: that argument
-            // was never going to resolve here, whatever else settles.
+            // `named` tells a bad argument (malformed, or another workspace's
+            // handle) apart from a state fact (well-formed, this workspace,
+            // simply not recorded) — the same distinction `Error` carries.
             Some(handle) => {
-                tasks::named(&summaries, key, handle.as_str()).map_err(Error::invalid_reference)?
+                tasks::named(&summaries, key, handle.as_str()).map_err(|error| match error {
+                    tasks::NamedError::InvalidReference(message) => {
+                        Error::invalid_reference(message)
+                    }
+                    tasks::NamedError::NotFound(message) => Error::new(message),
+                })?
             }
             None => tasks::latest_conversation(&summaries).ok_or_else(|| {
                 Error::new("no task in this workspace has a conversation to continue")

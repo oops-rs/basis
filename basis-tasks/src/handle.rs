@@ -27,13 +27,18 @@ impl TaskHandle {
     /// The refusal is deliberately generic — "not a task handle" rather than
     /// a byte-by-byte diagnosis — because the grammar is opaque by design:
     /// there is nothing more specific a caller should learn about *why* a
-    /// string is not one.
+    /// string is not one. The error is [`Error::invalid_reference`]: a
+    /// malformed handle was never going to resolve, whatever else settles —
+    /// the same fact [`crate::tasks::named`] reports for a handle from
+    /// another workspace.
     pub fn parse(handle: impl Into<String>) -> Result<Self, Error> {
         let handle = handle.into();
         if valid_task_handle(&handle).is_some() {
             Ok(Self(handle))
         } else {
-            Err(Error::new(format!("`{handle}` is not a task handle")))
+            Err(Error::invalid_reference(format!(
+                "`{handle}` is not a task handle"
+            )))
         }
     }
 
@@ -101,6 +106,10 @@ mod tests {
         for bad in ["not-a-handle", "0123456789abcdef", "../../etc/passwd"] {
             let error = TaskHandle::parse(bad).expect_err("refused");
             assert!(error.to_string().contains("not a task handle"), "{error}");
+            assert!(
+                error.is_invalid_reference(),
+                "a malformed handle was never going to resolve: {error}"
+            );
         }
     }
 

@@ -238,6 +238,20 @@ pub(crate) fn latest_conversation(summaries: &[TaskSummary]) -> Option<&TaskSumm
         .find(|summary| !summary.agent_id.is_empty())
 }
 
+/// Why [`named`] refused a handle — the distinction its caller needs to map
+/// onto its own vocabulary ([`Error::invalid_reference`](crate::Error::invalid_reference)
+/// versus an ordinary failure, in `Tasks`; `ClientError::usage` versus
+/// `ClientError::new` in `basis-cli`).
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) enum NamedError {
+    /// Malformed grammar, or a handle from another workspace — an argument
+    /// that was never going to resolve here, whatever else settles.
+    InvalidReference(String),
+    /// Well-formed, this workspace, but no task recorded under it — a state
+    /// fact (the directory is gone, or was never there), not a bad argument.
+    NotFound(String),
+}
+
 /// The task a handle names, when it names one in this workspace.
 ///
 /// A handle from another workspace is refused rather than searched for: the
@@ -247,19 +261,21 @@ pub(crate) fn named<'a>(
     summaries: &'a [TaskSummary],
     workspace_key: &str,
     handle: &str,
-) -> Result<&'a TaskSummary, String> {
+) -> Result<&'a TaskSummary, NamedError> {
     let Some((key, _)) = valid_task_handle(handle) else {
-        return Err(format!("`{handle}` is not a task handle"));
+        return Err(NamedError::InvalidReference(format!(
+            "`{handle}` is not a task handle"
+        )));
     };
     if key != workspace_key {
-        return Err(format!(
+        return Err(NamedError::InvalidReference(format!(
             "task {handle} belongs to another workspace; list it where it was started"
-        ));
+        )));
     }
     summaries
         .iter()
         .find(|summary| summary.task == handle)
-        .ok_or_else(|| format!("no task directory for {handle}"))
+        .ok_or_else(|| NamedError::NotFound(format!("no task directory for {handle}")))
 }
 
 /// The prompt's first line, bounded.
@@ -415,15 +431,41 @@ mod tests {
 
         let error = named(&summaries, here, &elsewhere).expect_err("refused");
         assert!(
+            matches!(error, NamedError::InvalidReference(_)),
+            "{error:?}"
+        );
+        assert!(
             format!("{error:?}").contains("another workspace"),
             "{error:?}"
         );
 
         let malformed = named(&summaries, here, "not-a-handle").expect_err("refused");
+        assert!(
+            matches!(malformed, NamedError::InvalidReference(_)),
+            "{malformed:?}"
+        );
         assert!(format!("{malformed:?}").contains("not a task handle"));
 
         let found = named(&summaries, here, &summaries[0].task).expect("in this workspace");
         assert_eq!(found.task, summaries[0].task);
+    }
+
+    /// Well-formed and this workspace's key, but no such task is recorded —
+    /// a state fact, distinct from an argument that could never have
+    /// resolved: `resolve_continuation` maps this to an ordinary `Error`
+    /// rather than `invalid_reference`.
+    #[test]
+    fn a_handle_that_fits_the_grammar_but_names_nothing_is_not_found_not_invalid() {
+        let here = "0123456789abcdef";
+        let missing = format!("{here}/{:032x}", 99);
+        let summaries = vec![summary(&format!("{here}/{:032x}", 1), "succeeded", 1, "a")];
+
+        let error = named(&summaries, here, &missing).expect_err("refused");
+        assert!(matches!(error, NamedError::NotFound(_)), "{error:?}");
+        assert!(
+            format!("{error:?}").contains("no task directory"),
+            "{error:?}"
+        );
     }
 
     #[test]
