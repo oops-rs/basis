@@ -72,6 +72,7 @@ pub mod hooks;
 #[cfg(feature = "mcp")]
 pub mod mcp;
 pub mod memory;
+mod named_roots;
 mod paths;
 pub mod provider;
 pub mod run;

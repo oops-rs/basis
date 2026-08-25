@@ -4,7 +4,10 @@
 //! mistake it looks like. Across roots the same name is intent — an override —
 //! so the stronger root keeps it and the weaker one contributes everything
 //! else. That is mentra's rule for skills, and templates would be surprising
-//! if they layered differently.
+//! if they layered differently. The sort-then-merge machinery behind both
+//! rules is [`crate::named_roots`]'s, shared with [`crate::memory`]; what
+//! stays here is finding the candidate files (recursive, for namespacing) and
+//! turning one into a [`Template`].
 
 use std::{
     collections::BTreeMap,
@@ -15,21 +18,15 @@ use std::{
 use super::{
     NAMESPACE_SEPARATOR, TEMPLATE_EXTENSION, Template, TemplateError, TemplateSource, parse,
 };
-use crate::context::ContextScope;
+use crate::{context::ContextScope, named_roots};
 
 /// Loads every source, strongest first, and returns the result ordered by name.
 pub fn load_sources(sources: &[TemplateSource]) -> Result<Vec<Template>, TemplateError> {
-    let mut merged: BTreeMap<String, Template> = BTreeMap::new();
-
-    for source in sources {
-        for (name, template) in load_root(&source.path, &source.scope)? {
-            // `or_insert` and not `insert`: a name a stronger root already
-            // claimed is not overwritten by a weaker one.
-            merged.entry(name).or_insert(template);
-        }
-    }
-
-    Ok(merged.into_values().collect())
+    named_roots::merge_roots(
+        sources
+            .iter()
+            .map(|source| load_root(&source.path, &source.scope)),
+    )
 }
 
 /// Loads one root. A repeated name here is an error rather than a shadow.
@@ -39,56 +36,57 @@ fn load_root(
 ) -> Result<BTreeMap<String, Template>, TemplateError> {
     let mut relative_paths = Vec::new();
     collect(root, Path::new(""), &mut relative_paths)?;
-    // Sorted so the file blamed for a duplicate is stable across filesystems.
-    relative_paths.sort();
+    let paths: Vec<PathBuf> = relative_paths
+        .into_iter()
+        .map(|relative| root.join(relative))
+        .collect();
 
-    let mut templates: BTreeMap<String, Template> = BTreeMap::new();
+    named_roots::load_root(
+        paths,
+        |path| {
+            // `named_roots::load_root` only ever hands back what this
+            // function gave it — one of `root`'s own joins — so the prefix
+            // always strips; the fallback is defensive, never exercised.
+            let relative = path.strip_prefix(root).unwrap_or(path);
+            let name = name_for(relative, path)?;
 
-    for relative in relative_paths {
-        let path = root.join(&relative);
-        let name = name_for(&relative, &path)?;
+            let raw = fs::read_to_string(path).map_err(|source| TemplateError::ReadFile {
+                path: path.clone(),
+                source,
+            })?;
+            let (meta, body) = parse::split(path, &raw)?;
 
-        let raw = fs::read_to_string(&path).map_err(|source| TemplateError::ReadFile {
-            path: path.clone(),
-            source,
-        })?;
-        let (meta, body) = parse::split(&path, &raw)?;
+            let description = meta
+                .description
+                .as_deref()
+                .map(str::trim)
+                .filter(|value| !value.is_empty())
+                .ok_or_else(|| TemplateError::MissingDescription { path: path.clone() })?
+                .to_string();
 
-        let description = meta
-            .description
-            .as_deref()
-            .map(str::trim)
-            .filter(|value| !value.is_empty())
-            .ok_or_else(|| TemplateError::MissingDescription { path: path.clone() })?
-            .to_string();
-
-        if let Some(first) = templates.get(&name) {
-            return Err(TemplateError::DuplicateName {
-                name,
-                first_path: first.path.clone(),
-                second_path: path,
-            });
-        }
-
-        templates.insert(
-            name.clone(),
-            Template {
-                name,
-                description,
-                argument_hint: meta
-                    .argument_hint
-                    .as_deref()
-                    .map(str::trim)
-                    .filter(|value| !value.is_empty())
-                    .map(str::to_string),
-                body,
-                path,
-                scope: scope.clone(),
-            },
-        );
-    }
-
-    Ok(templates)
+            Ok((
+                name.clone(),
+                Template {
+                    name,
+                    description,
+                    argument_hint: meta
+                        .argument_hint
+                        .as_deref()
+                        .map(str::trim)
+                        .filter(|value| !value.is_empty())
+                        .map(str::to_string),
+                    body,
+                    path: path.clone(),
+                    scope: scope.clone(),
+                },
+            ))
+        },
+        |name, first_path, second_path| TemplateError::DuplicateName {
+            name,
+            first_path,
+            second_path,
+        },
+    )
 }
 
 /// Collects template files below `root`, as paths relative to it.

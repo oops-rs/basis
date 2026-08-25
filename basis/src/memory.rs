@@ -57,7 +57,7 @@ use std::{
 use serde::{Deserialize, Serialize};
 use thiserror::Error;
 
-use crate::{context::ContextScope, frontmatter};
+use crate::{context::ContextScope, frontmatter, named_roots};
 
 /// The directory name both roots share: `memory/` inside the global config
 /// directory, `memory/` beside the store. One constant because it is one
@@ -248,17 +248,15 @@ pub(crate) fn roots(config: &MemoryConfig, store_dir: Option<&Path>) -> Vec<Memo
 ///
 /// A root that is not a directory contributes nothing — nobody has written a
 /// memory there yet. Within one root a repeated name is the mistake it looks
-/// like; across roots it is intent, and the stronger root keeps the name.
+/// like; across roots it is intent, and the stronger root keeps the name —
+/// [`crate::named_roots`] is where both rules actually live, shared with
+/// [`crate::templates`].
 pub(crate) fn load(sources: &[MemorySource]) -> Result<Vec<Memory>, MemoryError> {
-    let mut merged: BTreeMap<String, Memory> = BTreeMap::new();
-
-    for source in sources {
-        for (name, memory) in load_root(&source.path, &source.scope)? {
-            merged.entry(name).or_insert(memory);
-        }
-    }
-
-    Ok(merged.into_values().collect())
+    named_roots::merge_roots(
+        sources
+            .iter()
+            .map(|source| load_root(&source.path, &source.scope)),
+    )
 }
 
 /// Loads one root, flat: memories name themselves in frontmatter, so nesting
@@ -287,23 +285,19 @@ fn load_root(root: &Path, scope: &ContextScope) -> Result<BTreeMap<String, Memor
             paths.push(path);
         }
     }
-    // Sorted so the file blamed for a duplicate is stable across filesystems.
-    paths.sort();
 
-    let mut memories: BTreeMap<String, Memory> = BTreeMap::new();
-    for path in paths {
-        let memory = read_memory(&path, scope)?;
-        if let Some(first) = memories.get(&memory.name) {
-            return Err(MemoryError::DuplicateName {
-                name: memory.name,
-                first_path: first.path.clone(),
-                second_path: path,
-            });
-        }
-        memories.insert(memory.name.clone(), memory);
-    }
-
-    Ok(memories)
+    named_roots::load_root(
+        paths,
+        |path| {
+            let memory = read_memory(path, scope)?;
+            Ok((memory.name.clone(), memory))
+        },
+        |name, first_path, second_path| MemoryError::DuplicateName {
+            name,
+            first_path,
+            second_path,
+        },
+    )
 }
 
 /// Reads one file's frontmatter into a [`Memory`]. The body is deliberately
