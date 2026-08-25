@@ -4,8 +4,10 @@
 //! the run: the spec says what a *run* may spend, this says what one call
 //! may, and [`bounded`] is the only place that distinction is resolved.
 
+use std::sync::Arc;
 use std::time::{Duration, SystemTime};
 
+use mentra::RoundStrategy;
 use mentra::runtime::{CancellationToken, ProviderRetry, RunOptions};
 
 use super::{Bounds, RunError};
@@ -17,7 +19,7 @@ use crate::budget::BudgetPool;
 /// reasoning as [`Event`](crate::Event) — basis owns its surface so mentra's
 /// internals can move without breaking basis's callers. Only the knobs a harness
 /// actually needs are exposed; the rest stay at mentra's defaults.
-#[derive(Debug, Clone, Default)]
+#[derive(Clone, Default)]
 pub struct TurnOptions {
     /// Trips to abandon the turn. The turn fails and is rolled back — what a
     /// client's stop button means.
@@ -59,6 +61,55 @@ pub struct TurnOptions {
     /// A turn drawing on a pool with nothing left is refused before its prompt
     /// is sent, with [`RunError::BudgetExhausted`](crate::RunError::BudgetExhausted).
     pub budget: Option<BudgetPool>,
+    /// A policy consulted at each round boundary of this one call — after a
+    /// committed tool round, and after a committed tool-free assistant message
+    /// before the turn returns it.
+    ///
+    /// The steering surface: at either boundary the strategy may proceed,
+    /// inject a corrective user turn and run another round, switch the model
+    /// or reasoning for the rounds that follow
+    /// ([`RoundAdjustment`](crate::RoundAdjustment)), or end the turn
+    /// gracefully. `None` — the default — reproduces the round loop exactly as
+    /// it runs without one; a strategy that always proceeds is inert.
+    ///
+    /// Per call, like the two tokens above and unlike
+    /// [`bounds`](Self::bounds): mentra binds a strategy to exactly one run so
+    /// its state cannot leak into another, and a configured fallback here
+    /// would quietly share one strategy's state across every turn of a
+    /// conversation. A caller that wants the same policy each turn attaches it
+    /// each turn.
+    ///
+    /// Every decision still passes the run's bounds: an injected round is a
+    /// normal round, refused like any other once a budget is spent or a
+    /// deadline passed. A strategy's *stop* is the reverse — an instruction,
+    /// not an allowance — so a turn it ends reports no
+    /// [`Bound`](crate::Bound), exactly as [`stop`](Self::stop) does, and the
+    /// caveat there about a stop that lands after a tool round applies to a
+    /// strategy's stop unchanged. `basis`'s `tests/round_strategy.rs` pins
+    /// both facts.
+    ///
+    /// `Arc` because that is how mentra carries it — the strategy is shared
+    /// with the runner, not copied — and a host usually holds its half to read
+    /// what the strategy observed after the turn.
+    pub round_strategy: Option<Arc<dyn RoundStrategy>>,
+}
+
+/// By hand because a strategy is opaque: presence is the only honest thing a
+/// debug line can say about a `dyn` policy, and deriving would instead forbid
+/// `Debug` on every struct that embeds these options.
+impl std::fmt::Debug for TurnOptions {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("TurnOptions")
+            .field("cancel", &self.cancel)
+            .field("stop", &self.stop)
+            .field("bounds", &self.bounds)
+            .field("budget", &self.budget)
+            .field(
+                "round_strategy",
+                &self.round_strategy.as_ref().map(|_| ".."),
+            )
+            .finish()
+    }
 }
 
 impl TurnOptions {
@@ -156,6 +207,16 @@ impl TurnOptions {
         }
     }
 
+    /// Steers this one call through `strategy`, consulted at each round
+    /// boundary. See [`round_strategy`](Self::round_strategy) for what a
+    /// strategy may decide and what it can never override.
+    pub fn with_round_strategy(self, strategy: Arc<dyn RoundStrategy>) -> Self {
+        Self {
+            round_strategy: Some(strategy),
+            ..self
+        }
+    }
+
     /// `provider_retry` and `retry_budget` are the *runtime's*, not this
     /// turn's: how patiently a failing provider is waited out describes the
     /// provider connection (ADR-0018), so both arrive from
@@ -173,6 +234,7 @@ impl TurnOptions {
             deadline: self.bounds.deadline.map(|after| SystemTime::now() + after),
             tool_budget: self.bounds.tool_budget,
             token_budget: self.bounds.token_budget,
+            round_strategy: self.round_strategy,
             provider_retry,
             retry_budget,
             ..RunOptions::default()
@@ -444,5 +506,85 @@ mod tests {
     #[test]
     fn a_turn_with_no_pool_is_always_drawable() {
         assert!(drawable(&TurnOptions::default().with_token_budget(0)).is_ok());
+    }
+
+    /// A strategy that proceeds everywhere — enough to prove carriage, since
+    /// what these tests assert is *which object* mentra receives, not what it
+    /// decides.
+    struct Quiet;
+
+    #[async_trait::async_trait]
+    impl RoundStrategy for Quiet {
+        async fn on_round(&self, _ctx: mentra::RoundContext<'_>) -> mentra::RoundDecision {
+            mentra::RoundDecision::proceed()
+        }
+    }
+
+    #[test]
+    fn the_strategy_a_caller_attached_is_the_one_mentra_receives() {
+        // Identity, not equality: mentra shares the strategy with the runner
+        // through the `Arc`, so a copy would be a second policy with its own
+        // state and the caller's half would observe nothing.
+        let strategy: Arc<dyn RoundStrategy> = Arc::new(Quiet);
+        let options = TurnOptions::default().with_round_strategy(Arc::clone(&strategy));
+
+        let run_options = as_mentra_would(options);
+
+        let installed = run_options
+            .round_strategy
+            .expect("the strategy must reach mentra");
+        assert!(Arc::ptr_eq(&installed, &strategy));
+    }
+
+    #[test]
+    fn a_turn_without_a_strategy_hands_mentra_none() {
+        // The default must reproduce today's round loop exactly: mentra's
+        // `None` is the built-in loop, and anything else here would change
+        // behavior for every caller that asked for nothing.
+        assert!(
+            as_mentra_would(TurnOptions::default())
+                .round_strategy
+                .is_none()
+        );
+    }
+
+    #[test]
+    fn a_strategy_rides_the_merge_and_the_configured_bounds_still_fill_in() {
+        // The same claim `bounded` makes for the tokens: attaching a per-call
+        // extra says nothing about limits, so the configured deadline must
+        // still arrive — and the strategy must survive the merge that fills it.
+        let configured = TurnOptions::default().with_deadline(Duration::from_secs(600));
+        let options = TurnOptions::default().with_round_strategy(Arc::new(Quiet));
+
+        let merged = bounded(options, &configured);
+
+        assert!(
+            merged.round_strategy.is_some(),
+            "the strategy still arrives"
+        );
+        assert_eq!(merged.bounds.deadline, Some(Duration::from_secs(600)));
+    }
+
+    #[test]
+    fn a_configured_strategy_is_not_adopted_by_a_plain_turn() {
+        // Per call, like the tokens and unlike the bounds: mentra binds a
+        // strategy's state to one run, so a configured fallback would share
+        // one strategy across every turn of a conversation — exactly the leak
+        // the upstream contract exists to prevent.
+        let configured = TurnOptions::default().with_round_strategy(Arc::new(Quiet));
+
+        let merged = bounded(TurnOptions::default(), &configured);
+
+        assert!(merged.round_strategy.is_none());
+    }
+
+    #[test]
+    fn attaching_a_strategy_returns_a_new_value_and_clears_nothing() {
+        let (base, _token) = TurnOptions::cancellable();
+        let armed = base.clone().with_round_strategy(Arc::new(Quiet));
+
+        assert!(base.round_strategy.is_none(), "the original is untouched");
+        assert!(armed.round_strategy.is_some());
+        assert!(armed.cancel.is_some(), "the token survives the strategy");
     }
 }
