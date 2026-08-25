@@ -275,7 +275,12 @@ holding `meta.json`, `inbox.json`, `events.jsonl` and — written last —
 `terminal.json`, whose existence is the completion signal. mentra's store lives
 beside them at `<data root>/workspaces/<key>/store`, with compaction snapshots
 in `transcripts/` under it
-([ADR-0019](adr/0019-the-filesystem-is-the-coordination-surface.md)).
+([ADR-0019](adr/0019-the-filesystem-is-the-coordination-surface.md)). Since
+0.7 that store is plain files too — `agents/`, `rules.json`, `runs.jsonl`
+under the store directory, mentra's file-backed layout
+([ADR-0023](adr/0023-basis-persists-to-files.md)) — and a `runtime.sqlite`
+found there is a basis ≤0.6 store this build refuses by name rather than
+reads, migrates, or shadows.
 
 ## Environment
 

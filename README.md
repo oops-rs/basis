@@ -326,6 +326,16 @@ every handle obeys across processes (in process, concurrency is the host's tokio
   attach after it lapses settles the task as failed with `stopped_by: deadline` instead of starting
   a run whose time is already spent.
 
+0.7 change note, for an upgrade from 0.6: conversations are plain files now, not SQLite. mentra
+0.21's file-backed store lands and basis links no database at all — the directory
+`with_store_dir` names (the CLI's `<data-dir>/workspaces/<key>/store`) holds `agents/`,
+`rules.json` and `runs.jsonl` instead of a `runtime.sqlite`, readable with ordinary tools
+(ADR-0023). The old database is **not migrated**, in either direction: continuing a pre-0.7
+conversation needs basis 0.6, and a store directory still holding one is refused by name —
+with the ways forward in the message — rather than quietly shadowed by an empty file store.
+New work proceeds by pointing `BASIS_DATA_DIR` (or `with_store_dir`) somewhere fresh, or by
+moving the old store directory aside.
+
 0.6 change note, for an upgrade from 0.4.x: the API got smaller and the knobs got real. `RunConfig`
 is gone — open a `Workspace` and mint a `RunSpec` (`basis::run(path, prompt)` covers the one-shot);
 the free `prepare`/`resume` went with it. `Supervisor` is gone — in-process fan-out is a
