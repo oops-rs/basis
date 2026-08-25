@@ -57,6 +57,12 @@ pub struct Reply {
 }
 
 /// One workspace's durable tasks.
+///
+/// `Clone` because a handful of this type's own `async fn`s need an owned
+/// copy to move onto a blocking thread (see `blocking`, below) — every field
+/// is already cheap to clone (a path, an `Arc`), so this costs nothing a
+/// caller could not already do by hand.
+#[derive(Clone)]
 pub struct Tasks {
     data: DataDir,
     workspace: PathBuf,
@@ -370,6 +376,10 @@ impl Tasks {
     /// [`wait_message`](Self::wait_message), as one call — the edge is
     /// validated before the enqueue, so a rejected wait cannot leave a
     /// message behind.
+    ///
+    /// **Threading:** the edge check and the enqueue are this call's own
+    /// synchronous prelude and run through this crate's own `blocking`
+    /// helper; the wait after it is `attach::wait_for_message`'s own.
     pub async fn ask(
         &self,
         handle: &TaskHandle,
@@ -377,11 +387,21 @@ impl Tasks {
         message: impl Into<String>,
         timeout: Duration,
     ) -> Result<Reply, Error> {
-        policy::validate_wait_edge(&self.data, caller.map(TaskHandle::as_str), handle.as_str())
+        let data = self.data.clone();
+        let target = handle.clone();
+        let caller = caller.cloned();
+        let message = message.into();
+        let message_id = blocking(move || {
+            policy::validate_wait_edge(
+                &data,
+                caller.as_ref().map(TaskHandle::as_str),
+                target.as_str(),
+            )
             .map_err(Error::new)?;
-        let paths = attach::resolve(&self.data, handle.as_str()).map_err(Error::new)?;
-        let message_id =
-            inbox::enqueue(&paths, handle.as_str(), message.into()).map_err(Error::new)?;
+            let paths = attach::resolve(&data, target.as_str()).map_err(Error::new)?;
+            inbox::enqueue(&paths, target.as_str(), message).map_err(Error::new)
+        })
+        .await?;
         let outcome = attach::wait_for_message(
             &self.data,
             handle.as_str(),
@@ -401,6 +421,11 @@ impl Tasks {
     /// --message` shape: repeatable without any policy check once the reply
     /// exists, and edge-validated only for the wait that has to actually
     /// happen.
+    ///
+    /// **Threading:** the dispatch check and the edge check are this call's
+    /// own synchronous prelude and run through this crate's own `blocking`
+    /// helper; the wait after it, when one is still needed, is
+    /// `attach::wait_for_message`'s own.
     pub async fn wait_message(
         &self,
         handle: &TaskHandle,
@@ -408,36 +433,56 @@ impl Tasks {
         message_id: &str,
         timeout: Duration,
     ) -> Result<WaitOutcome, Error> {
-        let paths = attach::resolve(&self.data, handle.as_str()).map_err(Error::new)?;
-        let messages = inbox::load(&paths).map_err(Error::new)?;
-        let terminal = state::read_terminal(&paths).map_err(Error::new)?;
-        if let Some(payload) = inbox::message_payload_for_dispatch(
-            handle.as_str(),
-            &messages,
-            message_id,
-            terminal.as_ref(),
-        )
-        .map_err(Error::new)?
-        {
-            return Ok(WaitOutcome::Terminal(payload));
-        }
-        policy::validate_wait_edge(&self.data, caller.map(TaskHandle::as_str), handle.as_str())
+        let data = self.data.clone();
+        let target = handle.clone();
+        let caller = caller.cloned();
+        let mid = message_id.to_string();
+        let resolved = blocking(move || -> Result<Option<Value>, Error> {
+            let paths = attach::resolve(&data, target.as_str()).map_err(Error::new)?;
+            let messages = inbox::load(&paths).map_err(Error::new)?;
+            let terminal = state::read_terminal(&paths).map_err(Error::new)?;
+            if let Some(payload) = inbox::message_payload_for_dispatch(
+                target.as_str(),
+                &messages,
+                &mid,
+                terminal.as_ref(),
+            )
+            .map_err(Error::new)?
+            {
+                return Ok(Some(payload));
+            }
+            policy::validate_wait_edge(
+                &data,
+                caller.as_ref().map(TaskHandle::as_str),
+                target.as_str(),
+            )
             .map_err(Error::new)?;
-        attach::wait_for_message(
-            &self.data,
-            handle.as_str(),
-            message_id,
-            timeout,
-            self.prompt_host.clone(),
-        )
-        .await
-        .map_err(Error::new)
+            Ok(None)
+        })
+        .await?;
+        match resolved {
+            Some(payload) => Ok(WaitOutcome::Terminal(payload)),
+            None => attach::wait_for_message(
+                &self.data,
+                handle.as_str(),
+                message_id,
+                timeout,
+                self.prompt_host.clone(),
+            )
+            .await
+            .map_err(Error::new),
+        }
     }
 
     /// Awaits the task's terminal record, attaching to drive it whenever the
     /// attach lock is free — repeatable: a settled task's record is read
     /// straight off disk, never rerun. `live`, when given, is shown every
     /// event while (and only while) this call is the one driving.
+    ///
+    /// **Threading:** the terminal read and the edge check are this call's
+    /// own synchronous prelude and run through this crate's own `blocking`
+    /// helper; the wait after it, when one is still needed, is this crate's
+    /// own `wait_unvalidated`'s.
     pub async fn wait(
         &self,
         handle: &TaskHandle,
@@ -445,13 +490,27 @@ impl Tasks {
         timeout: Duration,
         live: Option<Arc<dyn LiveSink>>,
     ) -> Result<WaitOutcome, Error> {
-        let paths = attach::resolve(&self.data, handle.as_str()).map_err(Error::new)?;
-        if let Some(terminal) = state::read_terminal(&paths).map_err(Error::new)? {
-            return Ok(WaitOutcome::Terminal(terminal));
-        }
-        policy::validate_wait_edge(&self.data, caller.map(TaskHandle::as_str), handle.as_str())
+        let data = self.data.clone();
+        let target = handle.clone();
+        let caller = caller.cloned();
+        let resolved = blocking(move || -> Result<Option<Value>, Error> {
+            let paths = attach::resolve(&data, target.as_str()).map_err(Error::new)?;
+            if let Some(terminal) = state::read_terminal(&paths).map_err(Error::new)? {
+                return Ok(Some(terminal));
+            }
+            policy::validate_wait_edge(
+                &data,
+                caller.as_ref().map(TaskHandle::as_str),
+                target.as_str(),
+            )
             .map_err(Error::new)?;
-        self.wait_unvalidated(handle, timeout, live).await
+            Ok(None)
+        })
+        .await?;
+        match resolved {
+            Some(terminal) => Ok(WaitOutcome::Terminal(terminal)),
+            None => self.wait_unvalidated(handle, timeout, live).await,
+        }
     }
 
     /// [`wait`](Self::wait) minus the edge check — never exposed on its own,
@@ -464,14 +523,25 @@ impl Tasks {
     /// to pass differently here would recompute what that call already
     /// knows — against a value that, if stale, could strand a task nobody
     /// is left validated to drive.
+    ///
+    /// **Threading:** the terminal read is this call's own synchronous
+    /// prelude and runs through [`blocking`]; the wait after it is
+    /// [`attach::wait_for_terminal`]'s own — see its doc for where every lock
+    /// and fs read *it* makes runs, model turns included.
     async fn wait_unvalidated(
         &self,
         handle: &TaskHandle,
         timeout: Duration,
         live: Option<Arc<dyn LiveSink>>,
     ) -> Result<WaitOutcome, Error> {
-        let paths = attach::resolve(&self.data, handle.as_str()).map_err(Error::new)?;
-        if let Some(terminal) = state::read_terminal(&paths).map_err(Error::new)? {
+        let data = self.data.clone();
+        let target = handle.clone();
+        let resolved = blocking(move || -> Result<Option<Value>, Error> {
+            let paths = attach::resolve(&data, target.as_str()).map_err(Error::new)?;
+            state::read_terminal(&paths).map_err(Error::new)
+        })
+        .await?;
+        if let Some(terminal) = resolved {
             return Ok(WaitOutcome::Terminal(terminal));
         }
         let ctx = self.ctx(live);
@@ -484,13 +554,21 @@ impl Tasks {
     /// result — `spawn --await`'s shape, and the one place a wait skips edge
     /// validation: see this crate's private `wait_unvalidated` for why that
     /// is safe only here.
+    ///
+    /// **Threading:** [`spawn`](Self::spawn) is a synchronous unit in its own
+    /// right — a directory scan, the continuation lock, `create_dir`,
+    /// `save_meta` — and runs through this crate's own `blocking` helper here
+    /// exactly as it would if this crate wrote it as its own
+    /// `blocking`-wrapped prelude; the wait after it is this crate's own
+    /// `wait_unvalidated`'s.
     pub async fn spawn_and_wait(
         &self,
         spec: RunSpec,
         timeout: Duration,
         live: Option<Arc<dyn LiveSink>>,
     ) -> Result<(TaskHandle, WaitOutcome), Error> {
-        let handle = self.spawn(spec)?;
+        let tasks = self.clone();
+        let handle = blocking(move || tasks.spawn(spec)).await?;
         let outcome = self.wait_unvalidated(&handle, timeout, live).await?;
         Ok((handle, outcome))
     }
@@ -592,6 +670,27 @@ fn duration_ms(duration: Duration) -> u64 {
     duration.as_millis().min(u128::from(u64::MAX)) as u64
 }
 
+/// Runs one bounded, synchronous unit of this crate's own blocking work —
+/// a lock acquisition, an fs read or write, [`Tasks::spawn`]'s own mint — off
+/// the caller's async executor and onto tokio's blocking thread pool (G7's
+/// pattern, `ca9ddcb`, applied at this crate's own boundary).
+///
+/// Every `pub async fn` on [`Tasks`] that has a synchronous prelude (an edge
+/// check, an enqueue, a terminal read, `spawn` itself) runs it through this
+/// rather than inline on the caller's task — see each method's own
+/// `**Threading:**` note for which part that is. [`attach::wait_for_terminal`]
+/// and [`attach::wait_for_message`] carry the other half of the same rule for
+/// the poll loop and the model turns it drives.
+async fn blocking<T, F>(work: F) -> Result<T, Error>
+where
+    F: FnOnce() -> Result<T, Error> + Send + 'static,
+    T: Send + 'static,
+{
+    tokio::task::spawn_blocking(work)
+        .await
+        .unwrap_or_else(|error| Err(Error::new(format!("background task failed: {error}"))))
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -667,6 +766,56 @@ mod tests {
             .spawn(RunSpec::new("hello").with_approve(Approve::Prompt))
             .expect_err("no PromptHost means Prompt can never be answered");
         assert!(error.to_string().contains("ask"), "{error}");
+    }
+
+    /// T3: `wait`'s own lock and fs work — the poll loop's `resolve`,
+    /// `read_terminal`, `try_attach`, all of it — runs off the tokio worker
+    /// thread this test's (deliberately single-threaded) executor is. A
+    /// concurrent, purely async ticker sharing that one worker keeps making
+    /// progress the whole time `wait`'s poll loop sees a contended attach
+    /// lock, which a `wait` running any of that work inline could not
+    /// guarantee: a `current_thread` runtime has exactly one worker, and
+    /// blocking it stalls everything else scheduled there.
+    #[tokio::test(flavor = "current_thread")]
+    async fn wait_does_not_block_the_executor_it_is_called_from() {
+        let (_data_dir, _workspace, tasks) = tasks();
+        let handle = tasks
+            .spawn(
+                RunSpec::new("hello")
+                    .with_approve(Approve::Always)
+                    // Fails fast, without a network call, the moment it is
+                    // actually driven — this test's own point is entirely
+                    // about the poll loop leading up to that, not the turn.
+                    .with_provider("not-a-provider"),
+            )
+            .expect("spawns");
+        let paths = attach::resolve(&tasks.data, handle.as_str()).expect("agent dir");
+        // Stands in for another process already driving the task: `wait`'s
+        // poll loop sees a contended attach lock every iteration for a
+        // controlled stretch.
+        let held = attach::try_attach(&paths).unwrap().expect("lock is free");
+
+        let ticks = Arc::new(std::sync::atomic::AtomicUsize::new(0));
+        let counter = Arc::clone(&ticks);
+        let ticker = async move {
+            for _ in 0..40 {
+                tokio::time::sleep(Duration::from_millis(5)).await;
+                counter.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+            }
+        };
+        let releaser = async {
+            tokio::time::sleep(Duration::from_millis(200)).await;
+            drop(held);
+        };
+        let waiter = tasks.wait(&handle, None, Duration::from_secs(5), None);
+        let (outcome, (), ()) = tokio::join!(waiter, ticker, releaser);
+        outcome.expect("wait completes once the lock frees");
+        assert!(
+            ticks.load(std::sync::atomic::Ordering::SeqCst) >= 30,
+            "a ticker sharing this runtime's one worker thread kept making \
+             progress while wait's poll loop was contended — proof that \
+             loop's lock probes and fs reads never held that thread"
+        );
     }
 
     /// T2(a): a task minted with `continues = Some(agent_id)` holds an open

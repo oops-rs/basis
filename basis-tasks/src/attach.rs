@@ -15,6 +15,42 @@
 //! constraint, with no resident supervisor to enforce it. The process attached
 //! to a parent supervises exactly its own subtree — it drives unfinished
 //! children whose locks are free and observes the ones with live executors.
+//!
+//! # Threading (T3, whole-wave review)
+//!
+//! Everything in this module that touches a lock or a file runs on tokio's
+//! blocking thread pool, never on a caller's own async worker thread — the
+//! same discipline G7 (`ca9ddcb`) applied to `basis`'s own memory discovery,
+//! at this crate's boundary instead. Concretely:
+//!
+//! - [`wait_for_terminal`] and [`wait_for_message`] are themselves plain
+//!   `async fn`s that never touch a lock or a file directly. Each poll
+//!   iteration's work — the terminal read, the non-blocking attach probe,
+//!   and (if it wins the attach) the drive itself — happens inside
+//!   [`poll_once`]/[`poll_message_once`], each one `tokio::task::spawn_blocking`
+//!   call. Between iterations, `tokio::time::sleep` is the only thing either
+//!   function awaits directly.
+//! - [`drive`]'s own model turns are real `async` work (network calls
+//!   through mentra), and they run *inside* that same blocking-pool thread:
+//!   `poll_once`/`poll_message_once` borrow a
+//!   [`Handle`](tokio::runtime::Handle) before spawning and call
+//!   [`Handle::block_on`] on it once attached, so `drive`, `run_model`,
+//!   `settle`, and `settle_children`'s own recursive `drive` calls all run
+//!   as one unit on that thread — none of their own lock or fs calls need a
+//!   second `spawn_blocking` of their own, and nesting one would be
+//!   redundant, not incorrect (they are already off any tokio worker
+//!   thread). Attempting the reverse — calling `Handle::block_on` from a
+//!   thread tokio is already using to drive async tasks — panics outright
+//!   ("cannot start a runtime from within a runtime"), which is exactly the
+//!   failure mode that makes this ordering load-bearing rather than
+//!   cosmetic.
+//! - [`is_attached`] (the one lock probe outside the poll loop, for a
+//!   timeout's own `attached` field) gets its own small `spawn_blocking` for
+//!   the same reason.
+//!
+//! `client.rs`'s own `blocking` helper carries the same rule for each public
+//! `async fn`'s synchronous prelude (an edge check, an enqueue, `spawn`
+//! itself) — see its doc.
 
 use std::{
     io,
@@ -77,30 +113,78 @@ pub enum WaitOutcome {
 /// panics): a duration too large to represent as a deadline is waited
 /// forever rather than refused, which is what asking for one that large
 /// means.
+///
+/// **Threading (G7, `ca9ddcb`, applied at this crate's own boundary):** this
+/// function itself never touches a lock or a file — [`poll_once`] and
+/// [`is_attached`] do that, each on its own `spawn_blocking` thread, so the
+/// `time::sleep` between iterations is the only thing this `async fn` ever
+/// awaits directly on the caller's executor.
 pub(crate) async fn wait_for_terminal(
     data: &DataDir,
     task: &str,
     timeout: Duration,
     ctx: &DriveContext,
 ) -> Result<WaitOutcome, String> {
-    let paths = resolve(data, task)?;
     let deadline = Instant::now().checked_add(timeout);
     loop {
-        if let Some(terminal) = read_terminal(&paths)? {
-            return Ok(WaitOutcome::Terminal(terminal));
-        }
-        if let Some(guard) = try_attach(&paths)?
-            && let Some(terminal) = drive(data, task, guard, ctx).await?
-        {
+        if let Some(terminal) = poll_once(data.clone(), task.to_string(), ctx.clone()).await? {
             return Ok(WaitOutcome::Terminal(terminal));
         }
         if deadline.is_some_and(|deadline| Instant::now() >= deadline) {
             return Ok(WaitOutcome::TimedOut {
-                attached: lock::is_held(&paths.attach_lock()),
+                attached: is_attached(data, task).await?,
             });
         }
         time::sleep(POLL).await;
     }
+}
+
+/// One [`wait_for_terminal`] iteration, entirely on a blocking thread: the
+/// terminal read, the non-blocking attach probe, and — if this call wins the
+/// attach — driving the task via a runtime [`Handle`](tokio::runtime::Handle)
+/// borrowed for exactly that. `drive`'s own `.await`s (the model turns) still
+/// run correctly under this: `Handle::block_on` drives them to completion on
+/// this same blocking-pool thread rather than a tokio worker thread, which is
+/// the whole point — nothing this reaches (`resolve`, `read_terminal`,
+/// `try_attach`, every lock and fs read `drive`'s own call tree makes,
+/// `settle_children`'s recursive `drive` calls included) ever runs on one.
+///
+/// `None` means the iteration made no progress (nothing to attach to yet, or
+/// [`drive`] itself backed off) — indistinguishable to the caller from "still
+/// running", which is exactly right: both just mean try again next poll.
+async fn poll_once(
+    data: DataDir,
+    task: String,
+    ctx: DriveContext,
+) -> Result<Option<Value>, String> {
+    let handle = tokio::runtime::Handle::current();
+    tokio::task::spawn_blocking(move || -> Result<Option<Value>, String> {
+        let paths = resolve(&data, &task)?;
+        if let Some(terminal) = read_terminal(&paths)? {
+            return Ok(Some(terminal));
+        }
+        match try_attach(&paths)? {
+            Some(guard) => handle.block_on(drive(&data, &task, guard, &ctx)),
+            None => Ok(None),
+        }
+    })
+    .await
+    .unwrap_or_else(|error| Err(format!("poll task: {error}")))
+}
+
+/// Whether a live executor currently holds `task`'s attach lock — the one
+/// lock probe [`wait_for_terminal`] and [`wait_for_message`] need outside
+/// their own poll loop, to answer a timeout's `attached` field. On a
+/// blocking thread, like every other lock touch in this module.
+async fn is_attached(data: &DataDir, task: &str) -> Result<bool, String> {
+    let data = data.clone();
+    let task = task.to_string();
+    tokio::task::spawn_blocking(move || -> Result<bool, String> {
+        let paths = resolve(&data, &task)?;
+        Ok(lock::is_held(&paths.attach_lock()))
+    })
+    .await
+    .unwrap_or_else(|error| Err(format!("check attach lock: {error}")))
 }
 
 /// Waits for one correlated message reply, attaching to produce it whenever
@@ -117,6 +201,10 @@ pub(crate) async fn wait_for_terminal(
 /// `timeout` is saturated into a deadline, as [`wait_for_terminal`]'s is: a
 /// duration too large to represent as a deadline waits forever rather than
 /// panicking or refusing.
+///
+/// **Threading:** as [`wait_for_terminal`] — [`poll_message_once`] carries
+/// every lock and fs touch this makes onto a blocking thread; this `async fn`
+/// only ever awaits that and, between iterations, `time::sleep`.
 pub(crate) async fn wait_for_message(
     data: &DataDir,
     task: &str,
@@ -124,30 +212,78 @@ pub(crate) async fn wait_for_message(
     timeout: Duration,
     prompt_host: Option<Arc<dyn crate::approve::PromptHost>>,
 ) -> Result<WaitOutcome, String> {
-    let paths = resolve(data, task)?;
     let deadline = Instant::now().checked_add(timeout);
     let ctx = DriveContext::new(None, prompt_host);
     loop {
-        let messages = inbox::load(&paths)?;
-        let terminal = read_terminal(&paths)?;
-        if let Some(payload) =
-            inbox::message_payload_for_dispatch(task, &messages, message_id, terminal.as_ref())?
+        match poll_message_once(
+            data.clone(),
+            task.to_string(),
+            message_id.to_string(),
+            ctx.clone(),
+        )
+        .await?
         {
-            return Ok(WaitOutcome::Terminal(payload));
-        }
-        if terminal.is_none()
-            && let Some(guard) = try_attach(&paths)?
-        {
-            let _ = drive(data, task, guard, &ctx).await?;
-            continue;
+            MessagePoll::Resolved(payload) => return Ok(WaitOutcome::Terminal(payload)),
+            // A turn ran (for this message or another) but did not resolve
+            // ours: recheck immediately, the way the pre-thread-split loop
+            // did with its own `continue` — no reason to sleep when there is
+            // fresh state to read.
+            MessagePoll::Drove => continue,
+            MessagePoll::Idle => {}
         }
         if deadline.is_some_and(|deadline| Instant::now() >= deadline) {
             return Ok(WaitOutcome::TimedOut {
-                attached: lock::is_held(&paths.attach_lock()),
+                attached: is_attached(data, task).await?,
             });
         }
         time::sleep(POLL).await;
     }
+}
+
+/// What one [`wait_for_message`] iteration found.
+enum MessagePoll {
+    /// The message's dispatch payload — a reply, or a terminal record tagged
+    /// with the message id.
+    Resolved(Value),
+    /// This iteration drove a turn (this task's, via [`drive`]) but it was
+    /// not the one the caller is waiting on; state may have changed, so the
+    /// next iteration should look again before waiting out the poll cadence.
+    Drove,
+    /// Nothing to read and nothing to attach to (or attaching was
+    /// contended); the ordinary "still waiting" case.
+    Idle,
+}
+
+/// One [`wait_for_message`] iteration, entirely on a blocking thread — see
+/// [`poll_once`], which this is the message-scoped twin of: it checks
+/// `message_id`'s own dispatch payload rather than only the task's terminal,
+/// and only attaches while the task itself has no terminal yet.
+async fn poll_message_once(
+    data: DataDir,
+    task: String,
+    message_id: String,
+    ctx: DriveContext,
+) -> Result<MessagePoll, String> {
+    let handle = tokio::runtime::Handle::current();
+    tokio::task::spawn_blocking(move || -> Result<MessagePoll, String> {
+        let paths = resolve(&data, &task)?;
+        let messages = inbox::load(&paths)?;
+        let terminal = read_terminal(&paths)?;
+        if let Some(payload) =
+            inbox::message_payload_for_dispatch(&task, &messages, &message_id, terminal.as_ref())?
+        {
+            return Ok(MessagePoll::Resolved(payload));
+        }
+        if terminal.is_none()
+            && let Some(guard) = try_attach(&paths)?
+        {
+            let _ = handle.block_on(drive(&data, &task, guard, &ctx))?;
+            return Ok(MessagePoll::Drove);
+        }
+        Ok(MessagePoll::Idle)
+    })
+    .await
+    .unwrap_or_else(|error| Err(format!("poll message: {error}")))
 }
 
 pub(crate) fn resolve(data: &DataDir, task: &str) -> Result<AgentPaths, String> {
