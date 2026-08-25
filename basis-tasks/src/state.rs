@@ -26,7 +26,11 @@ pub(crate) const MAX_MESSAGE: usize = 256 * 1024;
 pub(crate) const MAX_PROMPT: usize = 256 * 1024;
 pub(crate) const MAX_EVENT_BYTES: usize = 32 * 1024;
 pub(crate) const MAX_RESULT_BYTES: usize = 1024 * 1024;
-pub(crate) const MAX_TASKS: usize = 1024;
+/// How many tasks one workspace may hold at once. `spawn` refuses past it
+/// (archiving an old agent directory is the way out); the ownership-policy
+/// walks in `policy` and `attach::cancel_tree` are bounded by it too, so
+/// corrupt or cyclic metadata cannot loop forever.
+pub const MAX_TASKS: usize = 1024;
 /// Byte cap on one agent's `events.jsonl`, standing in for the daemon-era
 /// journal cap: on overflow a final notice line is appended and recording
 /// stops — a run is never failed for observability.
@@ -391,7 +395,13 @@ pub(crate) fn bounded_text(mut value: String, limit: usize) -> (String, bool) {
     (value, true)
 }
 
-pub(crate) fn now_ms() -> u64 {
+/// Milliseconds since the epoch, clamped rather than panicking on a clock
+/// before it. The one clock every durable record here is stamped with —
+/// `created_ms`, `updated_ms`, a cancel marker's `requested_ms`, a message's
+/// `created_ms` — and what a host rendering one of those alongside its own
+/// notion of "now" (`basis list`'s own age column, for one) should read
+/// `now` from, so the two clocks cannot disagree about the epoch.
+pub fn now_ms() -> u64 {
     SystemTime::now()
         .duration_since(UNIX_EPOCH)
         .unwrap_or_default()

@@ -6,7 +6,7 @@
 
 use std::process::ExitCode;
 
-use basis_tasks::{TaskSummary, Tasks};
+use basis_tasks::{TaskSummary, Tasks, now_ms};
 use serde_json::json;
 
 use crate::{cli::ListArgs, exit::EXIT_OK};
@@ -15,10 +15,11 @@ use super::{error::ClientError, render::print_hint};
 
 /// How many rows a bare `basis list` prints.
 ///
-/// A workspace holds up to 1024 tasks and a person scanning a terminal reads
-/// the last screenful, so the default is a screenful-ish and `--all` is the
-/// way to ask for the rest. Stated on stderr when it elides anything: a bound
-/// nobody is told about is indistinguishable from missing data.
+/// A workspace holds up to [`basis_tasks::MAX_TASKS`] tasks and a person
+/// scanning a terminal reads the last screenful, so the default is a
+/// screenful-ish and `--all` is the way to ask for the rest. Stated on
+/// stderr when it elides anything: a bound nobody is told about is
+/// indistinguishable from missing data.
 const DEFAULT_LIMIT: usize = 50;
 
 pub(crate) fn list(args: ListArgs) -> Result<ExitCode, ClientError> {
@@ -93,14 +94,6 @@ fn age(since_ms: u64, now_ms: u64) -> String {
     } else {
         format!("{}d ago", seconds / 86_400)
     }
-}
-
-fn now_ms() -> u64 {
-    std::time::SystemTime::now()
-        .duration_since(std::time::UNIX_EPOCH)
-        .unwrap_or_default()
-        .as_millis()
-        .min(u128::from(u64::MAX)) as u64
 }
 
 #[cfg(test)]
