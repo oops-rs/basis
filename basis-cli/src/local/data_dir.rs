@@ -126,6 +126,26 @@ impl DataDir {
             Err(error) => Err(format!("read workspace record: {error}")),
         }
     }
+
+    /// The mentra store directory a run against `workspace` should use —
+    /// [`store_dir`](Self::store_dir) for whichever key
+    /// [`ensure_workspace`](Self::ensure_workspace) resolves.
+    ///
+    /// What a fresh workspace path resolves a `RuntimeBuilder::with_store_dir`
+    /// to (whole-wave review, G4): `task_runtime` reaches the same directory
+    /// through [`store_dir`](Self::store_dir) directly, because it already
+    /// has a validated task handle's key and re-deriving it would be a second
+    /// key-derivation to keep in step with this one. `basis`'s one-shot
+    /// route has no handle yet, so it calls this instead — the point being
+    /// that a `basis "<prompt>"` and a `basis spawn ...` against the same
+    /// repository resolve to one store directory, and, since memory's
+    /// workspace root derives beside it, one memory root too, rather than the
+    /// one-shot path falling back to mentra's process-cwd default and seeing
+    /// neither.
+    pub(crate) fn resolve_store_dir(&self, workspace: &Path) -> Result<PathBuf, String> {
+        let key = self.ensure_workspace(workspace)?;
+        Ok(self.store_dir(&key))
+    }
 }
 
 /// Every per-agent file, from one directory.
@@ -328,6 +348,41 @@ mod tests {
             fs::set_permissions(&nested, fs::Permissions::from_mode(0o700)).unwrap();
         }
         assert_eq!(fs::read(&path).unwrap(), contents);
+    }
+
+    #[test]
+    fn resolve_store_dir_is_ensure_workspaces_store_dir() {
+        // G4: this is the one call basis's one-shot route makes instead of
+        // reaching for `Runtime::builder()`'s default — it has to land on
+        // exactly what `store_dir(key)` names for the key `ensure_workspace`
+        // resolves, which is the same directory `task_runtime` reaches
+        // through a validated handle's key.
+        let dir = tempfile::tempdir().unwrap();
+        let data = DataDir::from_path(dir.path()).unwrap();
+        let repo = tempfile::tempdir().unwrap();
+
+        let key = data.ensure_workspace(repo.path()).expect("first use");
+        let resolved = data
+            .resolve_store_dir(repo.path())
+            .expect("resolves on a second call too");
+
+        assert_eq!(resolved, data.store_dir(&key));
+    }
+
+    #[test]
+    fn resolve_store_dir_is_stable_across_calls_for_the_same_workspace() {
+        let dir = tempfile::tempdir().unwrap();
+        let data = DataDir::from_path(dir.path()).unwrap();
+        let repo = tempfile::tempdir().unwrap();
+
+        let first = data.resolve_store_dir(repo.path()).expect("first call");
+        let second = data.resolve_store_dir(repo.path()).expect("second call");
+
+        assert_eq!(
+            first, second,
+            "a basis \"<prompt>\" and a basis spawn against the same repository \
+             must land on one store, not two"
+        );
     }
 
     #[test]

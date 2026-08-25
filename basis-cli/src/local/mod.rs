@@ -17,6 +17,7 @@ mod state;
 mod tasks;
 mod verbs;
 
+pub(crate) use data_dir::DataDir;
 pub(crate) use error::ClientError;
 pub(crate) use tasks::list;
 pub(crate) use verbs::{ask, cancel, has_current_task, inbox, send, spawn, wait, watch};
