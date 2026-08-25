@@ -27,6 +27,7 @@ configuration would be hiding it from the person who put it there.
 | Declared tools | `.basis/tools.json` | `tools.json` | workspace shadows global by tool name |
 | Subprocess hooks | `.basis/hooks.json` | `hooks.json` | both run, global first; the first refusal wins; each entry names its event |
 | MCP servers | `.mcp.json` | `mcp.json` | client-supplied → workspace → global, by server name |
+| Memories | `memory/` beside the runtime's store dir | `<config dir>/memory/` | workspace shadows global by memory name |
 
 A missing file is never an error. A file that exists and cannot be read or
 parsed always is: the operator wrote it meaning something, and a silently
@@ -226,6 +227,30 @@ keys are tolerated — the file is shared with other agents. `${VAR}` expands. A
 that exists but names no `mcpServers` is an error, because a typo would
 otherwise disable every server silently. An ACP client's `session/new` servers
 outrank both files.
+
+### Memory files
+
+Memory is files, not a subsystem: one `.md` per memory, YAML frontmatter
+naming `name`, a one-line `description`, and `type` (`user`, `feedback`,
+`project`, or `reference`), body free-form. Two roots: `memory/` in the global
+config directory, and — when the runtime keeps its history in a named
+directory (`RuntimeBuilder::with_store_dir`, which the CLI always does) — the
+sibling `memory/` beside that store, so the CLI's memories live at
+`<data root>/workspaces/<key>/memory`. Ephemeral or default history names no
+directory, so there is no per-workspace root then.
+`WorkspaceBuilder::with_memory` overrides either root or disables discovery.
+
+At `Workspace::open` each file's frontmatter is read — never the body — and an
+index (name, one line, path) is appended to the system prompt after the
+context documents; `SystemPrompt::Replace` removes it with everything else,
+and zero memories render no block at all. There is no memory tool and no
+database: recall is `read`, search is `grep`, writing or revising a memory is
+`write` and `edit`, and on a private runtime both roots join the file tools'
+allowed read and write roots so those calls reach them (a shared runtime's
+policy is fixed at build and cannot carry them, so writes there are refused).
+A memory file that exists and cannot be parsed fails the open, naming the
+file. Memories are not named in `run_started` — the index is prompt, not
+schema.
 
 ## Directories basis writes
 

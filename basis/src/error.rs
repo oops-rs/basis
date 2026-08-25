@@ -80,6 +80,9 @@ pub enum RunError {
     #[error("failed to load prompt templates: {0}")]
     Templates(#[from] crate::templates::TemplateError),
 
+    #[error("failed to load memories: {0}")]
+    Memory(#[from] crate::memory::MemoryError),
+
     #[error("failed to load hooks: {0}")]
     Hooks(#[from] crate::hooks::HookConfigError),
 

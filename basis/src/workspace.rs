@@ -67,6 +67,7 @@ use crate::{
     error::RunError,
     event::ContextFile,
     fingerprint::{self, Snapshot},
+    memory::Memory,
     run::{Effort, LoadedSkill, PreparedRun, RunContext},
     runtime::{Runtime, dispatch::HookRegistration},
     templates::Template,
@@ -109,6 +110,9 @@ pub struct Workspace {
     /// with.
     identifier: String,
     context: WorkspaceContext,
+    /// The memories discovered at open, frontmatter only, name-ordered after
+    /// shadowing. What the agent config's index block was rendered from.
+    memories: Vec<Memory>,
     /// Built once from the context, cloned per run: none of its inputs vary.
     agent: AgentConfig,
     skills_dirs: Vec<PathBuf>,
@@ -142,6 +146,7 @@ impl std::fmt::Debug for Workspace {
             .field("model", &self.model.id)
             .field("config_files", &self.config.files)
             .field("context_files", &self.context.documents().len())
+            .field("memories", &self.memories.len())
             .field("skills", &self.skills.len())
             .field("templates", &self.templates.len())
             .field("mcp_servers", &self.mcp_servers)
@@ -272,6 +277,17 @@ impl Workspace {
     /// The context documents discovered at open, weakest precedence first.
     pub fn context(&self) -> &WorkspaceContext {
         &self.context
+    }
+
+    /// The memories discovered at open, name-ordered, a workspace memory
+    /// shadowing a global one of the same name.
+    ///
+    /// Frontmatter only: the index in the system prompt is what a memory
+    /// costs by default, and the body stays on disk for the model — or a host
+    /// showing its user what the agent remembers — to read on demand. See
+    /// [`crate::memory`] for the convention.
+    pub fn memories(&self) -> &[Memory] {
+        &self.memories
     }
 
     /// The skills this workspace registered on the runtime, after layering.

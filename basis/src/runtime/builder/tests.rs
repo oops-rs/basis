@@ -1185,3 +1185,131 @@ fn a_config_beats_the_environment_by_being_asked_for() {
         "auto-detection is skipped exactly when a provider is requested"
     );
 }
+
+/// The memory half of the private policy: the roots sit outside the
+/// workspace, and the write is exercised through a real session rather than
+/// asserted against the policy struct, because mentra's authorization is
+/// `pub(crate)` and what basis promises is the tool call landing.
+#[tokio::test]
+async fn a_write_tool_reaches_the_memory_root_the_policy_names() {
+    use mentra::{
+        ContentBlock,
+        agent::{AgentConfig, WorkspaceConfig},
+        test::{MockRuntime, MockToolCall},
+    };
+
+    let workspace = tempfile::tempdir().expect("tempdir");
+    let memory_root = tempfile::tempdir().expect("tempdir");
+    let target = memory_root.path().join("deploy-notes.md");
+
+    let mock = MockRuntime::builder()
+        .model("mock-model", "openai")
+        .with_policy(workspace_policy(
+            workspace.path(),
+            ShellAccess::Granted,
+            &[memory_root.path().to_path_buf()],
+        ))
+        .tool_calls(vec![MockToolCall::new(
+            "files",
+            serde_json::json!({
+                "operations": [{
+                    "op": "create",
+                    "path": target,
+                    "content": "---\nname: deploy-notes\ndescription: d\ntype: project\n---\nbody\n",
+                }],
+            }),
+        )])
+        .text("wrote it")
+        .build()
+        .expect("the mock runtime builds");
+
+    let mut session = mock
+        .runtime()
+        .create_session_with_config(
+            "memory-write",
+            mock.model(),
+            AgentConfig {
+                workspace: WorkspaceConfig {
+                    base_dir: workspace.path().to_path_buf(),
+                    ..Default::default()
+                },
+                ..Default::default()
+            },
+        )
+        .expect("session");
+
+    session
+        .append_turn(vec![ContentBlock::Text {
+            text: "keep a note".to_string(),
+        }])
+        .await
+        .expect("the scripted turn runs");
+
+    assert!(
+        target.exists(),
+        "a memory root the policy names must be writable through the file tools"
+    );
+}
+
+/// The control: the same write with no memory roots stays refused, so the
+/// grant above is the roots' doing and not a loosened workspace bound.
+#[tokio::test]
+async fn without_the_roots_the_same_write_is_refused() {
+    use mentra::{
+        ContentBlock,
+        agent::{AgentConfig, WorkspaceConfig},
+        test::{MockRuntime, MockToolCall},
+    };
+
+    let workspace = tempfile::tempdir().expect("tempdir");
+    let elsewhere = tempfile::tempdir().expect("tempdir");
+    let target = elsewhere.path().join("deploy-notes.md");
+
+    let mock = MockRuntime::builder()
+        .model("mock-model", "openai")
+        .with_policy(workspace_policy(
+            workspace.path(),
+            ShellAccess::Granted,
+            &[],
+        ))
+        .tool_calls(vec![MockToolCall::new(
+            "files",
+            serde_json::json!({
+                "operations": [{
+                    "op": "create",
+                    "path": target,
+                    "content": "outside every root",
+                }],
+            }),
+        )])
+        .text("tried")
+        .build()
+        .expect("the mock runtime builds");
+
+    let mut session = mock
+        .runtime()
+        .create_session_with_config(
+            "memory-write-refused",
+            mock.model(),
+            AgentConfig {
+                workspace: WorkspaceConfig {
+                    base_dir: workspace.path().to_path_buf(),
+                    ..Default::default()
+                },
+                ..Default::default()
+            },
+        )
+        .expect("session");
+
+    session
+        .append_turn(vec![ContentBlock::Text {
+            text: "keep a note".to_string(),
+        }])
+        .await
+        .expect("the scripted turn still completes");
+
+    assert!(
+        !target.exists(),
+        "a path outside the workspace and every root must stay refused"
+    );
+}
