@@ -609,7 +609,8 @@ directly:
 
 ```toml
 [dependencies]
-basis-tasks = "0.1"   # unpublished so far — a git or path dependency until it isn't
+basis-tasks = "0.6"   # joins the workspace version at the next release — a git or path
+                       # dependency until then, same as basis-acp and basis were before 0.6.0
 ```
 
 ```rust

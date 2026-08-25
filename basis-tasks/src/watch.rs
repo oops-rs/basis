@@ -24,8 +24,13 @@ use crate::{Error, events::EventTail};
 /// host that would rather match on a type.
 #[derive(Debug, Clone)]
 pub struct WatchRecord {
-    /// This record's sequence number, monotonic within one task.
-    pub seq: u64,
+    /// This record's sequence number, monotonic within one task — `None`
+    /// only for a line whose `seq` is missing or not a number, which no
+    /// writer this crate ever produces but a hand-edited or foreign-written
+    /// journal could. Never silently `0`: that is a real sequence number
+    /// (the journal's first line), and reporting it for a line that carried
+    /// none would be indistinguishable from that line.
+    pub seq: Option<u64>,
     /// The exact JSON on disk.
     pub raw: Value,
     /// `raw`, typed — `None` for a record a newer basis wrote with a `type`
@@ -54,13 +59,40 @@ impl EventCursor {
             .tail
             .poll()
             .map_err(|error| Error::new(format!("read task events: {error}")))?;
-        Ok(records
-            .into_iter()
-            .map(|raw| {
-                let seq = raw.get("seq").and_then(Value::as_u64).unwrap_or_default();
-                let event = basis::Event::deserialize(&raw).ok().map(Box::new);
-                WatchRecord { seq, raw, event }
-            })
-            .collect())
+        Ok(records.into_iter().map(build_record).collect())
+    }
+}
+
+/// A raw journal line becomes a [`WatchRecord`]. `events::EventTail` already
+/// refuses to yield a line whose `seq` does not parse — this crate's own
+/// `WatchRecord::seq` still reads it back independently rather than trusting
+/// that filter to hold forever, because a public type's contract should not
+/// depend on an internal module's current strictness.
+fn build_record(raw: Value) -> WatchRecord {
+    let seq = raw.get("seq").and_then(Value::as_u64);
+    let event = basis::Event::deserialize(&raw).ok().map(Box::new);
+    WatchRecord { seq, raw, event }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn a_record_with_a_numeric_seq_carries_it() {
+        let record = build_record(serde_json::json!({"seq": 3, "type": "notice", "message": "hi"}));
+        assert_eq!(record.seq, Some(3));
+    }
+
+    /// Never silently `0`: that is a real sequence number, the journal's
+    /// first line, and reporting it for a line that carried none would be
+    /// indistinguishable from that line.
+    #[test]
+    fn a_record_with_no_seq_is_none_not_zero() {
+        let record = build_record(serde_json::json!({"type": "notice", "message": "hi"}));
+        assert_eq!(record.seq, None);
+
+        let not_a_number = build_record(serde_json::json!({"seq": "not-a-number"}));
+        assert_eq!(not_a_number.seq, None);
     }
 }
