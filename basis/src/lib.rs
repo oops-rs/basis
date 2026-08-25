@@ -37,10 +37,10 @@
 //! # }
 //! ```
 //!
-//! [`run`](run()) and its neighbours are the one-prompt shape: a
-//! [`RunConfig`] in, a report out, with a workspace opened and dropped around
-//! it. They are wrappers over the same path — [`RunConfig::split`] is the seam
-//! — so nothing behaves differently for having gone through one.
+//! [`run`](run()) and [`run_with_approver`] are the one-prompt shape: a path
+//! and a prompt in, a report out, with a workspace opened and dropped around
+//! it. They are wrappers over the same open-and-prepare — so nothing behaves
+//! differently for having gone through one.
 //!
 //! [`Runtime`] is the process's shape (ADR-0018), and only the N-repository
 //! host sees it: what changes when the host changes — provider and credential,
@@ -63,11 +63,11 @@ pub mod budget;
 pub mod compaction;
 pub mod config;
 pub mod context;
+pub mod error;
 pub mod event;
 mod expand;
 pub mod fingerprint;
 pub mod hooks;
-pub mod lifecycle;
 #[cfg(feature = "mcp")]
 pub mod mcp;
 mod paths;
@@ -104,6 +104,7 @@ pub use context::{
     ContextConfig, ContextDocument, ContextError, ContextScope, DEFAULT_CONTEXT_FALLBACK_FILE,
     DEFAULT_CONTEXT_FILE, SystemPrompt, WorkspaceContext,
 };
+pub use error::RunError;
 pub use event::{
     EVENT_SCHEMA_VERSION, Event, EventLine, JsonlWriter, Mutability, RunOutcome, SkillSummary,
     TemplateSummary,
@@ -117,18 +118,14 @@ pub use hooks::{
     HookResponse, HookRunner, HookSpec, HooksConfig, HooksSource, Interceptor, InterceptorError,
     OnFailure,
 };
-pub use lifecycle::{
-    Cancellation, LifecycleError, Supervisor, TaskContext, TaskHandle, TaskId, TaskState, WaitError,
-};
 #[cfg(feature = "mcp")]
 pub use mcp::{
     DEFAULT_GLOBAL_MCP_FILE, DEFAULT_WORKSPACE_MCP_FILE, McpConfig, McpError, McpServer, McpSource,
 };
 pub use run::{
-    Bound, CancellationToken, CollectingSink, Compacted, Effort, EventFanIn, EventSink, FnSink,
-    MergedEvents, NullSink, OutputReport, OutputSpec, PreparedRun, PromptPart, RunConfig,
-    RunContext, RunError, RunReport, RunUsage, TaggedEvent, TaggedSink, TurnOptions, resume, run,
-    run_with_approver,
+    Bound, Bounds, CancellationToken, CollectingSink, Compacted, Effort, EventFanIn, EventSink,
+    FnSink, MergedEvents, NullSink, OutputReport, OutputSpec, PreparedRun, PromptPart, RunContext,
+    RunReport, RunUsage, TaggedEvent, TaggedSink, TurnOptions, run, run_with_approver,
 };
 pub use runtime::{Runtime, RuntimeBuilder};
 pub use shell::ShellAccess;

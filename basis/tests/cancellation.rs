@@ -22,7 +22,7 @@ use std::{
 use async_trait::async_trait;
 use basis::{
     ApprovalAnswer, ApprovalDecision, ApprovalRequest, Approver, CancellationToken, CollectingSink,
-    Event, RunConfig, RunOutcome, TurnOptions, approval::ApprovalGate, run::prepare_with_session,
+    Event, RunOutcome, TurnOptions, approval::ApprovalGate, run::prepare_with_session,
 };
 use mentra::{
     BuiltinProvider, ContentBlock, ModelInfo, Role, Runtime, RuntimePolicy, Session,
@@ -133,12 +133,12 @@ fn workspace() -> tempfile::TempDir {
     dir
 }
 
-fn config(workspace: &Path) -> RunConfig {
-    RunConfig::new(workspace, "make a file").with_context(basis::ContextConfig {
+fn context() -> basis::ContextConfig {
+    basis::ContextConfig {
         file_name: "AGENTS.md".to_string(),
         global_dir: None,
         walk_parents: false,
-    })
+    }
 }
 
 /// Trips the token the moment it is consulted, then allows the call — a person
@@ -163,7 +163,9 @@ async fn a_turn_cancelled_mid_flight_reports_a_failed_run() {
     let (runtime, model) = scripted_write(dir.path());
     let mut prepared = prepare_with_session(
         session(&runtime, dir.path(), model),
-        &config(dir.path()),
+        dir.path(),
+        "make a file",
+        &context(),
         "openai",
         "scripted-model",
     )
@@ -224,7 +226,9 @@ async fn a_token_already_tripped_stops_the_turn_before_it_starts() {
     let (runtime, model) = scripted_write(dir.path());
     let mut prepared = prepare_with_session(
         session(&runtime, dir.path(), model),
-        &config(dir.path()),
+        dir.path(),
+        "make a file",
+        &context(),
         "openai",
         "scripted-model",
     )
@@ -251,13 +255,16 @@ async fn a_token_already_tripped_stops_the_turn_before_it_starts() {
 
 #[tokio::test]
 async fn a_second_turn_is_unaffected_by_the_first_turns_token() {
-    // A token belongs to one call, which is why it never lived on `RunConfig`.
+    // A token belongs to one call, which is why it never lived on the run's
+    // configuration.
     // If it leaked onto the run, the follow-up prompt would die on arrival.
     let dir = workspace();
     let (runtime, model) = scripted_write(dir.path());
     let mut prepared = prepare_with_session(
         session(&runtime, dir.path(), model),
-        &config(dir.path()),
+        dir.path(),
+        "make a file",
+        &context(),
         "openai",
         "scripted-model",
     )
@@ -320,7 +327,9 @@ async fn a_graceful_stop_after_a_tool_round_keeps_its_work_but_reports_failure()
     let (runtime, model) = scripted_write(dir.path());
     let mut prepared = prepare_with_session(
         session(&runtime, dir.path(), model),
-        &config(dir.path()),
+        dir.path(),
+        "make a file",
+        &context(),
         "openai",
         "scripted-model",
     )

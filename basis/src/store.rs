@@ -76,7 +76,7 @@ use mentra::{
     runtime::{SqliteRuntimeStore, VolatileRuntimeStore},
 };
 
-use crate::run::RunError;
+use crate::error::RunError;
 
 /// Distinguishes basis's rows from every other mentra program sharing the store.
 const IDENTIFIER_PREFIX: &str = "basis:";

@@ -9,11 +9,11 @@
 
 use std::path::{Path, PathBuf};
 
+use basis::ContextScope;
 use basis::templates::{
     self, DEFAULT_GLOBAL_TEMPLATES_DIR, DEFAULT_WORKSPACE_TEMPLATES_DIR, TemplateError,
     TemplatesConfig,
 };
-use basis::{ContextScope, RunConfig};
 
 /// A config with no global root unless the test asks for one, so nothing on the
 /// developer's own machine can change an outcome here.
@@ -148,32 +148,6 @@ fn a_template_without_a_description_is_rejected() {
     let error = templates::load(tmp.path(), &config(None)).expect_err("rejected");
 
     assert!(matches!(error, TemplateError::MissingDescription { .. }));
-}
-
-#[test]
-fn the_run_config_defaults_to_the_workspace_convention() {
-    let config = RunConfig::new("/repo", "prompt");
-
-    assert_eq!(
-        config.templates.workspace_subdir,
-        PathBuf::from(DEFAULT_WORKSPACE_TEMPLATES_DIR)
-    );
-}
-
-#[test]
-fn setting_templates_on_a_run_config_returns_a_new_value() {
-    let base = RunConfig::new("/repo", "prompt");
-    let derived = base.clone().with_templates(TemplatesConfig {
-        workspace_subdir: PathBuf::from("prompts"),
-        global_dir: None,
-    });
-
-    assert_eq!(
-        base.templates.workspace_subdir,
-        PathBuf::from(DEFAULT_WORKSPACE_TEMPLATES_DIR),
-        "the original must be untouched"
-    );
-    assert_eq!(derived.templates.workspace_subdir, PathBuf::from("prompts"));
 }
 
 #[test]

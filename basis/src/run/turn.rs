@@ -1,15 +1,14 @@
 //! What one turn may spend, and how it can be stopped.
 //!
-//! A sibling of [`RunConfig`](super::RunConfig) and [`RunSpec`](crate::RunSpec)
-//! rather than something owned by the run: those two say what a *run* may
-//! spend, this says what one call may, and [`bounded`] is the only place that
-//! distinction is resolved.
+//! A sibling of [`RunSpec`](crate::RunSpec) rather than something owned by
+//! the run: the spec says what a *run* may spend, this says what one call
+//! may, and [`bounded`] is the only place that distinction is resolved.
 
 use std::time::{Duration, SystemTime};
 
 use mentra::runtime::{CancellationToken, ProviderRetry, RunOptions};
 
-use super::RunError;
+use super::{Bounds, RunError};
 use crate::budget::BudgetPool;
 
 /// Limits and stop signals for a single turn.
@@ -33,35 +32,26 @@ pub struct TurnOptions {
     /// kept either way; the report is what disagrees. `basis`'s
     /// `tests/cancellation.rs` pins that behavior so a change to it is noticed.
     ///
-    /// A stopped turn reports no [`Bound`](crate::Bound), unlike
-    /// [`token_budget`](Self::token_budget) below. A bound is an allowance the
+    /// A stopped turn reports no [`Bound`](crate::Bound), unlike a spent
+    /// [`Bounds::token_budget`]. A bound is an allowance the
     /// run outgrew, and a script is right to retry one with a bigger number; a
     /// stop is an instruction whoever holds this token issued, and retrying it
     /// would undo their decision.
     pub stop: Option<CancellationToken>,
-    /// Gives up on the turn after this long.
-    pub deadline: Option<Duration>,
-    /// Caps how many tool calls one turn may make.
-    pub tool_budget: Option<usize>,
-    /// Caps the tokens one turn may report using, input plus output.
+    /// What this one call may spend — deadline, tool budget, token budget.
     ///
-    /// Soft by construction: usage is only known once a round has streamed in
-    /// full, so the round that crosses the line is always allowed to finish.
-    /// It ends the turn *gracefully* at the next boundary — what the model
-    /// already committed is kept, so the work is not thrown away for being one
-    /// round too long — and the report names
-    /// [`Bound::TokenBudget`](crate::Bound::TokenBudget) as what ended it.
-    ///
-    /// The caveat on [`stop`](Self::stop) about *how* a graceful end is
-    /// reported applies here too, and matters more: a turn stopped after a tool
-    /// round comes back failed for want of a final message, and without the
-    /// named bound that failure is indistinguishable from a provider's.
-    /// `basis`'s `tests/token_budget.rs` drives exactly that shape.
-    pub token_budget: Option<u64>,
+    /// One caveat here beyond what [`Bounds`] itself says, and it matters: a
+    /// token budget ends the turn *gracefully*, and the caveat on
+    /// [`stop`](Self::stop) about how a graceful end is reported applies — a
+    /// turn stopped after a tool round comes back failed for want of a final
+    /// message, and without the named bound that failure is indistinguishable
+    /// from a provider's. `basis`'s `tests/token_budget.rs` drives exactly
+    /// that shape.
+    pub bounds: Bounds,
     /// An allowance this turn shares with every other run drawing on it.
     ///
     /// The other kind of token bound, and the two compose rather than compete:
-    /// [`token_budget`](Self::token_budget) says what *this* turn may spend, a
+    /// [`Bounds::token_budget`] says what *this* turn may spend, a
     /// pool says what the whole job may, and a turn carrying both stops at
     /// whichever comes first. See [`BudgetPool`] for how that is arranged, and
     /// for the overshoot a shared soft bound implies.
@@ -127,23 +117,29 @@ impl TurnOptions {
         }
     }
 
+    /// Gives up on the turn after `deadline`. Sugar into
+    /// [`bounds`](Self::bounds).
     pub fn with_deadline(self, deadline: Duration) -> Self {
         Self {
-            deadline: Some(deadline),
+            bounds: self.bounds.with_deadline(deadline),
             ..self
         }
     }
 
+    /// Caps how many tool calls this turn may make. Sugar into
+    /// [`bounds`](Self::bounds).
     pub fn with_tool_budget(self, tool_budget: usize) -> Self {
         Self {
-            tool_budget: Some(tool_budget),
+            bounds: self.bounds.with_tool_budget(tool_budget),
             ..self
         }
     }
 
+    /// Caps the tokens this turn may report using. Sugar into
+    /// [`bounds`](Self::bounds).
     pub fn with_token_budget(self, token_budget: u64) -> Self {
         Self {
-            token_budget: Some(token_budget),
+            bounds: self.bounds.with_token_budget(token_budget),
             ..self
         }
     }
@@ -174,9 +170,9 @@ impl TurnOptions {
         let options = RunOptions {
             cancellation: self.cancel,
             stop: self.stop,
-            deadline: self.deadline.map(|after| SystemTime::now() + after),
-            tool_budget: self.tool_budget,
-            token_budget: self.token_budget,
+            deadline: self.bounds.deadline.map(|after| SystemTime::now() + after),
+            tool_budget: self.bounds.tool_budget,
+            token_budget: self.bounds.token_budget,
             provider_retry,
             retry_budget,
             ..RunOptions::default()
@@ -188,7 +184,7 @@ impl TurnOptions {
         // against every other's spending rather than its own.
         match self.budget {
             Some(pool) => RunOptions {
-                token_budget: Some(pool.turn_bound(self.token_budget)),
+                token_budget: Some(pool.turn_bound(self.bounds.token_budget)),
                 token_usage: pool.counter(),
                 ..options
             },
@@ -201,16 +197,14 @@ impl TurnOptions {
 /// A caller that passes options in order to attach a cancellation token has
 /// said nothing about limits, and reading that silence as "no deadline" would
 /// unbound a run whose config asked for one.
-pub(super) fn bounded(options: TurnOptions, bounds: &TurnOptions) -> TurnOptions {
+pub(super) fn bounded(options: TurnOptions, configured: &TurnOptions) -> TurnOptions {
     // Cloned rather than moved out, because taking the field would leave
     // `options` partially moved and the `..options` below could not finish the
     // job. It is an `Arc` either way.
-    let budget = options.budget.clone().or_else(|| bounds.budget.clone());
+    let budget = options.budget.clone().or_else(|| configured.budget.clone());
 
     TurnOptions {
-        deadline: options.deadline.or(bounds.deadline),
-        tool_budget: options.tool_budget.or(bounds.tool_budget),
-        token_budget: options.token_budget.or(bounds.token_budget),
+        bounds: options.bounds.or(configured.bounds),
         budget,
         ..options
     }
@@ -262,8 +256,8 @@ mod tests {
 
         let merged = bounded(options, &configured);
 
-        assert_eq!(merged.deadline, Some(Duration::from_secs(600)));
-        assert_eq!(merged.tool_budget, Some(12));
+        assert_eq!(merged.bounds.deadline, Some(Duration::from_secs(600)));
+        assert_eq!(merged.bounds.tool_budget, Some(12));
         assert!(merged.cancel.is_some(), "the token still arrives");
         assert!(!token.is_cancelled());
     }
@@ -318,7 +312,7 @@ mod tests {
         let explicit = TurnOptions::default().with_deadline(Duration::from_secs(30));
 
         assert_eq!(
-            bounded(explicit, &configured).deadline,
+            bounded(explicit, &configured).bounds.deadline,
             Some(Duration::from_secs(30))
         );
     }
@@ -327,9 +321,8 @@ mod tests {
     fn a_prepared_run_is_unbounded_until_it_is_bounded() {
         let unset = TurnOptions::default();
 
-        assert_eq!(bounded(TurnOptions::default(), &unset).deadline, None);
-        assert_eq!(bounded(TurnOptions::default(), &unset).tool_budget, None);
-        assert_eq!(bounded(TurnOptions::default(), &unset).token_budget, None);
+        let merged = bounded(TurnOptions::default(), &unset);
+        assert_eq!(merged.bounds, Bounds::default());
         assert!(bounded(TurnOptions::default(), &unset).budget.is_none());
     }
 

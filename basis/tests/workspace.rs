@@ -187,8 +187,11 @@ async fn a_spec_bounds_only_the_run_it_was_given_to() {
         .expect("mints");
     let unbounded = workspace.prepare("whatever it takes").expect("mints");
 
-    assert_eq!(bounded.bounds().deadline, Some(Duration::from_secs(30)));
-    assert_eq!(unbounded.bounds().deadline, None);
+    assert_eq!(
+        bounded.bounds().bounds.deadline,
+        Some(Duration::from_secs(30))
+    );
+    assert_eq!(unbounded.bounds().bounds.deadline, None);
 }
 
 /// Conversations are persisted where the caller said, and nowhere else.

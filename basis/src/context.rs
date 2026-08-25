@@ -242,7 +242,8 @@ impl WorkspaceContext {
 /// Both scopes already had their weakest end covered — the global `AGENTS.md`
 /// is a personal append below every workspace file. Neither variant touches
 /// the skills block: mentra appends that itself, after whatever basis hands it.
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+#[serde(rename_all = "snake_case")]
 pub enum SystemPrompt {
     /// The host's text alone. Discovered context files stay out of the prompt
     /// entirely — including the global one — which is what makes this usable

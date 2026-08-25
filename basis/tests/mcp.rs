@@ -13,7 +13,7 @@
 use std::path::{Path, PathBuf};
 
 use basis::{
-    ContextScope, McpConfig, McpError, McpServer, RunConfig,
+    ContextScope, McpConfig, McpError, McpServer,
     mcp::{DEFAULT_GLOBAL_MCP_FILE, DEFAULT_WORKSPACE_MCP_FILE, discover, servers},
 };
 
@@ -207,26 +207,6 @@ fn a_misspelled_top_level_key_is_reported() {
     assert!(
         matches!(error, McpError::NoServers { .. }),
         "a typo must not read as a workspace with no servers: {error}"
-    );
-}
-
-#[test]
-fn a_run_config_carries_discovery_settings_and_returns_new_values() {
-    let base = RunConfig::new("/repo", "prompt");
-    let derived = base
-        .clone()
-        .with_mcp(McpConfig::default().with_supplied(vec![McpServer::Sse(
-            mentra::McpSseServerConfig::new("obs", "https://example.com/sse"),
-        )]));
-
-    assert!(
-        base.mcp.supplied.is_empty(),
-        "the original config must be untouched"
-    );
-    assert_eq!(derived.mcp.supplied.len(), 1);
-    assert_eq!(
-        derived.mcp.workspace_file,
-        PathBuf::from(DEFAULT_WORKSPACE_MCP_FILE)
     );
 }
 

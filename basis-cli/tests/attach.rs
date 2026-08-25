@@ -688,7 +688,7 @@ fn an_appended_system_prompt_survives_the_spawn_and_reaches_the_model() {
     )
     .expect("meta is json");
     assert_eq!(
-        meta["options"]["append_system_prompt"], "answer in Latin",
+        meta["options"]["system_prompt"]["append"], "answer in Latin",
         "the flag has to be in the durable record, or the attacher cannot honor it"
     );
 
@@ -955,4 +955,36 @@ fn read_http_request(stream: &mut TcpStream) -> String {
     }
 
     String::from_utf8_lossy(&bytes).into_owned()
+}
+
+/// An empty prompt is refused before the workspace opens. Opening spawns
+/// every server `.mcp.json` names — the marker command below would prove it —
+/// and a refusal that has already spawned processes is not a refusal.
+#[test]
+fn an_empty_prompt_is_refused_before_any_mcp_server_spawns() {
+    let fixture = Fixture::new();
+    let marker = fixture.workspace.join("mcp-spawned");
+    fs::write(
+        fixture.workspace.join(".mcp.json"),
+        format!(
+            r#"{{"mcpServers": {{"marker": {{"command": "touch", "args": ["{}"]}}}}}}"#,
+            marker.display()
+        ),
+    )
+    .expect("mcp manifest");
+
+    let mut command = fixture.basis(&["spawn", "   ", "--json", "-C"]);
+    command.arg(&fixture.workspace);
+    let output = run_bounded(command);
+
+    assert!(!output.status.success(), "whitespace is not a prompt");
+    assert!(
+        stderr(&output).contains("prompt is empty"),
+        "{}",
+        stderr(&output)
+    );
+    assert!(
+        !marker.exists(),
+        "the refusal must come before any server spawns"
+    );
 }

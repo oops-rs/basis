@@ -12,7 +12,7 @@
 
 use std::sync::{Arc, Mutex};
 
-use basis::{Event, FnSink, RunConfig, RunOutcome};
+use basis::{Event, FnSink, RunOutcome, Workspace};
 use mentra::ModelSelector;
 
 #[tokio::main]
@@ -21,12 +21,11 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         .nth(1)
         .unwrap_or_else(|| "Name this project in one short sentence.".to_string());
 
-    let workspace = std::env::current_dir()?;
-
-    let mut config = RunConfig::new(workspace, prompt);
+    let mut builder = Workspace::builder(std::env::current_dir()?);
     if let Ok(model) = std::env::var("BASIS_MODEL") {
-        config = config.with_model(ModelSelector::Id(model));
+        builder = builder.with_model(ModelSelector::Id(model));
     }
+    let workspace = builder.open().await?;
 
     // A host usually wants to react to events, not just collect them. Anything
     // that is `FnMut(Event) -> io::Result<()>` is a sink; here we count tool
@@ -34,9 +33,9 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     let tool_calls = Arc::new(Mutex::new(Vec::<String>::new()));
     let seen = Arc::clone(&tool_calls);
 
-    let report = basis::run(
-        config,
-        FnSink::new(move |event| {
+    let report = workspace
+        .prepare(prompt)?
+        .execute(FnSink::new(move |event| {
             match event {
                 Event::RunStarted {
                     model,
@@ -61,9 +60,8 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
                 _ => {}
             }
             Ok(())
-        }),
-    )
-    .await?;
+        }))
+        .await?;
 
     println!("---");
     println!("session: {}", report.session_id);
@@ -75,5 +73,6 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     match report.outcome {
         RunOutcome::Ok => Ok(()),
         RunOutcome::Error { message } => Err(message.into()),
+        outcome => Err(format!("unrecognized outcome: {outcome:?}").into()),
     }
 }

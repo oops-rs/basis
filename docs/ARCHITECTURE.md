@@ -58,7 +58,7 @@ hot-reloadable extensions. Two pi decisions independently validate ours:
 | Session persistence + resume | SQLite-backed sessions, snapshots | mentra |
 | Compaction | mentra's compaction, configured by basis (`Compaction`) ✅ — every tool result the model was shown is kept, elision is opt-in by number, the trigger is a share of the model's window when the provider reports one, snapshots follow the store; `PreparedRun::compact` and ACP `/compact` run a pass on demand | built |
 | Session branching / tree | mentra's transcript tree, exposed on `PreparedRun` ✅ | built |
-| Builtin tools (files, shell, background exec, tasks) | Mentra builtins, with the roster basis's: `read`, `ls`, `grep`, `glob`, `write`, `edit` (mentra's split file tools, `RuntimeBuilder::with_file_tools`), `compact`, `memory_pin`/`memory_forget`/`memory_search`, `load_skill`, and `spawn` for commands and delegation. `shell`, `background_run`, `check_background`, `task`, `task_*`, `team_*` and `idle` are registered but not offered ✅ | mentra + built |
+| Builtin tools (files, shell, background exec, tasks) | Mentra builtins, with the roster basis's: `read`, `ls`, `grep`, `glob`, `write`, `edit` (mentra's split file tools, `RuntimeBuilder::with_file_tools`), `compact`, `load_skill`, and `spawn` for commands and delegation. `shell`, `background_run`, `check_background`, `task`, `task_*`, `team_*`, `idle` and — since D2 switched mentra's memory engine off — `memory_pin`/`memory_forget`/`memory_search` are registered but not offered ✅ | mentra + built |
 | Context files (AGENTS.md) | Loader: workspace + global, parent-dir walk; `CLAUDE.md` per directory where there is no `AGENTS.md` | build |
 | Skills (on-demand) | SKILL.md discovery, description-first loading, four roots — `.basis/skills` and `.agents/skills` in the workspace, `skills/` in the global config dir and `~/.agents/skills` | build |
 | Prompt templates (/commands) | Markdown templates with args, exposed over ACP as commands ✅ | built |
@@ -119,8 +119,8 @@ what the attach lock guarantees. A first token of the form `/name` is resolved a
 `basis::templates::load` — the same discovery ACP hands its command list from — and the rendered
 text is what the task records; a first token with a second slash is a path and passes through.
 
-In-process concurrent work is owned by `basis::Supervisor`. The binary adds
-the same ownership rules across CLI processes, and since
+In-process concurrent work is the host's tokio — `JoinSet`, `CancellationToken`, the
+bounds. The binary owns ADR-0017's ownership rules across CLI processes, and since
 [ADR-0019](adr/0019-the-filesystem-is-the-coordination-surface.md) it adds them
 on files rather than on a service. An agent is a directory under one global,
 workspace-keyed data directory — `BASIS_DATA_DIR`, else `XDG_DATA_HOME`, else the

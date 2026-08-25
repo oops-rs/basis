@@ -6,9 +6,8 @@
 //! handful of things that are actually per-run: what to ask, what to call the
 //! session, how hard to think, and what the run may spend.
 //!
-//! A spec is not a [`RunConfig`](crate::RunConfig) with fields removed. It is
-//! the per-run half of one, and every field it *lacks* is a field whose change
-//! would mean opening a different workspace.
+//! Every field a spec *lacks* is deliberate: a change there would mean
+//! opening a different workspace.
 //!
 //! [`Workspace`]: super::Workspace
 
@@ -16,7 +15,7 @@ use std::time::Duration;
 
 use crate::{
     budget::BudgetPool,
-    run::{Effort, TurnOptions},
+    run::{Bounds, Effort, TurnOptions},
 };
 
 /// Default name for the session a run creates. Sessions are named so a client
@@ -50,25 +49,13 @@ pub struct RunSpec {
     /// How hard the model should think. `None` leaves the provider's default;
     /// unsupported provider/model levels fail instead of being downgraded.
     pub effort: Option<Effort>,
-    /// Gives up on the run after this long.
-    ///
-    /// Unset by default, and unset for an unattended caller too. An attended
-    /// run has a person watching, who can tell "thinking hard" from "stuck" in
-    /// a way no timer can; a caller nobody is watching has to write the bound
-    /// down in advance, and with no scheduler shipped there is no period for
-    /// basis to guess one from (ADR-0014).
-    pub deadline: Option<Duration>,
-    /// Caps how many tool calls the run may make.
-    pub tool_budget: Option<usize>,
-    /// Caps the tokens the run may report using, input plus output.
-    ///
-    /// Soft by construction: usage is only known once a round has streamed in
-    /// full, so the round that crosses the line always finishes. This is the
-    /// bound that maps to money.
-    pub token_budget: Option<u64>,
+    /// What the run may spend — deadline, tool budget, token budget. All
+    /// unset by default, for the attended and the unattended caller alike;
+    /// [`Bounds`] carries the argument (ADR-0014).
+    pub bounds: Bounds,
     /// An allowance this run shares with the others drawing on it.
     ///
-    /// Where [`token_budget`](Self::token_budget) is this run's own ceiling, a
+    /// Where [`Bounds::token_budget`] is this run's own ceiling, a
     /// [`BudgetPool`] is the job's — the one figure a fan-out spends from
     /// together. A spec carrying both stops at whichever binds first.
     ///
@@ -85,9 +72,7 @@ impl RunSpec {
             prompt: prompt.into(),
             session_name: DEFAULT_SESSION_NAME.to_string(),
             effort: None,
-            deadline: None,
-            tool_budget: None,
-            token_budget: None,
+            bounds: Bounds::default(),
             budget: None,
         }
     }
@@ -114,7 +99,8 @@ impl RunSpec {
         }
     }
 
-    /// Gives up on the run after `deadline`.
+    /// Gives up on the run after `deadline`. Sugar into
+    /// [`bounds`](Self::bounds).
     ///
     /// Every bound here is a *graceful* end rather than a discarded run: the
     /// event stream closes the way it always does, and whatever the model
@@ -123,26 +109,28 @@ impl RunSpec {
     /// for being one round too long, would make callers reluctant to set one.
     pub fn with_deadline(self, deadline: Duration) -> Self {
         Self {
-            deadline: Some(deadline),
+            bounds: self.bounds.with_deadline(deadline),
             ..self
         }
     }
 
-    /// Caps how many tool calls the run may make.
+    /// Caps how many tool calls the run may make. Sugar into
+    /// [`bounds`](Self::bounds).
     pub fn with_tool_budget(self, tool_budget: usize) -> Self {
         Self {
-            tool_budget: Some(tool_budget),
+            bounds: self.bounds.with_tool_budget(tool_budget),
             ..self
         }
     }
 
-    /// Caps the tokens the run may report using, input plus output.
+    /// Caps the tokens the run may report using, input plus output. Sugar
+    /// into [`bounds`](Self::bounds).
     ///
     /// Soft: the round that crosses the line is allowed to finish, because
     /// usage is only known once a round has streamed in full.
     pub fn with_token_budget(self, token_budget: u64) -> Self {
         Self {
-            token_budget: Some(token_budget),
+            bounds: self.bounds.with_token_budget(token_budget),
             ..self
         }
     }
@@ -179,9 +167,7 @@ impl RunSpec {
     /// [`send_with_options`](crate::PreparedRun::send_with_options).
     pub fn turn_options(&self) -> TurnOptions {
         TurnOptions {
-            deadline: self.deadline,
-            tool_budget: self.tool_budget,
-            token_budget: self.token_budget,
+            bounds: self.bounds,
             budget: self.budget.clone(),
             ..TurnOptions::default()
         }
@@ -247,9 +233,7 @@ mod tests {
         // deadline from, so bounding is explicit everywhere.
         let options = RunSpec::new("prompt").turn_options();
 
-        assert_eq!(options.deadline, None);
-        assert_eq!(options.tool_budget, None);
-        assert_eq!(options.token_budget, None);
+        assert_eq!(options.bounds, Bounds::default());
     }
 
     #[test]
@@ -260,9 +244,9 @@ mod tests {
             .with_token_budget(50_000)
             .turn_options();
 
-        assert_eq!(options.deadline, Some(Duration::from_secs(3_600)));
-        assert_eq!(options.tool_budget, Some(12));
-        assert_eq!(options.token_budget, Some(50_000));
+        assert_eq!(options.bounds.deadline, Some(Duration::from_secs(3_600)));
+        assert_eq!(options.bounds.tool_budget, Some(12));
+        assert_eq!(options.bounds.token_budget, Some(50_000));
     }
 
     #[test]

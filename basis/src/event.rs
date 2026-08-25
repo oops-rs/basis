@@ -78,9 +78,13 @@ pub enum RuleScope {
 }
 
 /// Severity of an out-of-band notice.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+///
+/// `Info` is the default, and deliberately the quiet one: a reader defaulting
+/// a missing severity must not invent an alarm nobody raised.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum NoticeSeverity {
+    #[default]
     Info,
     Warning,
 }
@@ -107,6 +111,7 @@ pub enum TaskStatus {
 /// How a run ended.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(tag = "status", rename_all = "snake_case")]
+#[non_exhaustive]
 pub enum RunOutcome {
     /// The turn completed and the assistant produced a final message.
     Ok,
@@ -153,6 +158,7 @@ pub struct ContextFile {
 /// normalized from mentra's [`SessionEvent`](mentra::SessionEvent).
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[serde(tag = "type", rename_all = "snake_case")]
+#[non_exhaustive]
 pub enum Event {
     /// Always the first line. Carries the schema version.
     RunStarted {
@@ -295,6 +301,11 @@ pub enum Event {
         thoughts_tokens: u64,
     },
     Notice {
+        /// Defaulted on read — leniency for the reader only, the writer
+        /// always states it: journals written before 0.6.0 hold the CLI's
+        /// synthetic notices with no severity at all, and the message is the
+        /// part a person needs.
+        #[serde(default)]
         severity: NoticeSeverity,
         message: String,
     },
@@ -354,6 +365,40 @@ impl Event {
     pub fn from_session_event(event: &mentra::SessionEvent) -> Option<Self> {
         mapping::from_session_event(event)
     }
+
+    /// The wire tag `#[serde(tag = "type")]` writes for this variant, without
+    /// serializing anything to ask.
+    ///
+    /// Same-crate, exhaustive, no wildcard — deliberately, and always
+    /// compiled: a variant landing on this enum fails this match first, which
+    /// is the tripwire that forces the sibling crates' wildcard arms
+    /// (`basis-acp/src/update.rs`, the CLI renderer's `progress_line`) to be
+    /// revisited before the new variant can be silently eaten.
+    pub fn type_tag(&self) -> &'static str {
+        match self {
+            Event::RunStarted { .. } => "run_started",
+            Event::UserMessage { .. } => "user_message",
+            Event::AssistantDelta { .. } => "assistant_delta",
+            Event::AssistantReasoningDelta { .. } => "assistant_reasoning_delta",
+            Event::AssistantMessage { .. } => "assistant_message",
+            Event::ToolQueued { .. } => "tool_queued",
+            Event::ToolStarted { .. } => "tool_started",
+            Event::ToolProgress { .. } => "tool_progress",
+            Event::ToolCompleted { .. } => "tool_completed",
+            Event::PermissionRequested { .. } => "permission_requested",
+            Event::PermissionResolved { .. } => "permission_resolved",
+            Event::TaskUpdated { .. } => "task_updated",
+            Event::CompactionStarted { .. } => "compaction_started",
+            Event::CompactionCompleted { .. } => "compaction_completed",
+            Event::MemoryUpdated { .. } => "memory_updated",
+            Event::Usage { .. } => "usage",
+            Event::Notice { .. } => "notice",
+            Event::Retry { .. } => "retry",
+            Event::Error { .. } => "error",
+            Event::Branched { .. } => "branched",
+            Event::RunFinished { .. } => "run_finished",
+        }
+    }
 }
 
 /// `skip_serializing_if` for a count that is only news when it is not zero.
@@ -364,6 +409,33 @@ fn is_zero(count: &usize) -> bool {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// [`Event::type_tag`] is the compile-time tripwire behind
+    /// `#[non_exhaustive]` — the same-crate exhaustive match with no
+    /// wildcard, compiled in every build. What a test can add is honesty:
+    /// the hand-written tags must be the tags serde actually writes, or the
+    /// unknown-event lines downstream would name events by names that never
+    /// appear on the wire.
+    #[test]
+    fn the_type_tag_is_the_tag_serde_writes() {
+        for event in [
+            Event::AssistantDelta {
+                text: "hi".to_string(),
+            },
+            Event::Notice {
+                severity: NoticeSeverity::Info,
+                message: "m".to_string(),
+            },
+            Event::RunFinished {
+                outcome: RunOutcome::Ok,
+                stopped_by: None,
+                usage: None,
+            },
+        ] {
+            let written = serde_json::to_value(&event).expect("serializes");
+            assert_eq!(written["type"].as_str().expect("tagged"), event.type_tag());
+        }
+    }
 
     #[test]
     fn a_line_is_one_flat_object() {

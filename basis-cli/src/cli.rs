@@ -464,7 +464,18 @@ pub(crate) struct FingerprintArgs {
     pub(crate) workspace: Option<PathBuf>,
 }
 
-#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, clap::ValueEnum)]
+#[derive(
+    Debug,
+    Clone,
+    Copy,
+    Default,
+    PartialEq,
+    Eq,
+    clap::ValueEnum,
+    serde::Serialize,
+    serde::Deserialize,
+)]
+#[serde(rename_all = "lowercase")]
 pub(crate) enum ApproveMode {
     /// Allow consequential calls without asking.
     Always,

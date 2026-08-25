@@ -17,7 +17,7 @@
 
 use std::process::ExitCode;
 
-use basis::{RunConfig, ShellAccess, provider};
+use basis::{ShellAccess, provider};
 use basis_acp::StdioError;
 use mentra::ModelSelector;
 
@@ -133,39 +133,36 @@ pub(crate) async fn serve_bridge(acp: AcpArgs, args: BridgeArgs) -> ExitCode {
 
 /// Builds the template each ACP session is configured from.
 ///
-/// The workspace is a placeholder: every session replaces it with the `cwd`
-/// the client sends. It has to be *something* because `RunConfig` requires
-/// one, and the current directory is the least surprising stand-in.
+/// No workspace lives in it: every session brings its own `cwd` on
+/// `session/new`, so there is nothing for a placeholder to stand in for.
 fn acp_config(args: AcpArgs) -> Result<basis_acp::ServeConfig, String> {
-    let workspace =
-        std::env::current_dir().map_err(|error| format!("no working directory: {error}"))?;
-
-    let mut config = RunConfig::new(workspace, "").with_session_name("basis acp");
+    let mut template = basis_acp::SessionTemplate::new().with_session_name("basis acp");
 
     if let Some(name) = &args.provider {
-        config = config.with_provider(provider::parse(name).map_err(|error| error.to_string())?);
+        template =
+            template.with_provider(provider::parse(name).map_err(|error| error.to_string())?);
     }
     if let Some(base_url) = args.base_url {
-        config = config.with_base_url(base_url);
+        template = template.with_base_url(base_url);
     }
     if let Some(model) = args.model {
-        config = config.with_model(ModelSelector::Id(model));
+        template = template.with_model(ModelSelector::Id(model));
     }
 
-    config = config.with_shell(ShellAccess::from_flag(!args.no_shell));
+    template = template.with_shell(ShellAccess::from_flag(!args.no_shell));
 
     // Every session this server opens gets it: the operator started this
     // process for a purpose, and a client that names a `cwd` is not thereby
     // entitled to a different voice.
     if let Some(system_prompt) = cli::system_prompt(args.system_prompt, args.append_system_prompt) {
-        config = config.with_system_prompt(system_prompt);
+        template = template.with_system_prompt(system_prompt);
     }
 
     if let Some(effort) = args.effort {
-        config = config.with_effort(effort.into());
+        template = template.with_effort(effort.into());
     }
 
-    Ok(basis_acp::ServeConfig::new(config).with_initial_mode(args.approve.into()))
+    Ok(basis_acp::ServeConfig::new(template).with_initial_mode(args.approve.into()))
 }
 
 #[cfg(test)]

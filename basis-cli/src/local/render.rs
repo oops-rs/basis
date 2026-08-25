@@ -20,6 +20,8 @@ use std::{
     },
 };
 
+use basis::{Event, RunUsage};
+use serde::Deserialize;
 use serde_json::Value;
 
 use crate::exit::{EXIT_BOUNDED, EXIT_FAILED, EXIT_OK};
@@ -134,75 +136,116 @@ fn write_event(
     out: &mut impl Write,
     err: &mut impl Write,
 ) -> io::Result<bool> {
-    match text(event, "type") {
-        "assistant_delta" => {
-            let delta = text(event, "text");
-            write!(out, "{delta}")?;
+    let Some(event) = typed(event, err)? else {
+        return Ok(false);
+    };
+
+    match event {
+        Event::AssistantDelta { text } => {
+            write!(out, "{text}")?;
             out.flush()?;
-            return Ok(!delta.is_empty());
+            return Ok(!text.is_empty());
         }
-        "run_started" => writeln!(
-            err,
+        // Two things at the finish line, on the two streams they belong to:
+        // the newline that closes a streamed answer, and what the run spent.
+        Event::RunFinished { usage, .. } => {
+            if answered {
+                writeln!(out)?;
+            }
+            if let Some(spent) = usage.and_then(spent) {
+                writeln!(err, "basis: {spent}")?;
+            }
+        }
+        event => {
+            if let Some(line) = progress_line(&event) {
+                writeln!(err, "{line}")?;
+            }
+        }
+    }
+    Ok(false)
+}
+
+/// The typed event, or `None` after saying why on the progress stream.
+///
+/// Typed, so a new `Event` variant is a compile-time question in
+/// [`progress_line`] rather than a string that quietly stops matching — and
+/// deserialized from the borrowed `Value` directly, because this runs once
+/// per streamed delta and a clone per token chunk would be pure overhead. An
+/// event this build cannot name — a journal written by a newer basis — is
+/// said instead of rendered as nothing.
+fn typed(event: &Value, err: &mut impl Write) -> io::Result<Option<Event>> {
+    match Event::deserialize(event) {
+        Ok(event) => Ok(Some(event)),
+        Err(_) => {
+            writeln!(
+                err,
+                "basis: unrecognized event `{}`",
+                label(text(event, "type"), "untyped")
+            )?;
+            Ok(None)
+        }
+    }
+}
+
+/// One progress line for stderr, or `None` for the events deliberately
+/// silent at a terminal — reasoning deltas, per-round usage, permission
+/// bookkeeping — and, with the enum `#[non_exhaustive]`, the arm a future
+/// variant lands in; [`Event::type_tag`] is the exhaustive match that forces
+/// this list to be revisited when one does.
+fn progress_line(event: &Event) -> Option<String> {
+    Some(match event {
+        Event::RunStarted {
+            model,
+            context_files,
+            ..
+        } => format!(
             "basis: {}, {} context file(s)",
-            label(text(event, "model"), "unknown model"),
-            event["context_files"].as_array().map_or(0, Vec::len)
-        )?,
+            label(model, "unknown model"),
+            context_files.len()
+        ),
         // The queue event, not the start: it is the one that carries what the
         // call is *for*, and a person reading progress wants the command, not
         // the second announcement of the same call.
-        "tool_queued" => writeln!(
-            err,
+        Event::ToolQueued {
+            tool_name, summary, ..
+        } => format!(
             "  · {}",
-            one_line(
-                label(text(event, "summary"), text(event, "tool_name")),
-                SUMMARY_BUDGET
-            )
-        )?,
-        // Completions are what separate "the tool is still running" from "the
-        // model is thinking again", which is the question a silent terminal
-        // raises. A failing one is usually why the run went as it did, so it
-        // keeps its words.
-        //
-        // The name normally arrives; it is empty only for a result whose call
-        // this session never saw. Fall back to the id rather than printing a
-        // blank label.
-        "tool_completed" => {
-            let name = label(text(event, "tool_name"), text(event, "tool_call_id"));
-            if event["is_error"] == Value::Bool(true) {
-                let summary = one_line(text(event, "summary"), SUMMARY_BUDGET);
-                writeln!(err, "  ! {name}: {summary}")?;
+            one_line(label(summary, tool_name), SUMMARY_BUDGET)
+        ),
+        // Completions separate "the tool is still running" from "the model is
+        // thinking again". A failing one is usually why the run went as it
+        // did, so it keeps its words; the name is empty only for a result
+        // whose call this session never saw, so the id stands in.
+        Event::ToolCompleted {
+            tool_call_id,
+            tool_name,
+            summary,
+            is_error,
+        } => {
+            let name = label(tool_name, tool_call_id);
+            if *is_error {
+                format!("  ! {name}: {}", one_line(summary, SUMMARY_BUDGET))
             } else {
-                writeln!(err, "  ✓ {name}")?;
+                format!("  ✓ {name}")
             }
         }
         // Both are pauses with a reason, and a terminal that does not name
         // them looks stuck for as long as they last.
-        "compaction_started" => writeln!(err, "basis: compacting the conversation")?,
-        "retry" => writeln!(
-            err,
-            "basis: {} (retry {}/{})",
-            one_line(text(event, "error"), SUMMARY_BUDGET),
-            event["attempt"].as_u64().unwrap_or_default(),
-            event["max_attempts"].as_u64().unwrap_or_default()
-        )?,
-        "notice" | "error" => writeln!(
-            err,
-            "basis: {}",
-            label(text(event, "message"), "task event")
-        )?,
-        // Two things at the finish line, on the two streams they belong to:
-        // the newline that closes a streamed answer, and what the run spent.
-        "run_finished" => {
-            if answered {
-                writeln!(out)?;
-            }
-            if let Some(spent) = spent(event) {
-                writeln!(err, "basis: {spent}")?;
-            }
+        Event::CompactionStarted { .. } => "basis: compacting the conversation".to_string(),
+        Event::Retry {
+            error,
+            attempt,
+            max_attempts,
+            ..
+        } => format!(
+            "basis: {} (retry {attempt}/{max_attempts})",
+            one_line(error, SUMMARY_BUDGET)
+        ),
+        Event::Notice { message, .. } | Event::Error { message, .. } => {
+            format!("basis: {}", label(message, "task event"))
         }
-        _ => {}
-    }
-    Ok(false)
+        _ => return None,
+    })
 }
 
 /// What the run reported spending, in one line, or `None` when it reported
@@ -216,9 +259,8 @@ fn write_event(
 /// Nothing reported prints nothing. A provider that says nothing about usage
 /// leaves these at zero, and `0 in · 0 out` reads as a measurement of a free
 /// run rather than as the absence of a report.
-fn spent(event: &Value) -> Option<String> {
-    let count = |field| event["usage"][field].as_u64().unwrap_or_default();
-    let (input, output) = (count("input_tokens"), count("output_tokens"));
+fn spent(usage: RunUsage) -> Option<String> {
+    let (input, output) = (usage.input_tokens, usage.output_tokens);
     (input > 0 || output > 0).then(|| {
         format!(
             "{} in · {} out",
@@ -390,7 +432,66 @@ fn write_hint(payload: &Value, err: &mut impl Write) -> io::Result<()> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use basis::{Mutability, RunOutcome, event::ContextFile};
     use serde_json::json;
+
+    fn value(event: Event) -> Value {
+        serde_json::to_value(&event).expect("event serializes")
+    }
+
+    fn started(model: &str) -> Value {
+        value(Event::RunStarted {
+            schema: 1,
+            basis: "0.0.0".to_string(),
+            session_id: "s".to_string(),
+            workspace: "/repo".into(),
+            model: model.to_string(),
+            provider: "test".to_string(),
+            context_files: vec![ContextFile {
+                path: "/repo/AGENTS.md".into(),
+                scope: "workspace".to_string(),
+            }],
+            skills_dirs: Vec::new(),
+            skills: Vec::new(),
+            templates_dirs: Vec::new(),
+            templates: Vec::new(),
+            mcp_files: Vec::new(),
+            mcp_servers: Vec::new(),
+        })
+    }
+
+    fn tool_queued(summary: &str) -> Value {
+        value(Event::ToolQueued {
+            tool_call_id: "c1".to_string(),
+            tool_name: "shell".to_string(),
+            summary: summary.to_string(),
+            mutability: Mutability::Unknown,
+            input: Value::Null,
+        })
+    }
+
+    fn tool_completed(summary: &str, is_error: bool) -> Value {
+        value(Event::ToolCompleted {
+            tool_call_id: "c1".to_string(),
+            tool_name: "shell".to_string(),
+            summary: summary.to_string(),
+            is_error,
+        })
+    }
+
+    fn delta(text: &str) -> Value {
+        value(Event::AssistantDelta {
+            text: text.to_string(),
+        })
+    }
+
+    fn finished(usage: Option<RunUsage>) -> Value {
+        value(Event::RunFinished {
+            outcome: RunOutcome::Ok,
+            stopped_by: None,
+            usage,
+        })
+    }
 
     #[test]
     fn terminal_codes_do_not_depend_on_rendering() {
@@ -446,16 +547,16 @@ mod tests {
         let (mut out, mut err) = (Vec::new(), Vec::new());
 
         for event in [
-            json!({"type": "run_started", "model": "test-model",
-                   "context_files": [{"path": "/repo/AGENTS.md", "scope": "workspace"}]}),
-            json!({"type": "tool_queued", "tool_call_id": "c1", "tool_name": "shell",
-                   "summary": "shell: cargo test"}),
-            json!({"type": "tool_started", "tool_call_id": "c1", "tool_name": "shell"}),
-            json!({"type": "tool_completed", "tool_call_id": "c1", "tool_name": "shell",
-                   "summary": "0 failed", "is_error": false}),
-            json!({"type": "assistant_delta", "text": "the tests "}),
-            json!({"type": "assistant_delta", "text": "pass"}),
-            json!({"type": "run_finished", "status": "ok"}),
+            started("test-model"),
+            tool_queued("shell: cargo test"),
+            value(Event::ToolStarted {
+                tool_call_id: "c1".to_string(),
+                tool_name: "shell".to_string(),
+            }),
+            tool_completed("0 failed", false),
+            delta("the tests "),
+            delta("pass"),
+            finished(None),
         ] {
             live.show_to(&event, &mut out, &mut err)
                 .expect("writing to a vector");
@@ -495,10 +596,14 @@ mod tests {
         let (mut out, mut err) = (Vec::new(), Vec::new());
 
         for event in [
-            json!({"type": "assistant_delta", "text": "done"}),
-            json!({"type": "run_finished", "status": "ok",
-                   "usage": {"input_tokens": 12_300, "output_tokens": 1_200,
-                             "cache_read_tokens": 40, "cache_creation_tokens": 5}}),
+            delta("done"),
+            finished(Some(RunUsage {
+                input_tokens: 12_300,
+                output_tokens: 1_200,
+                cache_read_tokens: 40,
+                cache_creation_tokens: 5,
+                ..RunUsage::default()
+            })),
         ] {
             live.show_to(&event, &mut out, &mut err)
                 .expect("writing to a vector");
@@ -523,12 +628,7 @@ mod tests {
         let live = Live::when(true);
         let (mut out, mut err) = (Vec::new(), Vec::new());
 
-        for event in [
-            json!({"type": "run_finished", "status": "ok"}),
-            json!({"type": "run_finished", "status": "ok",
-                   "usage": {"input_tokens": 0, "output_tokens": 0,
-                             "cache_read_tokens": 0, "cache_creation_tokens": 0}}),
-        ] {
+        for event in [finished(None), finished(Some(RunUsage::default()))] {
             live.show_to(&event, &mut out, &mut err)
                 .expect("writing to a vector");
         }
@@ -554,8 +654,7 @@ mod tests {
         let (mut out, mut err) = (Vec::new(), Vec::new());
 
         live.show_to(
-            &json!({"type": "tool_completed", "tool_call_id": "c1", "tool_name": "shell",
-                    "summary": "no such file\nand a second line", "is_error": true}),
+            &tool_completed("no such file\nand a second line", true),
             &mut out,
             &mut err,
         )
@@ -576,9 +675,12 @@ mod tests {
         let (mut out, mut err) = (Vec::new(), Vec::new());
 
         for event in [
-            json!({"type": "assistant_delta", "text": "an answer"}),
-            json!({"type": "tool_started", "tool_call_id": "c1", "tool_name": "shell"}),
-            json!({"type": "run_finished", "status": "ok"}),
+            delta("an answer"),
+            value(Event::ToolStarted {
+                tool_call_id: "c1".to_string(),
+                tool_name: "shell".to_string(),
+            }),
+            finished(None),
         ] {
             live.show_to(&event, &mut out, &mut err)
                 .expect("writing to a vector");
@@ -599,12 +701,8 @@ mod tests {
         let succeeded = json!({"state": "succeeded", "result": "done"});
         assert!(!live.repeats(&succeeded, false), "nothing streamed yet");
 
-        live.show_to(
-            &json!({"type": "assistant_delta", "text": "done"}),
-            &mut Vec::new(),
-            &mut Vec::new(),
-        )
-        .expect("writing to a vector");
+        live.show_to(&delta("done"), &mut Vec::new(), &mut Vec::new())
+            .expect("writing to a vector");
 
         assert!(live.repeats(&succeeded, false));
         assert!(
@@ -615,6 +713,51 @@ mod tests {
             !live.repeats(&json!({"state": "failed", "error": "boom"}), false),
             "a failure was never on the stream, so it still has to be said"
         );
+    }
+
+    /// Journals from before 0.6.0 hold the CLI's synthetic notices with no
+    /// `severity`; the message is the part a person needs, and the reader's
+    /// `#[serde(default)]` is what keeps it reachable.
+    #[test]
+    fn a_notice_without_a_severity_still_renders_its_message() {
+        let live = Live::when(true);
+        let (mut out, mut err) = (Vec::new(), Vec::new());
+
+        live.show_to(
+            &json!({"type": "notice", "message": "event omitted because it exceeded 32768 bytes", "seq": 4}),
+            &mut out,
+            &mut err,
+        )
+        .expect("writing to a vector");
+
+        assert!(out.is_empty(), "a notice is never the answer");
+        assert_eq!(
+            String::from_utf8(err).expect("utf8"),
+            "basis: event omitted because it exceeded 32768 bytes\n"
+        );
+    }
+
+    /// A journal written by a newer basis can hold a type this build cannot
+    /// name. The old string-matching renderer fell into `_ => {}` and showed
+    /// nothing; saying so is the whole point of matching typed variants.
+    #[test]
+    fn an_event_this_build_cannot_name_is_said_not_swallowed() {
+        let live = Live::when(true);
+        let (mut out, mut err) = (Vec::new(), Vec::new());
+
+        live.show_to(
+            &json!({"type": "from_the_future", "seq": 3}),
+            &mut out,
+            &mut err,
+        )
+        .expect("writing to a vector");
+
+        assert!(out.is_empty(), "not the answer stream's business");
+        assert_eq!(
+            String::from_utf8(err).expect("utf8"),
+            "basis: unrecognized event `from_the_future`\n"
+        );
+        assert!(!live.answered());
     }
 
     /// stdout is the answer; the hint is not part of it. `basis "…" > out.md`

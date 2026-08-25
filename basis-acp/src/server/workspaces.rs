@@ -1,9 +1,9 @@
 //! What basis's own sessions are built on: one runtime for the server process,
 //! one workspace for each directory a client asks about.
 //!
-//! ADR-0018's shape at the protocol layer. The default source used to call
-//! [`prepare_without_prompt`](basis::run::prepare_without_prompt) per
-//! session, which opens a workspace, mints one run from it, and drops it — so
+//! ADR-0018's shape at the protocol layer. The default source used to open a
+//! whole workspace per
+//! session, minting one run from it and dropping it — so
 //! a server holding N editor sessions held N mentra runtimes, N provider
 //! resolutions and N store handles, and no session outlived the workspace
 //! whose MCP connections and hooks it was supposed to be running with. What is
@@ -35,7 +35,7 @@
 use std::{
     collections::{BTreeMap, HashMap},
     hash::{DefaultHasher, Hash, Hasher},
-    path::PathBuf,
+    path::{Path, PathBuf},
     sync::{Arc, Mutex},
 };
 
@@ -45,19 +45,19 @@ use mentra::{
 };
 
 use basis::{
-    McpServer, PersistedSession, PreparedRun, RunConfig, RunError, RunSpec, Runtime,
+    McpConfig, McpServer, PersistedSession, PreparedRun, RunError, RunSpec, Runtime,
     RuntimeBuilder, Workspace, WorkspaceBuilder,
 };
 use tokio::sync::OnceCell;
 
-use super::config::SessionSource;
+use super::config::{SessionSource, SessionTemplate};
 
 /// The default source: sessions basis builds itself, on the process's runtime.
 pub(super) struct ConfiguredSource {
     /// What the operator said and a client cannot: which model and endpoint,
-    /// whether commands are granted, where discovery looks. Its `workspace` is
-    /// a placeholder each session replaces with the `cwd` it was sent.
-    template: Option<RunConfig>,
+    /// whether commands are granted, the product's voice. No workspace lives
+    /// here — every session brings its own `cwd`.
+    template: SessionTemplate,
     /// One per process, however many sessions and workspaces it carries.
     runtime: OnceCell<Arc<Runtime>>,
     /// One per [`WorkspaceKey`], each behind its own cell.
@@ -71,9 +71,9 @@ pub(super) struct ConfiguredSource {
 }
 
 impl ConfiguredSource {
-    pub(super) fn new(template: Option<RunConfig>) -> Self {
+    pub(super) fn new(template: Option<SessionTemplate>) -> Self {
         Self {
-            template,
+            template: template.unwrap_or_default(),
             runtime: OnceCell::new(),
             workspaces: Mutex::new(HashMap::new()),
         }
@@ -84,12 +84,12 @@ impl ConfiguredSource {
     /// Test-only because building one resolves a provider credential, which is
     /// exactly what an offline test cannot do and exactly what
     /// [`RuntimeBuilder::with_api_key`](basis::RuntimeBuilder::with_api_key)
-    /// answers — and it is not on [`RunConfig`], which is the only thing
+    /// answers — and it is not on [`SessionTemplate`], which is the only thing
     /// [`ServeConfig`](super::ServeConfig) takes. A host that wants to supply
     /// its own runtime supplies its own
     /// [`SessionSource`](super::SessionSource), which is what that seam is for.
     #[cfg(test)]
-    pub(super) fn on_runtime(runtime: Arc<Runtime>, template: Option<RunConfig>) -> Self {
+    pub(super) fn on_runtime(runtime: Arc<Runtime>, template: Option<SessionTemplate>) -> Self {
         let source = Self::new(template);
         source
             .runtime
@@ -98,44 +98,70 @@ impl ConfiguredSource {
         source
     }
 
-    /// Builds the config for one session, in the client's working directory.
+    /// Builds the two halves of one session, in the client's working
+    /// directory: the workspace to open and the per-run spec to mint on it.
     ///
     /// Nothing here says anything about approval. A runtime's authorizer is
     /// fixed for its life, so basis installs one that surfaces every
     /// consequential call and answers none of them; which of those the client
     /// actually sees is the session's mode, which can still change (see
     /// [`mode`](crate::mode)).
-    pub(super) fn config_for(&self, cwd: PathBuf, mcp: Vec<McpServer>) -> RunConfig {
-        let config = match &self.template {
-            Some(template) => {
-                let mut config = template.clone();
-                config.workspace = cwd;
-                config
-            }
-            None => RunConfig::new(cwd, ""),
-        };
+    pub(super) fn parts_for(
+        &self,
+        cwd: PathBuf,
+        mcp: Vec<McpServer>,
+    ) -> (WorkspaceBuilder, RunSpec) {
+        let template = &self.template;
+
+        let mut builder = Workspace::builder(cwd).with_shell(template.shell);
+        if let Some(model) = &template.model {
+            builder = builder.with_model(model.clone());
+        }
+        if let Some(system_prompt) = &template.system_prompt {
+            builder = builder.with_system_prompt(system_prompt.clone());
+        }
+        // Discovery is the template's promise (`SessionTemplate::with_discovery`)
+        // — the operator's to point, defaulting to basis's own roots.
+        let discovery = &template.discovery;
+        let builder = builder
+            .with_context(discovery.context.clone())
+            .with_skills(discovery.skills.clone())
+            .with_templates(discovery.templates.clone())
+            .with_hooks(discovery.hooks.clone())
+            .with_tools(discovery.tools.clone());
 
         // The client's servers outrank the workspace's own: it is answering
         // for this session in particular. Discovery still runs, so a
         // `.mcp.json` the client said nothing about is still honored.
-        let mcp = config.mcp.clone().with_supplied(mcp);
-        config.with_mcp(mcp)
+        let builder = builder.with_mcp(self.session_mcp(mcp));
+
+        let mut spec = RunSpec::default();
+        if let Some(session_name) = &template.session_name {
+            spec = spec.with_session_name(session_name.clone());
+        }
+        if let Some(effort) = template.effort {
+            spec = spec.with_effort(effort);
+        }
+
+        (builder, spec)
     }
 
-    /// The workspace this session is minted from, and the per-run half of the
-    /// config that mints it.
+    /// One session's MCP config: where discovery starts, with the client's
+    /// servers landing on top — they outrank the workspace's own, because the
+    /// client is answering for this session in particular.
+    pub(super) fn session_mcp(&self, mcp: Vec<McpServer>) -> McpConfig {
+        self.template.discovery.mcp.clone().with_supplied(mcp)
+    }
+
+    /// The workspace this session is minted from, and the per-run half that
+    /// mints it.
     async fn workspace_for(
         &self,
         cwd: PathBuf,
         mcp: Vec<McpServer>,
     ) -> Result<(Arc<Workspace>, RunSpec), RunError> {
-        let config = self.config_for(cwd, mcp);
-        let key = WorkspaceKey::of(&config);
-        // `split` is basis's own mapping from a one-prompt config to the
-        // workspace and run halves it conflates, so the two cannot drift. The
-        // private runtime recipe it seeds the builder with is replaced below —
-        // this process resolved its provider once already.
-        let (builder, spec) = config.split();
+        let key = WorkspaceKey::new(&cwd, &mcp);
+        let (builder, spec) = self.parts_for(cwd, mcp);
 
         Ok((self.open(key, builder).await?, spec))
     }
@@ -172,17 +198,18 @@ impl ConfiguredSource {
 
     /// The process half of the template: what ADR-0018 moved onto the runtime.
     ///
-    /// The two fields [`RunConfig::split`] seeds a private runtime's recipe
-    /// with, plus the model as this runtime's *policy*. `split` restates that
-    /// model per workspace as an override, so the policy is belt to its
+    /// Provider and endpoint seed the private runtime's recipe, plus the model
+    /// as this runtime's *policy*. [`parts_for`](Self::parts_for) restates
+    /// that model per workspace as an override, so the policy is belt to its
     /// braces — but a runtime that reported a model none of its workspaces use
     /// would be describing a process nobody is running.
     fn recipe(&self) -> RuntimeBuilder {
-        let Some(template) = &self.template else {
-            return Runtime::builder();
-        };
+        let template = &self.template;
 
-        let mut recipe = Runtime::builder().with_model(template.model.clone());
+        let mut recipe = Runtime::builder();
+        if let Some(model) = &template.model {
+            recipe = recipe.with_model(model.clone());
+        }
         if let Some(provider) = template.provider {
             recipe = recipe.with_provider(provider);
         }
@@ -300,15 +327,14 @@ pub(super) struct WorkspaceKey {
 }
 
 impl WorkspaceKey {
-    pub(super) fn of(config: &RunConfig) -> Self {
+    pub(super) fn new(cwd: &Path, supplied: &[McpServer]) -> Self {
         Self {
             // Canonicalized so a symlinked spelling and its target are one
             // workspace rather than two, and used as written when it does not
             // resolve — the same ruling as `store::runtime_identifier`, for the
             // same reason: keying a map is not the place to validate a path.
-            workspace: std::fs::canonicalize(&config.workspace)
-                .unwrap_or_else(|_| config.workspace.clone()),
-            supplied: digest(&config.mcp.supplied),
+            workspace: std::fs::canonicalize(cwd).unwrap_or_else(|_| cwd.to_path_buf()),
+            supplied: digest(supplied),
         }
     }
 }
@@ -432,6 +458,22 @@ fn digest(servers: &[McpServer]) -> u64 {
                     max_tools,
                 )
                     .hash(&mut hasher);
+            }
+            // A transport this build does not know — the enum is
+            // `#[non_exhaustive]`. The discriminant separates two unknown
+            // *variants*; the name separates servers within one. What neither
+            // separates — two unknown servers of one variant differing only
+            // below the name — will key one workspace until this match learns
+            // the variant, and the consequence is bounded: the second session
+            // inherits the first one's connections rather than being handed a
+            // credential. basis's own same-crate matches (`McpServer::name`,
+            // its hand-written `Debug`) fail to compile the moment the
+            // variant lands, which is what forces this arm to become a real
+            // one.
+            server => {
+                std::mem::discriminant(server).hash(&mut hasher);
+                "unknown-transport".hash(&mut hasher);
+                server.name().hash(&mut hasher);
             }
         }
     }

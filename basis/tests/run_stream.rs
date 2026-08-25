@@ -8,10 +8,10 @@
 //! This is the harness `docs/p0-groundwork.md` §4a records as already shipped
 //! in mentra; basis's tests are its first consumer.
 
-use std::path::{Path, PathBuf};
+use std::path::PathBuf;
 
 use basis::{
-    Bound, CollectingSink, Event, JsonlWriter, RunConfig, RunOutcome, run::prepare_with_session,
+    Bound, CollectingSink, Event, JsonlWriter, RunOutcome, RunSpec, run::prepare_with_session,
 };
 use mentra::{
     RuntimePolicy,
@@ -28,12 +28,12 @@ fn workspace_with_context(body: &str) -> tempfile::TempDir {
 
 /// Config pinned to the given workspace, with the parent walk and the global
 /// file switched off so a real `AGENTS.md` above the temp dir cannot leak in.
-fn config(workspace: &Path, prompt: &str) -> RunConfig {
-    RunConfig::new(workspace, prompt).with_context(basis::ContextConfig {
+fn context() -> basis::ContextConfig {
+    basis::ContextConfig {
         file_name: "AGENTS.md".to_string(),
         global_dir: None,
         walk_parents: false,
-    })
+    }
 }
 
 fn mock(chunks: &[&str]) -> MockRuntime {
@@ -54,9 +54,15 @@ async fn a_run_streams_deltas_between_the_bookends() {
         .create_session("test", mock.model())
         .expect("session");
 
-    let config = config(workspace.path(), "say hello");
-    let mut prepared =
-        prepare_with_session(session, &config, "openai", "mock-model").expect("prepared");
+    let mut prepared = prepare_with_session(
+        session,
+        workspace.path(),
+        "say hello",
+        &context(),
+        "openai",
+        "mock-model",
+    )
+    .expect("prepared");
 
     let report = prepared
         .execute(CollectingSink::new())
@@ -108,9 +114,15 @@ async fn the_header_reports_the_context_that_was_loaded() {
         .create_session("test", mock.model())
         .expect("session");
 
-    let config = config(workspace.path(), "go");
-    let mut prepared =
-        prepare_with_session(session, &config, "openai", "mock-model").expect("prepared");
+    let mut prepared = prepare_with_session(
+        session,
+        workspace.path(),
+        "go",
+        &context(),
+        "openai",
+        "mock-model",
+    )
+    .expect("prepared");
     let report = prepared
         .execute(CollectingSink::new())
         .await
@@ -177,9 +189,15 @@ async fn workspace_context_reaches_the_model_as_the_system_prompt() {
         )
         .expect("session");
 
-    let config = config(workspace.path(), "go");
-    let mut prepared =
-        prepare_with_session(session, &config, "openai", "mock-model").expect("prepared");
+    let mut prepared = prepare_with_session(
+        session,
+        workspace.path(),
+        "go",
+        &context(),
+        "openai",
+        "mock-model",
+    )
+    .expect("prepared");
     prepared
         .execute(CollectingSink::new())
         .await
@@ -227,9 +245,15 @@ async fn tool_calls_appear_on_the_stream_with_parsed_input() {
         )
         .expect("session");
 
-    let config = config(workspace.path(), "list the files");
-    let mut prepared =
-        prepare_with_session(session, &config, "openai", "mock-model").expect("prepared");
+    let mut prepared = prepare_with_session(
+        session,
+        workspace.path(),
+        "list the files",
+        &context(),
+        "openai",
+        "mock-model",
+    )
+    .expect("prepared");
     let report = prepared
         .execute(CollectingSink::new())
         .await
@@ -282,9 +306,15 @@ async fn the_jsonl_rendering_is_one_parseable_object_per_line() {
         .create_session("test", mock.model())
         .expect("session");
 
-    let config = config(workspace.path(), "go");
-    let mut prepared =
-        prepare_with_session(session, &config, "openai", "mock-model").expect("prepared");
+    let mut prepared = prepare_with_session(
+        session,
+        workspace.path(),
+        "go",
+        &context(),
+        "openai",
+        "mock-model",
+    )
+    .expect("prepared");
     let report = prepared
         .execute(JsonlWriter::new(Vec::new()))
         .await
@@ -328,9 +358,15 @@ async fn a_failing_turn_still_closes_the_stream() {
         .create_session("test", mock.model())
         .expect("session");
 
-    let config = config(workspace.path(), "go");
-    let mut prepared =
-        prepare_with_session(session, &config, "openai", "mock-model").expect("prepared");
+    let mut prepared = prepare_with_session(
+        session,
+        workspace.path(),
+        "go",
+        &context(),
+        "openai",
+        "mock-model",
+    )
+    .expect("prepared");
     let report = prepared
         .execute(CollectingSink::new())
         .await
@@ -382,9 +418,15 @@ async fn a_failed_turns_message_is_unchanged_when_its_source_adds_nothing_new() 
         .create_session("test", mock.model())
         .expect("session");
 
-    let config = config(workspace.path(), "go");
-    let mut prepared =
-        prepare_with_session(session, &config, "openai", "mock-model").expect("prepared");
+    let mut prepared = prepare_with_session(
+        session,
+        workspace.path(),
+        "go",
+        &context(),
+        "openai",
+        "mock-model",
+    )
+    .expect("prepared");
     let report = prepared
         .execute(CollectingSink::new())
         .await
@@ -407,9 +449,15 @@ async fn a_tripped_bound_is_reported_as_a_bound_not_just_a_failure() {
         .create_session("test", mock.model())
         .expect("session");
 
-    let config = config(workspace.path(), "go").with_deadline(std::time::Duration::ZERO);
-    let mut prepared =
-        prepare_with_session(session, &config, "openai", "mock-model").expect("prepared");
+    let mut prepared = prepare_with_session(
+        session,
+        workspace.path(),
+        RunSpec::new("go").with_deadline(std::time::Duration::ZERO),
+        &context(),
+        "openai",
+        "mock-model",
+    )
+    .expect("prepared");
 
     let report = prepared
         .execute(CollectingSink::new())
@@ -444,9 +492,15 @@ async fn a_healthy_run_ran_into_no_bound() {
         .create_session("test", mock.model())
         .expect("session");
 
-    let config = config(workspace.path(), "go");
-    let mut prepared =
-        prepare_with_session(session, &config, "openai", "mock-model").expect("prepared");
+    let mut prepared = prepare_with_session(
+        session,
+        workspace.path(),
+        "go",
+        &context(),
+        "openai",
+        "mock-model",
+    )
+    .expect("prepared");
 
     let report = prepared
         .execute(CollectingSink::new())
@@ -466,12 +520,17 @@ async fn an_empty_prompt_is_refused_when_it_would_be_sent() {
         .create_session("test", mock.model())
         .expect("session");
 
-    let config = config(workspace.path(), "  \t\n ");
-
     // Preparing is fine — a session with nothing said yet is what ACP's
     // `session/new` opens. Sending is where the prompt has to be real.
-    let mut prepared =
-        prepare_with_session(session, &config, "openai", "mock-model").expect("prepared");
+    let mut prepared = prepare_with_session(
+        session,
+        workspace.path(),
+        "  \t\n ",
+        &context(),
+        "openai",
+        "mock-model",
+    )
+    .expect("prepared");
 
     assert!(prepared.execute(CollectingSink::new()).await.is_err());
 }
@@ -484,9 +543,17 @@ async fn a_missing_workspace_is_refused() {
         .create_session("test", mock.model())
         .expect("session");
 
-    let config = config(&PathBuf::from("/definitely/not/a/real/path"), "go");
-
-    assert!(prepare_with_session(session, &config, "openai", "mock-model").is_err());
+    assert!(
+        prepare_with_session(
+            session,
+            &PathBuf::from("/definitely/not/a/real/path"),
+            "go",
+            &context(),
+            "openai",
+            "mock-model"
+        )
+        .is_err()
+    );
 }
 
 /// The `.git` carve-out, proven where it matters: through a real runtime, on a
@@ -536,12 +603,18 @@ async fn a_write_into_git_hooks_is_refused() {
         )
         .expect("session");
 
-    let config = config(workspace.path(), "install a hook");
-    let report = prepare_with_session(session, &config, "openai", "mock-model")
-        .expect("prepared")
-        .execute(CollectingSink::new())
-        .await
-        .expect("the run reports rather than erroring");
+    let report = prepare_with_session(
+        session,
+        workspace.path(),
+        "install a hook",
+        &context(),
+        "openai",
+        "mock-model",
+    )
+    .expect("prepared")
+    .execute(CollectingSink::new())
+    .await
+    .expect("the run reports rather than erroring");
 
     let failed = report
         .sink
@@ -558,4 +631,29 @@ async fn a_write_into_git_hooks_is_refused() {
         !workspace.path().join(".git/hooks/pre-commit").exists(),
         "and must not reach the disk"
     );
+}
+
+/// The seam honors the whole spec it is handed: an effort asked for on the
+/// spec reaches the session rather than the void. (The free-function path
+/// applies it at mint; this path has only the session in hand.)
+#[tokio::test]
+async fn the_seam_applies_the_specs_effort_to_the_session() {
+    let workspace = workspace_with_context("rules");
+    let mock = mock(&["ok"]);
+    let session = mock
+        .runtime()
+        .create_session("test", mock.model())
+        .expect("session");
+
+    let prepared = prepare_with_session(
+        session,
+        workspace.path(),
+        RunSpec::new("go").with_effort(basis::Effort::High),
+        &context(),
+        "openai",
+        "mock-model",
+    )
+    .expect("prepared");
+
+    assert_eq!(prepared.effort(), Some(basis::Effort::High));
 }

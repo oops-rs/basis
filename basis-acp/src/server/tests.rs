@@ -19,16 +19,16 @@ use agent_client_protocol::schema::{
     },
 };
 
-use super::config::{ServeConfig, SessionSource};
+use super::config::{Discovery, ServeConfig, SessionSource, SessionTemplate};
 use super::initialize;
 use super::lifecycle::{delete_session, list_sessions, session_info, setup_failed};
 use super::turn::{prompt_parts, prompt_text, stop_reason, usage_update};
 use super::workspaces::{ConfiguredSource, WorkspaceKey};
 use crate::mode::ApprovalMode;
 use basis::{
-    ContextConfig, McpServer, PersistedSession, PreparedRun, PromptPart, RunConfig, RunError,
-    Runtime, ToolsConfig, hooks::HooksConfig, mcp::McpConfig, provider::ProviderError,
-    skills::SkillsConfig, templates::TemplatesConfig,
+    ContextConfig, McpServer, PersistedSession, PreparedRun, PromptPart, RunError, Runtime,
+    ToolsConfig, hooks::HooksConfig, mcp::McpConfig, provider::ProviderError, skills::SkillsConfig,
+    templates::TemplatesConfig,
 };
 use mentra::ModelSelector;
 
@@ -367,40 +367,18 @@ fn an_unknown_window_sends_nothing() {
 }
 
 #[test]
-fn the_config_template_takes_the_clients_working_directory() {
-    // Denied rather than granted, so the assertion below has something to
-    // catch: granted is the default, and a template that was dropped
-    // entirely would still look right.
-    let source = ConfiguredSource::new(Some(
-        RunConfig::new("/placeholder", "").with_shell(basis::ShellAccess::Denied),
-    ));
-
-    let built = source.config_for(PathBuf::from("/repo"), Vec::new());
-
-    assert_eq!(built.workspace, PathBuf::from("/repo"));
-    assert_eq!(
-        built.shell,
-        basis::ShellAccess::Denied,
-        "everything the client cannot say must carry through"
-    );
-}
-
-#[test]
 fn the_clients_mcp_servers_reach_the_config() {
     let source = ConfiguredSource::new(None);
 
-    let built = source.config_for(
-        PathBuf::from("/repo"),
-        vec![McpServer::Stdio(mentra::McpServerConfig {
-            name: "fs".to_string(),
-            command: "/bin/mcp-fs".to_string(),
-            args: Vec::new(),
-            env: Default::default(),
-            cwd: None,
-        })],
-    );
+    let built = source.session_mcp(vec![McpServer::Stdio(mentra::McpServerConfig {
+        name: "fs".to_string(),
+        command: "/bin/mcp-fs".to_string(),
+        args: Vec::new(),
+        env: Default::default(),
+        cwd: None,
+    })]);
 
-    let supplied: Vec<&str> = built.mcp.supplied.iter().map(McpServer::name).collect();
+    let supplied: Vec<&str> = built.supplied.iter().map(McpServer::name).collect();
     assert_eq!(
         supplied,
         vec!["fs"],
@@ -414,7 +392,7 @@ fn a_session_opens_asking_unless_the_operator_says_otherwise() {
     // headless run and wrong here: a client that can be asked should be.
     assert_eq!(ServeConfig::default().initial_mode, ApprovalMode::Prompt);
     assert_eq!(
-        ServeConfig::new(RunConfig::new("/repo", "")).initial_mode,
+        ServeConfig::new(SessionTemplate::new()).initial_mode,
         ApprovalMode::Prompt,
         "a template says what a run is, not how much it may do without asking"
     );
@@ -468,39 +446,43 @@ fn offline_runtime() -> Arc<Runtime> {
 
 /// A template that looks nowhere except where a test put something.
 ///
+/// Pinned to an id, which is what keeps model resolution off the network.
+fn offline_template() -> SessionTemplate {
+    SessionTemplate::new().with_model(ModelSelector::Id("test-model".to_string()))
+}
+
 /// Every discovery root is pinned, global ones to `None`: an unpinned one would
 /// read the developer's own configuration — and, for MCP, spawn the servers
-/// their `mcp.json` names. The model is an id rather than "newest available",
-/// which is what keeps resolution off the network.
-fn offline_template() -> RunConfig {
-    RunConfig::new("/placeholder", "")
-        .with_model(ModelSelector::Id("test-model".to_string()))
-        .with_context(ContextConfig {
+/// their `mcp.json` names.
+fn offline_discovery() -> Discovery {
+    Discovery {
+        context: ContextConfig {
             file_name: "AGENTS.md".to_string(),
             global_dir: None,
             walk_parents: false,
-        })
-        .with_skills(SkillsConfig {
+        },
+        skills: SkillsConfig {
             workspace_subdir: PathBuf::from(".basis/skills"),
             global_dir: None,
-        })
-        .with_templates(TemplatesConfig {
+        },
+        templates: TemplatesConfig {
             workspace_subdir: PathBuf::from(".basis/templates"),
             global_dir: None,
-        })
-        .with_hooks(HooksConfig {
+        },
+        hooks: HooksConfig {
             workspace_file: PathBuf::from(".basis/hooks.json"),
             global_dir: None,
-        })
-        .with_tools(ToolsConfig {
+        },
+        tools: ToolsConfig {
             workspace_file: PathBuf::from(".basis/tools.json"),
             global_dir: None,
-        })
-        .with_mcp(McpConfig {
+        },
+        mcp: McpConfig {
             workspace_file: PathBuf::from(".mcp.json"),
             global_dir: None,
             supplied: Vec::new(),
-        })
+        },
+    }
 }
 
 /// ADR-0018's acceptance for basis-acp: a server holding two sessions on one
@@ -516,7 +498,10 @@ fn offline_template() -> RunConfig {
 async fn two_sessions_on_one_workspace_share_one_runtime() {
     let repository = tempfile::tempdir().expect("tempdir");
     let runtime = offline_runtime();
-    let source = ConfiguredSource::on_runtime(Arc::clone(&runtime), Some(offline_template()));
+    let source = ConfiguredSource::on_runtime(
+        Arc::clone(&runtime),
+        Some(offline_template().with_discovery(offline_discovery())),
+    );
 
     let first = source
         .create(repository.path().to_path_buf(), Vec::new())
@@ -554,7 +539,6 @@ async fn two_sessions_on_one_workspace_share_one_runtime() {
 /// workspaces, because opening one spawns the programs it names.
 #[test]
 fn a_session_that_asked_for_different_servers_is_a_different_workspace() {
-    let source = ConfiguredSource::new(Some(offline_template()));
     let server = |command: &str| {
         vec![McpServer::Stdio(mentra::McpServerConfig {
             name: "fs".to_string(),
@@ -564,7 +548,7 @@ fn a_session_that_asked_for_different_servers_is_a_different_workspace() {
             cwd: None,
         })]
     };
-    let key = |mcp| WorkspaceKey::of(&source.config_for(PathBuf::from("/repo"), mcp));
+    let key = |mcp: Vec<McpServer>| WorkspaceKey::new(Path::new("/repo"), &mcp);
 
     assert_eq!(
         key(Vec::new()),
@@ -583,7 +567,7 @@ fn a_session_that_asked_for_different_servers_is_a_different_workspace() {
     );
     assert_ne!(
         key(Vec::new()),
-        WorkspaceKey::of(&source.config_for(PathBuf::from("/other-repo"), Vec::new())),
+        WorkspaceKey::new(Path::new("/other-repo"), &[]),
         "and a directory is a key"
     );
 }

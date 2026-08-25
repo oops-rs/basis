@@ -474,8 +474,8 @@ mod tests {
         assert_eq!(pool.bounds().budget, Some(pool.clone()));
 
         // And say nothing else, so they compose with whatever the caller sets.
-        assert_eq!(spec.deadline, None);
-        assert_eq!(spec.token_budget, None);
+        assert_eq!(spec.bounds.deadline, None);
+        assert_eq!(spec.bounds.token_budget, None);
         assert!(pool.bounds().cancel.is_none());
     }
 

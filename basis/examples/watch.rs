@@ -115,5 +115,7 @@ fn summarize<S>(report: &RunReport<S>) -> String {
             .to_string(),
         (RunOutcome::Error { .. }, Some(bound)) => format!("stopped by {bound:?}"),
         (RunOutcome::Error { message }, None) => format!("failed: {message}"),
+        // An outcome this build does not know; showing it beats hiding it.
+        (outcome, _) => format!("{outcome:?}"),
     }
 }

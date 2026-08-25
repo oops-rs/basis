@@ -46,7 +46,7 @@ exported — is spoken to with no `Authorization` header at all; one that wanted
   `.mcp.json` discovery, no `McpConfig` on a run, no servers registered
   ([ADR-0012](docs/adr/0012-one-contract-many-bindings.md)). Custom tools remain, because MCP was
   only ever one of the ways to reach them.
-- **~9 MB release binary**, down from cargo's 24 MB default. Each of the four profile settings that
+- **~10 MB release binary** (10.7 MB measured at 0.6.0), down from cargo's 24 MB default. Each of the four profile settings that
   gets there is argued in the workspace manifest, including the one deliberately absent:
   `panic = "abort"` turns any panic into a dead process, which is what an embedded harness and a
   long-lived server exist to avoid.
@@ -71,8 +71,8 @@ Keep the run and send again for a conversation — `run.send("and which of those
 AllowAll)` — because the session survives the turn, and `run.agent_id()` is the handle
 `Workspace::resume` takes in a later process.
 
-Bounds are builders on either shape — `RunConfig` for a one-shot free function, `RunSpec` for a run
-minted from a workspace — and every bound ends the run *gracefully*: the stream closes the way it
+Bounds are builders on `RunSpec` — one shape, however the run is made — and every bound ends the
+run *gracefully*: the stream closes the way it
 always does and whatever the model committed is kept. `report.stopped_by` is
 `Some(Bound::Deadline | Bound::ToolBudget | Bound::TokenBudget)` when a bound ended the run rather
 than the work ([ADR-0014](docs/adr/0014-watch-retired-runs-are-boundable.md)).
@@ -113,11 +113,10 @@ the limit plus one in-flight round per concurrent run. A turn drawing on a spent
 `RunError::BudgetExhausted` *before* its prompt is sent — a decision with its own name, so a fan-out
 stops minting on it instead of retrying it like a provider error.
 
-Work a run delegates through `spawn` is inside the **bound** — the subagent runs on the parent's
-accounting handle — but outside the **tally**: the relay that puts a child's usage on the parent's
-stream is internal to mentra's delegation intrinsic and a registered tool cannot reach it, so
-`RunReport::usage` under-reports any run that delegated.
-[docs/REDESIGN.md](docs/REDESIGN.md) carries that gap as open, not fixed.
+Work a run delegates through `spawn` is inside the **bound** and, since mentra `5f303b8` and
+basis `e22aa63`, inside the **tally** too: the subagent runs on the parent's accounting handle,
+the child's usage is relayed onto the parent's stream, and `RunReport::usage` agrees with the
+figure the bound stops on. [docs/REDESIGN.md](docs/REDESIGN.md) records the gap as closed.
 
 ### One stream for many runs
 
@@ -138,12 +137,14 @@ design: hold the answers, drop the reports.
 
 ### Structured concurrency
 
-`basis::Supervisor` owns concurrent work in process, under the same rules the CLI's durable
-handles obey below: `spawn` returns a `TaskHandle` immediately, `wait` observes a terminal state
-without rerunning anything, `cancel` flows downward to attached descendants, and detached work is a
-new root ([ADR-0017](docs/adr/0017-structured-agent-concurrency.md)). A wait-for cycle cannot be
-built in process at all, since the only handle there is to wait on is one you spawned yourself —
-across processes it is a handle anyone can name, which is what the wait rules below are for.
+In process, concurrency is the host's tokio: a fan-out is a `tokio::task::JoinSet`, a stop
+button is the `CancellationToken` a `TurnOptions` hands back, and what keeps an unattended branch
+finite is the bounds — deadline, tool budget, token budget — not a scheduler of basis's own
+(`examples/review_workflow.rs` runs that shape live). The four ADR-0017 rules — `spawn` returns a
+handle immediately, `wait` observes a terminal state without rerunning anything, `cancel` flows
+downward to attached descendants, detached work is a new root — are the CLI's durable-task
+contract below ([ADR-0017](docs/adr/0017-structured-agent-concurrency.md)), where a handle is
+something any process can name and the wait rules earn their keep.
 Stopping one turn is two signals:
 `TurnOptions::cancellable()` abandons the turn and rolls it back, which is a client's stop button;
 `TurnOptions::stoppable()` ends it at the next round boundary, keeping what the model committed.
@@ -296,8 +297,9 @@ starts — `--await` is the parent's explicit opt-in, and `--resumable` is the s
 backgrounding is the OS's job — `basis wait <ID> &`, `nohup`, tmux, `systemd-run`, CI. Cancellation
 is honored at turn boundaries (a hung tool call is ended by the deadline), and a crash mid-turn
 loses the in-flight round: re-driving it may repeat tool side effects, because a checkpoint
-restores state, never effects. Four rules are the load-bearing part, and hold in process and
-across processes alike:
+restores state, never effects. Four rules are the load-bearing part — the durable-task contract
+every handle obeys across processes (in process, concurrency is the host's tokio; see
+"Structured concurrency" above):
 
 - **Ownership is a tree.** An attached child inherits its parent's cancellation and the narrower
   deadline. A successful parent keeps attached children in scope until they settle; a failed or

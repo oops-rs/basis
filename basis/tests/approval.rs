@@ -21,7 +21,7 @@ use std::{
 use async_trait::async_trait;
 use basis::{
     AllowAll, ApprovalAnswer, ApprovalDecision, ApprovalRequest, Approver, CollectingSink, DenyAll,
-    Event, RunConfig, ToolSideEffectLevel,
+    Event, ToolSideEffectLevel,
     approval::ApprovalGate,
     run::prepare_with_session,
     tools::declared::{DeclaredTool, DeclaredToolSpec, SideEffect},
@@ -142,12 +142,12 @@ fn session(runtime: &Runtime, workspace: &Path, model: ModelInfo) -> Session {
         .expect("session")
 }
 
-fn config(workspace: &Path) -> RunConfig {
-    RunConfig::new(workspace, "make a file").with_context(basis::ContextConfig {
+fn context() -> basis::ContextConfig {
+    basis::ContextConfig {
         file_name: "AGENTS.md".to_string(),
         global_dir: None,
         walk_parents: false,
-    })
+    }
 }
 
 /// Records what it was asked, then lets the approver under test answer.
@@ -177,9 +177,15 @@ async fn run_with<A: Approver>(
     let session = session(&runtime, workspace, model);
     let seen = Arc::new(Mutex::new(Vec::new()));
 
-    let mut prepared =
-        prepare_with_session(session, &config(workspace), "openai", "scripted-model")
-            .expect("prepared");
+    let mut prepared = prepare_with_session(
+        session,
+        workspace,
+        "make a file",
+        &context(),
+        "openai",
+        "scripted-model",
+    )
+    .expect("prepared");
 
     let report = tokio::time::timeout(
         NOT_STUCK,
@@ -354,7 +360,9 @@ async fn a_run_with_no_approver_of_its_own_allows_what_it_cannot_ask_about() {
 
     let mut prepared = prepare_with_session(
         session,
-        &config(workspace.path()),
+        workspace.path(),
+        "make a file",
+        &context(),
         "openai",
         "scripted-model",
     )
@@ -398,7 +406,9 @@ async fn a_broken_sink_stops_the_narration_and_not_the_turn() {
 
     let mut prepared = prepare_with_session(
         session,
-        &config(workspace.path()),
+        workspace.path(),
+        "make a file",
+        &context(),
         "openai",
         "scripted-model",
     )
@@ -541,7 +551,9 @@ async fn an_approver_can_allow_edits_and_deny_the_network_without_naming_a_tool(
 
     let mut prepared = prepare_with_session(
         session,
-        &config(workspace.path()),
+        workspace.path(),
+        "make a file",
+        &context(),
         "openai",
         "scripted-model",
     )

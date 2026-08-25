@@ -128,7 +128,7 @@ pub enum Wire {
     Responses,
 }
 
-use crate::run::RunError;
+use crate::error::RunError;
 
 use dispatch::{HookDispatch, HookRegistration, WorkspaceGuardEntry};
 

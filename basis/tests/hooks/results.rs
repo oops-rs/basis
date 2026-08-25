@@ -30,9 +30,7 @@ use mentra::{
 };
 use serde_json::json;
 
-use basis::{
-    CollectingSink, Event, RunConfig, hooks, hooks::HookRunner, run::prepare_with_session,
-};
+use basis::{CollectingSink, Event, hooks, hooks::HookRunner, run::prepare_with_session};
 
 use super::Workspace;
 
@@ -123,16 +121,23 @@ async fn read_through_hooks(workspace: &Workspace, path: &str) -> (Vec<Event>, V
         )
         .expect("session");
 
-    let config = RunConfig::new(workspace.path(), "read it").with_context(basis::ContextConfig {
+    let context = basis::ContextConfig {
         file_name: "AGENTS.md".to_string(),
         global_dir: None,
         walk_parents: false,
-    });
-    let report = prepare_with_session(session, &config, "openai", "scripted-model")
-        .expect("prepared")
-        .execute(CollectingSink::new())
-        .await
-        .expect("the run completes");
+    };
+    let report = prepare_with_session(
+        session,
+        workspace.path(),
+        "read it",
+        &context,
+        "openai",
+        "scripted-model",
+    )
+    .expect("prepared")
+    .execute(CollectingSink::new())
+    .await
+    .expect("the run completes");
 
     let shown = shown.lock().expect("not poisoned").clone();
     (report.sink.into_events(), shown)

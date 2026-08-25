@@ -23,9 +23,9 @@ use super::credential::Credential;
 
 use crate::{
     approval::ApprovalGate,
+    error::RunError,
     hooks::Interceptor,
     provider,
-    run::RunError,
     shell::ShellAccess,
     store,
     tools::{
@@ -525,13 +525,12 @@ impl RuntimeBuilder {
     /// Pointing this at [`store::default_directory`](crate::store::default_directory)
     /// is exactly the default.
     ///
-    /// Deliberately absent from [`RunConfig`](crate::RunConfig), for the reason
-    /// its `api_key` is: a one-prompt config describes an invocation, and where
-    /// a machine keeps its history is not something an invocation decides. A
-    /// one-shot caller that needs it hands
-    /// [`RunConfig::split`](crate::RunConfig::split)'s builder a runtime recipe
-    /// through [`WorkspaceBuilder::with_runtime_builder`](crate::WorkspaceBuilder::with_runtime_builder),
-    /// which is the documented migration path.
+    /// Deliberately not a per-run knob: a run describes an invocation, and
+    /// where a machine keeps its history is not something an invocation
+    /// decides. A one-shot caller that needs it opens the
+    /// [`Workspace`](crate::Workspace) itself and hands
+    /// [`WorkspaceBuilder::with_runtime_builder`](crate::WorkspaceBuilder::with_runtime_builder)
+    /// a recipe, which is the documented migration path.
     pub fn with_store_dir(self, dir: impl Into<PathBuf>) -> Self {
         Self {
             history: Some(History::Directory(dir.into())),

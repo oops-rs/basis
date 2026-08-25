@@ -29,7 +29,6 @@ use crate::{
     approval::{AllowAll, Approver},
     context::WorkspaceContext,
     event::{ContextFile, EVENT_SCHEMA_VERSION, Event, RunOutcome, SkillSummary, TemplateSummary},
-    lifecycle::{LifecycleError, Supervisor, TaskHandle},
     templates::Template,
     workspace::Workspace,
 };
@@ -157,8 +156,8 @@ impl PreparedRun {
 
     /// Sets what every turn on this run may spend.
     ///
-    /// [`prepare`](super::prepare) installs [`RunConfig`](super::RunConfig)'s
-    /// bounds here; a host that built its own session says so itself. Only the
+    /// [`Workspace`](crate::Workspace) installs [`RunSpec`](crate::RunSpec)'s
+    /// bounds here at mint; a host that built its own session says so itself. Only the
     /// limits are read — a cancellation token belongs to one call, not to the
     /// run, and arrives through [`send_with_options`](Self::send_with_options).
     pub fn with_bounds(self, bounds: TurnOptions) -> Self {
@@ -248,7 +247,7 @@ impl PreparedRun {
     /// against right now. Known when the model was resolved through the
     /// provider's listing and that listing reports one — mentra looks a
     /// pinned id up there too (`bfe952b`), so `--model`, a repository's
-    /// `config.json` and `RunConfig::with_model` all get a window when the
+    /// `config.json` and `WorkspaceBuilder::with_model` all get a window when the
     /// provider publishes one. Gemini's listing does, as `inputTokenLimit`;
     /// Anthropic's and the OpenAI wires' do not, and neither does a server
     /// that cannot list. `None` for a run [`set_model`](Self::set_model) has
@@ -437,51 +436,6 @@ impl PreparedRun {
     ) -> Result<RunReport<S>, RunError> {
         let prompt = self.run.prompt.clone();
         self.turn(vec![PromptPart::Text(prompt)], sink, approver, options)
-            .await
-    }
-
-    /// Starts this one-shot run under a lifecycle [`Supervisor`].
-    ///
-    /// The handle is returned as soon as the supervisor accepts the work.
-    /// Waiting happens through [`TaskHandle::wait`], independently of the
-    /// event sink. A successful task's bytes are the assistant's UTF-8 final
-    /// message; a failed run becomes [`crate::TaskState::Failed`].
-    ///
-    /// Cancellation is cooperative: the supervisor trips the turn's own
-    /// cancellation token, then waits for the run to close its event stream
-    /// before publishing [`crate::TaskState::Cancelled`].
-    pub async fn spawn<S: EventSink, A: Approver>(
-        mut self,
-        supervisor: &Supervisor,
-        parent: Option<&TaskHandle>,
-        detached: bool,
-        sink: S,
-        approver: A,
-    ) -> Result<TaskHandle, LifecycleError> {
-        supervisor
-            .spawn_cooperative(parent, detached, move |context| async move {
-                let (options, cancel) = TurnOptions::cancellable();
-                let cancellation = context.cancellation();
-                let execution = self.execute_with_approver_and_options(sink, approver, options);
-                tokio::pin!(execution);
-
-                let report = tokio::select! {
-                    report = &mut execution => report,
-                    () = cancellation.cancelled() => {
-                        cancel.cancel();
-                        execution.await
-                    }
-                }
-                .map_err(|error| error.to_string())?;
-
-                match (report.outcome, report.final_message) {
-                    (RunOutcome::Ok, Some(message)) => Ok(message.into_bytes()),
-                    (RunOutcome::Ok, None) => {
-                        Err("run finished successfully without a final message".to_string())
-                    }
-                    (RunOutcome::Error { message }, _) => Err(message),
-                }
-            })
             .await
     }
 

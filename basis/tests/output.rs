@@ -28,8 +28,8 @@ use std::{
 
 use async_trait::async_trait;
 use basis::{
-    AllowAll, Bound, CollectingSink, Event, FnSink, OutputSpec, RunConfig, RunError, RunOutcome,
-    TurnOptions, run::prepare_with_session,
+    AllowAll, Bound, CollectingSink, Event, FnSink, OutputSpec, RunError, RunOutcome, TurnOptions,
+    run::prepare_with_session,
 };
 use mentra::{
     BuiltinProvider, ContentBlock, ModelInfo, Role, Runtime, RuntimePolicy, Session, TokenUsage,
@@ -287,12 +287,12 @@ fn workspace() -> tempfile::TempDir {
     dir
 }
 
-fn config(workspace: &Path) -> RunConfig {
-    RunConfig::new(workspace, "review this diff").with_context(basis::ContextConfig {
+fn context() -> basis::ContextConfig {
+    basis::ContextConfig {
         file_name: "AGENTS.md".to_string(),
         global_dir: None,
         walk_parents: false,
-    })
+    }
 }
 
 fn session(runtime: &Runtime, workspace: &Path, model: ModelInfo) -> Session {
@@ -338,7 +338,9 @@ fn prepared_with<P: Provider + 'static>(
 
     let run = prepare_with_session(
         session(&runtime, dir.path(), model),
-        &config(dir.path()),
+        dir.path(),
+        "review this diff",
+        &context(),
         "anthropic",
         "typed-model",
     )
@@ -592,7 +594,9 @@ async fn usage_is_summed_across_every_round_of_a_turn() {
 
     let mut run = prepare_with_session(
         session(&runtime, dir.path(), model),
-        &config(dir.path()),
+        dir.path(),
+        "review this diff",
+        &context(),
         "anthropic",
         "typed-model",
     )
