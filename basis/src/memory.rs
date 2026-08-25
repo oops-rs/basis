@@ -24,6 +24,18 @@
 //!   data dir. Ephemeral history, and mentra's process-cwd default, name no
 //!   directory basis chose, so there is no per-workspace root to derive.
 //!
+//!   **Resolved only on a workspace-bound (private) runtime.** A store dir is
+//!   one fact about a *runtime*, and on a shared one (ADR-0018) that runtime
+//!   is not this workspace's alone — deriving a sibling from it would hand
+//!   every workspace borrowing the runtime the identical directory, each
+//!   reading the others' memory index into its own prompt. So
+//!   `WorkspaceBuilder::open` passes no store dir on the shared path at all,
+//!   and [`WorkspaceMemoryRoot::BesideStore`] resolves to nothing there,
+//!   exactly parallel to the dispatcher's existing shared-runtime posture: it
+//!   can deny a write, never grant a root policy never named. An explicit
+//!   [`WorkspaceMemoryRoot::Dir`] is unaffected either way — naming a path is
+//!   the host taking responsibility for it.
+//!
 //! A workspace memory shadows a global one of the same name — the rule skills
 //! and templates already follow. Zero memories render no block at all, and a
 //! missing directory is simply absent; a file that exists and cannot be
@@ -191,7 +203,11 @@ struct Frontmatter {
 ///
 /// `store_dir` is what [`RuntimeBuilder::with_store_dir`] named, or `None`
 /// when history is ephemeral or at mentra's default — the cases with no
-/// directory basis chose that a convention could build beside.
+/// directory basis chose that a convention could build beside. Also `None`
+/// on a *shared* runtime regardless of what it was built with:
+/// `WorkspaceBuilder::open` passes nothing there on purpose, because a store
+/// dir on a shared runtime is not this one workspace's fact to build beside —
+/// see the module docs.
 ///
 /// [`RuntimeBuilder::with_store_dir`]: crate::RuntimeBuilder::with_store_dir
 pub(crate) fn roots(config: &MemoryConfig, store_dir: Option<&Path>) -> Vec<MemorySource> {

@@ -425,12 +425,25 @@ impl WorkspaceBuilder {
         // runtime's policy names them (the model writes memories through the
         // ordinary file tools, and the roots sit outside the workspace), and
         // the first memory is written by exactly the run that finds none to
-        // read. On a *shared* runtime the fixed policy cannot carry
-        // per-workspace roots, so the index still renders but a file tool
-        // write to a root outside the agent's own directory is refused —
-        // recorded beside the other costs of sharing.
+        // read.
+        //
+        // **`WorkspaceMemoryRoot::BesideStore` resolves only here, on the
+        // private path.** A shared runtime's store dir is one runtime-wide
+        // fact, not this workspace's — every workspace borrowing it would
+        // derive the identical sibling `memory/` directory, and each would
+        // read the others' memory index into its own prompt (worse than the
+        // write-is-refused gap this replaces: that let the index render
+        // anyway). `None` here is what makes `memory::roots` skip the
+        // workspace root entirely on a shared runtime, exactly parallel to
+        // the dispatcher's existing shared-runtime posture — it can deny, it
+        // cannot grant a root the policy never named. The global root is
+        // unaffected: every workspace's own memories are exactly that,
+        // whichever runtime they borrow. An explicit
+        // [`WorkspaceMemoryRoot::Dir`](crate::memory::WorkspaceMemoryRoot::Dir)
+        // is unaffected either way — naming a path is the host taking
+        // responsibility for it, shared runtime or not.
         let store_dir = match &self.runtime {
-            RuntimeSource::Shared(runtime) => runtime.store_dir().map(Path::to_path_buf),
+            RuntimeSource::Shared(_) => None,
             RuntimeSource::Private(recipe) => recipe.named_store_dir().map(Path::to_path_buf),
         };
         let memory_sources = memory::roots(&self.memory, store_dir.as_deref());

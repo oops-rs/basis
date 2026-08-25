@@ -10,7 +10,10 @@
 //! Every workspace is opened against a closed port with an explicit model id,
 //! so nothing is contacted; see `tests/workspace.rs` for why that holds.
 
-use std::path::{Path, PathBuf};
+use std::{
+    path::{Path, PathBuf},
+    sync::Arc,
+};
 
 use basis::{
     ContextConfig, MemoryConfig, Runtime, RuntimeBuilder, Workspace, WorkspaceBuilder,
@@ -216,4 +219,114 @@ async fn ephemeral_history_leaves_only_the_global_root() {
         .map(|memory| memory.name.as_str())
         .collect();
     assert_eq!(names, ["style"]);
+}
+
+#[tokio::test]
+async fn a_shared_runtimes_store_dir_grants_no_workspace_memory_root_by_default() {
+    // G2: BesideStore resolves only on a workspace-bound (private) runtime.
+    // A shared runtime's store dir is one runtime-wide fact, not either
+    // workspace's alone — if it resolved here, both of these unrelated
+    // repositories would derive the identical sibling `memory/` directory and
+    // read each other's memory index into their own prompt.
+    let tmp = tempfile::tempdir().expect("tempdir");
+    let store = tmp.path().join("shared-store");
+    write(
+        &tmp.path().join("memory").join("note.md"),
+        &memory_file("note", "would leak across every workspace if resolved"),
+    );
+
+    let runtime = Arc::new(
+        offline_runtime()
+            .with_store_dir(&store)
+            .build()
+            .expect("builds offline"),
+    );
+
+    let first_repo = tmp.path().join("first");
+    std::fs::create_dir_all(&first_repo).expect("create repo");
+    let second_repo = tmp.path().join("second");
+    std::fs::create_dir_all(&second_repo).expect("create repo");
+
+    let by_default = MemoryConfig {
+        global_root: None,
+        workspace_root: WorkspaceMemoryRoot::BesideStore,
+    };
+
+    let first = offline(&first_repo)
+        .with_runtime(Arc::clone(&runtime))
+        .with_memory(by_default.clone())
+        .open()
+        .await
+        .expect("opens");
+    let second = offline(&second_repo)
+        .with_runtime(runtime)
+        .with_memory(by_default)
+        .open()
+        .await
+        .expect("opens");
+
+    assert!(
+        first.memories().is_empty(),
+        "no workspace root on a shared runtime: {:?}",
+        first.memories()
+    );
+    assert!(
+        second.memories().is_empty(),
+        "no workspace root on a shared runtime: {:?}",
+        second.memories()
+    );
+}
+
+#[tokio::test]
+async fn an_explicit_dir_is_still_honored_on_a_shared_runtime() {
+    // Naming a path is the host taking responsibility for it — unlike the
+    // derived `BesideStore`, an explicit `Dir` is not runtime-wide guesswork,
+    // so it is unaffected by G2 either way.
+    let tmp = tempfile::tempdir().expect("tempdir");
+    let runtime = Arc::new(
+        offline_runtime()
+            .with_ephemeral_history()
+            .build()
+            .expect("builds offline"),
+    );
+
+    let first_repo = tmp.path().join("first");
+    std::fs::create_dir_all(&first_repo).expect("create repo");
+    let first_memories = tmp.path().join("first-memories");
+    write(
+        &first_memories.join("note.md"),
+        &memory_file("note", "this workspace's own"),
+    );
+
+    let second_repo = tmp.path().join("second");
+    std::fs::create_dir_all(&second_repo).expect("create repo");
+    let second_memories = tmp.path().join("second-memories");
+    write(
+        &second_memories.join("other.md"),
+        &memory_file("other", "the other workspace's own"),
+    );
+
+    let first = offline(&first_repo)
+        .with_runtime(Arc::clone(&runtime))
+        .with_memory(MemoryConfig {
+            global_root: None,
+            workspace_root: WorkspaceMemoryRoot::Dir(first_memories),
+        })
+        .open()
+        .await
+        .expect("opens");
+    let second = offline(&second_repo)
+        .with_runtime(runtime)
+        .with_memory(MemoryConfig {
+            global_root: None,
+            workspace_root: WorkspaceMemoryRoot::Dir(second_memories),
+        })
+        .open()
+        .await
+        .expect("opens");
+
+    assert_eq!(first.memories().len(), 1);
+    assert_eq!(first.memories()[0].name, "note");
+    assert_eq!(second.memories().len(), 1);
+    assert_eq!(second.memories()[0].name, "other");
 }

@@ -238,11 +238,18 @@ outrank both files.
 Memory is files, not a subsystem: one `.md` per memory, YAML frontmatter
 naming `name`, a one-line `description`, and `type` (`user`, `feedback`,
 `project`, or `reference`), body free-form. Two roots: `memory/` in the global
-config directory, and — when the runtime keeps its history in a named
-directory (`RuntimeBuilder::with_store_dir`, which the CLI always does) — the
-sibling `memory/` beside that store, so the CLI's memories live at
+config directory, and — when the runtime is bound to this one workspace
+(`Workspace::open`'s private path) and keeps its history in a named directory
+(`RuntimeBuilder::with_store_dir`, which the CLI always does) — the sibling
+`memory/` beside that store, so the CLI's memories live at
 `<data root>/workspaces/<key>/memory`. Ephemeral or default history names no
-directory, so there is no per-workspace root then.
+directory, so there is no per-workspace root then. **On a shared runtime the
+derived root is always absent, whatever its store dir is** — a store dir there
+is one runtime-wide fact, not any one workspace's, and deriving from it would
+hand every workspace borrowing that runtime the same directory, each reading
+the others' memory index into its own prompt. A `WorkspaceMemoryRoot::Dir`
+named explicitly is unaffected: naming a path is the host's own
+responsibility, shared runtime or not.
 `WorkspaceBuilder::with_memory` overrides either root or disables discovery.
 
 At `Workspace::open` each file's frontmatter is read — never the body — and an

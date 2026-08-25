@@ -1144,10 +1144,6 @@ impl RuntimeBuilder {
 
         Ok(Runtime {
             mentra,
-            store_dir: self.history.and_then(|history| match history {
-                History::Directory(dir) => Some(dir),
-                History::Ephemeral => None,
-            }),
             command_environment,
             provider,
             // Unsaid is the newest the provider offers, which is what this
