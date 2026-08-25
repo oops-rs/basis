@@ -143,12 +143,12 @@ pub struct PersistedSession {
     pub messages: usize,
     /// When the conversation was first written, in seconds since the epoch.
     ///
-    /// Optional because mentra's summary is: a store that keeps nothing across
-    /// process lifetimes has no row and therefore no answer, and basis carries
-    /// that rather than inventing a number to fill the gap. Nothing reached
-    /// through [`list_in`] is one of those — listing opens a SQLite store of
-    /// its own, whatever the workspace was running on — so in practice both of
-    /// these arrive set. [`list_in`]'s ordering still handles `None`, because a
+    /// Optional because mentra's summary is: a store that keeps nothing
+    /// across process lifetimes has no record and therefore no answer, and
+    /// basis carries that rather than inventing a number to fill the gap.
+    /// Nothing reached through [`list_in`] is one of those — listing opens a
+    /// file store of its own, whatever the workspace was running on — so in
+    /// practice both of these arrive set. [`list_in`]'s ordering still handles `None`, because a
     /// rule that only works for the values it happens to see is not a rule.
     pub created_at: Option<u64>,
     /// When it was last written, on the same clock and absent in the same case.
@@ -207,8 +207,9 @@ pub fn list_in(dir: &Path, workspace: &Path) -> Result<Vec<PersistedSession>, Ru
 /// Ordered here rather than at each surface, because there are two of them —
 /// `basis list` and ACP's `session/list` — and a client that sorted for itself
 /// would need a timestamp basis might not have. mentra returns creation order
-/// (`ORDER BY created_at, id` for SQLite, insertion order for the volatile
-/// store), which answers "which is oldest" and never "which was I just in".
+/// (sorted `(created_at, id)` for the file store, insertion order for the
+/// volatile one), which answers "which is oldest" and never "which was I just
+/// in".
 ///
 /// Two rules, and the second is what makes the answer usable at all:
 ///
@@ -275,10 +276,10 @@ pub fn forget_in(dir: &Path, agent_id: &str) -> Result<(), RunError> {
 /// `RuntimeBuilder::build` refuses to produce one with an empty provider
 /// registry — so a provider is registered to satisfy the builder, with a
 /// placeholder key. Nothing here resolves a model or reaches the network:
-/// listing reads a SQLite table and deleting writes one, and the runtime is
-/// dropped as soon as it has. Requiring a real credential to touch local rows
-/// would make `session/list` and `session/delete` fail for a reason that has
-/// nothing to do with either.
+/// listing reads the store's files and deleting removes some, and the runtime
+/// is dropped as soon as it has. Requiring a real credential to touch local
+/// records would make `session/list` and `session/delete` fail for a reason
+/// that has nothing to do with either.
 ///
 /// The store is built from `dir` rather than left at mentra's default, so that
 /// this and [`RuntimeBuilder::with_store_dir`](crate::RuntimeBuilder::with_store_dir)
@@ -344,7 +345,7 @@ pub(crate) fn refuse_legacy_store(dir: &Path) -> Result<(), RunError> {
 /// workspace, which is
 /// what makes two ephemeral workspaces two histories rather than one — the type
 /// is `Clone` and clones share state, so a shared instance would be a shared
-/// database with none of the durability.
+/// store with none of the durability.
 ///
 /// The backing for
 /// [`RuntimeBuilder::with_ephemeral_history`](crate::RuntimeBuilder::with_ephemeral_history),
@@ -359,7 +360,7 @@ pub(crate) fn volatile() -> VolatileRuntimeStore {
 /// mentra writes the whole transcript to a file before it replaces a prefix of
 /// it with a summary, so *somewhere* is not optional; what is optional is
 /// whether basis chooses it. It should: a snapshot is a verbatim copy of the
-/// same conversation the database holds, and mentra's own default puts the two
+/// same conversation the store holds, and mentra's own default puts the two
 /// in one directory. Keeping that relationship is what makes
 /// [`RuntimeBuilder::with_store_dir`](crate::RuntimeBuilder::with_store_dir)
 /// move both — and pointing it at [`default_directory`] a no-op, exactly as it
@@ -370,7 +371,7 @@ pub(crate) fn transcripts_in(dir: &Path) -> PathBuf {
 
 /// Where they go when nobody said where the history lives.
 ///
-/// Keyed by the process's current directory, like the database beside it — the
+/// Keyed by the process's current directory, like the store beside it — the
 /// hazard `with_store_dir` exists to answer, left in place for the caller that
 /// has not asked.
 pub(crate) fn default_transcripts() -> PathBuf {
