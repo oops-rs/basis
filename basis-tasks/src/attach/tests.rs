@@ -49,7 +49,8 @@ async fn drive_attached(data: &DataDir, task: &str) -> Value {
     let guard = try_attach(&paths).unwrap().expect("lock is free");
     drive(data, task, guard, &DriveContext::default())
         .await
-        .expect("drives to terminal")
+        .expect("drives without error")
+        .expect("nothing else claims this conversation, so this attempt settles")
 }
 
 #[tokio::test]
@@ -296,6 +297,50 @@ async fn a_crash_between_the_settle_pass_writes_recovers_on_the_next_attach() {
             .expect("no longer stranded");
     assert_eq!(resolved["state"], "succeeded");
     assert_eq!(resolved["message"], stranded);
+}
+
+/// T2(b): a conversation already claimed — another lock holder standing in
+/// for a sibling task already inside `Workspace::resume` on the same agent
+/// id — is observed, not raced: `drive` backs off with `None` rather than
+/// attempting the same resume, settles nothing, and releases the task's own
+/// attach lock so a later attempt can retry once the conversation frees up.
+#[tokio::test]
+async fn a_claimed_conversation_is_observed_not_raced() {
+    let (_dir, data) = data();
+    let task = handle(1);
+    let paths = record(&data, &task, None, true, None);
+    let mut meta = load_meta(&paths).unwrap();
+    meta.continues = Some("conversation-1".to_string());
+    save_meta(&paths, &meta).unwrap();
+
+    let (key, _) = valid_task_handle(&task).unwrap();
+    let held = try_conversation(&data, key, "conversation-1")
+        .unwrap()
+        .expect("nobody else holds it yet");
+
+    let guard = try_attach(&paths).unwrap().expect("lock is free");
+    let outcome = drive(&data, &task, guard, &DriveContext::default())
+        .await
+        .expect("backing off is not an error");
+    assert!(
+        outcome.is_none(),
+        "a claimed conversation is observed, not driven"
+    );
+    assert!(
+        read_terminal(&paths).unwrap().is_none(),
+        "nothing settled while the conversation was claimed elsewhere"
+    );
+    assert!(
+        try_attach(&paths).unwrap().is_some(),
+        "backing off releases this task's own attach lock for a later attempt"
+    );
+
+    drop(held);
+    drive_attached(&data, &task).await;
+    assert!(
+        read_terminal(&paths).unwrap().is_some(),
+        "once the conversation frees up, the next attempt makes progress"
+    );
 }
 
 #[test]

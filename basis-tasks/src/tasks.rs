@@ -279,6 +279,51 @@ pub(crate) fn named<'a>(
         .ok_or_else(|| NamedError::NotFound(format!("no task directory for {handle}")))
 }
 
+/// A non-terminal task in this workspace that already names `agent_id` as
+/// what it continues — the claim [`Tasks::spawn`](crate::Tasks::spawn) checks
+/// before minting a second one under the same [`continue_lock`](DataDir),
+/// and the reason a claim can be checked for at all: two tasks racing to
+/// continue one conversation would both eventually call `Workspace::resume`
+/// on it, and only refusing the second claimant here — before either ever
+/// attaches — keeps that from being the first anyone hears of it.
+///
+/// Scanned directly rather than through [`workspace_tasks`], which answers a
+/// different question (`--continue`'s own target) and does not carry
+/// `continues` on its rows.
+pub(crate) fn claimed_continuation(
+    data: &DataDir,
+    key: &str,
+    agent_id: &str,
+) -> Result<Option<String>, String> {
+    let agents = data.agents_dir(key);
+    let entries = match std::fs::read_dir(&agents) {
+        Ok(entries) => entries,
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(None),
+        Err(error) => return Err(format!("scan workspace agents: {error}")),
+    };
+    for entry in entries {
+        let entry = entry.map_err(|error| format!("scan workspace agents: {error}"))?;
+        let task = format!("{key}/{}", entry.file_name().to_string_lossy());
+        let Some(paths) = data.agent_dir(&task).filter(AgentPaths::exists) else {
+            continue;
+        };
+        let Ok(meta) = load_meta(&paths) else {
+            continue;
+        };
+        if meta.continues.as_deref() != Some(agent_id) {
+            continue;
+        }
+        if read_terminal(&paths)?.is_some() {
+            // Settled — its claim released the moment it did, the same rule
+            // `latest_conversation` skipping a never-attached task follows a
+            // level up: a claim only means anything while it is open.
+            continue;
+        }
+        return Ok(Some(task));
+    }
+    Ok(None)
+}
+
 /// The prompt's first line, bounded.
 fn first_line(prompt: &str) -> String {
     let line = prompt.lines().next().unwrap_or_default().trim();
@@ -291,7 +336,7 @@ fn first_line(prompt: &str) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::state::{MessageState, RunOptions};
+    use crate::state::{MessageState, RunOptions, save_meta, write_terminal};
 
     /// A row that has been touched exactly once, when it started — the shape
     /// every assertion below that is not about activity wants.
@@ -466,6 +511,48 @@ mod tests {
         assert!(
             format!("{error:?}").contains("no task directory"),
             "{error:?}"
+        );
+    }
+
+    /// T2(a): a task that already records `continues = Some(agent_id)` and
+    /// has not yet settled is an open claim on that conversation — the fact
+    /// `Tasks::spawn` checks before minting a second claimant.
+    #[test]
+    fn a_still_open_continuation_is_a_claim_a_settled_one_releases() {
+        let dir = tempfile::tempdir().unwrap();
+        let data = DataDir::from_path(dir.path()).unwrap();
+        let key = "0123456789abcdef";
+        let claimant = format!("{key}/{:032x}", 1);
+        let paths = data.agent_dir(&claimant).unwrap();
+        std::fs::create_dir_all(paths.dir()).unwrap();
+        let meta = TaskMeta::new(
+            claimant.clone(),
+            None,
+            true,
+            "/repo".to_string(),
+            "continue it".to_string(),
+            RunOptions::default(),
+            None,
+        )
+        .continuing(Some("conversation-1".to_string()));
+        save_meta(&paths, &meta).unwrap();
+
+        assert_eq!(
+            claimed_continuation(&data, key, "conversation-1").unwrap(),
+            Some(claimant.clone()),
+            "an unsettled claimant is still holding its claim"
+        );
+        assert_eq!(
+            claimed_continuation(&data, key, "some-other-conversation").unwrap(),
+            None,
+            "a claim on one conversation says nothing about another"
+        );
+
+        write_terminal(&paths, &json!({"state": "succeeded", "result": "done"})).unwrap();
+        assert_eq!(
+            claimed_continuation(&data, key, "conversation-1").unwrap(),
+            None,
+            "a settled claimant's claim released the moment it settled"
         );
     }
 

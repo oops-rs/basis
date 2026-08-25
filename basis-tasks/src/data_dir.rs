@@ -66,6 +66,35 @@ impl DataDir {
         self.workspace_dir(key).join("agents")
     }
 
+    /// Where [`Tasks::spawn`](crate::Tasks::spawn) serializes minting a
+    /// continuation: held from the moment it resolves which conversation to
+    /// continue through the moment it records that choice, so a second spawn
+    /// racing the first for the same conversation resolves *after* the
+    /// first's claim is on disk to see it, rather than beside it. Beside
+    /// `agents/` and `store/`, not inside either — it protects the
+    /// resolution, not any one task's files.
+    pub(crate) fn continue_lock(&self, key: &str) -> PathBuf {
+        self.workspace_dir(key).join("continue.lock")
+    }
+
+    /// One lock file per conversation this workspace has ever resumed — the
+    /// double-continuation race's other half (see `attach::drive`'s
+    /// `try_conversation`): even once `continue_lock` above keeps a *second
+    /// mint* from claiming an already-claimed conversation, two
+    /// already-minted sibling tasks that both record the same `continues`
+    /// must still not both call `Workspace::resume` on it at once.
+    ///
+    /// Filenamed by a hash of the agent id rather than the id itself —
+    /// mentra's id format is not this crate's contract to keep stable, and a
+    /// hash is a path component no id's own characters can smuggle anything
+    /// into.
+    pub(crate) fn conversation_lock(&self, key: &str, agent_id: &str) -> io::Result<PathBuf> {
+        let dir = self.workspace_dir(key).join("conversations");
+        fs::create_dir_all(&dir)?;
+        restrict_directory(&dir)?;
+        Ok(dir.join(format!("{}.lock", fnv1a(agent_id.as_bytes()))))
+    }
+
     /// The agent directory a validated handle names, without requiring it to
     /// exist. `None` when the handle does not fit the grammar, so an opaque
     /// string can never become a path outside the root.
@@ -205,8 +234,16 @@ pub(crate) fn workspace_key(path: &Path) -> String {
     let canonical = canonical_workspace(path)
         .map(|path| path.to_string_lossy().into_owned())
         .unwrap_or_else(|_| path.to_string_lossy().into_owned());
+    fnv1a(canonical.as_bytes())
+}
+
+/// FNV-1a, hex-encoded — small, stable, and content-addressed rather than
+/// length- or character-set-dependent. [`workspace_key`] and
+/// [`DataDir::conversation_lock`] both name a directory after whatever this
+/// returns instead of the text they hashed.
+fn fnv1a(bytes: &[u8]) -> String {
     let mut hash = 0xcbf29ce484222325_u64;
-    for byte in canonical.as_bytes() {
+    for byte in bytes {
         hash ^= u64::from(*byte);
         hash = hash.wrapping_mul(0x100000001b3);
     }

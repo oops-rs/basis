@@ -89,8 +89,10 @@ pub(crate) async fn wait_for_terminal(
         if let Some(terminal) = read_terminal(&paths)? {
             return Ok(WaitOutcome::Terminal(terminal));
         }
-        if let Some(guard) = try_attach(&paths)? {
-            return Ok(WaitOutcome::Terminal(drive(data, task, guard, ctx).await?));
+        if let Some(guard) = try_attach(&paths)?
+            && let Some(terminal) = drive(data, task, guard, ctx).await?
+        {
+            return Ok(WaitOutcome::Terminal(terminal));
         }
         if deadline.is_some_and(|deadline| Instant::now() >= deadline) {
             return Ok(WaitOutcome::TimedOut {
@@ -136,7 +138,7 @@ pub(crate) async fn wait_for_message(
         if terminal.is_none()
             && let Some(guard) = try_attach(&paths)?
         {
-            drive(data, task, guard, &ctx).await?;
+            let _ = drive(data, task, guard, &ctx).await?;
             continue;
         }
         if deadline.is_some_and(|deadline| Instant::now() >= deadline) {
@@ -214,24 +216,76 @@ fn children_of(data: &DataDir, task: &str) -> Result<Vec<String>, String> {
 }
 
 /// Executes the agent to its terminal record while holding the attach lock,
-/// and returns the raw terminal payload. The lock is released on return.
+/// and returns the raw terminal payload — or `None` when this attempt made
+/// no progress because the conversation it would resume is already claimed by
+/// another task's executor (see [`try_conversation`]). `None` means exactly
+/// what a contended [`try_attach`] already means to its own caller: nobody
+/// drove anything this attempt, the lock this call did hold (this task's own
+/// attach lock, dropped with `guard` on any return) is released, and the
+/// caller's poll loop retries — the same observe-don't-race contract, one
+/// layer down, for T2(b)'s double-continuation race.
 pub(crate) async fn drive(
     data: &DataDir,
     task: &str,
     mut guard: lock::Lock,
     ctx: &DriveContext,
-) -> Result<Value, String> {
+) -> Result<Option<Value>, String> {
     let paths = resolve(data, task)?;
     // Someone may have finished the task between our probe and our lock.
     if let Some(terminal) = read_terminal(&paths)? {
-        return Ok(terminal);
+        return Ok(Some(terminal));
     }
     guard.write_fingerprint();
     let mut meta = load_meta(&paths)?;
     if meta.pending_terminal.is_none() {
-        run_model(data, task, &paths, &mut meta, ctx).await?;
+        match existing_conversation(&meta) {
+            Some(agent_id) => {
+                let (key, _) = valid_task_handle(task)
+                    .ok_or_else(|| format!("malformed task handle {task}"))?;
+                match try_conversation(data, key, &agent_id)? {
+                    Some(_conversation) => {
+                        run_model(data, task, &paths, &mut meta, ctx).await?;
+                    }
+                    None => return Ok(None),
+                }
+            }
+            None => run_model(data, task, &paths, &mut meta, ctx).await?,
+        }
     }
-    settle(data, &paths, &mut meta, ctx).await
+    Ok(Some(settle(data, &paths, &mut meta, ctx).await?))
+}
+
+/// The conversation this task's next turn resumes, if it resumes one at all
+/// — its own prior attach, or what it was minted to continue. `None` is a
+/// brand-new conversation, the only case [`try_conversation`] is skipped for:
+/// nothing else can already be driving a conversation that does not exist
+/// yet. The same two-branch read [`run_model`] makes of `reattached`, kept in
+/// one place so `drive`'s pre-check and `run_model`'s own resume agree by
+/// construction.
+fn existing_conversation(meta: &TaskMeta) -> Option<String> {
+    if meta.agent_id.is_empty() {
+        meta.continues.clone()
+    } else {
+        Some(meta.agent_id.clone())
+    }
+}
+
+/// Tries one conversation's lock, non-blocking — the conversation-scoped
+/// counterpart of [`try_attach`]. Two tasks that both record `continues`
+/// against the same agent id (T2's double-continuation race) — or, on a
+/// reattach, a second process holding a stale idea of this same task — must
+/// not both call `Workspace::resume` on it at once; `None` here means
+/// somebody already is, and the caller's contract is to observe that, not
+/// race it.
+fn try_conversation(
+    data: &DataDir,
+    key: &str,
+    agent_id: &str,
+) -> Result<Option<lock::Lock>, String> {
+    let path = data
+        .conversation_lock(key, agent_id)
+        .map_err(|error| format!("prepare conversation lock: {error}"))?;
+    lock::try_exclusive(&path).map_err(|error| format!("acquire conversation lock: {error}"))
 }
 
 /// Runs the recorded work to a pending completion. Model, configuration, and
@@ -296,11 +350,7 @@ async fn run_model(
     // resume to mentra and a first attach to basis — its prompt has not been
     // asked yet, which is exactly what `answered_before` below preserves.
     let reattached = !meta.agent_id.is_empty();
-    let existing = if reattached {
-        Some(meta.agent_id.clone())
-    } else {
-        meta.continues.clone()
-    };
+    let existing = existing_conversation(meta);
     let prepared = match existing.as_deref() {
         Some(agent_id) => workspace.resume(agent_id, spec),
         None => workspace.prepare(spec),
@@ -564,8 +614,16 @@ async fn settle_children(
                 Some(guard) => {
                     // A child driven here is somebody else's run: this
                     // process is finishing it to keep the scope rule, not
-                    // showing it to whoever asked about the parent.
-                    Box::pin(drive(data, &child, guard, &ctx.hidden())).await?;
+                    // showing it to whoever asked about the parent. `None`
+                    // (its conversation is claimed elsewhere) leaves it
+                    // unfinished for the next pass, same as a contended
+                    // attach lock.
+                    if Box::pin(drive(data, &child, guard, &ctx.hidden()))
+                        .await?
+                        .is_none()
+                    {
+                        remaining = true;
+                    }
                 }
                 None => remaining = true,
             }

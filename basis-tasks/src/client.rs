@@ -209,6 +209,15 @@ impl Tasks {
         }
         let parent = if detached { None } else { caller };
 
+        // T2(a): resolving which conversation to continue, minting the task
+        // directory, and recording the claim (`continues`) on it are one
+        // unit against a second spawn targeting this same workspace —
+        // otherwise two concurrent `--continue`s could both resolve the same
+        // conversation before either's claim is on disk for the other to
+        // see. Held past `save_meta` below, then dropped explicitly: nothing
+        // after that point reads or writes what this protects.
+        let continue_lock = lock::exclusive(&self.data.continue_lock(&key))
+            .map_err(|error| Error::new(format!("acquire workspace continuation lock: {error}")))?;
         let continues = self.resolve_continuation(&canonical, &key, continuation)?;
 
         let requested_deadline = Some(
@@ -276,6 +285,7 @@ impl Tasks {
         )
         .continuing(continues);
         state::save_meta(&paths, &meta).map_err(Error::new)?;
+        drop(continue_lock);
 
         TaskHandle::parse(task)
     }
@@ -329,6 +339,20 @@ impl Tasks {
                 chosen.task
             ))
             .with_hint(Hint::Wait(TaskHandle::parse(chosen.task.clone())?)));
+        }
+        // T2(a): a sibling that already recorded `continues` against this
+        // same conversation, and has not yet settled, holds an open claim on
+        // it — minting a second claimant here is exactly the race that lets
+        // two executors resume one conversation at once.
+        if let Some(claimant) =
+            tasks::claimed_continuation(&self.data, key, &chosen.agent_id).map_err(Error::new)?
+        {
+            let claimant = TaskHandle::parse(claimant)?;
+            return Err(Error::new(format!(
+                "task {claimant} already continues this conversation; a conversation admits \
+                 one open claim at a time"
+            ))
+            .with_hint(Hint::Wait(claimant)));
         }
         Ok(Some(chosen.agent_id.clone()))
     }
@@ -643,6 +667,65 @@ mod tests {
             .spawn(RunSpec::new("hello").with_approve(Approve::Prompt))
             .expect_err("no PromptHost means Prompt can never be answered");
         assert!(error.to_string().contains("ask"), "{error}");
+    }
+
+    /// T2(a): a task minted with `continues = Some(agent_id)` holds an open
+    /// claim on that conversation until it settles — a second spawn that
+    /// would continue the same conversation refuses rather than mint a
+    /// second claimant, the double-continuation race `continue_lock` and
+    /// this check exist to close.
+    #[test]
+    fn a_second_continuation_of_the_same_conversation_is_refused_while_the_first_is_open() {
+        let (_data_dir, _workspace, tasks) = tasks();
+
+        // Stand in for a task that finished with a conversation to
+        // continue — built directly, the way `attach`'s own tests build a
+        // completed task, rather than driven through a real model.
+        let done = tasks
+            .spawn(RunSpec::new("hello").with_approve(Approve::Always))
+            .expect("spawns");
+        let paths = attach::resolve(&tasks.data, done.as_str()).expect("agent dir");
+        let mut meta = state::load_meta(&paths).expect("meta.json");
+        meta.agent_id = "conversation-1".to_string();
+        state::save_meta(&paths, &meta).expect("save");
+        state::write_terminal(
+            &paths,
+            &serde_json::json!({"state": "succeeded", "result": "d"}),
+        )
+        .expect("terminal");
+
+        let first = tasks
+            .spawn(
+                RunSpec::new("step two")
+                    .with_approve(Approve::Always)
+                    .continuing(crate::Continuation::Latest),
+            )
+            .expect("the first continuation claims the conversation");
+
+        let refused = tasks
+            .spawn(
+                RunSpec::new("step two, again")
+                    .with_approve(Approve::Always)
+                    .continuing(crate::Continuation::Latest),
+            )
+            .expect_err("a second, still-open claim on the same conversation is refused");
+        assert!(refused.to_string().contains(first.as_str()), "{refused}");
+
+        // Once the first claimant settles, its claim releases and a fresh
+        // continuation of the same conversation is ordinary again.
+        let first_paths = attach::resolve(&tasks.data, first.as_str()).expect("agent dir");
+        state::write_terminal(
+            &first_paths,
+            &serde_json::json!({"state": "succeeded", "result": "d2"}),
+        )
+        .expect("terminal");
+        tasks
+            .spawn(
+                RunSpec::new("step three")
+                    .with_approve(Approve::Always)
+                    .continuing(crate::Continuation::Latest),
+            )
+            .expect("a settled claimant no longer blocks the conversation");
     }
 
     /// ADR-0019: an unattended task always gets a finite service bound, even
