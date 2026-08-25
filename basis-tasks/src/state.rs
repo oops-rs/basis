@@ -15,11 +15,11 @@ use std::{
 
 use basis::{Bound, Effort, RunUsage, SystemPrompt};
 
-use crate::cli::ApproveMode;
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
 
-use super::data_dir::{AgentPaths, write_private_atomic};
+use crate::approve::Approve;
+use crate::data_dir::{AgentPaths, write_private_atomic};
 
 pub(crate) const MAX_MESSAGES: usize = 16;
 pub(crate) const MAX_MESSAGE: usize = 256 * 1024;
@@ -65,7 +65,7 @@ pub(crate) struct RunOptions {
     /// Typed, same story: `"always"` / `"never"` / `"prompt"` on the wire,
     /// unchanged — and an invalid mode is now unrepresentable, so corruption
     /// fails at decode, named, instead of somewhere downstream.
-    pub approve: ApproveMode,
+    pub approve: Approve,
     pub deadline_ms: Option<u64>,
     pub tool_budget: Option<usize>,
     pub token_budget: Option<u64>,
@@ -402,7 +402,7 @@ pub(crate) fn now_ms() -> u64 {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::local::data_dir::DataDir;
+    use crate::data_dir::DataDir;
 
     fn agent(dir: &tempfile::TempDir) -> AgentPaths {
         let data = DataDir::from_path(dir.path()).unwrap();

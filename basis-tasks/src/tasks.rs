@@ -25,42 +25,31 @@
 //! listing is ordered by a fact it shows — `--json` keeps `started_ms` for
 //! anyone who wanted the birthday. See [`last_activity_ms`] for what counts.
 
-use std::{path::Path, process::ExitCode};
+use std::path::Path;
 
 use basis::RunUsage;
 use serde_json::{Value, json};
 
-use crate::{cli::ListArgs, exit::EXIT_OK};
-
-use super::{
+use crate::{
     data_dir::{AgentPaths, DataDir, canonical_workspace, valid_task_handle, workspace_key},
-    error::{ClientError, probe_state},
     inbox, lock,
-    render::print_hint,
-    state::{MessageRecord, TaskMeta, load_meta, now_ms, read_terminal},
+    state::{MessageRecord, TaskMeta, load_meta, read_terminal},
 };
-
-/// How many rows a bare `basis list` prints.
-///
-/// A workspace holds up to `MAX_TASKS` agents and a person scanning a terminal
-/// reads the last screenful, so the default is a screenful-ish and `--all` is
-/// the way to ask for the rest. Stated on stderr when it elides anything: a
-/// bound nobody is told about is indistinguishable from missing data.
-const DEFAULT_LIMIT: usize = 50;
 
 /// How much of a prompt's first line a row carries. A row is an index entry,
 /// not the prompt — `basis watch <ID>` has the whole run.
 const PROMPT_BUDGET: usize = 64;
 
-/// One task, as `list` reports it and as `--continue` picks from it.
+/// One task, as [`Tasks::list`](crate::Tasks::list) reports it and as a
+/// `--continue`-shaped continuation picks from it.
 #[derive(Debug, Clone)]
-pub(crate) struct TaskSummary {
+pub struct TaskSummary {
     pub task: String,
     /// `running`, `resumable`, or whatever the terminal record settled on.
     pub state: String,
     pub started_ms: u64,
     /// When this task was last worked in, per [`last_activity_ms`]. What the
-    /// rows are ordered and aged by, and what `--continue` picks by.
+    /// list is ordered by, and what a continuation picks by.
     pub last_activity_ms: u64,
     /// The prompt's first line, bounded by [`PROMPT_BUDGET`].
     pub prompt: String,
@@ -72,7 +61,12 @@ pub(crate) struct TaskSummary {
 }
 
 impl TaskSummary {
-    fn payload(&self) -> Value {
+    /// The `basis list --json` row shape (ADR-0015): the fields above, plus
+    /// `continuable` and, when the task spent anything, `usage`. Kept here
+    /// rather than duplicated by a caller building its own object, so a
+    /// script reading `--json` and a host reading this struct's JSON agree by
+    /// construction.
+    pub fn payload(&self) -> Value {
         let mut payload = json!({
             "task": self.task,
             "state": self.state,
@@ -88,55 +82,6 @@ impl TaskSummary {
         }
         payload
     }
-
-    fn row(&self, now: u64) -> String {
-        format!(
-            "{}  {:<9}  {:>8}  {}",
-            self.task,
-            self.state,
-            age(self.last_activity_ms, now),
-            self.prompt
-        )
-    }
-}
-
-pub(crate) fn list(args: ListArgs) -> Result<ExitCode, ClientError> {
-    let workspace = match args.workspace.clone() {
-        Some(path) => path,
-        None => {
-            std::env::current_dir().map_err(|error| format!("no working directory: {error}"))?
-        }
-    };
-    let data = DataDir::discover().map_err(|error| format!("open task data directory: {error}"))?;
-    // A workspace nothing has ever run in lists nothing, which is a complete
-    // answer rather than an error.
-    let summaries: Vec<TaskSummary> = workspace_tasks(&data, &workspace)?.unwrap_or_default();
-
-    let shown = if args.all {
-        summaries.len()
-    } else {
-        summaries.len().min(DEFAULT_LIMIT)
-    };
-    let now = now_ms();
-    for summary in &summaries[..shown] {
-        if args.json {
-            println!("{}", summary.payload());
-        } else {
-            println!("{}", summary.row(now));
-        }
-    }
-
-    if summaries.is_empty() && !args.json {
-        eprintln!("basis: no tasks in this workspace");
-    }
-    if shown < summaries.len() {
-        eprintln!(
-            "basis: showing the {shown} most recent of {}; use `--all` for the rest",
-            summaries.len()
-        );
-    }
-    print_hint(&json!({"next": next_step(&summaries)}));
-    Ok(ExitCode::from(EXIT_OK))
 }
 
 /// Every task recorded for `workspace`, last worked in first, or `None` when
@@ -265,6 +210,15 @@ fn task_state(paths: &AgentPaths) -> Result<String, String> {
     }
 }
 
+/// The task's honest state while unfinished: `running` only when a live
+/// executor observably holds the attach lock, `resumable` otherwise. The same
+/// two-fact derivation [`Tasks::wait`](crate::Tasks::wait) and
+/// [`Tasks::watch`](crate::Tasks::watch) settle a timeout's `attached` field
+/// with, so all three answer "what is this task doing" the same way.
+pub fn probe_state(attached: bool) -> &'static str {
+    if attached { "running" } else { "resumable" }
+}
+
 /// The conversation `--continue` picks up: the task in this workspace last
 /// worked in that has one.
 ///
@@ -293,28 +247,19 @@ pub(crate) fn named<'a>(
     summaries: &'a [TaskSummary],
     workspace_key: &str,
     handle: &str,
-) -> Result<&'a TaskSummary, ClientError> {
+) -> Result<&'a TaskSummary, String> {
     let Some((key, _)) = valid_task_handle(handle) else {
-        return Err(ClientError::usage(format!(
-            "`{handle}` is not a task handle; `basis list` prints them"
-        )));
+        return Err(format!("`{handle}` is not a task handle"));
     };
     if key != workspace_key {
-        return Err(ClientError::usage(format!(
-            "task {handle} belongs to another workspace; run `basis list` where it was started"
-        )));
+        return Err(format!(
+            "task {handle} belongs to another workspace; list it where it was started"
+        ));
     }
     summaries
         .iter()
         .find(|summary| summary.task == handle)
-        .ok_or_else(|| ClientError::new(format!("no task directory for {handle}")))
-}
-
-fn next_step(summaries: &[TaskSummary]) -> String {
-    match latest_conversation(summaries) {
-        Some(_) => "basis spawn --continue <PROMPT>".to_string(),
-        None => "basis spawn <PROMPT>".to_string(),
-    }
+        .ok_or_else(|| format!("no task directory for {handle}"))
 }
 
 /// The prompt's first line, bounded.
@@ -326,29 +271,10 @@ fn first_line(prompt: &str) -> String {
     }
 }
 
-/// How long ago, in the coarsest unit that still says something.
-///
-/// Relative rather than absolute because a list is read to find the run you
-/// remember, and "2h ago" answers that where a timestamp asks you to subtract.
-/// `--json` carries both `last_activity_ms` and `started_ms` for anything that
-/// needs the arithmetic, or the other clock.
-fn age(since_ms: u64, now_ms: u64) -> String {
-    let seconds = now_ms.saturating_sub(since_ms) / 1_000;
-    if seconds < 60 {
-        "just now".to_string()
-    } else if seconds < 3_600 {
-        format!("{}m ago", seconds / 60)
-    } else if seconds < 172_800 {
-        format!("{}h ago", seconds / 3_600)
-    } else {
-        format!("{}d ago", seconds / 86_400)
-    }
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::local::state::{MessageState, RunOptions};
+    use crate::state::{MessageState, RunOptions};
 
     /// A row that has been touched exactly once, when it started — the shape
     /// every assertion below that is not about activity wants.
@@ -387,16 +313,6 @@ mod tests {
             created_ms,
             reply: None,
         }
-    }
-
-    #[test]
-    fn a_row_carries_the_handle_its_follow_up_needs() {
-        let row = summary("w/t", "succeeded", 0, "agent-1").row(7_200_000);
-
-        assert!(row.starts_with("w/t"), "{row}");
-        assert!(row.contains("succeeded"), "{row}");
-        assert!(row.contains("2h ago"), "{row}");
-        assert!(row.contains("fix the failing test"), "{row}");
     }
 
     #[test]
@@ -478,19 +394,13 @@ mod tests {
         );
     }
 
-    /// The listing is ordered by activity, so the age it prints has to be that
-    /// same activity — a column measuring one clock beside an order following
-    /// another is a list that cannot be read.
+    /// The listing is ordered by activity, and `--json` carries that same
+    /// clock alongside the birthday rather than only the one it is ordered
+    /// by — a caller wanting either arithmetic gets both.
     #[test]
-    fn a_row_ages_by_when_it_was_last_worked_in() {
+    fn a_json_row_carries_both_clocks() {
         let mut worked = summary("w/t", "succeeded", 0, "agent-1");
         worked.last_activity_ms = 7_140_000;
-
-        let row = worked.row(7_200_000);
-        assert!(
-            row.contains("1m ago"),
-            "not 2h, which is only how long ago it started: {row}"
-        );
 
         let payload = worked.payload();
         assert_eq!(payload["started_ms"], 0, "the birthday survives in --json");
@@ -514,15 +424,6 @@ mod tests {
 
         let found = named(&summaries, here, &summaries[0].task).expect("in this workspace");
         assert_eq!(found.task, summaries[0].task);
-    }
-
-    #[test]
-    fn ages_are_read_in_the_coarsest_unit_that_still_says_something() {
-        assert_eq!(age(0, 30_000), "just now");
-        assert_eq!(age(0, 5 * 60_000), "5m ago");
-        assert_eq!(age(0, 3 * 3_600_000), "3h ago");
-        assert_eq!(age(0, 3 * 86_400_000), "3d ago");
-        assert_eq!(age(500, 0), "just now", "a clock that went backwards");
     }
 
     #[test]

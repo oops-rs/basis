@@ -1,9 +1,14 @@
-//! The static ownership policy behind wait, cancel, and hint decisions.
+//! The static ownership policy behind wait and cancel.
 //!
 //! ADR-0017's rules, evaluated over `meta.json` parent chains instead of the
 //! daemon's journal. The dynamic wait graph is gone (ADR-0019): a wait is a
 //! process observing a file, a cycle is two observers, and the finite deadline
 //! bounds it — so only the static tree shape is checked here.
+//!
+//! What next command a caller should be told to run instead — `basis inbox`
+//! rather than an impossible `basis wait` — is not this module's business:
+//! that is a hint, and hints are `basis-cli`'s (ADR-0015). [`Tasks::can_await`](crate::Tasks::can_await)
+//! is the fact a host builds one from.
 
 use super::{
     data_dir::DataDir,
@@ -73,23 +78,6 @@ pub(crate) fn validate_cancel_target(
     ))
 }
 
-/// Return a next action that is legal for the submitting task. Enqueue-only
-/// sends never block; when the target is an ancestor, peer, or self, suggest
-/// inspecting the target's inbox instead of an impossible `basis wait` edge.
-pub(crate) fn send_next_hint(
-    data: &DataDir,
-    caller: Option<&str>,
-    target: &str,
-    message: &str,
-) -> String {
-    if let Some(caller) = caller
-        && validate_wait_edge(data, Some(caller), target).is_err()
-    {
-        return format!("basis inbox {target}");
-    }
-    format!("basis wait {target} --message {message}")
-}
-
 fn is_ancestor(data: &DataDir, ancestor: &str, descendant: &str) -> bool {
     let mut current = meta_of(data, descendant).and_then(|meta| meta.parent);
     // Bounded walk: corrupt metadata must not become an infinite loop.
@@ -117,7 +105,7 @@ fn root_of(data: &DataDir, task: &str) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::local::state::{RunOptions, save_meta};
+    use crate::state::{RunOptions, save_meta};
 
     pub(crate) fn record(data: &DataDir, task: &str, parent: Option<&str>) {
         let paths = data.agent_dir(task).expect("well-formed handle");
@@ -175,24 +163,5 @@ mod tests {
         assert!(validate_cancel_target(&data, Some(&root), &child).is_ok());
         assert!(validate_cancel_target(&data, Some(&root), &root).is_ok());
         assert!(validate_cancel_target(&data, None, &root).is_ok());
-    }
-
-    #[test]
-    fn send_hint_does_not_recommend_an_impossible_wait() {
-        let (_dir, data, [root, child, ..]) = tree();
-
-        assert_eq!(
-            send_next_hint(&data, Some(&child), &root, "message-1"),
-            format!("basis inbox {root}"),
-            "a child must not be told to wait on its ancestor"
-        );
-        assert_eq!(
-            send_next_hint(&data, Some(&root), &child, "message-1"),
-            format!("basis wait {child} --message message-1")
-        );
-        assert_eq!(
-            send_next_hint(&data, None, &child, "message-1"),
-            format!("basis wait {child} --message message-1")
-        );
     }
 }

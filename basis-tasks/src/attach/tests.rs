@@ -3,8 +3,8 @@
 //! deadline boundaries, and the runtime recipe.
 
 use super::*;
-use crate::cli::ApproveMode;
-use crate::local::state::RunOptions;
+use crate::approve::{Approve, validate_approval};
+use crate::state::RunOptions;
 use serde_json::{Value, json};
 
 fn handle(index: u8) -> String {
@@ -28,7 +28,7 @@ fn record(
         "do not run".to_string(),
         RunOptions {
             provider: Some("not-a-provider".to_string()),
-            approve: ApproveMode::Never,
+            approve: Approve::Never,
             ..RunOptions::default()
         },
         None,
@@ -47,7 +47,7 @@ fn data() -> (tempfile::TempDir, DataDir) {
 async fn drive_attached(data: &DataDir, task: &str) -> Value {
     let paths = data.agent_dir(task).unwrap();
     let guard = try_attach(&paths).unwrap().expect("lock is free");
-    drive(data, task, guard, &Live::hidden())
+    drive(data, task, guard, &DriveContext::default())
         .await
         .expect("drives to terminal")
 }
@@ -264,12 +264,12 @@ fn an_unknown_provider_fails_the_task_rather_than_going_unread() {
 }
 
 /// ADR-0020: `prompt` is answerable exactly when a process is driving the
-/// agent *and* has a terminal to ask at. The interactive half cannot be
-/// integration-tested — a test harness has no TTY — so the rule is pinned
-/// here, where both halves can be stated.
+/// agent *and* has somewhere to put the question. The interactive half cannot
+/// be integration-tested — a test harness has no prompt host — so the rule is
+/// pinned here, where both halves can be stated.
 #[test]
-fn prompt_approval_needs_a_driver_with_a_terminal() {
-    for mode in [ApproveMode::Always, ApproveMode::Never] {
+fn prompt_approval_needs_a_driver_that_can_ask() {
+    for mode in [Approve::Always, Approve::Never] {
         assert!(
             validate_approval(mode, false).is_ok(),
             "{mode:?} asks nobody"
@@ -281,15 +281,15 @@ fn prompt_approval_needs_a_driver_with_a_terminal() {
     }
 
     assert!(
-        validate_approval(ApproveMode::Prompt, true).is_ok(),
-        "an attached terminal is exactly what `prompt` needs"
+        validate_approval(Approve::Prompt, true).is_ok(),
+        "a host that can ask is exactly what `prompt` needs"
     );
 
-    let refused = validate_approval(ApproveMode::Prompt, false)
-        .expect_err("nobody attached means nobody to ask")
+    let refused = validate_approval(Approve::Prompt, false)
+        .expect_err("nobody able to ask means nobody to ask")
         .to_string();
-    assert!(refused.contains("terminal"), "{refused}");
+    assert!(refused.contains("ask"), "{refused}");
 
     // An unknown mode is no longer spellable here at all: the record holds
-    // `ApproveMode` itself, so a corrupted value fails at decode instead.
+    // `Approve` itself, so a corrupted value fails at decode instead.
 }

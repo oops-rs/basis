@@ -1,0 +1,38 @@
+[package]
+name = "basis-tasks"
+description = "The durable task layer over basis: a filesystem-coordinated lifecycle for spawned agents, reachable from Rust and not only from the CLI."
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+readme.workspace = true
+repository.workspace = true
+homepage.workspace = true
+keywords = ["agent", "llm", "harness", "mentra", "durable"]
+categories = ["development-tools"]
+
+[dependencies]
+basis.workspace = true
+# Resume recovery reads a resumed session's own committed messages: the last
+# assistant text, for the crashed process's unrecorded result. `history()`
+# returning `&[mentra::Message]` is basis's own public surface, not a reach
+# past it (contrast `PreparedRun::answered_turns`, the fact basis exposes
+# instead of a caller matching `mentra::Role` for it).
+mentra.workspace = true
+
+# The attach lock: one writer, ever, per task (ADR-0019). Already in the tree
+# via basis-cli, which is where this crate's implementation lived before
+# extraction.
+fs2.workspace = true
+serde = { workspace = true }
+serde_json.workspace = true
+# Atomic-replace writes for every durable file: a temporary file in the same
+# directory, persisted over the destination.
+tempfile.workspace = true
+tokio.workspace = true
+# Stable, capability-scoped task ids: the `<workspace-key>/<uuid>` grammar.
+uuid = { workspace = true, features = ["v4", "serde"] }
+
+[dev-dependencies]
+mentra = { workspace = true, features = ["test-utils"] }
+tokio = { workspace = true, features = ["time"] }

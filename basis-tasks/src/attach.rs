@@ -17,7 +17,7 @@
 //! children whose locks are free and observes the ones with live executors.
 
 use std::{
-    io::{self, IsTerminal},
+    io,
     path::Path,
     sync::{Arc, Mutex},
     time::Duration,
@@ -31,13 +31,14 @@ use basis::{
 use serde_json::Value;
 use tokio::time::{self, Instant};
 
-use crate::{approver::TerminalApprover, cli::ApproveMode};
-
-use super::{
+use crate::{
+    Error,
+    approve::Approve,
     data_dir::{AgentPaths, DataDir, valid_task_handle},
     events::EventLog,
-    inbox, lock,
-    render::Live,
+    inbox,
+    live::DriveContext,
+    lock,
     state::{
         MAX_RESULT_BYTES, MAX_TASKS, MessageReply, PendingTerminal, TaskMeta, bounded_text,
         cancel_requested, load_meta, now_ms, read_terminal, request_cancel, save_meta,
@@ -46,11 +47,18 @@ use super::{
 };
 
 /// The polling cadence everything waits at: terminal records, contended
-/// locks, child settling. Bounded CPU, honest tail latency.
-pub(crate) const POLL: Duration = Duration::from_millis(100);
+/// locks, child settling. Bounded CPU, honest tail latency. Public so a host
+/// composing its own loop around [`crate::EventCursor`] — `basis watch`'s own
+/// loop, for one — polls at the same cadence this crate's own waits do.
+pub const POLL: Duration = Duration::from_millis(100);
 
-pub(crate) enum WaitOutcome {
-    /// The raw terminal payload, as `terminal.json` holds it.
+/// What a bounded wait produced: the settled payload, or a timeout with
+/// enough said about it to retry sensibly.
+#[derive(Debug, Clone, PartialEq)]
+pub enum WaitOutcome {
+    /// The raw terminal payload, as `terminal.json` holds it — or, for
+    /// [`wait_for_message`], the correlated reply or terminal-tagged payload
+    /// `message_payload_for_dispatch` resolved.
     Terminal(Value),
     /// The bounded wait elapsed; `attached` reports whether a live executor
     /// held the lock at that moment.
@@ -60,14 +68,15 @@ pub(crate) enum WaitOutcome {
 /// Waits for a task's terminal record, attaching to produce it whenever the
 /// lock is free. A contended lock means a live executor exists: observe.
 ///
-/// `live` is the caller's terminal, shown to while this process is the one
-/// executing. It stays silent for a record that was merely read off disk:
-/// there is nothing live about a run that finished before this process asked.
+/// `ctx` carries the caller's terminal, shown to while this process is the
+/// one executing, and its say over `Approve::Prompt`. Nothing is shown for a
+/// record that was merely read off disk: there is nothing live about a run
+/// that finished before this process asked.
 pub(crate) async fn wait_for_terminal(
     data: &DataDir,
     task: &str,
     timeout: Duration,
-    live: &Live,
+    ctx: &DriveContext,
 ) -> Result<WaitOutcome, String> {
     let paths = resolve(data, task)?;
     let deadline = Instant::now() + timeout;
@@ -76,7 +85,7 @@ pub(crate) async fn wait_for_terminal(
             return Ok(WaitOutcome::Terminal(terminal));
         }
         if let Some(guard) = try_attach(&paths)? {
-            return Ok(WaitOutcome::Terminal(drive(data, task, guard, live).await?));
+            return Ok(WaitOutcome::Terminal(drive(data, task, guard, ctx).await?));
         }
         if Instant::now() >= deadline {
             return Ok(WaitOutcome::TimedOut {
@@ -94,15 +103,19 @@ pub(crate) async fn wait_for_terminal(
 /// Nothing is shown while it drives. The caller asked for *one message's*
 /// reply, and the turns this process may have to run to reach it can belong
 /// to other messages entirely — streaming them would answer a question nobody
-/// asked, on the stream the answer is supposed to arrive on.
+/// asked, on the stream the answer is supposed to arrive on. `Approve::Prompt`
+/// still answers through `prompt_host`, because approval and visibility are
+/// independent facts.
 pub(crate) async fn wait_for_message(
     data: &DataDir,
     task: &str,
     message_id: &str,
     timeout: Duration,
+    prompt_host: Option<Arc<dyn crate::approve::PromptHost>>,
 ) -> Result<WaitOutcome, String> {
     let paths = resolve(data, task)?;
     let deadline = Instant::now() + timeout;
+    let ctx = DriveContext::new(None, prompt_host);
     loop {
         let messages = inbox::load(&paths)?;
         let terminal = read_terminal(&paths)?;
@@ -114,7 +127,7 @@ pub(crate) async fn wait_for_message(
         if terminal.is_none()
             && let Some(guard) = try_attach(&paths)?
         {
-            drive(data, task, guard, &Live::hidden()).await?;
+            drive(data, task, guard, &ctx).await?;
             continue;
         }
         if Instant::now() >= deadline {
@@ -197,7 +210,7 @@ pub(crate) async fn drive(
     data: &DataDir,
     task: &str,
     mut guard: lock::Lock,
-    live: &Live,
+    ctx: &DriveContext,
 ) -> Result<Value, String> {
     let paths = resolve(data, task)?;
     // Someone may have finished the task between our probe and our lock.
@@ -207,9 +220,9 @@ pub(crate) async fn drive(
     guard.write_fingerprint();
     let mut meta = load_meta(&paths)?;
     if meta.pending_terminal.is_none() {
-        run_model(data, task, &paths, &mut meta, live).await?;
+        run_model(data, task, &paths, &mut meta, ctx).await?;
     }
-    settle(data, &paths, &mut meta).await
+    settle(data, &paths, &mut meta, ctx).await
 }
 
 /// Runs the recorded work to a pending completion. Model, configuration, and
@@ -220,7 +233,7 @@ async fn run_model(
     task: &str,
     paths: &AgentPaths,
     meta: &mut TaskMeta,
-    live: &Live,
+    ctx: &DriveContext,
 ) -> Result<(), String> {
     if meta.deadline_passed() {
         return record_pending(
@@ -289,7 +302,7 @@ async fn run_model(
     };
     if !reattached {
         meta.agent_id = run.agent_id().to_string();
-        meta.answered_before = answered(run.history());
+        meta.answered_before = run.answered_turns();
         meta.updated_ms = now_ms();
         save_meta(paths, meta)?;
     }
@@ -302,7 +315,7 @@ async fn run_model(
     let mut last_result = String::new();
     let mut last_stopped_by: Option<Bound> = None;
     if reattached {
-        initial_done = answered(run.history()) > meta.answered_before;
+        initial_done = run.answered_turns() > meta.answered_before;
         if let Some(message) = run
             .history()
             .iter()
@@ -350,13 +363,13 @@ async fn run_model(
         if let Some(remaining) = remaining {
             turn = turn.with_deadline(remaining);
         }
-        let approver = match approver(meta.options.approve) {
+        let approver = match approver(meta.options.approve, ctx) {
             Ok(approver) => approver,
-            Err(error) => return record_failure(paths, meta, error, None),
+            Err(error) => return record_failure(paths, meta, error.to_string(), None),
         };
         let sink = FileSink {
             log: Arc::clone(&events),
-            live: live.clone(),
+            ctx: ctx.clone(),
         };
         let completed_message = message.as_ref().map(|(id, _)| id.clone());
         let execution = async {
@@ -438,18 +451,6 @@ async fn run_model(
     }
 }
 
-/// How many assistant turns a transcript has committed.
-///
-/// The count, not the presence: a continued conversation arrives with answers
-/// already on it, and "has this task answered yet" is only a question the
-/// count can settle.
-fn answered(history: &[mentra::Message]) -> usize {
-    history
-        .iter()
-        .filter(|message| matches!(message.role, mentra::Role::Assistant))
-        .count()
-}
-
 fn record_pending(
     paths: &AgentPaths,
     meta: &mut TaskMeta,
@@ -482,13 +483,18 @@ fn record_failure(
 /// terminal record. The terminal write happens under the inbox lock so a
 /// concurrent enqueue either lands before the unanswered sweep or is refused
 /// by the terminal record it would otherwise miss.
-async fn settle(data: &DataDir, paths: &AgentPaths, meta: &mut TaskMeta) -> Result<Value, String> {
+async fn settle(
+    data: &DataDir,
+    paths: &AgentPaths,
+    meta: &mut TaskMeta,
+    ctx: &DriveContext,
+) -> Result<Value, String> {
     reconsider_cancel(paths, meta)?;
     let cancel_children = !matches!(
         meta.pending_terminal,
         Some(PendingTerminal::Succeeded { .. })
     );
-    settle_children(data, meta, cancel_children).await?;
+    settle_children(data, meta, cancel_children, ctx).await?;
     // A cancel that arrived while children settled still lands before the
     // terminal record, exactly as the daemon replaced a pending completion.
     reconsider_cancel(paths, meta)?;
@@ -521,6 +527,7 @@ async fn settle_children(
     data: &DataDir,
     meta: &TaskMeta,
     cancel_children: bool,
+    ctx: &DriveContext,
 ) -> Result<(), String> {
     loop {
         let mut unfinished = Vec::new();
@@ -546,7 +553,7 @@ async fn settle_children(
                     // A child driven here is somebody else's run: this
                     // process is finishing it to keep the scope rule, not
                     // showing it to whoever asked about the parent.
-                    Box::pin(drive(data, &child, guard, &Live::hidden())).await?;
+                    Box::pin(drive(data, &child, guard, &ctx.hidden())).await?;
                 }
                 None => remaining = true,
             }
@@ -607,8 +614,8 @@ fn task_runtime(data: &DataDir, task: &str, meta: &TaskMeta) -> Result<RuntimeBu
         valid_task_handle(task).ok_or_else(|| format!("malformed task handle {task}"))?;
     let mut runtime = Runtime::builder()
         .with_store_dir(data.store_dir(key))
-        .with_command_environment("BASIS_TASK_ID", task)
-        .with_command_environment("BASIS_DATA_DIR", data.root().to_string_lossy());
+        .with_command_environment(crate::BASIS_TASK_ID, task)
+        .with_command_environment(crate::BASIS_DATA_DIR, data.root().to_string_lossy());
     if let Some(name) = &meta.options.provider {
         runtime = runtime.with_provider(provider::parse(name).map_err(|error| error.to_string())?);
     }
@@ -616,46 +623,27 @@ fn task_runtime(data: &DataDir, task: &str, meta: &TaskMeta) -> Result<RuntimeBu
         runtime = runtime.with_base_url(base_url);
     }
     if let Some(parent) = &meta.parent {
-        runtime = runtime.with_command_environment("BASIS_PARENT_TASK_ID", parent);
+        runtime = runtime.with_command_environment(crate::BASIS_PARENT_TASK_ID, parent);
     }
     Ok(runtime)
 }
 
-/// Whether this process can put an approval question to a person.
+/// `mode`'s approver for one attach, given what this process brought to it.
 ///
 /// Under ADR-0019 the executor is whichever process holds the attach lock, so
-/// this is a property of the attacher rather than of the agent: the terminal
-/// that ran `basis "…"` or `basis wait <ID>` is the one that gets asked.
-pub(crate) fn can_ask() -> bool {
-    std::io::stdin().is_terminal()
-}
-
-/// `interactive` is whether the caller will be driving the agent *and* has a
-/// terminal to ask at. Both halves matter: a `--resumable` agent has no
-/// attacher yet, and an attacher reading from a pipe has nobody to ask.
-///
-/// An *invalid* mode is no longer this function's business: the record holds
-/// [`ApproveMode`] itself, so a spelling the type cannot carry fails at
-/// decode, named, instead of here.
-pub(crate) fn validate_approval(mode: ApproveMode, interactive: bool) -> Result<(), String> {
-    match mode {
-        ApproveMode::Always | ApproveMode::Never => Ok(()),
-        ApproveMode::Prompt if interactive => Ok(()),
-        ApproveMode::Prompt => Err(
-            "`--approve prompt` needs a terminal on the process driving the agent; use `always` or `never` for work nobody is attached to"
-                .to_string(),
-        ),
-    }
-}
-
-fn approver(mode: ApproveMode) -> Result<Box<dyn Approver>, String> {
-    validate_approval(mode, can_ask())?;
+/// whether `Prompt` is answerable is a property of the attacher rather than
+/// of the task — see [`PromptHost`](crate::approve::PromptHost).
+fn approver(mode: Approve, ctx: &DriveContext) -> Result<Box<dyn Approver>, Error> {
+    crate::approve::validate_approval(mode, ctx.can_ask())?;
     Ok(match mode {
-        ApproveMode::Always => Box::new(AllowAll),
-        ApproveMode::Never => Box::new(DenyAll),
-        // `TerminalApprover` refuses on its own if the terminal disappears
-        // between this check and the question, so the fallback stays safe.
-        ApproveMode::Prompt => Box::new(TerminalApprover::new()),
+        Approve::Always => Box::new(AllowAll),
+        Approve::Never => Box::new(DenyAll),
+        // `ctx.can_ask()` having just returned true is what makes this
+        // `expect` honest: `validate` above already refused `Prompt` for a
+        // context with no host, or one that cannot currently ask.
+        Approve::Prompt => ctx
+            .approver()
+            .expect("validate confirmed a host that can ask"),
     })
 }
 
@@ -681,13 +669,13 @@ fn remaining_deadline(deadline_at: Option<u64>) -> Option<Duration> {
 /// nobody is reading, not that the work should stop.
 struct FileSink {
     log: Arc<Mutex<EventLog>>,
-    live: Live,
+    ctx: DriveContext,
 }
 
 impl EventSink for FileSink {
     fn emit(&mut self, event: Event) -> io::Result<()> {
         if let Ok(value) = serde_json::to_value(event) {
-            let _ = self.live.show(&value);
+            self.ctx.show(&value);
             if let Ok(mut log) = self.log.lock() {
                 let _ = log.append(value);
             }

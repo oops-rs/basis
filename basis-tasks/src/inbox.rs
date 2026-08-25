@@ -218,7 +218,7 @@ pub(crate) fn message_payload_for_dispatch(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::local::{
+    use crate::{
         data_dir::DataDir,
         state::{RunOptions, TaskMeta, save_meta, write_terminal},
     };
