@@ -46,6 +46,7 @@
 //! resolution path, and this is it.
 
 mod builder;
+mod roster;
 mod spec;
 
 use std::path::{Path, PathBuf};
@@ -54,6 +55,7 @@ use std::sync::Arc;
 use mentra::{ModelInfo, Session, agent::AgentConfig, provider::ReasoningOptions};
 
 pub use builder::WorkspaceBuilder;
+pub use roster::ToolRoster;
 pub(crate) use spec::DEFAULT_SESSION_NAME;
 pub use spec::RunSpec;
 

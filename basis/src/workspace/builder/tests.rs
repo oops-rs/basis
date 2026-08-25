@@ -37,11 +37,31 @@ fn remembering(
     system_prompt: Option<&SystemPrompt>,
     memories: &[Memory],
 ) -> mentra::agent::AgentConfig {
+    with_roster(
+        workspace,
+        context,
+        system_prompt,
+        memories,
+        ToolRoster::default(),
+    )
+}
+
+/// `remembering`, with the roster stated explicitly instead of defaulted —
+/// what item (d) of decision D3 needs to pin: the rendered prompt does not
+/// consult the roster at all.
+fn with_roster(
+    workspace: &Path,
+    context: &WorkspaceContext,
+    system_prompt: Option<&SystemPrompt>,
+    memories: &[Memory],
+    roster: ToolRoster,
+) -> mentra::agent::AgentConfig {
     agent_config(
         workspace,
         context,
         system_prompt,
         crate::memory::index_block(memories).as_deref(),
+        roster,
         Compaction::default(),
         PathBuf::from("/transcripts"),
     )
@@ -246,6 +266,30 @@ fn memories_alone_still_make_a_prompt() {
 
     let system = agent.system.expect("a system prompt");
     assert!(system.starts_with("<memories>"), "{system}");
+}
+
+#[test]
+fn the_memory_index_renders_whatever_the_roster_says() {
+    // Item (d) of decision D3: the roster decides which tools the model may
+    // call, not what the system prompt says. A roster narrowed to `spawn`
+    // alone still ships the same memory index a default roster would — the
+    // prompt is `WorkspaceContext` and `memory::index_block`, assembled with
+    // no view of `ToolRoster` at all.
+    let agent = with_roster(
+        Path::new("/repo"),
+        &house_rules(),
+        None,
+        &deploy_memories(),
+        ToolRoster::only([crate::tools::SPAWN]),
+    );
+
+    let system = agent.system.expect("a system prompt");
+    assert!(system.contains("<memories>"), "{system}");
+    assert!(system.contains("deploy-notes — how deploys go out"));
+    assert!(
+        !agent.tool_profile.allows("read"),
+        "the roster still narrows what the model may actually call"
+    );
 }
 
 #[tokio::test]
@@ -499,6 +543,7 @@ fn what_a_host_says_about_compaction_is_what_the_agent_carries() {
         &WorkspaceContext::default(),
         None,
         None,
+        ToolRoster::default(),
         compaction,
         PathBuf::from("/transcripts"),
     );
