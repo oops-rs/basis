@@ -269,12 +269,13 @@ flowchart LR
 ```
 
 - **Crate layering mirrors pi's package layering**: mentra-provider ≈ pi-ai, mentra ≈
-  pi-agent-core, basis ≈ pi-coding-agent minus TUI. Since ADR-0011 basis is itself three crates,
+  pi-agent-core, basis ≈ pi-coding-agent minus TUI. Since ADR-0011 basis is itself four crates,
   split by dependency weight rather than by release schedule (they share one version):
   **`basis`** is the in-process SDK and carries no protocol, no transport, and no TTY
-  code; **`basis-acp`** is the ACP adapter over its event stream and seams, opt-in by
-  dependency; **`basis`** is the binary over both, and the explicit `basis serve --acp` command
-  is what an editor spawns. MCP is a
+  code; **`basis-tasks`** is the durable task layer over it, reachable from Rust without the
+  binary (ADR-0022); **`basis-acp`** is the ACP adapter over `basis`'s event stream and seams,
+  opt-in by dependency; **`basis`** is the binary over all three, and the explicit
+  `basis serve --acp` command is what an editor spawns. MCP is a
   default-on `mcp` feature of `basis`, so an embedder can compile a core that has never
   heard of it (ADR-0012). The websocket bridge stays in the binary, marked extractable: it
   is ACP-ecosystem tooling with no basis-specific knowledge, and never an identity argument

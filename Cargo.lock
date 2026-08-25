@@ -277,6 +277,7 @@ dependencies = [
  "async-trait",
  "basis",
  "basis-acp",
+ "basis-tasks",
  "clap",
  "fs2",
  "futures",
@@ -287,6 +288,19 @@ dependencies = [
  "thiserror",
  "tokio",
  "tokio-tungstenite",
+]
+
+[[package]]
+name = "basis-tasks"
+version = "0.6.0"
+dependencies = [
+ "basis",
+ "fs2",
+ "mentra",
+ "serde",
+ "serde_json",
+ "tempfile",
+ "tokio",
  "uuid",
 ]
 

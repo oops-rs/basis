@@ -14,6 +14,9 @@ categories = ["development-tools", "command-line-utilities"]
 [dependencies]
 basis.workspace = true
 basis-acp.workspace = true
+# The durable task layer (ADR-0019, D8): the CLI's lifecycle verbs are the
+# first client of this, not its implementation.
+basis-tasks.workspace = true
 mentra.workspace = true
 
 # The bridge speaks ACP's transport traits without speaking ACP itself: it
@@ -22,20 +25,22 @@ agent-client-protocol.workspace = true
 async-trait.workspace = true
 clap.workspace = true
 futures.workspace = true
-fs2.workspace = true
 serde.workspace = true
 serde_json.workspace = true
 tempfile.workspace = true
 thiserror.workspace = true
 tokio.workspace = true
 tokio-tungstenite.workspace = true
-uuid.workspace = true
 
 [dev-dependencies]
 mentra = { workspace = true, features = ["test-utils"] }
 tokio = { workspace = true, features = ["time"] }
 # The bridge tests dial the bridge, which the binary itself never does.
 tokio-tungstenite = { workspace = true, features = ["connect"] }
+# `basis-cli/tests/attach.rs` locks a task's `attach.lock` directly to test
+# contention from outside the executor; `basis-tasks` is the crate that owns
+# that file's format, not this one.
+fs2.workspace = true
 
 [[bin]]
 name = "basis"

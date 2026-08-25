@@ -3,8 +3,8 @@
 //! deadline boundaries, and the runtime recipe.
 
 use super::*;
-use crate::cli::ApproveMode;
-use crate::local::state::RunOptions;
+use crate::approve::{Approve, validate_approval};
+use crate::state::{MessageState, RunOptions};
 use serde_json::{Value, json};
 
 fn handle(index: u8) -> String {
@@ -28,7 +28,7 @@ fn record(
         "do not run".to_string(),
         RunOptions {
             provider: Some("not-a-provider".to_string()),
-            approve: ApproveMode::Never,
+            approve: Approve::Never,
             ..RunOptions::default()
         },
         None,
@@ -47,9 +47,10 @@ fn data() -> (tempfile::TempDir, DataDir) {
 async fn drive_attached(data: &DataDir, task: &str) -> Value {
     let paths = data.agent_dir(task).unwrap();
     let guard = try_attach(&paths).unwrap().expect("lock is free");
-    drive(data, task, guard, &Live::hidden())
+    drive(data, task, guard, &DriveContext::default())
         .await
-        .expect("drives to terminal")
+        .expect("drives without error")
+        .expect("nothing else claims this conversation, so this attempt settles")
 }
 
 #[tokio::test]
@@ -189,6 +190,32 @@ async fn a_late_cancel_replaces_a_pending_completion() {
 }
 
 #[tokio::test]
+async fn a_duration_too_large_to_be_a_deadline_waits_rather_than_panics() {
+    let (_dir, data) = data();
+    let task = handle(1);
+    record(
+        &data,
+        &task,
+        None,
+        true,
+        Some(PendingTerminal::Succeeded {
+            result: "done".to_string(),
+        }),
+    );
+    // `Instant::now() + Duration::MAX` panics; the deadline has to saturate
+    // instead, and a task that already has a terminal record must still
+    // return it immediately — proof the saturated deadline never blocks a
+    // wait that had no need to.
+    let outcome = wait_for_terminal(&data, &task, Duration::MAX, &DriveContext::default())
+        .await
+        .expect("does not panic");
+    assert_eq!(
+        outcome,
+        WaitOutcome::Terminal(json!({"state": "succeeded", "result": "done"}))
+    );
+}
+
+#[tokio::test]
 async fn terminal_failure_resolves_unanswered_messages() {
     let (_dir, data) = data();
     let task = handle(1);
@@ -213,6 +240,107 @@ async fn terminal_failure_resolves_unanswered_messages() {
         assert_eq!(payload["state"], "failed");
         assert_eq!(payload["message"], id);
     }
+}
+
+/// T1: the settle pass's two writes are ordered so a crash between them
+/// leaves a *resumable* task, never a settled one with a message it can no
+/// longer re-sweep. Reconstructed directly as the crash window itself —
+/// `finish_unanswered_durably` returns before the terminal write it is
+/// supposed to precede — rather than by actually killing a process.
+#[tokio::test]
+async fn a_crash_between_the_settle_pass_writes_recovers_on_the_next_attach() {
+    let (_dir, data) = data();
+    let task = handle(1);
+    let paths = record(&data, &task, None, true, None);
+    let stranded = inbox::enqueue(&paths, &task, "are you there".to_string()).unwrap();
+
+    // What run_model has already done by the time settle is ever reached:
+    // pending_terminal recorded, durably, before either of settle's writes.
+    let mut meta = load_meta(&paths).unwrap();
+    meta.pending_terminal = Some(PendingTerminal::Succeeded {
+        result: "done".to_string(),
+    });
+    save_meta(&paths, &meta).unwrap();
+
+    // The crash window: only the inbox write lands. Dropping the guard
+    // without writing the terminal is the "process died right here" this
+    // test stands in for.
+    drop(inbox::finish_unanswered_durably(&paths).unwrap());
+    assert!(
+        read_terminal(&paths).unwrap().is_none(),
+        "no terminal record crossed the crash — the task is still resumable"
+    );
+    let swept = inbox::load(&paths).unwrap();
+    assert_eq!(
+        swept
+            .iter()
+            .find(|message| message.id == stranded)
+            .unwrap()
+            .state,
+        MessageState::Delivered,
+        "the inbox write landed before the crash"
+    );
+
+    // The next attach recovers without a model turn: pending_terminal
+    // survived, so run_model is skipped and settle simply finishes what it
+    // started — re-sweeping (idempotent) and completing the terminal write.
+    let payload = drive_attached(&data, &task).await;
+    assert_eq!(payload, json!({"state": "succeeded", "result": "done"}));
+
+    // And the message the crash stranded resolves — terminal-tagged, since
+    // it was never individually replied to.
+    let terminal = read_terminal(&paths).unwrap().unwrap();
+    let messages = inbox::load(&paths).unwrap();
+    let resolved =
+        inbox::message_payload_for_dispatch(&task, &messages, &stranded, Some(&terminal))
+            .unwrap()
+            .expect("no longer stranded");
+    assert_eq!(resolved["state"], "succeeded");
+    assert_eq!(resolved["message"], stranded);
+}
+
+/// T2(b): a conversation already claimed — another lock holder standing in
+/// for a sibling task already inside `Workspace::resume` on the same agent
+/// id — is observed, not raced: `drive` backs off with `None` rather than
+/// attempting the same resume, settles nothing, and releases the task's own
+/// attach lock so a later attempt can retry once the conversation frees up.
+#[tokio::test]
+async fn a_claimed_conversation_is_observed_not_raced() {
+    let (_dir, data) = data();
+    let task = handle(1);
+    let paths = record(&data, &task, None, true, None);
+    let mut meta = load_meta(&paths).unwrap();
+    meta.continues = Some("conversation-1".to_string());
+    save_meta(&paths, &meta).unwrap();
+
+    let (key, _) = valid_task_handle(&task).unwrap();
+    let held = try_conversation(&data, key, "conversation-1")
+        .unwrap()
+        .expect("nobody else holds it yet");
+
+    let guard = try_attach(&paths).unwrap().expect("lock is free");
+    let outcome = drive(&data, &task, guard, &DriveContext::default())
+        .await
+        .expect("backing off is not an error");
+    assert!(
+        outcome.is_none(),
+        "a claimed conversation is observed, not driven"
+    );
+    assert!(
+        read_terminal(&paths).unwrap().is_none(),
+        "nothing settled while the conversation was claimed elsewhere"
+    );
+    assert!(
+        try_attach(&paths).unwrap().is_some(),
+        "backing off releases this task's own attach lock for a later attempt"
+    );
+
+    drop(held);
+    drive_attached(&data, &task).await;
+    assert!(
+        read_terminal(&paths).unwrap().is_some(),
+        "once the conversation frees up, the next attempt makes progress"
+    );
 }
 
 #[test]
@@ -264,12 +392,12 @@ fn an_unknown_provider_fails_the_task_rather_than_going_unread() {
 }
 
 /// ADR-0020: `prompt` is answerable exactly when a process is driving the
-/// agent *and* has a terminal to ask at. The interactive half cannot be
-/// integration-tested — a test harness has no TTY — so the rule is pinned
-/// here, where both halves can be stated.
+/// agent *and* has somewhere to put the question. The interactive half cannot
+/// be integration-tested — a test harness has no prompt host — so the rule is
+/// pinned here, where both halves can be stated.
 #[test]
-fn prompt_approval_needs_a_driver_with_a_terminal() {
-    for mode in [ApproveMode::Always, ApproveMode::Never] {
+fn prompt_approval_needs_a_driver_that_can_ask() {
+    for mode in [Approve::Always, Approve::Never] {
         assert!(
             validate_approval(mode, false).is_ok(),
             "{mode:?} asks nobody"
@@ -281,15 +409,15 @@ fn prompt_approval_needs_a_driver_with_a_terminal() {
     }
 
     assert!(
-        validate_approval(ApproveMode::Prompt, true).is_ok(),
-        "an attached terminal is exactly what `prompt` needs"
+        validate_approval(Approve::Prompt, true).is_ok(),
+        "a host that can ask is exactly what `prompt` needs"
     );
 
-    let refused = validate_approval(ApproveMode::Prompt, false)
-        .expect_err("nobody attached means nobody to ask")
+    let refused = validate_approval(Approve::Prompt, false)
+        .expect_err("nobody able to ask means nobody to ask")
         .to_string();
-    assert!(refused.contains("terminal"), "{refused}");
+    assert!(refused.contains("ask"), "{refused}");
 
     // An unknown mode is no longer spellable here at all: the record holds
-    // `ApproveMode` itself, so a corrupted value fails at decode instead.
+    // `Approve` itself, so a corrupted value fails at decode instead.
 }

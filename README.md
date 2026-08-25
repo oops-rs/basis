@@ -6,7 +6,9 @@
 basis is an agent harness you **embed**. `basis` is the harness itself, as a library: open a
 `Workspace`, mint runs from it, read one event stream, plug your own code into the seams. It carries
 no protocol, no transport and no terminal code, so an embedding host's dependency graph states what
-it uses ([ADR-0011](docs/adr/0011-layered-crates.md)); `basis-acp` and the binary are thin shells.
+it uses ([ADR-0011](docs/adr/0011-layered-crates.md)); `basis-tasks` is the durable task layer
+over it ([ADR-0022](docs/adr/0022-the-task-layer-is-a-crate.md)), and `basis-acp` and the binary
+are thin shells.
 
 ```rust
 // [dependencies] basis = "0.4"
@@ -50,7 +52,7 @@ exported — is spoken to with no `Authorization` header at all; one that wanted
   gets there is argued in the workspace manifest, including the one deliberately absent:
   `panic = "abort"` turns any panic into a dead process, which is what an embedded harness and a
   long-lived server exist to avoid.
-- **~29k lines of Rust** across the three crates, ~40k with tests.
+- **~29k lines of Rust** across the four crates, ~40k with tests.
 
 ## The SDK
 
@@ -417,7 +419,8 @@ model's window is, so the summarizing trigger is a fixed token count rather than
 the packages convention, and provider
 OAuth; the delegation bound-vs-tally gap above; and **nobody has driven this from Zed or JetBrains
 yet** — it is verified against the protocol and its official client library, not against the
-ecosystem. The three crates are on crates.io at one version, as is mentra. CI runs fmt, clippy at
+ecosystem. The three published crates are on crates.io at one version, as is mentra —
+`basis-tasks` joins them at the next release. CI runs fmt, clippy at
 `-D warnings`, and the full suite on Linux, macOS and Windows, plus MSRV (1.88, edition 2024).
 
 Every addition faces one check: does it make embedding cheaper for a Rust host, is it a convention
@@ -429,7 +432,7 @@ for `--effort`, custom endpoints, and the hooks `shell`→`spawn` migration) ·
 [conventions.md](docs/conventions.md) (every file and variable basis reads, in precedence order) ·
 [embedding.md](docs/embedding.md) (the SDK in detail) · [targets.md](docs/targets.md) (running a
 command somewhere else) · [REDESIGN.md](docs/REDESIGN.md) (ledger) ·
-[adr/](docs/adr/) (21 locked decisions) · [proposals/](docs/proposals/) (deferred ideas).
+[adr/](docs/adr/) (23 locked decisions) · [proposals/](docs/proposals/) (deferred ideas).
 
 ## License
 

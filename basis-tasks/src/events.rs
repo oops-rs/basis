@@ -204,7 +204,7 @@ impl EventTail {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::local::data_dir::DataDir;
+    use crate::data_dir::DataDir;
 
     fn agent(dir: &tempfile::TempDir) -> AgentPaths {
         let data = DataDir::from_path(dir.path()).unwrap();

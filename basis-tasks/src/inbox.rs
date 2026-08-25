@@ -3,9 +3,14 @@
 //! An atomic-rewrite JSON array of [`MessageRecord`]. Every rewrite happens
 //! under `inbox.lock`, held for the rewrite only — senders enqueue, the
 //! executor drains at turn boundaries — and never across a model turn. The
-//! settle pass writes `terminal.json` while still holding this lock, so an
-//! enqueue that saw no terminal record is guaranteed to have its message
-//! resolved (delivered, reply or terminal-tagged) rather than stranded.
+//! settle pass's two writes — sweeping every unanswered message durable in
+//! `inbox.json`, then `terminal.json` — both land under one hold of this
+//! lock, so an enqueue that saw no terminal record is guaranteed to have its
+//! message resolved (delivered, reply or terminal-tagged) rather than
+//! stranded. The *order* of those two writes is load-bearing
+//! ([`finish_unanswered_durably`]): the inbox first, so a crash between them
+//! leaves a task that is still resumable, not one whose messages a settled
+//! task can no longer re-sweep.
 
 use std::io;
 
@@ -53,6 +58,30 @@ fn save(paths: &AgentPaths, messages: &[MessageRecord]) -> Result<(), String> {
         serde_json::to_vec(messages).map_err(|error| format!("encode task inbox: {error}"))?;
     write_private_atomic(&paths.inbox(), &bytes)
         .map_err(|error| format!("persist task inbox: {error}"))
+}
+
+/// The settle pass's first write: every message not already delivered its
+/// own correlated reply is marked delivered, durably, before anything else.
+/// Returns the still-held inbox lock, so the caller's second write —
+/// `write_terminal` — lands before a concurrent enqueue can, and before
+/// anything releases this hold.
+///
+/// **Order is the whole point.** A crash between this write and the
+/// terminal one that follows it leaves `inbox.json` swept but no
+/// `terminal.json` — a task that is still resumable, whose `meta.json`
+/// already recorded `pending_terminal` (set before `settle` is ever called),
+/// so the next attach skips the model and simply finishes the settle pass:
+/// re-sweeping (idempotent) and retrying the terminal write. Writing
+/// `terminal.json` first would risk the opposite: a settled task — nothing
+/// will ever attach it again — whose inbox still shows a message `Pending`
+/// forever, because only an attach re-sweeps it.
+pub(crate) fn finish_unanswered_durably(paths: &AgentPaths) -> Result<lock::Lock, String> {
+    let guard = lock::exclusive(&paths.inbox_lock())
+        .map_err(|error| format!("lock task inbox: {error}"))?;
+    let mut messages = load(paths)?;
+    finish_unanswered(&mut messages);
+    save(paths, &messages)?;
+    Ok(guard)
 }
 
 /// Enqueues one message, enforcing the lifetime and size bounds and refusing a
@@ -218,7 +247,7 @@ pub(crate) fn message_payload_for_dispatch(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::local::{
+    use crate::{
         data_dir::DataDir,
         state::{RunOptions, TaskMeta, save_meta, write_terminal},
     };

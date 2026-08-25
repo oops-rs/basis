@@ -549,6 +549,11 @@ fn a_session_something_is_driving_is_refused_by_the_state_it_is_in() {
         "the refusal names the state that caused it: {}",
         stderr(&refused)
     );
+    assert!(
+        stderr(&refused).contains(&format!("next: use `basis wait {task}`")),
+        "the hint points at the task itself: {}",
+        stderr(&refused)
+    );
 
     attacher.kill().expect("kill the attacher");
     let _ = attacher.wait();
@@ -602,8 +607,58 @@ fn continuing_where_there_is_nothing_to_continue_says_so() {
         stderr(&refused)
     );
     assert!(
+        stderr(&refused).contains("next: use `basis spawn <PROMPT>`"),
+        "the hint offers a fresh spawn, the only next step that works: {}",
+        stderr(&refused)
+    );
+    assert!(
         endpoint.requests().is_empty(),
         "a refused spawn touches no model"
+    );
+}
+
+/// Spawning non-detached from inside a task that belongs to another
+/// workspace is refused with the escape named, not just described: the hint
+/// is `basis spawn --detached <PROMPT>`, not left to the message's prose.
+#[test]
+fn spawning_from_inside_a_task_into_another_workspace_hints_detached() {
+    let fixture = Fixture::new();
+    let endpoint = ScriptedEndpoint::start(Vec::new());
+
+    let first = run_bounded(fixture.run(&fixture.workspace, &endpoint, &["over here"]));
+    assert!(first.status.success(), "{}", stderr(&first));
+    let caller = task_in_hint(&stderr(&first));
+
+    let mut command = fixture.run(&fixture.elsewhere, &endpoint, &["and over there"]);
+    command.env("BASIS_TASK_ID", &caller);
+    let refused = run_bounded(command);
+
+    assert_eq!(refused.status.code(), Some(1), "{}", stderr(&refused));
+    assert!(
+        stderr(&refused).contains("belongs to another workspace"),
+        "{}",
+        stderr(&refused)
+    );
+    assert!(
+        stderr(&refused).contains("next: use `basis spawn --detached <PROMPT>`"),
+        "{}",
+        stderr(&refused)
+    );
+
+    // The same hint, as the structured `next` field `--json` carries.
+    let mut json_command =
+        fixture.run(&fixture.elsewhere, &endpoint, &["and over there", "--json"]);
+    json_command.env("BASIS_TASK_ID", &caller);
+    let json_refused = run_bounded(json_command);
+    assert_eq!(
+        json_refused.status.code(),
+        Some(1),
+        "{}",
+        stderr(&json_refused)
+    );
+    assert_eq!(
+        rows(&json_refused)[0]["next"],
+        "basis spawn --detached <PROMPT>"
     );
 }
 

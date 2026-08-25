@@ -507,6 +507,16 @@ impl From<ApproveMode> for basis_acp::ApprovalMode {
     }
 }
 
+impl From<ApproveMode> for basis_tasks::Approve {
+    fn from(mode: ApproveMode) -> Self {
+        match mode {
+            ApproveMode::Always => Self::Always,
+            ApproveMode::Prompt => Self::Prompt,
+            ApproveMode::Never => Self::Never,
+        }
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

@@ -206,6 +206,50 @@ async fn the_session_survives_and_reports_its_history() {
     );
 }
 
+/// `answered_turns` is the fact a crash-recovering host takes a watermark of:
+/// two turns each add one assistant message, never one of the user's own.
+#[tokio::test]
+async fn answered_turns_counts_the_assistant_messages_only() {
+    let workspace = workspace();
+    let mock = mock(&["one", "two"]);
+    let session = mock
+        .runtime()
+        .create_session("test", mock.model())
+        .expect("session");
+
+    let mut prepared = prepare_with_session(
+        session,
+        workspace.path(),
+        "first",
+        &context(),
+        "openai",
+        "mock-model",
+    )
+    .expect("prepared");
+
+    assert_eq!(
+        prepared.answered_turns(),
+        0,
+        "nothing is committed before a turn runs"
+    );
+
+    prepared
+        .execute(CollectingSink::new())
+        .await
+        .expect("first turn");
+    assert_eq!(prepared.answered_turns(), 1);
+
+    prepared
+        .send("second", CollectingSink::new(), AllowAll)
+        .await
+        .expect("second turn");
+    assert_eq!(
+        prepared.answered_turns(),
+        2,
+        "one count per turn, not per message: each turn also committed a user message"
+    );
+}
+
 #[tokio::test]
 async fn an_empty_follow_up_prompt_is_refused() {
     let workspace = workspace();

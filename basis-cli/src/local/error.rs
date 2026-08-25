@@ -7,6 +7,7 @@
 
 use std::{process::ExitCode, time::Duration};
 
+use basis_tasks::probe_state;
 use serde_json::Value;
 
 use crate::exit::{EXIT_BOUNDED, EXIT_FAILED, EXIT_USAGE};
@@ -119,10 +120,32 @@ impl From<&str> for ClientError {
     }
 }
 
-/// The task's honest state while unfinished: `running` only when a live
-/// executor observably holds the attach lock, `resumable` otherwise.
-pub(crate) fn probe_state(attached: bool) -> &'static str {
-    if attached { "running" } else { "resumable" }
+/// `basis-tasks`'s errors carry no exit code or hint *text* of their own —
+/// that mapping is ADR-0015's, and it lives here. Two facts do cross the
+/// boundary, because this is where they become one: `is_invalid_reference`
+/// changes the code (a handle from another workspace, a malformed one, is an
+/// argument no amount of waiting fixes, the same distinction
+/// [`ClientError::usage`] exists for), and `hint` — when the error names a
+/// next step unambiguously — becomes the `next:` line
+/// [`ClientError::pointing_at`] carries. A call site that knows more still (a
+/// timeout) builds its own instead of routing through this.
+impl From<basis_tasks::Error> for ClientError {
+    fn from(error: basis_tasks::Error) -> Self {
+        let hint = error.hint().map(|hint| match hint {
+            basis_tasks::Hint::SpawnDetached => "basis spawn --detached <PROMPT>".to_string(),
+            basis_tasks::Hint::SpawnFresh => "basis spawn <PROMPT>".to_string(),
+            basis_tasks::Hint::Wait(task) => format!("basis wait {task}"),
+        });
+        let base = if error.is_invalid_reference() {
+            Self::usage(error.to_string())
+        } else {
+            Self::new(error.to_string())
+        };
+        match hint {
+            Some(next) => base.pointing_at(next),
+            None => base,
+        }
+    }
 }
 
 pub(crate) fn wait_timeout(task: &str, timeout: Duration, attached: bool) -> ClientError {
