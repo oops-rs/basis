@@ -18,10 +18,7 @@ use tokio::time::{self, Instant};
 use uuid::Uuid;
 
 use crate::{
-    cli::{
-        ApproveMode, AskArgs, CancelArgs, EffortArg, InboxArgs, RunArgs, SendArgs, WaitArgs,
-        WatchArgs,
-    },
+    cli::{AskArgs, CancelArgs, InboxArgs, RunArgs, SendArgs, WaitArgs, WatchArgs},
     duration_arg::DurationArg,
     exit::EXIT_OK,
     run::prompt_from,
@@ -74,7 +71,7 @@ pub(crate) async fn spawn(args: RunArgs, attach: bool) -> Result<ExitCode, Clien
     // Only a process that stays to drive the agent can put a question to
     // anyone, so the approval mode is validated against this route rather than
     // against the mode alone.
-    validate_approval(&options.approve, attach && can_ask())?;
+    validate_approval(options.approve, attach && can_ask())?;
 
     let data = discover()?;
     let canonical = canonical_workspace(&workspace)
@@ -442,10 +439,15 @@ fn run_options(args: &RunArgs) -> RunOptions {
         base_url: args.base_url.clone(),
         model: args.model.clone(),
         no_shell: args.no_shell,
-        system_prompt: args.system_prompt.clone(),
-        append_system_prompt: args.append_system_prompt.clone(),
-        effort: args.effort.map(effort_name).map(str::to_string),
-        approve: approval_name(args.approve).to_string(),
+        // Typed from the flags: clap has already refused both system-prompt
+        // spellings at once, so `Replace` first is the whole rule.
+        system_prompt: crate::cli::system_prompt(
+            args.system_prompt.clone(),
+            args.append_system_prompt.clone(),
+        ),
+        append_system_prompt: None,
+        effort: args.effort.map(Into::into),
+        approve: args.approve,
         // An unattended owner has no human watching it. Give it a finite
         // service bound even when the attended one-shot spelling omitted one;
         // `--deadline` still narrows this explicitly.
@@ -469,24 +471,6 @@ fn duration_arg(duration: Duration) -> DurationArg {
         format!("{seconds}s")
     };
     text.parse().expect("service default is a valid duration")
-}
-
-fn effort_name(effort: EffortArg) -> &'static str {
-    match effort {
-        EffortArg::Low => "low",
-        EffortArg::Medium => "medium",
-        EffortArg::High => "high",
-        EffortArg::XHigh => "xhigh",
-        EffortArg::Max => "max",
-    }
-}
-
-fn approval_name(mode: ApproveMode) -> &'static str {
-    match mode {
-        ApproveMode::Always => "always",
-        ApproveMode::Prompt => "prompt",
-        ApproveMode::Never => "never",
-    }
 }
 
 fn workspace_or_current(workspace: Option<PathBuf>) -> Result<PathBuf, String> {

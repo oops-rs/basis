@@ -13,7 +13,9 @@ use std::{
     time::{SystemTime, UNIX_EPOCH},
 };
 
-use basis::RunUsage;
+use basis::{Bound, Effort, RunUsage, SystemPrompt};
+
+use crate::cli::ApproveMode;
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
 
@@ -39,22 +41,85 @@ pub(crate) struct RunOptions {
     pub base_url: Option<String>,
     pub model: Option<String>,
     pub no_shell: bool,
-    /// The host's say over the system prompt, as the two flags spell it:
-    /// `system_prompt` replaces the workspace's context, `append_system_prompt`
-    /// follows it. Flattened rather than held as a `basis::SystemPrompt`
-    /// because that is what this record already does with an effort — and
-    /// because clap has refused both at once by the time either is written, so
-    /// the pair cannot disagree. Defaulted, so a `meta.json` written before
-    /// these existed still loads.
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub system_prompt: Option<String>,
+    /// The host's say over the system prompt, held as the type it is:
+    /// `Replace` displaces the workspace's context, `Append` follows it.
+    ///
+    /// Written typed (`{"replace": …}` / `{"append": …}`). The pre-0.6
+    /// record spelled it as two flat strings, and a task directory outlives
+    /// the binary that minted it, so the compat reader below still accepts
+    /// the flat `Replace` half and [`folded`](Self::folded) picks up the
+    /// legacy append field on load.
+    #[serde(
+        default,
+        skip_serializing_if = "Option::is_none",
+        deserialize_with = "system_prompt_compat"
+    )]
+    pub system_prompt: Option<SystemPrompt>,
+    /// The pre-0.6 append half, read-only: folded into
+    /// [`system_prompt`](Self::system_prompt) on load and never written back.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub append_system_prompt: Option<String>,
-    pub effort: Option<String>,
-    pub approve: String,
+    /// Typed, and byte-for-byte the strings the old writer spelled
+    /// (`"low"` … `"max"`), so an old record needs no shim.
+    pub effort: Option<Effort>,
+    /// Typed, same story: `"always"` / `"never"` / `"prompt"` on the wire,
+    /// unchanged — and an invalid mode is now unrepresentable, so corruption
+    /// fails at decode, named, instead of somewhere downstream.
+    pub approve: ApproveMode,
     pub deadline_ms: Option<u64>,
     pub tool_budget: Option<usize>,
     pub token_budget: Option<u64>,
+}
+
+impl RunOptions {
+    /// Folds the pre-0.6 two-string system-prompt spelling into the typed
+    /// field. Called by [`load_meta`], so everything downstream sees one
+    /// spelling however old the record is.
+    fn folded(self) -> Self {
+        let (system_prompt, append) = (
+            self.system_prompt.clone(),
+            self.append_system_prompt.clone(),
+        );
+        Self {
+            system_prompt: system_prompt.or_else(|| append.map(SystemPrompt::Append)),
+            append_system_prompt: None,
+            ..self
+        }
+    }
+}
+
+/// Accepts the typed spelling and the pre-0.6 flat string, which was always
+/// the `Replace` half — clap refused both flags at once before either was
+/// recorded.
+fn system_prompt_compat<'de, D>(deserializer: D) -> Result<Option<SystemPrompt>, D::Error>
+where
+    D: serde::Deserializer<'de>,
+{
+    #[derive(Deserialize)]
+    #[serde(untagged)]
+    enum Compat {
+        Typed(SystemPrompt),
+        Legacy(String),
+    }
+
+    Ok(
+        Option::<Compat>::deserialize(deserializer)?.map(|value| match value {
+            Compat::Typed(system_prompt) => system_prompt,
+            Compat::Legacy(replace) => SystemPrompt::Replace(replace),
+        }),
+    )
+}
+
+/// Accepts what the typed writer spells — the same `deadline` /
+/// `tool_budget` / `token_budget` strings the old one used — and reads
+/// anything else, like the `unknown` the old writer could emit for a bound it
+/// had no name for, as no bound rather than an unloadable record.
+fn bound_compat<'de, D>(deserializer: D) -> Result<Option<Bound>, D::Error>
+where
+    D: serde::Deserializer<'de>,
+{
+    let name = Option::<String>::deserialize(deserializer)?;
+    Ok(name.and_then(|name| serde_json::from_value(Value::String(name)).ok()))
 }
 
 /// A task whose own work has finished, but whose attached children may still
@@ -82,8 +147,12 @@ pub(crate) struct MessageReply {
     pub result: String,
     #[serde(default, skip_serializing_if = "is_false")]
     pub result_truncated: bool,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub stopped_by: Option<String>,
+    #[serde(
+        default,
+        skip_serializing_if = "Option::is_none",
+        deserialize_with = "bound_compat"
+    )]
+    pub stopped_by: Option<Bound>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -127,8 +196,12 @@ pub(crate) struct TaskMeta {
     pub pending_terminal: Option<PendingTerminal>,
     #[serde(default, skip_serializing_if = "is_false")]
     pub result_truncated: bool,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub stopped_by: Option<String>,
+    #[serde(
+        default,
+        skip_serializing_if = "Option::is_none",
+        deserialize_with = "bound_compat"
+    )]
+    pub stopped_by: Option<Bound>,
     /// What every turn this task has driven reported spending, summed.
     ///
     /// Kept in `meta.json` rather than recomputed from the event journal
@@ -214,11 +287,11 @@ impl TaskMeta {
                 if self.result_truncated {
                     terminal["result_truncated"] = Value::Bool(true);
                 }
-                with_stopped_by(terminal, self.stopped_by.as_deref())
+                with_stopped_by(terminal, self.stopped_by)
             }
             PendingTerminal::Failed { error } => with_stopped_by(
                 serde_json::json!({"state": "failed", "error": error}),
-                self.stopped_by.as_deref(),
+                self.stopped_by,
             ),
             PendingTerminal::Cancelled => serde_json::json!({"state": "cancelled"}),
         };
@@ -226,9 +299,9 @@ impl TaskMeta {
     }
 }
 
-fn with_stopped_by(mut payload: Value, stopped_by: Option<&str>) -> Value {
+fn with_stopped_by(mut payload: Value, stopped_by: Option<Bound>) -> Value {
     if let Some(stopped_by) = stopped_by {
-        payload["stopped_by"] = Value::String(stopped_by.to_string());
+        payload["stopped_by"] = serde_json::json!(stopped_by);
     }
     payload
 }
@@ -254,11 +327,18 @@ fn is_false(value: &bool) -> bool {
 pub(crate) fn load_meta(paths: &AgentPaths) -> Result<TaskMeta, String> {
     let bytes = std::fs::read(paths.meta())
         .map_err(|error| format!("read task metadata for {}: {error}", paths.dir().display()))?;
-    serde_json::from_slice(&bytes).map_err(|error| {
+    let meta: TaskMeta = serde_json::from_slice(&bytes).map_err(|error| {
         format!(
             "decode task metadata for {}: {error}",
             paths.dir().display()
         )
+    })?;
+
+    // One spelling downstream, however old the record: the pre-0.6 system
+    // prompt strings fold into the typed field on the way in.
+    Ok(TaskMeta {
+        options: meta.options.folded(),
+        ..meta
     })
 }
 
@@ -393,7 +473,7 @@ mod tests {
         record.pending_terminal = Some(PendingTerminal::Failed {
             error: "took too long".to_string(),
         });
-        record.stopped_by = Some("deadline".to_string());
+        record.stopped_by = Some(Bound::Deadline);
         assert_eq!(
             record.terminal_payload().unwrap(),
             serde_json::json!({"state": "failed", "error": "took too long", "stopped_by": "deadline"})

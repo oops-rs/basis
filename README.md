@@ -46,7 +46,7 @@ exported — is spoken to with no `Authorization` header at all; one that wanted
   `.mcp.json` discovery, no `McpConfig` on a run, no servers registered
   ([ADR-0012](docs/adr/0012-one-contract-many-bindings.md)). Custom tools remain, because MCP was
   only ever one of the ways to reach them.
-- **~9 MB release binary**, down from cargo's 24 MB default. Each of the four profile settings that
+- **~10 MB release binary** (10.7 MB measured at 0.6.0), down from cargo's 24 MB default. Each of the four profile settings that
   gets there is argued in the workspace manifest, including the one deliberately absent:
   `panic = "abort"` turns any panic into a dead process, which is what an embedded harness and a
   long-lived server exist to avoid.
@@ -113,11 +113,10 @@ the limit plus one in-flight round per concurrent run. A turn drawing on a spent
 `RunError::BudgetExhausted` *before* its prompt is sent — a decision with its own name, so a fan-out
 stops minting on it instead of retrying it like a provider error.
 
-Work a run delegates through `spawn` is inside the **bound** — the subagent runs on the parent's
-accounting handle — but outside the **tally**: the relay that puts a child's usage on the parent's
-stream is internal to mentra's delegation intrinsic and a registered tool cannot reach it, so
-`RunReport::usage` under-reports any run that delegated.
-[docs/REDESIGN.md](docs/REDESIGN.md) carries that gap as open, not fixed.
+Work a run delegates through `spawn` is inside the **bound** and, since mentra `5f303b8` and
+basis `e22aa63`, inside the **tally** too: the subagent runs on the parent's accounting handle,
+the child's usage is relayed onto the parent's stream, and `RunReport::usage` agrees with the
+figure the bound stops on. [docs/REDESIGN.md](docs/REDESIGN.md) records the gap as closed.
 
 ### One stream for many runs
 
@@ -298,8 +297,9 @@ starts — `--await` is the parent's explicit opt-in, and `--resumable` is the s
 backgrounding is the OS's job — `basis wait <ID> &`, `nohup`, tmux, `systemd-run`, CI. Cancellation
 is honored at turn boundaries (a hung tool call is ended by the deadline), and a crash mid-turn
 loses the in-flight round: re-driving it may repeat tool side effects, because a checkpoint
-restores state, never effects. Four rules are the load-bearing part, and hold in process and
-across processes alike:
+restores state, never effects. Four rules are the load-bearing part — the durable-task contract
+every handle obeys across processes (in process, concurrency is the host's tokio; see
+"Structured concurrency" above):
 
 - **Ownership is a tree.** An attached child inherits its parent's cancellation and the narrower
   deadline. A successful parent keeps attached children in scope until they settle; a failed or

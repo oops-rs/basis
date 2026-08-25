@@ -24,14 +24,14 @@ use std::{
 };
 
 use basis::{
-    AllowAll, Approver, Bound, CancellationToken, DenyAll, Effort, Event, EventSink, ModelSelector,
+    AllowAll, Approver, Bound, CancellationToken, DenyAll, Event, EventSink, ModelSelector,
     RunOutcome, RunSpec, Runtime, RuntimeBuilder, ShellAccess, TurnOptions, Workspace,
     WorkspaceBuilder, provider,
 };
 use serde_json::Value;
 use tokio::time::{self, Instant};
 
-use crate::{approver::TerminalApprover, cli};
+use crate::{approver::TerminalApprover, cli::ApproveMode};
 
 use super::{
     data_dir::{AgentPaths, DataDir, valid_task_handle},
@@ -229,7 +229,7 @@ async fn run_model(
             PendingTerminal::Failed {
                 error: "task deadline elapsed before the next turn".to_string(),
             },
-            Some("deadline".to_string()),
+            Some(Bound::Deadline),
         );
     }
     // A cancel before any turn — on a never-attached or between-attaches
@@ -257,10 +257,7 @@ async fn run_model(
         Ok(runtime) => runtime,
         Err(error) => return record_failure(paths, meta, error, None),
     };
-    let (builder, spec) = match run_parts(meta) {
-        Ok(parts) => parts,
-        Err(error) => return record_failure(paths, meta, error, None),
-    };
+    let (builder, spec) = run_parts(meta);
     let workspace = match builder.with_runtime_builder(runtime).open().await {
         Ok(workspace) => Arc::new(workspace),
         Err(error) => return record_failure(paths, meta, error.to_string(), None),
@@ -303,7 +300,7 @@ async fn run_model(
     // assistant text stands in for the crashed process's unrecorded result.
     let mut initial_done = false;
     let mut last_result = String::new();
-    let mut last_stopped_by: Option<String> = None;
+    let mut last_stopped_by: Option<Bound> = None;
     if reattached {
         initial_done = answered(run.history()) > meta.answered_before;
         if let Some(message) = run
@@ -330,7 +327,7 @@ async fn run_model(
                 PendingTerminal::Failed {
                     error: "task deadline elapsed before the next turn".to_string(),
                 },
-                Some("deadline".to_string()),
+                Some(Bound::Deadline),
             );
         }
         let message = if initial_done {
@@ -353,7 +350,7 @@ async fn run_model(
         if let Some(remaining) = remaining {
             turn = turn.with_deadline(remaining);
         }
-        let approver = match approver(&meta.options.approve) {
+        let approver = match approver(meta.options.approve) {
             Ok(approver) => approver,
             Err(error) => return record_failure(paths, meta, error, None),
         };
@@ -382,7 +379,7 @@ async fn run_model(
                         PendingTerminal::Failed {
                             error: "task deadline elapsed during the turn".to_string(),
                         },
-                        Some("deadline".to_string()),
+                        Some(Bound::Deadline),
                     );
                 }
             },
@@ -399,7 +396,7 @@ async fn run_model(
         meta.updated_ms = now_ms();
         save_meta(paths, meta)?;
 
-        let stopped_by = report.stopped_by.map(bound_name);
+        let stopped_by = report.stopped_by;
         match report.outcome {
             RunOutcome::Error { message } => {
                 return if cancel_requested(paths) {
@@ -418,7 +415,7 @@ async fn run_model(
                         Some(MessageReply {
                             result: reply,
                             result_truncated,
-                            stopped_by: stopped_by.clone(),
+                            stopped_by,
                         }),
                     )?;
                 }
@@ -457,7 +454,7 @@ fn record_pending(
     paths: &AgentPaths,
     meta: &mut TaskMeta,
     completion: PendingTerminal,
-    stopped_by: Option<String>,
+    stopped_by: Option<Bound>,
 ) -> Result<(), String> {
     if matches!(completion, PendingTerminal::Cancelled) {
         meta.result_truncated = false;
@@ -474,7 +471,7 @@ fn record_failure(
     paths: &AgentPaths,
     meta: &mut TaskMeta,
     message: String,
-    stopped_by: Option<String>,
+    stopped_by: Option<Bound>,
 ) -> Result<(), String> {
     let (error, _) = bounded_text(message, MAX_RESULT_BYTES);
     meta.result_truncated = false;
@@ -567,26 +564,22 @@ async fn settle_children(
 /// here as well would build a value that
 /// [`with_runtime_builder`](basis::WorkspaceBuilder::with_runtime_builder)
 /// then replaces.
-fn run_parts(meta: &TaskMeta) -> Result<(WorkspaceBuilder, RunSpec), String> {
+fn run_parts(meta: &TaskMeta) -> (WorkspaceBuilder, RunSpec) {
     let options = &meta.options;
     let mut builder = Workspace::builder(Path::new(&meta.workspace))
         .with_shell(ShellAccess::from_flag(!options.no_shell));
     if let Some(model) = &options.model {
         builder = builder.with_model(ModelSelector::Id(model.clone()));
     }
-    // Reconstructed from the two recorded halves rather than one field: the
-    // pair is how `spawn` spelled it, and clap refused both at once before
-    // either was written, so `Replace` first is the whole rule.
-    if let Some(system_prompt) = cli::system_prompt(
-        options.system_prompt.clone(),
-        options.append_system_prompt.clone(),
-    ) {
+    // Recorded as the type it is; `load_meta` has already folded the
+    // pre-0.6 two-string spelling into this one field.
+    if let Some(system_prompt) = options.system_prompt.clone() {
         builder = builder.with_system_prompt(system_prompt);
     }
 
     let mut spec = RunSpec::new(meta.prompt.clone());
-    if let Some(effort) = options.effort.as_deref() {
-        spec = spec.with_effort(parse_effort(effort)?);
+    if let Some(effort) = options.effort {
+        spec = spec.with_effort(effort);
     }
     if let Some(remaining) = remaining_deadline(meta.deadline_at_ms) {
         spec = spec.with_deadline(remaining.max(Duration::from_millis(1)));
@@ -597,7 +590,7 @@ fn run_parts(meta: &TaskMeta) -> Result<(WorkspaceBuilder, RunSpec), String> {
     if let Some(token_budget) = options.token_budget {
         spec = spec.with_token_budget(token_budget);
     }
-    Ok((builder, spec))
+    (builder, spec)
 }
 
 /// The recipe for this task's own runtime: the process half of the recorded
@@ -628,17 +621,6 @@ fn task_runtime(data: &DataDir, task: &str, meta: &TaskMeta) -> Result<RuntimeBu
     Ok(runtime)
 }
 
-fn parse_effort(value: &str) -> Result<Effort, String> {
-    match value {
-        "low" => Ok(Effort::Low),
-        "medium" => Ok(Effort::Medium),
-        "high" => Ok(Effort::High),
-        "xhigh" => Ok(Effort::XHigh),
-        "max" => Ok(Effort::Max),
-        value => Err(format!("unsupported effort `{value}`")),
-    }
-}
-
 /// Whether this process can put an approval question to a person.
 ///
 /// Under ADR-0019 the executor is whichever process holds the attach lock, so
@@ -651,28 +633,30 @@ pub(crate) fn can_ask() -> bool {
 /// `interactive` is whether the caller will be driving the agent *and* has a
 /// terminal to ask at. Both halves matter: a `--resumable` agent has no
 /// attacher yet, and an attacher reading from a pipe has nobody to ask.
-pub(crate) fn validate_approval(value: &str, interactive: bool) -> Result<(), String> {
-    match value {
-        "always" | "never" => Ok(()),
-        "prompt" if interactive => Ok(()),
-        "prompt" => Err(
+///
+/// An *invalid* mode is no longer this function's business: the record holds
+/// [`ApproveMode`] itself, so a spelling the type cannot carry fails at
+/// decode, named, instead of here.
+pub(crate) fn validate_approval(mode: ApproveMode, interactive: bool) -> Result<(), String> {
+    match mode {
+        ApproveMode::Always | ApproveMode::Never => Ok(()),
+        ApproveMode::Prompt if interactive => Ok(()),
+        ApproveMode::Prompt => Err(
             "`--approve prompt` needs a terminal on the process driving the agent; use `always` or `never` for work nobody is attached to"
                 .to_string(),
         ),
-        value => Err(format!("unsupported approval mode `{value}`")),
     }
 }
 
-fn approver(value: &str) -> Result<Box<dyn Approver>, String> {
-    validate_approval(value, can_ask())?;
-    match value {
-        "always" => Ok(Box::new(AllowAll)),
-        "never" => Ok(Box::new(DenyAll)),
+fn approver(mode: ApproveMode) -> Result<Box<dyn Approver>, String> {
+    validate_approval(mode, can_ask())?;
+    Ok(match mode {
+        ApproveMode::Always => Box::new(AllowAll),
+        ApproveMode::Never => Box::new(DenyAll),
         // `TerminalApprover` refuses on its own if the terminal disappears
         // between this check and the question, so the fallback stays safe.
-        "prompt" => Ok(Box::new(TerminalApprover::new())),
-        _ => unreachable!("validated above"),
-    }
+        ApproveMode::Prompt => Box::new(TerminalApprover::new()),
+    })
 }
 
 pub(crate) fn earlier_deadline(left: Option<u64>, right: Option<u64>) -> Option<u64> {
@@ -685,16 +669,6 @@ pub(crate) fn earlier_deadline(left: Option<u64>, right: Option<u64>) -> Option<
 
 fn remaining_deadline(deadline_at: Option<u64>) -> Option<Duration> {
     deadline_at.map(|deadline| Duration::from_millis(deadline.saturating_sub(now_ms())))
-}
-
-fn bound_name(bound: Bound) -> String {
-    match bound {
-        Bound::Deadline => "deadline",
-        Bound::ToolBudget => "tool_budget",
-        Bound::TokenBudget => "token_budget",
-        _ => "unknown",
-    }
-    .to_string()
 }
 
 /// The executor's event sink: every event lands in `events.jsonl`, and — when

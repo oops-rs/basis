@@ -401,14 +401,11 @@ of retrying it like a provider error.
 
 Both the pool and `RunReport::usage` count what providers *report*. One that reports
 nothing spends nothing as far as either is concerned. Work a run delegates through `spawn`
-is inside the **bound**: the subagent runs on the parent's accounting handle, so what it
-spends is what a `BudgetPool` meters and what a `--token-budget` stops the parent on. It is
-outside the **tally**: the relay that puts a child's usage on the parent's event stream is
-internal to mentra's own delegation intrinsic and a registered tool cannot reach it, so
-`RunReport::usage` reports what the parent's own rounds cost and under-reports any run that
-delegated. The number that stops a run and the number it says it spent are the same only
-when nothing was delegated; [REDESIGN.md](REDESIGN.md) carries the gap as an open
-upstream candidate rather than as a fixed one.
+is inside the **bound** and inside the **tally** alike: the subagent runs on the parent's
+accounting handle, so what it spends is what a `BudgetPool` meters and what a
+`--token-budget` stops the parent on — and since mentra `5f303b8` and basis `e22aa63` the
+child's usage is relayed onto the parent's stream too, so `RunReport::usage` agrees with
+the figure the bound stops on. [REDESIGN.md](REDESIGN.md) records the gap as closed.
 
 ## One stream for many runs
 

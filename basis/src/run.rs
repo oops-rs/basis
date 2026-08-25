@@ -77,7 +77,8 @@ pub use mentra::runtime::CancellationToken;
 /// does. Provider adapters translate this semantic level to their own wire
 /// format. A provider or model that does not offer the requested level returns
 /// an error rather than silently lowering it.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+#[serde(rename_all = "lowercase")]
 #[non_exhaustive]
 pub enum Effort {
     Low,

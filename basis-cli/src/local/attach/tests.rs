@@ -3,6 +3,7 @@
 //! deadline boundaries, and the runtime recipe.
 
 use super::*;
+use crate::cli::ApproveMode;
 use crate::local::state::RunOptions;
 use serde_json::{Value, json};
 
@@ -27,7 +28,7 @@ fn record(
         "do not run".to_string(),
         RunOptions {
             provider: Some("not-a-provider".to_string()),
-            approve: "never".to_string(),
+            approve: ApproveMode::Never,
             ..RunOptions::default()
         },
         None,
@@ -268,23 +269,27 @@ fn an_unknown_provider_fails_the_task_rather_than_going_unread() {
 /// here, where both halves can be stated.
 #[test]
 fn prompt_approval_needs_a_driver_with_a_terminal() {
-    for mode in ["always", "never"] {
-        assert!(validate_approval(mode, false).is_ok(), "{mode} asks nobody");
-        assert!(validate_approval(mode, true).is_ok(), "{mode} asks nobody");
+    for mode in [ApproveMode::Always, ApproveMode::Never] {
+        assert!(
+            validate_approval(mode, false).is_ok(),
+            "{mode:?} asks nobody"
+        );
+        assert!(
+            validate_approval(mode, true).is_ok(),
+            "{mode:?} asks nobody"
+        );
     }
 
     assert!(
-        validate_approval("prompt", true).is_ok(),
+        validate_approval(ApproveMode::Prompt, true).is_ok(),
         "an attached terminal is exactly what `prompt` needs"
     );
 
-    let refused = validate_approval("prompt", false)
+    let refused = validate_approval(ApproveMode::Prompt, false)
         .expect_err("nobody attached means nobody to ask")
         .to_string();
     assert!(refused.contains("terminal"), "{refused}");
 
-    assert!(
-        validate_approval("sometimes", true).is_err(),
-        "an unknown mode is not quietly treated as one of the known ones"
-    );
+    // An unknown mode is no longer spellable here at all: the record holds
+    // `ApproveMode` itself, so a corrupted value fails at decode instead.
 }

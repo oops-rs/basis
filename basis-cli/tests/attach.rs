@@ -688,7 +688,7 @@ fn an_appended_system_prompt_survives_the_spawn_and_reaches_the_model() {
     )
     .expect("meta is json");
     assert_eq!(
-        meta["options"]["append_system_prompt"], "answer in Latin",
+        meta["options"]["system_prompt"]["append"], "answer in Latin",
         "the flag has to be in the durable record, or the attacher cannot honor it"
     );
 
