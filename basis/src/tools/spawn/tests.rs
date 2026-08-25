@@ -431,7 +431,7 @@ fn delegation_stops_at_the_floor_and_says_what_to_do_instead() {
     let _first = ledger.entered("child", 1);
     assert_eq!(ledger.authorize_delegation("child"), Ok(1));
 
-    let _second = ledger.entered("grandchild", MAX_DEPTH);
+    let _second = ledger.entered("grandchild", DEFAULT_DELEGATION_DEPTH);
     let refused = ledger
         .authorize_delegation("grandchild")
         .expect_err("the floor holds");
@@ -462,11 +462,30 @@ fn a_finished_delegation_leaves_no_trace_in_the_ledger() {
 }
 
 #[test]
+fn with_targets_and_depth_moves_the_floor() {
+    // Decision D9: the floor is `RuntimeBuilder::with_delegation_depth`'s
+    // value now, threaded in here — not the constant it defaulted to.
+    let ledger = depth::Depth::new(1);
+
+    assert_eq!(ledger.authorize_delegation("root"), Ok(0));
+
+    let _entered = ledger.entered("child", 1);
+    let refused = ledger
+        .authorize_delegation("child")
+        .expect_err("the narrower floor holds at 1, not 2");
+    assert_eq!(
+        refused,
+        "this work is already 1 levels of delegation deep and spawn goes no deeper than 1; \
+         do it here rather than handing it on"
+    );
+}
+
+#[test]
 fn a_command_is_never_refused_for_being_deep() {
     // Depth bounds *nesting*. An agent at the floor is still allowed to do the
     // work itself, and running a command is exactly that.
     let tool = SpawnTool::new();
-    let _entered = tool.depth.entered("deep", MAX_DEPTH);
+    let _entered = tool.depth.entered("deep", DEFAULT_DELEGATION_DEPTH);
 
     assert!(tool.depth.authorize_delegation("deep").is_err());
     assert_eq!(parsed("!cargo test").mode(), Mode::Command);

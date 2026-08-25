@@ -246,8 +246,10 @@ fn offline(workspace: &Path) -> WorkspaceBuilder {
             walk_parents: false,
         })
         .with_skills(SkillsConfig {
-            workspace_subdir: PathBuf::from(".basis/skills"),
+            workspace_subdir: Some(PathBuf::from(".basis/skills")),
+            shared_workspace_dir: true,
             global_dir: None,
+            shared_home_dir: false,
         })
         .with_templates(TemplatesConfig {
             workspace_subdir: PathBuf::from(".basis/templates"),

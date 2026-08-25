@@ -76,7 +76,7 @@ use parse::{INPUT_FIELD, Mode, Spawn, parse};
 // so the dispatcher asks this parser rather than becoming a second reader.
 pub(crate) use parse::{LOCAL_TARGET, Mode as SpawnMode, is_target_name, parse as parse_spawn};
 
-pub use depth::MAX_DEPTH;
+pub use depth::DEFAULT_DELEGATION_DEPTH;
 
 /// The name the model calls, an operator writes in a rule, and a
 /// `.basis/hooks.json` entry matches on.
@@ -159,6 +159,10 @@ impl SpawnTool {
     /// the description, and refuse a name nothing registered before the
     /// approver is asked about it.
     ///
+    /// [`DEFAULT_DELEGATION_DEPTH`]'s floor; call
+    /// [`with_targets_and_depth`](Self::with_targets_and_depth) for a
+    /// different one.
+    ///
     /// Called by [`RuntimeBuilder`](crate::RuntimeBuilder) with the set it
     /// collected; a host driving mentra directly calls it with whatever it
     /// registered on its own executor. Names it does not recognise are refused
@@ -166,8 +170,21 @@ impl SpawnTool {
     /// turns a working call into a refusal rather than into a silent local
     /// run — which is the direction this has to fail in.
     pub fn with_targets(targets: impl IntoIterator<Item = String>) -> Self {
+        Self::with_targets_and_depth(targets, depth::DEFAULT_DELEGATION_DEPTH)
+    }
+
+    /// [`with_targets`](Self::with_targets), with the delegation floor stated
+    /// explicitly (decision D9) instead of defaulted — what
+    /// [`RuntimeBuilder::with_delegation_depth`](crate::RuntimeBuilder::with_delegation_depth)
+    /// threads through at registration. The guard's shape does not change:
+    /// still basis's own ledger, still refusing *in the preview*, so a
+    /// remembered allow-rule cannot lift it whatever the floor is set to.
+    pub fn with_targets_and_depth(
+        targets: impl IntoIterator<Item = String>,
+        max_depth: usize,
+    ) -> Self {
         Self {
-            depth: depth::Depth::default(),
+            depth: depth::Depth::new(max_depth),
             targets: targets
                 .into_iter()
                 .collect::<BTreeSet<_>>()

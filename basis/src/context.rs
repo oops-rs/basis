@@ -95,6 +95,41 @@ impl Default for ContextConfig {
 }
 
 impl ContextConfig {
+    /// No context discovery at all (decision D9): `AGENTS.md` and `CLAUDE.md`
+    /// are simply not read, in the workspace, in any ancestor, or in the
+    /// global config directory.
+    ///
+    /// **Workspace validation still happens.** [`WorkspaceContext::discover_with`]
+    /// resolves and checks the path before it ever looks at `file_names` —
+    /// a workspace that does not exist, is not a directory, or cannot be
+    /// canonicalized still fails [`open`](crate::WorkspaceBuilder::open) the
+    /// same way it would with discovery on. What stops is reading *files*: no
+    /// document is collected, so [`WorkspaceContext::render`] is always
+    /// `None` and the system prompt is whatever else supplied one —
+    /// [`SystemPrompt`], the memory index, or nothing.
+    ///
+    /// Reuses the fields rather than adding a fourth: an empty `file_name`
+    /// is what [`file_names`](Self::file_names) treats as *no name to look
+    /// for*, so no candidate is ever found in any directory regardless of
+    /// [`global_dir`](Self::global_dir) or
+    /// [`walk_parents`](Self::walk_parents) — set to their least-surprising
+    /// values here rather than left at whatever the caller had, so a `Debug`
+    /// print of this value does not suggest a knob that still does something.
+    ///
+    /// Who wants this: a host with its own opinion about what an agent should
+    /// be told and no interest in a repository's ([`SystemPrompt::Replace`]
+    /// already drops discovery from the *prompt*, but still pays for reading
+    /// the files to report them; this skips the read too) — or a test that
+    /// wants a result independent of whatever `AGENTS.md` the machine
+    /// running it happens to carry.
+    pub fn none() -> Self {
+        Self {
+            file_name: String::new(),
+            global_dir: None,
+            walk_parents: false,
+        }
+    }
+
     /// The names to try in one directory, strongest first. The first that is
     /// there is the document that directory contributes; the rest are not read.
     ///
@@ -103,8 +138,13 @@ impl ContextConfig {
     /// reading `CLAUDE.md` behind that name would be basis loading instructions
     /// from a file the host never named — the one thing a discovery knob exists
     /// to prevent.
+    ///
+    /// Empty is [`ContextConfig::none`]'s doing: no name to look for is no
+    /// candidate ever found, in any directory.
     pub fn file_names(&self) -> Vec<&str> {
-        if self.file_name == DEFAULT_CONTEXT_FILE {
+        if self.file_name.is_empty() {
+            Vec::new()
+        } else if self.file_name == DEFAULT_CONTEXT_FILE {
             vec![DEFAULT_CONTEXT_FILE, DEFAULT_CONTEXT_FALLBACK_FILE]
         } else {
             vec![self.file_name.as_str()]
@@ -354,6 +394,39 @@ mod tests {
             ContextConfig::default().file_names(),
             vec![DEFAULT_CONTEXT_FILE, DEFAULT_CONTEXT_FALLBACK_FILE]
         );
+    }
+
+    #[test]
+    fn none_names_nothing_to_look_for() {
+        assert!(ContextConfig::none().file_names().is_empty());
+    }
+
+    #[test]
+    fn none_discovers_no_documents_even_when_agents_md_exists() {
+        // The workspace's own AGENTS.md is present and readable; `none()`
+        // still finds nothing, because it never looks.
+        let tmp = tempfile::tempdir().expect("tempdir");
+        let workspace = tmp.path().join("repo");
+        write(&workspace, DEFAULT_CONTEXT_FILE, "workspace rules");
+
+        let context = WorkspaceContext::discover_with(&workspace, &ContextConfig::none())
+            .expect("workspace validation still runs and still succeeds");
+
+        assert!(context.is_empty());
+        assert_eq!(context.render(), None);
+    }
+
+    #[test]
+    fn none_still_validates_the_workspace_path() {
+        // Discovery is off, not the existence check: a caller should learn a
+        // bad path is bad the same way it always has.
+        let tmp = tempfile::tempdir().expect("tempdir");
+        let missing = tmp.path().join("does-not-exist");
+
+        let error = WorkspaceContext::discover_with(&missing, &ContextConfig::none())
+            .expect_err("a missing workspace is still an error under `none()`");
+
+        assert!(matches!(error, ContextError::WorkspaceMissing { .. }));
     }
 
     #[test]

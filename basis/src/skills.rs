@@ -66,28 +66,39 @@ pub const DEFAULT_GLOBAL_SKILLS_DIR: &str = "skills";
 
 /// How to look for skills.
 ///
-/// Two knobs, four roots: the shared `.agents/skills` spellings are not
-/// configurable because they are not basis's to name — a fixed path is what
-/// makes them shared. What a caller still decides is which basis-specific root
-/// to use and whether the user's personal scope is read at all.
+/// Four fields, one per root (D9): the shared `.agents/skills` roots carry no
+/// path of their own — a fixed spelling is what makes them shared, and
+/// relocating one would stop it being the convention `.agents/skills` names —
+/// so those two are plain switches, on by default. The two basis-specific
+/// roots carry the path *and* the switch in one `Option`: `None` disables the
+/// root, `Some(path)` both enables it and says where. Every root disables
+/// independently of the other three.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct SkillsConfig {
-    /// Path relative to the workspace root.
-    pub workspace_subdir: PathBuf,
-    /// The global config directory, if any. `skills/` inside it is used.
-    ///
-    /// Also the switch for the personal scope as a whole: `None` means *read
-    /// no directory of this user's*, which is how every offline test in this
-    /// repository keeps discovery off the developer's own machine, and
-    /// `$HOME/.agents/skills` is that same scope under the shared spelling.
+    /// `<workspace>/.basis/skills`, relative to the workspace root. `None`
+    /// disables this root alone.
+    pub workspace_subdir: Option<PathBuf>,
+    /// Whether `<workspace>/.agents/skills` — the convention `pi` and Claude
+    /// Code already read — is one of the roots.
+    pub shared_workspace_dir: bool,
+    /// The global config directory, if any. `skills/` inside it is the third
+    /// root; `None` disables that root alone and says nothing about
+    /// [`shared_home_dir`](Self::shared_home_dir).
     pub global_dir: Option<PathBuf>,
+    /// Whether `$HOME/.agents/skills` — the shared convention's personal
+    /// scope — is one of the roots. Gated on its own switch rather than on
+    /// [`global_dir`](Self::global_dir), unlike before D9: a caller can now
+    /// keep this while disabling basis's own global root, or the reverse.
+    pub shared_home_dir: bool,
 }
 
 impl Default for SkillsConfig {
     fn default() -> Self {
         Self {
-            workspace_subdir: PathBuf::from(DEFAULT_WORKSPACE_SKILLS_DIR),
+            workspace_subdir: Some(PathBuf::from(DEFAULT_WORKSPACE_SKILLS_DIR)),
+            shared_workspace_dir: true,
             global_dir: crate::context::ContextConfig::default().global_dir,
+            shared_home_dir: true,
         }
     }
 }
@@ -114,35 +125,40 @@ pub fn discover(workspace: &Path, config: &SkillsConfig) -> Vec<SkillsSource> {
 fn discover_in(workspace: &Path, config: &SkillsConfig, home: Option<&Path>) -> Vec<SkillsSource> {
     let mut sources = Vec::new();
 
-    push(
-        &mut sources,
-        workspace.join(&config.workspace_subdir),
-        ContextScope::Workspace,
-    );
-    push(
-        &mut sources,
-        workspace.join(SHARED_SKILLS_DIR),
-        ContextScope::Workspace,
-    );
+    if let Some(subdir) = &config.workspace_subdir {
+        push(
+            &mut sources,
+            workspace.join(subdir),
+            ContextScope::Workspace,
+        );
+    }
+    if config.shared_workspace_dir {
+        push(
+            &mut sources,
+            workspace.join(SHARED_SKILLS_DIR),
+            ContextScope::Workspace,
+        );
+    }
 
-    // The personal scope, in both of its spellings. `global_dir` gates the
-    // shared root without locating it: `~/.agents/skills` is a fixed path by
-    // convention, not somewhere a host relocates, so the only question a
-    // caller can answer about it is whether this user's directories are read
-    // at all — and `None` is how a caller already says no.
     if let Some(global) = &config.global_dir {
         push(
             &mut sources,
             global.join(DEFAULT_GLOBAL_SKILLS_DIR),
             ContextScope::Global,
         );
-        if let Some(home) = home {
-            push(
-                &mut sources,
-                home.join(SHARED_SKILLS_DIR),
-                ContextScope::Global,
-            );
-        }
+    }
+    // `~/.agents/skills` is a fixed path by convention, not somewhere a host
+    // relocates, so the only question a caller answers about it (D9) is
+    // whether it is read at all — independently of the global root above,
+    // unlike before D9, when one `Option` gated both.
+    if config.shared_home_dir
+        && let Some(home) = home
+    {
+        push(
+            &mut sources,
+            home.join(SHARED_SKILLS_DIR),
+            ContextScope::Global,
+        );
     }
 
     sources
@@ -177,10 +193,14 @@ fn user_home() -> Option<PathBuf> {
 mod tests {
     use super::*;
 
+    /// The default three roots enabled, `global_dir` as given — the shape
+    /// most tests below vary along exactly one axis.
     fn config(global: Option<PathBuf>) -> SkillsConfig {
         SkillsConfig {
-            workspace_subdir: PathBuf::from(DEFAULT_WORKSPACE_SKILLS_DIR),
+            workspace_subdir: Some(PathBuf::from(DEFAULT_WORKSPACE_SKILLS_DIR)),
+            shared_workspace_dir: true,
             global_dir: global,
+            shared_home_dir: true,
         }
     }
 
@@ -349,15 +369,124 @@ mod tests {
     }
 
     #[test]
-    fn no_personal_scope_means_no_shared_user_directory_either() {
-        // `global_dir: None` is how a caller says *read none of this user's
-        // directories*; honoring it for one spelling and not the other would
-        // read the machine the caller was keeping out.
+    fn disabling_the_shared_home_root_alone_leaves_the_other_three() {
         let tmp = tempfile::tempdir().expect("tempdir");
+        let workspace = tmp.path().join("repo");
+        let global = tmp.path().join("global");
         let home = tmp.path().join("home");
+        dir(&workspace, DEFAULT_WORKSPACE_SKILLS_DIR);
+        dir(&global, DEFAULT_GLOBAL_SKILLS_DIR);
         dir(&home, SHARED_SKILLS_DIR);
 
-        assert!(found(tmp.path(), &config(None), Some(&home)).is_empty());
+        let sources = found(
+            &workspace,
+            &SkillsConfig {
+                shared_home_dir: false,
+                ..config(Some(global))
+            },
+            Some(&home),
+        );
+
+        assert_eq!(sources.len(), 2, "workspace root and global root only");
+        assert!(
+            sources
+                .iter()
+                .all(|source| source.path != home.join(SHARED_SKILLS_DIR))
+        );
+    }
+
+    #[test]
+    fn a_missing_global_dir_no_longer_silences_the_home_root() {
+        // Before D9 one `Option` gated both the global root and the home
+        // root; each disables on its own switch now, so a caller can keep
+        // this one while turning the other off, or the reverse.
+        let tmp = tempfile::tempdir().expect("tempdir");
+        let home = tmp.path().join("home");
+        let shared_user = dir(&home, SHARED_SKILLS_DIR);
+
+        let sources = found(tmp.path(), &config(None), Some(&home));
+
+        assert_eq!(
+            sources,
+            vec![SkillsSource {
+                path: shared_user,
+                scope: ContextScope::Global,
+            }]
+        );
+    }
+
+    #[test]
+    fn disabling_the_global_dir_alone_leaves_the_home_root() {
+        let tmp = tempfile::tempdir().expect("tempdir");
+        let global = tmp.path().join("global");
+        let home = tmp.path().join("home");
+        dir(&global, DEFAULT_GLOBAL_SKILLS_DIR);
+        let shared_user = dir(&home, SHARED_SKILLS_DIR);
+
+        let sources = found(
+            tmp.path(),
+            &SkillsConfig {
+                global_dir: None,
+                ..config(Some(global))
+            },
+            Some(&home),
+        );
+
+        assert_eq!(
+            sources,
+            vec![SkillsSource {
+                path: shared_user,
+                scope: ContextScope::Global,
+            }]
+        );
+    }
+
+    #[test]
+    fn disabling_the_basis_workspace_root_alone_leaves_the_shared_one() {
+        let tmp = tempfile::tempdir().expect("tempdir");
+        dir(tmp.path(), DEFAULT_WORKSPACE_SKILLS_DIR);
+        let shared = dir(tmp.path(), SHARED_SKILLS_DIR);
+
+        let sources = found(
+            tmp.path(),
+            &SkillsConfig {
+                workspace_subdir: None,
+                ..config(None)
+            },
+            None,
+        );
+
+        assert_eq!(
+            sources,
+            vec![SkillsSource {
+                path: shared,
+                scope: ContextScope::Workspace,
+            }]
+        );
+    }
+
+    #[test]
+    fn disabling_the_shared_workspace_root_alone_leaves_the_basis_one() {
+        let tmp = tempfile::tempdir().expect("tempdir");
+        let basis = dir(tmp.path(), DEFAULT_WORKSPACE_SKILLS_DIR);
+        dir(tmp.path(), SHARED_SKILLS_DIR);
+
+        let sources = found(
+            tmp.path(),
+            &SkillsConfig {
+                shared_workspace_dir: false,
+                ..config(None)
+            },
+            None,
+        );
+
+        assert_eq!(
+            sources,
+            vec![SkillsSource {
+                path: basis,
+                scope: ContextScope::Workspace,
+            }]
+        );
     }
 
     #[test]
@@ -380,8 +509,10 @@ mod tests {
         let sources = found(
             &global,
             &SkillsConfig {
-                workspace_subdir: PathBuf::from(DEFAULT_GLOBAL_SKILLS_DIR),
+                workspace_subdir: Some(PathBuf::from(DEFAULT_GLOBAL_SKILLS_DIR)),
+                shared_workspace_dir: false,
                 global_dir: Some(global.clone()),
+                shared_home_dir: false,
             },
             None,
         );

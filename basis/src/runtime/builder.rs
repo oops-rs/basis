@@ -125,6 +125,9 @@ pub struct RuntimeBuilder {
     /// by-value `with_tool` takes it whole. `Send + Sync` are not restated on
     /// the box: `ToolDefinition` itself requires both.
     host_tools: Vec<Box<dyn mentra::tool::ExecutableTool>>,
+    /// How many levels of delegation `spawn` will start before refusing
+    /// ([`with_delegation_depth`](Self::with_delegation_depth), decision D9).
+    delegation_depth: usize,
     /// A provider the host constructed itself
     /// ([`with_provider_instance`](Self::with_provider_instance)). When set,
     /// the provider question is answered: resolution never runs, the
@@ -200,6 +203,7 @@ impl std::fmt::Debug for RuntimeBuilder {
             .field("responses_transport", &self.responses_transport)
             .field("wire", &self.wire)
             .field("file_tools", &self.file_tools)
+            .field("delegation_depth", &self.delegation_depth)
             .field(
                 "command_environment",
                 &self.command_environment.keys().collect::<Vec<_>>(),
@@ -233,6 +237,7 @@ impl Default for RuntimeBuilder {
             command_environment: BTreeMap::new(),
             command_targets: CommandTargets::new(),
             host_tools: Vec::new(),
+            delegation_depth: crate::tools::DEFAULT_DELEGATION_DEPTH,
             host_provider: None,
         }
     }
@@ -779,6 +784,28 @@ impl RuntimeBuilder {
         }
     }
 
+    /// How many levels of delegation `spawn` will start before refusing, on
+    /// every workspace this runtime carries (decision D9).
+    ///
+    /// [`crate::tools::DEFAULT_DELEGATION_DEPTH`] (two) unless a caller says
+    /// otherwise here — the smallest bound that leaves delegation
+    /// compositional (a subagent may split its own work once) while keeping
+    /// runaway recursion structurally impossible rather than merely unlikely.
+    /// The root run is depth 0, so the deepest agent that can still delegate
+    /// is one less than this value.
+    ///
+    /// The guard's shape does not move with the number: it is still basis's
+    /// own ledger (mentra's floor is name-specific and does not fire for a
+    /// registered tool), and it still refuses *in the preview*, so a
+    /// remembered allow-rule cannot lift whatever floor is set here.
+    #[must_use]
+    pub fn with_delegation_depth(self, depth: usize) -> Self {
+        Self {
+            delegation_depth: depth,
+            ..self
+        }
+    }
+
     /// How long a command may run before it is killed.
     ///
     /// Two minutes by default, which suits the commands a harness usually runs
@@ -987,10 +1014,13 @@ impl RuntimeBuilder {
             // Told the target names, and only the names: the tool needs them to
             // teach the `!@` prefix and to refuse one nothing registered, while
             // *which executor* a name resolves to stays the runtime's business
-            // (ADR-0021). With none registered this is `SpawnTool::new()` in
-            // every observable respect, including that the model is never told
-            // the prefix exists.
-            .with_tool(SpawnTool::with_targets(target_names))
+            // (ADR-0021). With none registered and the default depth this is
+            // `SpawnTool::new()` in every observable respect, including that
+            // the model is never told the prefix exists.
+            .with_tool(SpawnTool::with_targets_and_depth(
+                target_names,
+                self.delegation_depth,
+            ))
             // The one pre-hook basis registers, always: mentra takes hooks at
             // build time only, and workspaces arrive later, through the
             // dispatcher (see `runtime::dispatch`).

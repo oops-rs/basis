@@ -880,8 +880,10 @@ async fn workspace_on(runtime: std::sync::Arc<Runtime>, root: &Path) -> crate::W
             walk_parents: false,
         })
         .with_skills(crate::SkillsConfig {
-            workspace_subdir: PathBuf::from(".basis/skills"),
+            workspace_subdir: Some(PathBuf::from(".basis/skills")),
+            shared_workspace_dir: true,
             global_dir: None,
+            shared_home_dir: false,
         })
         .with_templates(crate::TemplatesConfig {
             workspace_subdir: PathBuf::from(".basis/templates"),
