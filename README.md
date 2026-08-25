@@ -217,6 +217,12 @@ config — never through code in `basis`:
   reason the model sees, or `modify` with a replacement input. An entry that says `"event":
   "post_tool_use"` is asked after the call instead, is shown what the tool returned, and may
   `replace` it. Any language; one that breaks denies.
+- **Memories** — `.md` files with `name`/`description`/`type` frontmatter, indexed into the system
+  prompt at open: name, one line, path — the body stays on disk for the model to `read` when the
+  description warrants it. Two roots: `memory/` in the global config directory, and `memory/` beside
+  the runtime's store when history has a named directory; a workspace memory shadows a global one by
+  name. No database and no memory tool — recall is `read`, search is `grep`, writing one is `write` —
+  and zero memories cost zero context.
 
 [docs/conventions.md](docs/conventions.md) is the one-page reference: every file, every directory,
 every `BASIS_*` variable, and which wins when two say the same thing.
