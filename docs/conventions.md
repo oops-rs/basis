@@ -288,9 +288,6 @@ unset. A base URL — passed, configured, or exported — outranks auto-detectio
 because pointing at an endpoint is always deliberate. A host-supplied provider
 instance (`RuntimeBuilder::with_provider_instance`) reads none of them:
 resolution is skipped whole, and a provider, base URL or key named beside the
-instance is refused rather than outranked. A host-supplied provider
-instance (`RuntimeBuilder::with_provider_instance`) reads none of them:
-resolution is skipped whole, and a provider, base URL or key named beside the
 instance is refused rather than outranked.
 
 `XDG_CONFIG_HOME`, `XDG_DATA_HOME` and `HOME` are consulted only as the
