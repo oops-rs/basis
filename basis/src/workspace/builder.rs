@@ -35,6 +35,7 @@ use crate::{
     error::RunError,
     event::ContextFile,
     hooks::{self, HookRunner, HooksConfig},
+    memory::{self, MemoryConfig},
     run::LoadedSkill,
     runtime::{Runtime, RuntimeBuilder, dispatch},
     shell::ShellAccess,
@@ -69,6 +70,7 @@ pub struct WorkspaceBuilder {
     /// The host's own say over the system prompt; `None` is discovery alone.
     system_prompt: Option<SystemPrompt>,
     skills: SkillsConfig,
+    memory: MemoryConfig,
     #[cfg(feature = "mcp")]
     mcp: McpConfig,
     templates: TemplatesConfig,
@@ -109,6 +111,7 @@ impl std::fmt::Debug for WorkspaceBuilder {
             .field("config", &self.config)
             .field("system_prompt", &self.system_prompt)
             .field("skills", &self.skills)
+            .field("memory", &self.memory)
             .field("templates", &self.templates)
             .field("hooks", &self.hooks)
             .field("tools", &self.tools)
@@ -136,6 +139,7 @@ impl WorkspaceBuilder {
             // a seam is not a default.
             system_prompt: None,
             skills: SkillsConfig::default(),
+            memory: MemoryConfig::default(),
             #[cfg(feature = "mcp")]
             mcp: McpConfig::default(),
             templates: TemplatesConfig::default(),
@@ -246,6 +250,18 @@ impl WorkspaceBuilder {
 
     pub fn with_skills(self, skills: SkillsConfig) -> Self {
         Self { skills, ..self }
+    }
+
+    /// Sets where memory files are discovered, or turns discovery off.
+    ///
+    /// Memory is files, not a subsystem — see [`crate::memory`] for the
+    /// convention, the two default roots, and what the index costs. Unset,
+    /// the convention applies: the global config directory's `memory/`, plus
+    /// the sibling `memory/` beside the runtime's store dir when
+    /// [`RuntimeBuilder::with_store_dir`](crate::RuntimeBuilder::with_store_dir)
+    /// named one. [`MemoryConfig::disabled`] reads nothing at all.
+    pub fn with_memory(self, memory: MemoryConfig) -> Self {
+        Self { memory, ..self }
     }
 
     /// Sets which MCP servers this workspace connects.
@@ -379,6 +395,26 @@ impl WorkspaceBuilder {
         // one.
         let declared_sources = declared::discover(&self.path, &self.tools)?;
 
+        // Memory, before the runtime is acquired for the reason the files
+        // above are — a memory that does not parse fails the open naming the
+        // file. The workspace root derives beside the runtime's store dir
+        // ([`crate::memory`]), which on the private path is still a recipe, so
+        // both shapes are asked before the match below consumes them. The
+        // roots are resolved whether or not they exist yet: the private
+        // runtime's policy names them (the model writes memories through the
+        // ordinary file tools, and the roots sit outside the workspace), and
+        // the first memory is written by exactly the run that finds none to
+        // read. On a *shared* runtime the fixed policy cannot carry
+        // per-workspace roots, so the index still renders but a file tool
+        // write to a root outside the agent's own directory is refused —
+        // recorded beside the other costs of sharing.
+        let store_dir = match &self.runtime {
+            RuntimeSource::Shared(runtime) => runtime.store_dir().map(Path::to_path_buf),
+            RuntimeSource::Private(recipe) => recipe.named_store_dir().map(Path::to_path_buf),
+        };
+        let memory_sources = memory::roots(&self.memory, store_dir.as_deref());
+        let memories = memory::load(&memory_sources)?;
+
         let shared = matches!(self.runtime, RuntimeSource::Shared(_));
         let runtime = match self.runtime {
             // A shared runtime's provider, credential and endpoint are the
@@ -478,6 +514,7 @@ impl WorkspaceBuilder {
                 &self.path,
                 &context,
                 self.system_prompt.as_ref(),
+                memory::index_block(&memories).as_deref(),
                 self.compaction,
                 runtime.transcripts_dir().to_path_buf(),
             ),
@@ -492,6 +529,7 @@ impl WorkspaceBuilder {
             effort: config.effort.as_ref().map(|effort| effort.value),
             config,
             context,
+            memories,
             skills_dirs,
             skills,
             templates_dirs,
@@ -647,11 +685,15 @@ fn agent_config(
     workspace: &Path,
     context: &WorkspaceContext,
     system_prompt: Option<&SystemPrompt>,
+    memory_index: Option<&str>,
     compaction: Compaction,
     transcripts: PathBuf,
 ) -> mentra::agent::AgentConfig {
     mentra::agent::AgentConfig {
-        system: context.render_with(system_prompt),
+        // The memory index rides the context's own render path — after the
+        // documents, before a host's `Append`, gone under `Replace` — so it
+        // obeys the same rules as everything else in the prompt.
+        system: context.render_with_appendix(system_prompt, memory_index),
         tool_profile: mentra::agent::ToolProfile::hide(hidden_tools()),
         workspace: mentra::agent::WorkspaceConfig {
             base_dir: workspace.to_path_buf(),

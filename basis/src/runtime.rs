@@ -174,6 +174,12 @@ pub struct Runtime {
     /// count from the waits, and a runtime that widened one without the other
     /// would be half a statement.
     provider_retry_budget: usize,
+    /// The directory the host named for this runtime's history
+    /// ([`RuntimeBuilder::with_store_dir`]), kept because a convention builds
+    /// beside it: the workspace memory root is the sibling `memory/` directory
+    /// ([`crate::memory`]). `None` for ephemeral history and for mentra's
+    /// process-cwd default — the two cases with no directory basis chose.
+    store_dir: Option<PathBuf>,
     /// Where a compaction snapshot goes, derived once from the history posture
     /// this runtime was built with.
     ///
@@ -250,6 +256,14 @@ impl Runtime {
     /// would invite a second answer.
     pub(crate) fn transcripts_dir(&self) -> &Path {
         &self.transcripts
+    }
+
+    /// The history directory the host named, if any — what the workspace
+    /// memory root is derived beside. `pub(crate)` for `transcripts_dir`'s
+    /// reason: the host that wants to say where history goes says it once, on
+    /// the builder.
+    pub(crate) fn store_dir(&self) -> Option<&Path> {
+        self.store_dir.as_deref()
     }
 
     /// The retry schedule and attempt count every run minted on this runtime

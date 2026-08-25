@@ -11,6 +11,7 @@ use mentra::{
 };
 
 use crate::context::{ContextDocument, ContextScope};
+use crate::memory::{Memory, MemoryKind};
 
 use super::*;
 
@@ -26,13 +27,35 @@ fn configured(
     context: &WorkspaceContext,
     system_prompt: Option<&SystemPrompt>,
 ) -> mentra::agent::AgentConfig {
+    remembering(workspace, context, system_prompt, &[])
+}
+
+/// `configured`, with the index block `memories` render.
+fn remembering(
+    workspace: &Path,
+    context: &WorkspaceContext,
+    system_prompt: Option<&SystemPrompt>,
+    memories: &[Memory],
+) -> mentra::agent::AgentConfig {
     agent_config(
         workspace,
         context,
         system_prompt,
+        crate::memory::index_block(memories).as_deref(),
         Compaction::default(),
         PathBuf::from("/transcripts"),
     )
+}
+
+/// One memory, for the prompt tests below.
+fn deploy_memories() -> Vec<Memory> {
+    vec![Memory {
+        name: "deploy-notes".to_string(),
+        description: "how deploys go out".to_string(),
+        kind: MemoryKind::Project,
+        path: PathBuf::from("/mem/deploy-notes.md"),
+        scope: ContextScope::Global,
+    }]
 }
 
 /// One workspace document, for the prompt tests below.
@@ -152,6 +175,111 @@ fn the_last_system_prompt_said_is_the_one_that_holds() {
     assert_eq!(
         builder.system_prompt,
         Some(SystemPrompt::Append("second".to_string()))
+    );
+}
+
+#[test]
+fn the_memory_index_lands_after_the_context_documents() {
+    // The index is workspace data, so it goes where the rendered block's
+    // preamble puts the more specific statement — after the documents.
+    let agent = remembering(Path::new("/repo"), &house_rules(), None, &deploy_memories());
+
+    let system = agent.system.expect("a system prompt");
+    let context = system.find("house rules").expect("the workspace's say");
+    let index = system.find("<memories>").expect("the index");
+    assert!(context < index, "{system}");
+    assert!(system.contains("deploy-notes — how deploys go out"));
+}
+
+#[test]
+fn a_replaced_prompt_drops_the_memory_index_too() {
+    // `Replace` is the whole prompt; the index rides the same render path as
+    // the documents, so it goes with them rather than surviving them.
+    let agent = remembering(
+        Path::new("/repo"),
+        &house_rules(),
+        Some(&SystemPrompt::Replace(
+            "you are Acme's reviewer".to_string(),
+        )),
+        &deploy_memories(),
+    );
+
+    assert_eq!(agent.system.as_deref(), Some("you are Acme's reviewer"));
+}
+
+#[test]
+fn a_hosts_append_still_lands_after_the_memory_index() {
+    // The host's text stays the most specific statement — nothing on disk,
+    // memories included, may outrank the program actually running this agent.
+    let agent = remembering(
+        Path::new("/repo"),
+        &house_rules(),
+        Some(&SystemPrompt::Append("answer in Chinese".to_string())),
+        &deploy_memories(),
+    );
+
+    let system = agent.system.expect("a system prompt");
+    let index = system.find("<memories>").expect("the index");
+    let host = system.find("answer in Chinese").expect("the host's say");
+    assert!(index < host, "{system}");
+}
+
+#[test]
+fn no_memories_leave_the_prompt_byte_identical() {
+    // Zero memories, zero cost: a workspace that never heard of the
+    // convention renders exactly the prompt it always did.
+    let agent = remembering(Path::new("/repo"), &house_rules(), None, &[]);
+
+    assert_eq!(agent.system, house_rules().render());
+}
+
+#[test]
+fn memories_alone_still_make_a_prompt() {
+    // An empty workspace with memories is not an empty prompt: the index is
+    // workspace data even when no document is.
+    let agent = remembering(
+        Path::new("/repo"),
+        &WorkspaceContext::default(),
+        None,
+        &deploy_memories(),
+    );
+
+    let system = agent.system.expect("a system prompt");
+    assert!(system.starts_with("<memories>"), "{system}");
+}
+
+#[tokio::test]
+async fn the_memory_index_reaches_the_provider_request() {
+    // The block is prompt, not schema: nothing on the event stream names it,
+    // so the place to assert it is the request the provider is actually sent.
+    let mock = MockRuntime::builder()
+        .model("mock-model", "openai")
+        .text("noted")
+        .build()
+        .expect("the mock runtime builds");
+    let config = remembering(Path::new("/repo"), &house_rules(), None, &deploy_memories());
+    let mut session = mock
+        .runtime()
+        .create_session_with_config("memories", mock.model(), config)
+        .expect("session");
+
+    session
+        .append_turn(vec![ContentBlock::Text {
+            text: "hello".to_string(),
+        }])
+        .await
+        .expect("the scripted turn runs");
+
+    let requests = mock.recorded_requests().await;
+    let system = requests
+        .last()
+        .and_then(|request| request.system.as_deref())
+        .expect("a system prompt reached the provider");
+    assert!(system.contains("<memories>"), "{system}");
+    assert!(system.contains("deploy-notes — how deploys go out"));
+    assert!(
+        system.find("house rules") < system.find("<memories>"),
+        "the index comes after the documents: {system}"
     );
 }
 
@@ -369,6 +497,7 @@ fn what_a_host_says_about_compaction_is_what_the_agent_carries() {
     let agent = agent_config(
         Path::new("/repo"),
         &WorkspaceContext::default(),
+        None,
         None,
         compaction,
         PathBuf::from("/transcripts"),

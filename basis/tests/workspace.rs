@@ -34,8 +34,8 @@ use std::{
 };
 
 use basis::{
-    CollectingSink, ContextConfig, RunOutcome, Runtime, RuntimeBuilder, Snapshot, Workspace,
-    WorkspaceBuilder, hooks::HooksConfig, runtime::Wire, skills::SkillsConfig, store,
+    CollectingSink, ContextConfig, MemoryConfig, RunOutcome, Runtime, RuntimeBuilder, Snapshot,
+    Workspace, WorkspaceBuilder, hooks::HooksConfig, runtime::Wire, skills::SkillsConfig, store,
     templates::TemplatesConfig, tools::declared::ToolsConfig,
 };
 use mentra::{
@@ -72,6 +72,7 @@ fn offline(workspace: &Path) -> WorkspaceBuilder {
             workspace_subdir: PathBuf::from(".basis/skills"),
             global_dir: None,
         })
+        .with_memory(MemoryConfig::disabled())
         .with_templates(TemplatesConfig {
             workspace_subdir: PathBuf::from(".basis/templates"),
             global_dir: None,

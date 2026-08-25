@@ -71,6 +71,7 @@ mod frontmatter;
 pub mod hooks;
 #[cfg(feature = "mcp")]
 pub mod mcp;
+pub mod memory;
 mod paths;
 pub mod provider;
 pub mod run;
@@ -123,6 +124,11 @@ pub use hooks::{
 pub use mcp::{
     DEFAULT_GLOBAL_MCP_FILE, DEFAULT_WORKSPACE_MCP_FILE, McpConfig, McpError, McpServer, McpSource,
 };
+// The memory *configuration* comes to the root, beside its siblings
+// `SkillsConfig` and `TemplatesConfig` — a host pointing basis at different
+// memory roots is doing the same thing it does for those. `Memory` and its
+// kind stay in `memory`, next to the convention they only make sense beside.
+pub use memory::{MemoryConfig, WorkspaceMemoryRoot};
 pub use run::{
     Bound, Bounds, CancellationToken, CollectingSink, Compacted, Effort, EventFanIn, EventSink,
     FnSink, MergedEvents, NullSink, OutputReport, OutputSpec, PreparedRun, PromptPart, RunContext,

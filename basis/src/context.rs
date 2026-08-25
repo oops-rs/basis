@@ -211,16 +211,31 @@ impl WorkspaceContext {
     ///
     /// `None` for `host` is the discovery-only prompt, byte for byte.
     pub fn render_with(&self, host: Option<&SystemPrompt>) -> Option<String> {
+        self.render_with_appendix(host, None)
+    }
+
+    /// [`render_with`](Self::render_with), with a workspace-derived appendix —
+    /// the memory index — slotted between the discovered documents and the
+    /// host's say.
+    ///
+    /// One function rather than concatenation at the call site, so the
+    /// appendix rides the same rules as everything else in the prompt:
+    /// [`SystemPrompt::Replace`] removes it with the context block, a host's
+    /// [`SystemPrompt::Append`] still lands last as the most specific
+    /// statement, and a blank appendix is no appendix at all.
+    pub(crate) fn render_with_appendix(
+        &self,
+        host: Option<&SystemPrompt>,
+        appendix: Option<&str>,
+    ) -> Option<String> {
         match host {
-            None => self.render(),
+            None => joined([self.render(), appendix.and_then(spoken)]),
             Some(SystemPrompt::Replace(text)) => spoken(text),
-            Some(SystemPrompt::Append(text)) => match (self.render(), spoken(text)) {
-                // The host's text goes last, where the rendered block's own
-                // preamble says the most specific statement goes.
-                (Some(context), Some(host)) => Some(format!("{context}\n\n{host}")),
-                (Some(context), None) => Some(context),
-                (None, host) => host,
-            },
+            // The host's text goes last, where the rendered block's own
+            // preamble says the most specific statement goes.
+            Some(SystemPrompt::Append(text)) => {
+                joined([self.render(), appendix.and_then(spoken), spoken(text)])
+            }
         }
     }
 }
@@ -282,6 +297,17 @@ pub enum SystemPrompt {
 /// the model has to explain to itself.
 fn spoken(text: &str) -> Option<String> {
     (!text.trim().is_empty()).then(|| text.to_string())
+}
+
+/// The sections that had something to say, joined the way the rendered block
+/// separates documents; `None` when none did.
+fn joined<const N: usize>(sections: [Option<String>; N]) -> Option<String> {
+    let spoken: Vec<String> = sections.into_iter().flatten().collect();
+    if spoken.is_empty() {
+        None
+    } else {
+        Some(spoken.join("\n\n"))
+    }
 }
 
 #[cfg(test)]

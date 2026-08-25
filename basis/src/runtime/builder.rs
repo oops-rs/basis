@@ -580,6 +580,17 @@ impl RuntimeBuilder {
         }
     }
 
+    /// The history directory this recipe names, if any — what
+    /// [`Workspace::open`](crate::Workspace::open) derives the workspace
+    /// memory root beside ([`crate::memory`]), read here because the private
+    /// path resolves memory before the runtime exists.
+    pub(crate) fn named_store_dir(&self) -> Option<&Path> {
+        match &self.history {
+            Some(History::Directory(dir)) => Some(dir),
+            _ => None,
+        }
+    }
+
     /// Gives the host's own code a say over each tool call, on every workspace
     /// this runtime carries.
     ///
@@ -932,6 +943,10 @@ impl RuntimeBuilder {
 
         Ok(Runtime {
             mentra,
+            store_dir: self.history.and_then(|history| match history {
+                History::Directory(dir) => Some(dir),
+                History::Ephemeral => None,
+            }),
             command_environment,
             provider: choice.provider,
             provider_label: ProviderId::from(choice.provider).to_string(),
