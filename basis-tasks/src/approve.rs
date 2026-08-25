@@ -18,7 +18,7 @@ pub enum Approve {
     Always,
     /// Ask whatever [`PromptHost`] the executing process supplied. Refused at
     /// spawn and at attach for a process with none, or with one that cannot
-    /// currently ask (see [`validate`]).
+    /// currently ask (see [`validate_approval`]).
     #[default]
     Prompt,
     /// Refuse anything that changes state outside the process.

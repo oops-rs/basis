@@ -8,9 +8,7 @@
 
 use std::{path::PathBuf, process::ExitCode, sync::Arc, time::Duration};
 
-use basis_tasks::{
-    Continuation, PromptHost, RunSpec, TaskHandle, Tasks, WaitOutcome, validate_approval,
-};
+use basis_tasks::{Continuation, RunSpec, TaskHandle, Tasks, WaitOutcome};
 use serde_json::json;
 
 use crate::{
@@ -41,10 +39,10 @@ pub(crate) async fn spawn(args: RunArgs, attach: bool) -> Result<ExitCode, Clien
     let workspace = workspace_or_current(args.workspace.clone())?;
     let prompt = prompt_from(args.prompt.clone())?;
     let approve: basis_tasks::Approve = args.approve.into();
-    // Only a process that stays to drive the agent can put a question to
-    // anyone, so the approval mode is validated against this route rather than
-    // against the mode alone.
-    validate_approval(approve, attach && CliPromptHost.can_ask())?;
+    // `Tasks::spawn` refuses `Approve::Prompt` itself when this `Tasks` has
+    // no way to answer it — the same check this used to make here, ahead of
+    // it, against `attach` rather than against whether this `Tasks` can ever
+    // ask at all. Nothing left to duplicate.
     let spec = run_spec(&args, prompt, approve)?;
 
     let tasks = open_tasks(workspace)?;

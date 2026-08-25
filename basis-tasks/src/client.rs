@@ -165,6 +165,11 @@ impl Tasks {
                 state::MAX_PROMPT
             )));
         }
+        // Refused here, before a task directory is even minted: a task whose
+        // approval mode can never be honored by this `Tasks` — no
+        // `PromptHost`, or one that cannot currently ask — is refused as a
+        // cheaper, clearer failure than one that could never make progress.
+        crate::approve::validate_approval(approve, self.can_ask())?;
 
         let deadline_ms = duration_ms(deadline.unwrap_or(DEFAULT_DEADLINE));
         let options = RunOptions {
@@ -519,4 +524,59 @@ impl Tasks {
 
 fn duration_ms(duration: Duration) -> u64 {
     duration.as_millis().min(u128::from(u64::MAX)) as u64
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::Approve;
+
+    fn tasks() -> (tempfile::TempDir, tempfile::TempDir, Tasks) {
+        let data_dir = tempfile::tempdir().unwrap();
+        let workspace = tempfile::tempdir().unwrap();
+        let tasks = Tasks::open_at(data_dir.path(), workspace.path()).unwrap();
+        (data_dir, workspace, tasks)
+    }
+
+    /// `Approve::Prompt` names a question nobody can answer without a
+    /// `PromptHost`; a `Tasks` with none refuses it at spawn, before a task
+    /// directory even exists, rather than minting one that could never make
+    /// progress — the doc on [`crate::Approve::Prompt`] promises exactly
+    /// this.
+    #[test]
+    fn spawn_refuses_prompt_mode_with_no_prompt_host() {
+        let (_data_dir, _workspace, tasks) = tasks();
+
+        let error = tasks
+            .spawn(RunSpec::new("hello").with_approve(Approve::Prompt))
+            .expect_err("no PromptHost means Prompt can never be answered");
+        assert!(error.to_string().contains("ask"), "{error}");
+    }
+
+    /// ADR-0019: an unattended task always gets a finite service bound, even
+    /// when the caller named none — `attach::run_model` enforces deadlines
+    /// for agents nobody attached to in time, and that has nothing to bound
+    /// against without this.
+    #[test]
+    fn an_unset_deadline_records_the_default_at_spawn() {
+        let (_data_dir, _workspace, tasks) = tasks();
+
+        let handle = tasks
+            .spawn(RunSpec::new("hello").with_approve(Approve::Always))
+            .expect("spawns");
+
+        // Grey-box: `Tasks` exposes no deadline accessor — the durable
+        // record is basis-tasks's own business — so the test reads it the
+        // way `attach`'s own tests read `meta.json` directly.
+        let paths = attach::resolve(&tasks.data, handle.as_str()).expect("agent dir");
+        let meta = state::load_meta(&paths).expect("meta.json");
+        assert_eq!(
+            meta.options.deadline_ms,
+            Some(duration_ms(DEFAULT_DEADLINE))
+        );
+        assert!(
+            meta.deadline_at_ms.is_some(),
+            "an unattended task always gets a finite service bound"
+        );
+    }
 }
