@@ -1,6 +1,6 @@
 # basis — Redesign plan
 
-> rev 13 · 2026-08-22 · The transition from the P0–P4 harness to the SDK-first
+> rev 14 · 2026-08-25 · The transition from the P0–P4 harness to the SDK-first
 > shape decided in [ADR-0010](adr/0010-the-crate-is-the-workflow-surface.md)
 > through [ADR-0017](adr/0017-structured-agent-concurrency.md). This document is the
 > honest ledger of that transition: what exists, what is in between, what is not
@@ -63,6 +63,17 @@
 > document shorter is the same as rev 6: each fix is written with what it
 > cost and what it newly exposes, and the three candidates it created on the
 > way — none upstream-shaped — are named where the old ones were.
+> **Rev 14 is wave 1 — subtract.** The tree's own duplications go: the
+> in-process `Supervisor` (ADR-0017's four rules live only as the CLI's
+> durable-task contract now), the three spellings of the three bounds
+> (`Bounds`), the third spelling of a run (`RunConfig`, and with it `split()`
+> and the free `prepare`/`prepare_without_prompt`/`resume`), the four import
+> cycles manufactured by `RunError`'s address, the second JSONL shape the
+> journal kept beside the stream's, and the string re-encodings in task
+> metadata. The wire enums are sealed `#[non_exhaustive]` behind wildcards
+> that are not allowed to swallow, and mentra's memory engine is off by D2.
+> §2 carries one row per item, each with what it cost and what it newly
+> exposes; every public-API removal ships in 0.6.0.
 
 ## 1. The target in one paragraph
 
