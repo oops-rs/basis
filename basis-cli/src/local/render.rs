@@ -7,7 +7,7 @@
 //! One event renderer serves both processes that can be showing a run: the
 //! executor holding the attach lock, and a `basis watch` tailing the journal
 //! that executor writes. They differ in where an event comes from — a typed
-//! [`Event`](basis::Event) serialized on its way to `events.jsonl`, or a
+//! [`Event`] serialized on its way to `events.jsonl`, or a
 //! record read back out of it — and in nothing a person should see, so they
 //! meet at [`Live`] on the JSON shape both already have.
 

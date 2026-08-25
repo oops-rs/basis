@@ -386,7 +386,7 @@ pub(crate) fn index_block(memories: &[Memory]) -> Option<String> {
     ))
 }
 
-/// The bytes of a memory file, frontmatter serialized so [`load`] parses back
+/// The bytes of a memory file, frontmatter serialized so `load` parses back
 /// exactly what was written — a description carrying a colon survives.
 ///
 /// For hosts writing memories from their own code — a sink filing what a

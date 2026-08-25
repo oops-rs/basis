@@ -68,7 +68,7 @@ impl Bounds {
 
     /// Fills in whatever `self` leaves unset from `fallback`.
     ///
-    /// The merge [`bounded`](super::turn::bounded) resolves a turn with: an
+    /// The merge `bounded` (in `run::turn`) resolves a turn with: an
     /// explicit bound wins, a configured one fills the silence, and unset
     /// stays unset. Reading a caller's silence as "no deadline" would unbound
     /// a run whose config asked for one.

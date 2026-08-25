@@ -1,7 +1,7 @@
 //! This binary's [`basis_tasks::PromptHost`]: a terminal, or nothing.
 //!
 //! `basis-tasks` has no terminal to ask at (ADR-0011) — the same reason
-//! [`TerminalApprover`](crate::approver::TerminalApprover) lives here and not
+//! [`TerminalApprover`] lives here and not
 //! in `basis`. This is the seam that lends it one: whichever process holds a
 //! task's attach lock answers `Approve::Prompt` through its own stdin, exactly
 //! as the pre-extraction daemon-less CLI did.

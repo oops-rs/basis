@@ -230,7 +230,7 @@ pub use crate::error::RunError;
 
 /// Runs one prompt to completion, streaming events into `sink`.
 ///
-/// Consequential calls are approved by [`AllowAll`](crate::AllowAll), which is
+/// Consequential calls are approved by [`AllowAll`], which is
 /// what a headless run needs: there is nobody to ask, and a question nothing
 /// answers is a hang. It asserts nothing about the run being confined — with
 /// commands on by default (ADR-0013) an unattended run carries its user's full

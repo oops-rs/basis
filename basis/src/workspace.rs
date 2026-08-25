@@ -184,7 +184,7 @@ impl Workspace {
     /// conversation with nothing said yet is a real state — it is what ACP's
     /// `session/new` opens — so the emptiness check belongs where a prompt is
     /// actually sent, which is [`PreparedRun::execute`] and
-    /// [`PreparedRun::send`]. (The free [`prepare`](crate::run::prepare) keeps
+    /// [`PreparedRun::send`]. (The free [`run`](crate::run()) keeps
     /// its own up-front check, because a one-shot caller that passed nothing
     /// wants to hear about it before a session exists.)
     pub fn prepare(&self, spec: impl Into<RunSpec>) -> Result<PreparedRun, RunError> {

@@ -2,7 +2,7 @@
 //!
 //! [`RunError`] is the crate's universal error — opening a workspace,
 //! preparing a run, driving one — and it used to live in
-//! [`run`](crate::run), where history put it. Four of that module's in-edges
+//! [`run`](mod@crate::run), where history put it. Four of that module's in-edges
 //! (the store, the event mapping, the runtime, the budget) imported nothing
 //! from `run` *but* this type, which manufactured four of the crate's import
 //! cycles out of one name. At the root, an error is something every module
@@ -20,7 +20,7 @@ use crate::{context::ContextError, provider::ProviderError};
 ///
 /// One error type across all three, rather than a `WorkspaceError` beside it:
 /// opening a workspace exists to prepare runs, and every failure listed here is
-/// a failure a caller of [`run`] has always been able to receive.
+/// a failure a caller of [`run`](crate::run()) has always been able to receive.
 #[derive(Debug, Error)]
 #[non_exhaustive]
 pub enum RunError {
@@ -60,7 +60,7 @@ pub enum RunError {
     /// deserializes it here, so a value that does not fit `T` is a schema or
     /// prompt problem — retry with a clearer schema — while a provider failure
     /// is not. The exchange stays in the session's transcript either way; see
-    /// [`PreparedRun::output`].
+    /// [`PreparedRun::output`](crate::PreparedRun::output).
     #[error("the run's output did not match the requested type: {0}")]
     OutputMismatch(#[source] serde_json::Error),
 

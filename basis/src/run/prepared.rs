@@ -228,7 +228,8 @@ impl PreparedRun {
         self.session.id().to_string()
     }
 
-    /// The persisted agent id: the handle [`resume`](super::resume) takes.
+    /// The persisted agent id: the handle
+    /// [`resume`](crate::Workspace::resume) takes.
     ///
     /// Unlike the session id this survives the process, because it names the
     /// row in mentra's store rather than this run of it.

@@ -59,7 +59,8 @@ use crate::{
 ///
 /// A pool bounds what a run *starts*, not what it finishes. Usage is known only
 /// at a round boundary, so the round that crosses the line always completes —
-/// that is the softness [`TurnOptions::token_budget`] already documents — and
+/// that is the softness [`Bounds::token_budget`](crate::Bounds::token_budget)
+/// already documents — and
 /// with N runs in flight, N of them can be mid-round when the line is crossed.
 /// State it as: **the pool lands at up to `limit` plus one round from each run
 /// that was running when the limit was reached.** For a sequential caller that

@@ -106,7 +106,7 @@ pub enum McpServer {
 /// — mentra types SSE and Streamable HTTP headers alike as `SecretString`,
 /// which redacts itself — but their `url` is a plain `String`, and a query
 /// string is where an expanded credential sits (`?key=…`), so both remote
-/// arms print it through [`redacted_url`].
+/// arms print it through `redacted_url`.
 impl std::fmt::Debug for McpServer {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         match self {

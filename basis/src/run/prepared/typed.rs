@@ -43,13 +43,14 @@ impl PreparedRun {
     /// the approver, `RunFinished`: a client reading events cannot tell a typed
     /// turn from any other, which is the point — only the return value differs.
     /// The answer travels as the terminal tool's
-    /// [`ToolQueued`](Event::ToolQueued) input and
-    /// [`ToolCompleted`](Event::ToolCompleted) summary, and
-    /// [`RunReport::final_message`] stays `None`, because a typed turn's
+    /// [`ToolQueued`](crate::Event::ToolQueued) input and
+    /// [`ToolCompleted`](crate::Event::ToolCompleted) summary, and
+    /// [`RunReport::final_message`](crate::RunReport::final_message) stays
+    /// `None`, because a typed turn's
     /// committed final message is that tool result — putting a JSON payload in
     /// a field named for the assistant's prose would have every client render
     /// it as speech. Prose the model wrote alongside the call, usually none,
-    /// arrives as [`Event::AssistantMessage`].
+    /// arrives as [`Event::AssistantMessage`](crate::Event::AssistantMessage).
     ///
     /// Where a plain turn reports its failure on the stream and still returns
     /// `Ok`, this returns `Err`: a typed turn without a value has nothing to
@@ -66,7 +67,8 @@ impl PreparedRun {
     ///   second of those the most ways, since nothing forces its ending: it can
     ///   answer in prose, or be refused another round by a bound while it is
     ///   still gathering. Which bound that was is on the stream, as
-    ///   [`Event::RunFinished`]'s `stopped_by` — [`Bound::TokenBudget`] for an
+    ///   [`Event::RunFinished`](crate::Event::RunFinished)'s `stopped_by` —
+    ///   [`Bound::TokenBudget`](crate::Bound::TokenBudget) for an
     ///   allowance spent mid-gather — and only there, because the report that
     ///   would otherwise carry it is not handed back when there is no value to
     ///   hand back with it.
