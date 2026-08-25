@@ -15,7 +15,7 @@ use std::{
 };
 
 use mentra::{
-    BuiltinProvider, ModelSelector, ProviderId, RuntimePolicy,
+    BuiltinProvider, ModelSelector, Provider, ProviderId, RuntimePolicy,
     provider_core::{AuthScheme, responses, responses::ResponsesProvider},
 };
 
@@ -125,6 +125,12 @@ pub struct RuntimeBuilder {
     /// by-value `with_tool` takes it whole. `Send + Sync` are not restated on
     /// the box: `ToolDefinition` itself requires both.
     host_tools: Vec<Box<dyn mentra::tool::ExecutableTool>>,
+    /// A provider the host constructed itself
+    /// ([`with_provider_instance`](Self::with_provider_instance)). When set,
+    /// the provider question is answered: resolution never runs, the
+    /// environment is never read, and [`build`](Self::build) refuses the
+    /// knobs resolution would have read beside it.
+    host_provider: Option<HostProvider>,
 }
 
 /// What a caller said about where this runtime's conversations go.
@@ -142,6 +148,30 @@ pub(crate) enum History {
     Ephemeral,
 }
 
+/// A provider instance the host built, held until [`RuntimeBuilder::build`]
+/// hands it to mentra.
+///
+/// Two parts because they are needed at two times. The `id` is read out of
+/// the instance's descriptor at the `with_` call: it is what
+/// [`Runtime::provider`] reports and what models resolve under, and holding
+/// it here is what lets `Debug` and the ambiguity refusal name the instance
+/// without asking it again. The installer is `FnOnce` because mentra takes
+/// the instance by value, and boxing that move is what keeps this builder
+/// free of a generic parameter a half-configured one would have to carry.
+struct HostProvider {
+    id: ProviderId,
+    install: Box<dyn FnOnce(mentra::RuntimeBuilder) -> mentra::RuntimeBuilder + Send + Sync>,
+}
+
+/// Where the provider a runtime runs on came from: an instance the host
+/// constructed, or basis's resolution over the enum, the base URL and the
+/// environment. Settled first in `build_with`, because everything downstream
+/// — which mentra door, which id models resolve under — follows from it.
+enum ProviderSource {
+    Host(HostProvider),
+    Resolved(provider::ProviderChoice),
+}
+
 /// Hand-written so a supplied credential cannot reach a log through a
 /// `{:?}`. Everything else is printed as it is; the command environment names
 /// its variables and redacts their values.
@@ -151,6 +181,10 @@ impl std::fmt::Debug for RuntimeBuilder {
             .field("provider", &self.provider)
             .field("base_url", &self.base_url)
             .field("api_key", &self.api_key.as_ref().map(|_| "<redacted>"))
+            .field(
+                "provider_instance",
+                &self.host_provider.as_ref().map(|host| host.id.as_str()),
+            )
             .field("model", &self.model)
             .field("history", &self.history)
             .field(
@@ -199,14 +233,72 @@ impl Default for RuntimeBuilder {
             command_environment: BTreeMap::new(),
             command_targets: CommandTargets::new(),
             host_tools: Vec::new(),
+            host_provider: None,
         }
     }
 }
 
 impl RuntimeBuilder {
+    /// Names the provider basis resolves the credential and the models
+    /// against — one of the three knobs [`crate::provider`]'s resolution
+    /// reads, beside [`with_base_url`](Self::with_base_url) and
+    /// [`with_api_key`](Self::with_api_key). Like them it cannot sit beside a
+    /// [`with_provider_instance`](Self::with_provider_instance): the instance
+    /// already answers what this chooses, so [`build`](Self::build) refuses
+    /// the pair by name rather than ranking it.
     pub fn with_provider(self, provider: BuiltinProvider) -> Self {
         Self {
             provider: Some(provider),
+            ..self
+        }
+    }
+
+    /// Runs this runtime on a provider the *host* constructed, instead of one
+    /// basis resolves.
+    ///
+    /// mentra's own seam, surfaced: an implementation of
+    /// [`Provider`](crate::Provider) — a vendor SDK already living in the
+    /// host's process, a gateway spoken to in a shape basis has no preset
+    /// for, a scripted provider in a test — is registered under the id its
+    /// own descriptor reports. Every workspace on this runtime resolves
+    /// models against it and streams turns through it, and
+    /// [`Runtime::provider`] reports its id.
+    ///
+    /// **An instance is an answer, not a preference.** With one supplied,
+    /// [`crate::provider`]'s resolution never runs: no environment variable
+    /// is read, no credential is looked up, and `build` stays as offline as
+    /// ever. The knobs resolution reads therefore cannot sit beside one —
+    /// [`with_provider`](Self::with_provider),
+    /// [`with_base_url`](Self::with_base_url) and
+    /// [`with_api_key`](Self::with_api_key) are each refused at
+    /// [`build`](Self::build) with
+    /// [`ProviderError::AmbiguousProviderSource`](crate::provider::ProviderError::AmbiguousProviderSource),
+    /// whichever order they were called in — a named refusal, the same
+    /// posture as the unattributed credential, because a silent priority is a
+    /// knob that silently stopped working. A `config.json`'s `provider` and
+    /// `base_url` yield instead ([`with_config`](Self::with_config) fills
+    /// emptiness, and the question is no longer empty), and
+    /// [`with_wire`](Self::with_wire) has nothing left to say: it is read
+    /// only under a base URL, and the instance speaks whatever wire it
+    /// implements.
+    ///
+    /// A later call replaces the earlier instance — the one-value rule every
+    /// single-valued knob here follows.
+    ///
+    /// The trait is re-exported at the crate root, and everything an
+    /// implementation touches as [`crate::runtime`]'s provider-authoring
+    /// re-exports, so a host writes one against `basis` alone.
+    #[must_use]
+    pub fn with_provider_instance<P>(self, provider: P) -> Self
+    where
+        P: Provider + 'static,
+    {
+        let id = provider.descriptor().id;
+        Self {
+            host_provider: Some(HostProvider {
+                id,
+                install: Box::new(move |builder| builder.with_provider_instance(provider)),
+            }),
             ..self
         }
     }
@@ -226,6 +318,10 @@ impl RuntimeBuilder {
     /// reached by saying [`with_wire(Wire::Responses)`](Self::with_wire), and
     /// such an endpoint then uses complete local replay rather than automatic
     /// `previous_response_id` chaining.
+    ///
+    /// Beside a [`with_provider_instance`](Self::with_provider_instance) this
+    /// is refused at [`build`](Self::build): an instance reaches its endpoint
+    /// itself, so a base URL next to one has nowhere left to point.
     pub fn with_base_url(self, base_url: impl Into<String>) -> Self {
         Self {
             base_url: Some(base_url.into()),
@@ -246,6 +342,11 @@ impl RuntimeBuilder {
     /// [`with_base_url`](Self::with_base_url) is refused rather than guessed
     /// at — with nothing to attribute it to, basis would be picking a service to
     /// send someone's credential to.
+    ///
+    /// Beside a [`with_provider_instance`](Self::with_provider_instance) this
+    /// is refused at [`build`](Self::build) for the same reason: an instance
+    /// authenticates itself, so a key basis cannot hand it is a credential on
+    /// its way to being ignored.
     pub fn with_api_key(self, api_key: impl Into<String>) -> Self {
         Self {
             api_key: Some(api_key.into()),
@@ -293,15 +394,33 @@ impl RuntimeBuilder {
     /// runtime it builds, so the one-repository host gets it without asking. A
     /// host building a shared [`Runtime`] states its own process facts and
     /// calls this itself if it wants a file to speak for them.
+    ///
+    /// **A provider instance leaves the file's `provider` and `base_url`
+    /// unread.** [`with_provider_instance`](Self::with_provider_instance)
+    /// answers the question those keys answer, and this method only ever
+    /// fills emptiness — so they yield silently where an explicit builder
+    /// call is refused by name. The model policy still arrives: which model
+    /// is asked for is orthogonal to who answers.
     #[must_use]
     pub fn with_config(self, config: &crate::Config) -> Self {
+        // See the doc above: with an instance supplied the provider question
+        // is not empty, and emptiness is all a file may fill.
+        let provider_unanswered = self.host_provider.is_none();
         Self {
-            provider: self
-                .provider
-                .or_else(|| config.provider.as_ref().map(|provider| provider.value)),
-            base_url: self
-                .base_url
-                .or_else(|| config.base_url.as_ref().map(|url| url.value.clone())),
+            provider: self.provider.or_else(|| {
+                config
+                    .provider
+                    .as_ref()
+                    .filter(|_| provider_unanswered)
+                    .map(|provider| provider.value)
+            }),
+            base_url: self.base_url.or_else(|| {
+                config
+                    .base_url
+                    .as_ref()
+                    .filter(|_| provider_unanswered)
+                    .map(|url| url.value.clone())
+            }),
             model: self.model.or_else(|| config.model_selector()),
             ..self
         }
@@ -802,11 +921,33 @@ impl RuntimeBuilder {
         // each declared tool's subprocess (`crate::tools::declared`).
         let command_environment = Arc::new(self.command_environment);
 
-        let choice = provider::resolve_with(
-            self.provider,
-            self.base_url.as_deref(),
-            self.api_key.as_deref(),
-        )?;
+        // Which provider this runtime runs on, settled before assembly. A
+        // host-supplied instance is an answer rather than a preference:
+        // resolution — and with it the environment — is skipped entirely. The
+        // knobs resolution *reads* are refused beside one, by name, at the
+        // same moment an unattributed credential is: a silent priority here
+        // would be a `with_provider` that silently stopped meaning anything.
+        let source = match self.host_provider {
+            Some(host) => {
+                for (also_set, knob) in [
+                    (self.provider.is_some(), "with_provider"),
+                    (self.base_url.is_some(), "with_base_url"),
+                    (self.api_key.is_some(), "with_api_key"),
+                ] {
+                    if also_set {
+                        return Err(
+                            provider::ProviderError::AmbiguousProviderSource { knob }.into()
+                        );
+                    }
+                }
+                ProviderSource::Host(host)
+            }
+            None => ProviderSource::Resolved(provider::resolve_with(
+                self.provider,
+                self.base_url.as_deref(),
+                self.api_key.as_deref(),
+            )?),
+        };
 
         let dispatch = Arc::new(HookDispatch::new(self.interceptors));
 
@@ -906,35 +1047,42 @@ impl RuntimeBuilder {
         // runtime level, so there is nothing for the async constructor to
         // connect. Workspace-owned connections arrive post-build (ADR-0018).
         // A base URL is the only place the wire is a question: a preset carries
-        // the one its vendor speaks.
-        let mentra = match (&choice.base_url, self.wire) {
-            // mentra's own door for a compatible endpoint, keyed or not;
-            // filed under the resolved id so the model lookup finds it.
-            (Some(base_url), Wire::ChatCompletions) => builder.with_openai_compatible(
-                ProviderId::from(choice.provider),
-                base_url,
-                choice.api_key.clone(),
-            ),
-            (Some(base_url), Wire::Responses) => {
-                builder.with_registered_provider(responses_provider(
-                    choice.provider,
-                    base_url,
-                    Credential::new(choice.api_key.as_deref()),
-                ))
+        // the one its vendor speaks, and an instance *is* its wire.
+        let (mentra, provider) = match source {
+            // The host's own door: registered under the id the instance's
+            // descriptor reports, which is the id models resolve under.
+            ProviderSource::Host(host) => ((host.install)(builder).build()?, host.id),
+            ProviderSource::Resolved(choice) => {
+                let assembled = match (&choice.base_url, self.wire) {
+                    // mentra's own door for a compatible endpoint, keyed or
+                    // not; filed under the resolved id so the model lookup
+                    // finds it.
+                    (Some(base_url), Wire::ChatCompletions) => builder.with_openai_compatible(
+                        ProviderId::from(choice.provider),
+                        base_url,
+                        choice.api_key.clone(),
+                    ),
+                    (Some(base_url), Wire::Responses) => {
+                        builder.with_registered_provider(responses_provider(
+                            choice.provider,
+                            base_url,
+                            Credential::new(choice.api_key.as_deref()),
+                        ))
+                    }
+                    // A preset takes a `String`; resolution hands one back for
+                    // every keyed preset, and the two local ones ignore what
+                    // they are given.
+                    (None, _) => builder
+                        .with_provider(choice.provider, choice.api_key.clone().unwrap_or_default()),
+                };
+                (assembled.build()?, ProviderId::from(choice.provider))
             }
-            // A preset takes a `String`; resolution hands one back for every
-            // keyed preset, and the two local ones ignore what they are given.
-            (None, _) => {
-                builder.with_provider(choice.provider, choice.api_key.clone().unwrap_or_default())
-            }
-        }
-        .build()?;
+        };
 
         Ok(Runtime {
             mentra,
             command_environment,
-            provider: choice.provider,
-            provider_label: ProviderId::from(choice.provider).to_string(),
+            provider,
             // Unsaid is the newest the provider offers, which is what this
             // builder has always resolved for a caller that named no model.
             model: self.model.unwrap_or(ModelSelector::NewestAvailable),
