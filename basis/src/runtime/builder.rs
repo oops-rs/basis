@@ -8,24 +8,20 @@
 //! the same time everything else on a mentra runtime is. What stays on the
 //! workspace is what the repository says.
 
+mod provider_settlement;
+
 use std::{
     collections::{BTreeMap, HashMap},
     path::{Path, PathBuf},
     sync::{Arc, Mutex},
 };
 
-use mentra::{
-    BuiltinProvider, ModelSelector, Provider, ProviderId, RuntimePolicy,
-    provider_core::{AuthScheme, responses, responses::ResponsesProvider},
-};
-
-use super::credential::Credential;
+use mentra::{BuiltinProvider, ModelSelector, Provider, RuntimePolicy};
 
 use crate::{
     approval::ApprovalGate,
     error::RunError,
     hooks::Interceptor,
-    provider,
     shell::ShellAccess,
     store,
     tools::{
@@ -33,6 +29,8 @@ use crate::{
         spawn::{LOCAL_TARGET, is_target_name},
     },
 };
+
+use provider_settlement::HostProvider;
 
 use super::{
     FileToolProfile, ProviderRetry, ResponsesTransport, Runtime, RuntimeExecutor, Wire,
@@ -152,30 +150,6 @@ pub(crate) enum History {
     /// [`RuntimeBuilder::with_ephemeral_history`]: kept in memory, and
     /// nowhere else.
     Ephemeral,
-}
-
-/// A provider instance the host built, held until [`RuntimeBuilder::build`]
-/// hands it to mentra.
-///
-/// Two parts because they are needed at two times. The `id` is read out of
-/// the instance's descriptor at the `with_` call: it is what
-/// [`Runtime::provider`] reports and what models resolve under, and holding
-/// it here is what lets `Debug` and the ambiguity refusal name the instance
-/// without asking it again. The installer is `FnOnce` because mentra takes
-/// the instance by value, and boxing that move is what keeps this builder
-/// free of a generic parameter a half-configured one would have to carry.
-struct HostProvider {
-    id: ProviderId,
-    install: Box<dyn FnOnce(mentra::RuntimeBuilder) -> mentra::RuntimeBuilder + Send + Sync>,
-}
-
-/// Where the provider a runtime runs on came from: an instance the host
-/// constructed, or basis's resolution over the enum, the base URL and the
-/// environment. Settled first in `build_with`, because everything downstream
-/// — which mentra door, which id models resolve under — follows from it.
-enum ProviderSource {
-    Host(HostProvider),
-    Resolved(provider::ProviderChoice),
 }
 
 /// Hand-written so a supplied credential cannot reach a log through a
@@ -973,33 +947,14 @@ impl RuntimeBuilder {
         // D5d) — see the loop beside `Ok(Runtime { .. })` below for why.
         let host_tools = self.host_tools;
 
-        // Which provider this runtime runs on, settled before assembly. A
-        // host-supplied instance is an answer rather than a preference:
-        // resolution — and with it the environment — is skipped entirely. The
-        // knobs resolution *reads* are refused beside one, by name, at the
-        // same moment an unattributed credential is: a silent priority here
-        // would be a `with_provider` that silently stopped meaning anything.
-        let source = match self.host_provider {
-            Some(host) => {
-                for (also_set, knob) in [
-                    (self.provider.is_some(), "with_provider"),
-                    (self.base_url.is_some(), "with_base_url"),
-                    (self.api_key.is_some(), "with_api_key"),
-                ] {
-                    if also_set {
-                        return Err(
-                            provider::ProviderError::AmbiguousProviderSource { knob }.into()
-                        );
-                    }
-                }
-                ProviderSource::Host(host)
-            }
-            None => ProviderSource::Resolved(provider::resolve_with(
-                self.provider,
-                self.base_url.as_deref(),
-                self.api_key.as_deref(),
-            )?),
-        };
+        // Which provider this runtime runs on, settled before assembly —
+        // `provider_settlement::settle`'s own docs have the ambiguity rule.
+        let source = provider_settlement::settle(
+            self.host_provider,
+            self.provider,
+            self.base_url,
+            self.api_key,
+        )?;
 
         let dispatch = Arc::new(HookDispatch::new(self.interceptors));
 
@@ -1089,41 +1044,10 @@ impl RuntimeBuilder {
             None => store::default_transcripts(),
         };
 
-        // `build`, not `build_async`: no MCP server is ever registered at the
-        // runtime level, so there is nothing for the async constructor to
-        // connect. Workspace-owned connections arrive post-build (ADR-0018).
-        // A base URL is the only place the wire is a question: a preset carries
-        // the one its vendor speaks, and an instance *is* its wire.
-        let (mentra, provider) = match source {
-            // The host's own door: registered under the id the instance's
-            // descriptor reports, which is the id models resolve under.
-            ProviderSource::Host(host) => ((host.install)(builder).build()?, host.id),
-            ProviderSource::Resolved(choice) => {
-                let assembled = match (&choice.base_url, self.wire) {
-                    // mentra's own door for a compatible endpoint, keyed or
-                    // not; filed under the resolved id so the model lookup
-                    // finds it.
-                    (Some(base_url), Wire::ChatCompletions) => builder.with_openai_compatible(
-                        ProviderId::from(choice.provider),
-                        base_url,
-                        choice.api_key.clone(),
-                    ),
-                    (Some(base_url), Wire::Responses) => {
-                        builder.with_registered_provider(responses_provider(
-                            choice.provider,
-                            base_url,
-                            Credential::new(choice.api_key.as_deref()),
-                        ))
-                    }
-                    // A preset takes a `String`; resolution hands one back for
-                    // every keyed preset, and the two local ones ignore what
-                    // they are given.
-                    (None, _) => builder
-                        .with_provider(choice.provider, choice.api_key.clone().unwrap_or_default()),
-                };
-                (assembled.build()?, ProviderId::from(choice.provider))
-            }
-        };
+        // A base URL is the only place the wire is a question: a preset
+        // carries the one its vendor speaks, and an instance *is* its wire —
+        // `provider_settlement::assemble`'s own docs have the rest.
+        let (mentra, provider) = provider_settlement::assemble(source, builder, self.wire)?;
 
         // Claimed one at a time, now that the runtime exists and already
         // carries every registration basis makes unconditionally — `spawn`,
@@ -1288,39 +1212,6 @@ fn git_protected(policy: RuntimePolicy, workspace: &Path) -> RuntimePolicy {
     policy
         .with_denied_write_root(git.join("hooks"))
         .with_denied_write_root(git.join("config"))
-}
-
-/// Builds a provider aimed at a base URL that serves OpenAI's own Responses
-/// wire — [`RuntimeBuilder::with_wire`]'s other answer.
-///
-/// mentra's OpenAI preset is the right shape — the Responses wire format and
-/// bearer auth — so basis takes that definition, swaps the base URL, and disables
-/// automatic Hybrid HTTP state chaining. Building on the preset avoids
-/// describing a provider from scratch and drifting from whatever mentra learns
-/// next.
-///
-/// The preset's own id is `openai`, which is right only when nothing named
-/// another: it is filed under the resolved id for [`chat_completions_provider`]'s
-/// reason, so that `--provider … --base-url …` finds its model rather than
-/// failing at the first turn under a name nobody registered.
-fn responses_provider(
-    provider: BuiltinProvider,
-    base_url: &str,
-    credential: Credential,
-) -> ResponsesProvider<Credential> {
-    let mut definition = responses::openai_definition();
-    definition.base_url = Some(base_url.to_string());
-    definition.descriptor.id = ProviderId::from(provider);
-    definition.descriptor.display_name = Some(format!("OpenAI-compatible ({base_url})"));
-    if !credential.is_some() {
-        definition.auth_scheme = AuthScheme::None;
-    }
-
-    // A compatible endpoint promises the Responses wire shape, not every
-    // optional OpenAI extension. basis already replays the complete local
-    // transcript, so do not probe `previous_response_id` support with a
-    // request that may fail; native provider presets retain Hybrid chaining.
-    ResponsesProvider::new(definition, credential).without_hybrid_http_previous_response_id()
 }
 
 #[cfg(test)]
