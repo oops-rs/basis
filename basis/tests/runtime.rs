@@ -30,7 +30,7 @@ use std::{
 };
 
 use basis::{
-    CollectingSink, ContextConfig, RunOutcome, Runtime, Workspace, WorkspaceBuilder,
+    CollectingSink, ContextConfig, MemoryConfig, RunOutcome, Runtime, Workspace, WorkspaceBuilder,
     hooks::HooksConfig, skills::SkillsConfig, store, templates::TemplatesConfig,
     tools::declared::ToolsConfig,
 };
@@ -67,6 +67,10 @@ fn pinned(workspace: &Path, runtime: Arc<Runtime>) -> WorkspaceBuilder {
             workspace_file: PathBuf::from(".basis/tools.json"),
             global_dir: None,
         })
+        // A malformed file in the developer's own ~/.config/basis/memory must
+        // never be able to fail this suite (G1); this test is not about
+        // memory at all.
+        .with_memory(MemoryConfig::disabled())
 }
 
 fn shared_runtime(endpoint: &ScriptedEndpoint) -> Arc<Runtime> {

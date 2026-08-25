@@ -21,8 +21,8 @@ use std::{
 };
 
 use basis::{
-    CollectingSink, Config, ContextConfig, Effort, Runtime, Workspace, WorkspaceBuilder,
-    hooks::HooksConfig, skills::SkillsConfig, templates::TemplatesConfig,
+    CollectingSink, Config, ContextConfig, Effort, MemoryConfig, Runtime, Workspace,
+    WorkspaceBuilder, hooks::HooksConfig, skills::SkillsConfig, templates::TemplatesConfig,
     tools::declared::ToolsConfig,
 };
 use mentra::ModelSelector;
@@ -56,6 +56,10 @@ fn pinned(workspace: &Path) -> WorkspaceBuilder {
             workspace_file: PathBuf::from(".basis/tools.json"),
             global_dir: None,
         })
+        // A malformed file in the developer's own ~/.config/basis/memory must
+        // never be able to fail this suite (G1); this test is not about
+        // memory at all.
+        .with_memory(MemoryConfig::disabled())
 }
 
 /// A runtime that resolves its provider locally and reaches a closed port if

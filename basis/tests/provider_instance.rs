@@ -15,8 +15,8 @@ use std::sync::{
 };
 
 use basis::{
-    CollectingSink, ContextConfig, ModelSelector, Provider, RunOutcome, Runtime, Workspace,
-    WorkspaceBuilder, async_trait,
+    CollectingSink, ContextConfig, MemoryConfig, ModelSelector, Provider, RunOutcome, Runtime,
+    Workspace, WorkspaceBuilder, async_trait,
     hooks::HooksConfig,
     runtime::{
         ContentBlock, ModelInfo, ProviderCapabilities, ProviderDescriptor, ProviderError,
@@ -97,6 +97,10 @@ fn pinned(workspace: &Path, runtime: Arc<Runtime>) -> WorkspaceBuilder {
             workspace_file: PathBuf::from(".basis/tools.json"),
             global_dir: None,
         })
+        // A malformed file in the developer's own ~/.config/basis/memory must
+        // never be able to fail this suite (G1); this test is not about
+        // memory at all.
+        .with_memory(MemoryConfig::disabled())
 }
 
 #[tokio::test]

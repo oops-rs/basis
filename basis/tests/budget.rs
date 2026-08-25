@@ -32,8 +32,8 @@ use std::{
 };
 
 use basis::{
-    BudgetPool, CollectingSink, ContextConfig, RunError, RunOutcome, RunSpec, Runtime, TurnOptions,
-    Workspace, WorkspaceBuilder, hooks::HooksConfig, skills::SkillsConfig,
+    BudgetPool, CollectingSink, ContextConfig, MemoryConfig, RunError, RunOutcome, RunSpec,
+    Runtime, TurnOptions, Workspace, WorkspaceBuilder, hooks::HooksConfig, skills::SkillsConfig,
     templates::TemplatesConfig,
 };
 use mentra::ModelSelector;
@@ -76,6 +76,10 @@ fn offline(workspace: &Path, endpoint: &ScriptedEndpoint) -> WorkspaceBuilder {
             workspace_file: PathBuf::from(".basis/hooks.json"),
             global_dir: None,
         })
+        // A malformed file in the developer's own ~/.config/basis/memory must
+        // never be able to fail this suite (G1); this test is not about
+        // memory at all.
+        .with_memory(MemoryConfig::disabled())
 }
 
 async fn workspace_on(endpoint: &ScriptedEndpoint) -> Workspace {
