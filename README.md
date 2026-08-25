@@ -120,6 +120,13 @@ basis `e22aa63`, inside the **tally** too: the subagent runs on the parent's acc
 the child's usage is relayed onto the parent's stream, and `RunReport::usage` agrees with the
 figure the bound stops on. [docs/REDESIGN.md](docs/REDESIGN.md) records the gap as closed.
 
+Who that subagent *is* is a host decision since 0.7: `RuntimeBuilder::with_child_policy` maps
+each delegation (its prompt, the parent, the workspace) to a `ChildSpec` overriding the child's
+roster, model, or system prompt — cheap read-only triage beside a full-strength fixer is the
+shape it exists for (`examples/child_policy.rs`). Unset, every child stays an exact clone of its
+parent as it always has, and the approver's preview gains a `child` key only when a policy
+actually overrode something, so existing remembered rules keep matching.
+
 ### One stream for many runs
 
 Each run wants a sink of its own; a host wants one view of all of them without losing which run said
@@ -334,7 +341,9 @@ every handle obeys across processes (in process, concurrency is the host's tokio
 conversation needs basis 0.6, and a store directory still holding one is refused by name —
 with the ways forward in the message — rather than quietly shadowed by an empty file store.
 New work proceeds by pointing `BASIS_DATA_DIR` (or `with_store_dir`) somewhere fresh, or by
-moving the old store directory aside.
+moving the old store directory aside. One new knob: `RuntimeBuilder::with_child_policy` decides
+per delegation who the spawned child is (roster, model, system prompt); unset is the exact
+clone-of-the-parent every earlier basis spawned.
 
 0.6 change note, for an upgrade from 0.4.x: the API got smaller and the knobs got real. `RunConfig`
 is gone — open a `Workspace` and mint a `RunSpec` (`basis::run(path, prompt)` covers the one-shot);
