@@ -17,8 +17,9 @@ use std::{path::PathBuf, sync::Arc};
 use super::workspaces::ConfiguredSource;
 use crate::mode::ApprovalMode;
 use basis::{
-    BuiltinProvider, Effort, McpServer, ModelSelector, PersistedSession, PreparedRun, RunError,
-    ShellAccess, SystemPrompt,
+    BuiltinProvider, ContextConfig, Effort, McpServer, ModelSelector, PersistedSession,
+    PreparedRun, RunError, ShellAccess, SystemPrompt, ToolsConfig, hooks::HooksConfig,
+    mcp::McpConfig, skills::SkillsConfig, templates::TemplatesConfig,
 };
 
 /// Where an ACP session's [`PreparedRun`] comes from.
@@ -108,6 +109,31 @@ pub trait SessionSource: Send + Sync + 'static {
     }
 }
 
+/// Where every session's workspace discovery looks.
+///
+/// The defaults are basis's own — workspace files plus the user-global roots
+/// — and this is the operator's knob to say otherwise: a server that must not
+/// honor the developer's global `mcp.json` pins `McpConfig { global_dir:
+/// None, .. }` here, and an offline test pins every root the same way. It
+/// lives on the template because discovery is part of what the operator
+/// promised every session, not something a client can renegotiate per
+/// `session/new`.
+#[derive(Debug, Clone, Default)]
+pub struct Discovery {
+    /// Where context files (`AGENTS.md`) are discovered.
+    pub context: ContextConfig,
+    /// Where skills are discovered.
+    pub skills: SkillsConfig,
+    /// Where prompt templates are discovered.
+    pub templates: TemplatesConfig,
+    /// Where subprocess hooks are discovered.
+    pub hooks: HooksConfig,
+    /// Where declared subprocess tools are discovered.
+    pub tools: ToolsConfig,
+    /// Where MCP servers are discovered, before the client's own land on top.
+    pub mcp: McpConfig,
+}
+
 /// What the operator said and a client cannot say for itself: which provider
 /// and endpoint, which model, whether commands are granted, the product's own
 /// voice, how hard to think, and what to call the sessions.
@@ -125,6 +151,7 @@ pub struct SessionTemplate {
     pub(super) system_prompt: Option<SystemPrompt>,
     pub(super) effort: Option<Effort>,
     pub(super) session_name: Option<String>,
+    pub(super) discovery: Discovery,
 }
 
 impl SessionTemplate {
@@ -181,6 +208,11 @@ impl SessionTemplate {
             session_name: Some(session_name.into()),
             ..self
         }
+    }
+
+    /// Points every session's discovery somewhere else — see [`Discovery`].
+    pub fn with_discovery(self, discovery: Discovery) -> Self {
+        Self { discovery, ..self }
     }
 }
 

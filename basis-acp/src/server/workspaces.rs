@@ -58,11 +58,6 @@ pub(super) struct ConfiguredSource {
     /// whether commands are granted, the product's voice. No workspace lives
     /// here — every session brings its own `cwd`.
     template: SessionTemplate,
-    /// Test-only: pins every discovery root, so an offline test never reads
-    /// the developer's own configuration — or, for MCP, spawns the servers
-    /// their `mcp.json` names.
-    #[cfg(test)]
-    discovery: Option<PinnedDiscovery>,
     /// One per process, however many sessions and workspaces it carries.
     runtime: OnceCell<Arc<Runtime>>,
     /// One per [`WorkspaceKey`], each behind its own cell.
@@ -79,8 +74,6 @@ impl ConfiguredSource {
     pub(super) fn new(template: Option<SessionTemplate>) -> Self {
         Self {
             template: template.unwrap_or_default(),
-            #[cfg(test)]
-            discovery: None,
             runtime: OnceCell::new(),
             workspaces: Mutex::new(HashMap::new()),
         }
@@ -127,7 +120,15 @@ impl ConfiguredSource {
         if let Some(system_prompt) = &template.system_prompt {
             builder = builder.with_system_prompt(system_prompt.clone());
         }
-        let builder = self.pinned(builder);
+        // Discovery is the template's promise (`SessionTemplate::with_discovery`)
+        // — the operator's to point, defaulting to basis's own roots.
+        let discovery = &template.discovery;
+        let builder = builder
+            .with_context(discovery.context.clone())
+            .with_skills(discovery.skills.clone())
+            .with_templates(discovery.templates.clone())
+            .with_hooks(discovery.hooks.clone())
+            .with_tools(discovery.tools.clone());
 
         // The client's servers outrank the workspace's own: it is answering
         // for this session in particular. Discovery still runs, so a
@@ -145,53 +146,11 @@ impl ConfiguredSource {
         (builder, spec)
     }
 
-    /// Applies the test-only discovery pins; the production build has none.
-    #[cfg(test)]
-    fn pinned(&self, builder: WorkspaceBuilder) -> WorkspaceBuilder {
-        match &self.discovery {
-            Some(pins) => builder
-                .with_context(pins.context.clone())
-                .with_skills(pins.skills.clone())
-                .with_templates(pins.templates.clone())
-                .with_hooks(pins.hooks.clone())
-                .with_tools(pins.tools.clone()),
-            None => builder,
-        }
-    }
-
-    #[cfg(not(test))]
-    fn pinned(&self, builder: WorkspaceBuilder) -> WorkspaceBuilder {
-        builder
-    }
-
-    /// One session.s MCP config: where discovery starts, with the client.s
-    /// servers landing on top — they outrank the workspace.s own, because the
+    /// One session's MCP config: where discovery starts, with the client's
+    /// servers landing on top — they outrank the workspace's own, because the
     /// client is answering for this session in particular.
     pub(super) fn session_mcp(&self, mcp: Vec<McpServer>) -> McpConfig {
-        self.mcp_base().with_supplied(mcp)
-    }
-
-    /// Where MCP discovery starts before the client.s servers land on top.
-    #[cfg(test)]
-    fn mcp_base(&self) -> McpConfig {
-        match &self.discovery {
-            Some(pins) => pins.mcp.clone(),
-            None => McpConfig::default(),
-        }
-    }
-
-    #[cfg(not(test))]
-    fn mcp_base(&self) -> McpConfig {
-        McpConfig::default()
-    }
-
-    /// Pins every discovery root for an offline test.
-    #[cfg(test)]
-    pub(super) fn with_discovery(self, discovery: PinnedDiscovery) -> Self {
-        Self {
-            discovery: Some(discovery),
-            ..self
-        }
+        self.template.discovery.mcp.clone().with_supplied(mcp)
     }
 
     /// The workspace this session is minted from, and the per-run half that
@@ -378,22 +337,6 @@ impl WorkspaceKey {
             supplied: digest(supplied),
         }
     }
-}
-
-/// Every discovery root, pinned — a test-only shape.
-///
-/// The operator template deliberately says nothing about discovery: no use
-/// case has asked for it, and `basis serve --acp` offers no flag. Offline
-/// tests still must pin every root, or opening a workspace would read the
-/// developer's own configuration and spawn whatever their `mcp.json` names.
-#[cfg(test)]
-pub(super) struct PinnedDiscovery {
-    pub(super) context: basis::ContextConfig,
-    pub(super) skills: basis::SkillsConfig,
-    pub(super) templates: basis::TemplatesConfig,
-    pub(super) hooks: basis::HooksConfig,
-    pub(super) tools: basis::ToolsConfig,
-    pub(super) mcp: McpConfig,
 }
 
 /// A digest of the servers a client supplied, values included.

@@ -63,7 +63,7 @@ pub use commands::available_commands;
 pub use mcp::from_acp;
 pub use mode::{ApprovalMode, ModeError, ModedApprover, SessionModes};
 pub use options::{Change, ConfigError};
-pub use server::{ServeConfig, SessionSource, SessionTemplate, serve};
+pub use server::{Discovery, ServeConfig, SessionSource, SessionTemplate, serve};
 pub use session::{AcpSession, SessionRegistry};
 pub use stdio::{StdioError, serve_stdio};
 pub use update::session_update;
