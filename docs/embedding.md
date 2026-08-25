@@ -596,6 +596,39 @@ own layout, so relocating the store relocates them. An ephemeral runtime files t
 the OS temp directory instead — mentra writes a snapshot before it summarizes without
 asking the store, so *nowhere* is not available for that one file.
 
+## Durable, resumable tasks (`basis-tasks`)
+
+Everything above is one run: a `Workspace`, a `RunSpec`, a turn that ends when the model
+stops. `basis-tasks` is a sibling crate, over `basis` alone, for the other shape — a task
+that outlives the process that started it, resumable from a durable handle, driven by
+whichever process next attaches ([ADR-0017](adr/0017-structured-agent-concurrency.md),
+[ADR-0019](adr/0019-the-filesystem-is-the-coordination-surface.md),
+[ADR-0022](adr/0022-the-task-layer-is-a-crate.md)). It is what the `basis` binary's
+`spawn`/`send`/`ask`/`wait`/`cancel`/`watch`/`list` verbs are built on, reachable from Rust
+directly:
+
+```toml
+[dependencies]
+basis-tasks = "0.1"   # unpublished so far — a git or path dependency until it isn't
+```
+
+```rust
+let tasks = basis_tasks::Tasks::open(&workspace)?;
+let handle = tasks.spawn(basis_tasks::RunSpec::new(prompt))?;
+let reply = tasks.ask(&handle, None, "and now?", std::time::Duration::from_secs(60)).await?;
+for task in tasks.list()? { /* … */ }
+```
+
+`Tasks::open` resolves the same data directory the CLI does (`BASIS_DATA_DIR`, else an
+absolute `XDG_DATA_HOME`, else the platform data home); `Tasks::open_at` takes an explicit
+root instead, for a host — or a test — that wants no dependency on the process environment.
+Every cap ADR-0017 set is unchanged here: 16 messages per inbox, 4 KiB bounded summaries, a
+finite default deadline on every unattended task, downward-only cancellation, and the
+wait-edge policy admitting a descendant or an independent root and refusing an ancestor or a
+peer. `Approve::Prompt` needs a `PromptHost` supplied — a library has no terminal to ask at
+any more than `basis` itself does — and showing a task's progress live is a `LiveSink` a
+caller plugs in per call rather than something the crate decides for you.
+
 ## Compaction
 
 Two unrelated things shorten a history, and only one of them is the one you would guess.
