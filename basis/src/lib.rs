@@ -123,9 +123,11 @@ pub use mcp::{
     DEFAULT_GLOBAL_MCP_FILE, DEFAULT_WORKSPACE_MCP_FILE, McpConfig, McpError, McpServer, McpSource,
 };
 pub use run::{
-    Bound, Bounds, CancellationToken, CollectingSink, Compacted, Effort, EventFanIn, EventSink,
-    FnSink, MergedEvents, NullSink, OutputReport, OutputSpec, PreparedRun, PromptPart, RunContext,
-    RunReport, RunUsage, TaggedEvent, TaggedSink, TurnOptions, run, run_with_approver,
+    Bound, Bounds, CancellationToken, CollectingSink, Compacted, ContentBlock, Effort, EventFanIn,
+    EventSink, FnSink, MergedEvents, ModelInfo, NullSink, OutputReport, OutputSpec, PreparedRun,
+    PromptPart, ReasoningChange, ReasoningOptions, RoundAdjustment, RoundBoundary, RoundContext,
+    RoundDecision, RoundStrategy, RoundToolResult, RunContext, RunReport, RunUsage, TaggedEvent,
+    TaggedSink, TurnOptions, run, run_with_approver,
 };
 pub use runtime::{Runtime, RuntimeBuilder};
 pub use shell::ShellAccess;

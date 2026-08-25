@@ -73,6 +73,33 @@ pub use usage::RunUsage;
 /// gracefully.
 pub use mentra::runtime::CancellationToken;
 
+/// The per-turn steering seam, whole: the trait a host implements and every
+/// type its signatures make that host *name*.
+///
+/// Re-exported rather than wrapped, under the rule stated on
+/// [`CancellationToken`] — a mentra type basis's surface asks a caller to
+/// write is a name basis re-exports, or the caller pins mentra in their own
+/// manifest to spell it. And like the token, a strategy is an *identity*
+/// rather than a value: [`TurnOptions::with_round_strategy`] hands mentra the
+/// caller's own `Arc`, so a basis-owned mirror of [`RoundDecision`] would be a
+/// translation layer with opinions of its own — the opposite of a seam.
+///
+/// The set is exactly what implementing costs. [`RoundStrategy`] is the trait
+/// (spelled with [`async_trait`](crate::async_trait), which basis already
+/// re-exports); [`RoundContext`] and [`RoundBoundary`] are its question;
+/// [`RoundDecision`], [`RoundAdjustment`], [`ReasoningChange`] and
+/// [`RoundToolResult`] are its vocabulary for answering. The last three are
+/// here because the vocabulary's own signatures demand them:
+/// [`RoundDecision::inject`] takes [`ContentBlock`]s,
+/// [`RoundAdjustment::with_model`] a [`ModelInfo`], and
+/// [`ReasoningChange::Set`] a [`ReasoningOptions`] — whose `effort` field an
+/// [`Effort`] converts into, so switching effort mid-run never names mentra's
+/// own level enum.
+pub use mentra::{
+    ContentBlock, ModelInfo, ReasoningChange, ReasoningOptions, RoundAdjustment, RoundBoundary,
+    RoundContext, RoundDecision, RoundStrategy, RoundToolResult,
+};
+
 /// How hard the model should think before answering.
 ///
 /// basis's own enum rather than a re-export, for the reason [`Event`](crate::Event) and
