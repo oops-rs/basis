@@ -56,8 +56,8 @@ pub struct ToolRoster(ToolProfile);
 
 impl Default for ToolRoster {
     /// What every workspace has offered before this type existed: `spawn`'s
-    /// two replaced doors ([`REPLACED_TOOLS`]) and the intrinsics basis has
-    /// never deliberately surfaced ([`UNSURFACED_TOOLS`]), hidden; everything
+    /// two replaced doors (`REPLACED_TOOLS`) and the intrinsics basis has
+    /// never deliberately surfaced (`UNSURFACED_TOOLS`), hidden; everything
     /// else mentra's runtime registers — the file tools, `load_skill`,
     /// `compact`, and whatever a host's own tools or an MCP server add —
     /// offered.
