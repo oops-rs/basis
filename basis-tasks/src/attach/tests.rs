@@ -189,6 +189,32 @@ async fn a_late_cancel_replaces_a_pending_completion() {
 }
 
 #[tokio::test]
+async fn a_duration_too_large_to_be_a_deadline_waits_rather_than_panics() {
+    let (_dir, data) = data();
+    let task = handle(1);
+    record(
+        &data,
+        &task,
+        None,
+        true,
+        Some(PendingTerminal::Succeeded {
+            result: "done".to_string(),
+        }),
+    );
+    // `Instant::now() + Duration::MAX` panics; the deadline has to saturate
+    // instead, and a task that already has a terminal record must still
+    // return it immediately — proof the saturated deadline never blocks a
+    // wait that had no need to.
+    let outcome = wait_for_terminal(&data, &task, Duration::MAX, &DriveContext::default())
+        .await
+        .expect("does not panic");
+    assert_eq!(
+        outcome,
+        WaitOutcome::Terminal(json!({"state": "succeeded", "result": "done"}))
+    );
+}
+
+#[tokio::test]
 async fn terminal_failure_resolves_unanswered_messages() {
     let (_dir, data) = data();
     let task = handle(1);

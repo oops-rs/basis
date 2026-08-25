@@ -72,6 +72,11 @@ pub enum WaitOutcome {
 /// one executing, and its say over `Approve::Prompt`. Nothing is shown for a
 /// record that was merely read off disk: there is nothing live about a run
 /// that finished before this process asked.
+///
+/// `timeout` is saturated into a deadline (`Instant::now() + Duration::MAX`
+/// panics): a duration too large to represent as a deadline is waited
+/// forever rather than refused, which is what asking for one that large
+/// means.
 pub(crate) async fn wait_for_terminal(
     data: &DataDir,
     task: &str,
@@ -79,7 +84,7 @@ pub(crate) async fn wait_for_terminal(
     ctx: &DriveContext,
 ) -> Result<WaitOutcome, String> {
     let paths = resolve(data, task)?;
-    let deadline = Instant::now() + timeout;
+    let deadline = Instant::now().checked_add(timeout);
     loop {
         if let Some(terminal) = read_terminal(&paths)? {
             return Ok(WaitOutcome::Terminal(terminal));
@@ -87,7 +92,7 @@ pub(crate) async fn wait_for_terminal(
         if let Some(guard) = try_attach(&paths)? {
             return Ok(WaitOutcome::Terminal(drive(data, task, guard, ctx).await?));
         }
-        if Instant::now() >= deadline {
+        if deadline.is_some_and(|deadline| Instant::now() >= deadline) {
             return Ok(WaitOutcome::TimedOut {
                 attached: lock::is_held(&paths.attach_lock()),
             });
@@ -106,6 +111,10 @@ pub(crate) async fn wait_for_terminal(
 /// asked, on the stream the answer is supposed to arrive on. `Approve::Prompt`
 /// still answers through `prompt_host`, because approval and visibility are
 /// independent facts.
+///
+/// `timeout` is saturated into a deadline, as [`wait_for_terminal`]'s is: a
+/// duration too large to represent as a deadline waits forever rather than
+/// panicking or refusing.
 pub(crate) async fn wait_for_message(
     data: &DataDir,
     task: &str,
@@ -114,7 +123,7 @@ pub(crate) async fn wait_for_message(
     prompt_host: Option<Arc<dyn crate::approve::PromptHost>>,
 ) -> Result<WaitOutcome, String> {
     let paths = resolve(data, task)?;
-    let deadline = Instant::now() + timeout;
+    let deadline = Instant::now().checked_add(timeout);
     let ctx = DriveContext::new(None, prompt_host);
     loop {
         let messages = inbox::load(&paths)?;
@@ -130,7 +139,7 @@ pub(crate) async fn wait_for_message(
             drive(data, task, guard, &ctx).await?;
             continue;
         }
-        if Instant::now() >= deadline {
+        if deadline.is_some_and(|deadline| Instant::now() >= deadline) {
             return Ok(WaitOutcome::TimedOut {
                 attached: lock::is_held(&paths.attach_lock()),
             });
