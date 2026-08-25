@@ -24,7 +24,7 @@ use std::{
 };
 
 use basis::{
-    ContextConfig, RunError, Runtime, RuntimeBuilder, Workspace,
+    ContextConfig, MemoryConfig, RunError, Runtime, RuntimeBuilder, Workspace,
     hooks::HooksConfig,
     skills::SkillsConfig,
     templates::TemplatesConfig,
@@ -149,6 +149,10 @@ fn offline(workspace: &Path) -> basis::WorkspaceBuilder {
             workspace_file: PathBuf::from(".basis/tools.json"),
             global_dir: None,
         })
+        // A malformed file in the developer's own ~/.config/basis/memory must
+        // never be able to fail this suite (G1); this test is not about
+        // memory at all.
+        .with_memory(MemoryConfig::disabled())
 }
 
 /// A runtime whose one scripted turn calls `jenkins_job` with `input`.

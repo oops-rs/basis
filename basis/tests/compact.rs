@@ -21,8 +21,9 @@ use std::{
 };
 
 use basis::{
-    CollectingSink, ContextConfig, Event, Runtime, Workspace, WorkspaceBuilder, hooks::HooksConfig,
-    skills::SkillsConfig, store, templates::TemplatesConfig, tools::declared::ToolsConfig,
+    CollectingSink, ContextConfig, Event, MemoryConfig, Runtime, Workspace, WorkspaceBuilder,
+    hooks::HooksConfig, skills::SkillsConfig, store, templates::TemplatesConfig,
+    tools::declared::ToolsConfig,
 };
 use mentra::{BuiltinProvider, ModelSelector};
 
@@ -263,6 +264,10 @@ fn offline(workspace: &Path) -> WorkspaceBuilder {
             workspace_file: PathBuf::from(".basis/tools.json"),
             global_dir: None,
         })
+        // A malformed file in the developer's own ~/.config/basis/memory must
+        // never be able to fail this suite (G1); this test is not about
+        // memory at all.
+        .with_memory(MemoryConfig::disabled())
 }
 
 /// A runtime whose history — and whose compaction snapshots — go where the

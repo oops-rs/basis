@@ -10,6 +10,8 @@ use std::io::{Read, Write};
 use std::net::{TcpListener, TcpStream};
 use std::thread;
 
+use mentra::provider_core::AuthScheme;
+
 use super::*;
 // Spelled the way a downstream that depends only on `basis` has to spell it,
 // which is what makes the stubs below a real check on the re-exports.
@@ -17,6 +19,10 @@ use crate::runtime::{
     CommandOutput, CommandRequest, CommandSpec, LocalRuntimeExecutor, RuntimeExecutor,
 };
 use crate::tools::SPAWN;
+use crate::{provider, runtime::credential::Credential};
+// `provider_settlement` is private to `builder.rs`, visible here for the same
+// reason the rest of it is: `tests.rs` is `builder`'s own submodule.
+use provider_settlement::responses_provider;
 
 fn read_http_request(stream: &mut TcpStream) -> String {
     let mut bytes = Vec::new();
