@@ -241,6 +241,31 @@ impl PreparedRun {
         self.session.history()
     }
 
+    /// How many of the assistant's turns this run's history has committed.
+    ///
+    /// The count, not the presence: a session resumed with `--continue` or
+    /// `--session` arrives with answers already on it, and "has this run
+    /// answered yet" is only a question a count can settle against a
+    /// watermark taken earlier — one taken right after mint, before anything
+    /// was asked, tells a caller recovering from a crash mid-turn whether the
+    /// last committed message is the crashed turn's own answer or one it
+    /// inherited.
+    ///
+    /// The fact [`history`](Self::history) alone does not expose: reading it
+    /// off `history()` directly means matching on `mentra::Role`, which pulls
+    /// a host into a dependency on mentra's own type for a question basis can
+    /// just answer. This is the narrower of the two fixes — it settles
+    /// exactly that one count rather than growing `history()`'s element type
+    /// a role of basis's own, which a caller wanting the *text* of a message
+    /// still would not need.
+    pub fn answered_turns(&self) -> usize {
+        self.session
+            .history()
+            .iter()
+            .filter(|message| matches!(message.role, mentra::Role::Assistant))
+            .count()
+    }
+
     /// This run's model's context window, when it is known.
     ///
     /// Read from the live session, so it is whatever mentra is compacting
