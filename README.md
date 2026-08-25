@@ -324,6 +324,20 @@ every handle obeys across processes (in process, concurrency is the host's tokio
   attach after it lapses settles the task as failed with `stopped_by: deadline` instead of starting
   a run whose time is already spent.
 
+0.6 change note, for an upgrade from 0.4.x: the API got smaller and the knobs got real. `RunConfig`
+is gone — open a `Workspace` and mint a `RunSpec` (`basis::run(path, prompt)` covers the one-shot);
+the free `prepare`/`resume` went with it. `Supervisor` is gone — in-process fan-out is a
+`tokio::task::JoinSet` plus the `CancellationToken` a `TurnOptions` hands back. The three bounds
+live in one `Bounds` value (`spec.bounds.deadline`; the `with_*` sugar is unchanged). `Event`,
+`RunOutcome`, `RunError`, `McpServer` and `McpError` are `#[non_exhaustive]`. A tool call's
+side-effect level rides mentra's `PermissionRequested.classification`; `SideEffectLevels` is
+deleted. `.mcp.json` `type: "http"` connects (Streamable HTTP). Memory is a directory convention
+(`memory/` roots of frontmatter Markdown, indexed into the prompt) and mentra's memory engine is
+off. New knobs: `ToolRoster`, `with_provider_instance`, `TurnOptions::with_round_strategy`,
+`MemoryConfig`, `with_delegation_depth`, and basis-acp's `SessionTemplate` + `Discovery`. The
+mentra floor is 0.20.0. Old CLI journals and task records still load; the wire schema number is
+unchanged.
+
 E2 change note, for an upgrade: the hidden per-workspace daemon and its registry are gone, and
 nothing moves with them. `BASIS_REGISTRY_DIR` is removed, and whatever the registry held — under it,
 under `BASIS_CONFIG_DIR/agents`, under `XDG_RUNTIME_DIR`, or in the temp directory — is **not
