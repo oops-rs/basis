@@ -10,9 +10,10 @@ use std::io::{Read, Write};
 use std::net::{TcpListener, TcpStream};
 use std::thread;
 
-use mentra::provider_core::AuthScheme;
+use mentra::{Provider, provider_core::AuthScheme};
 
 use super::*;
+use crate::tools::spawn::LOCAL_TARGET;
 // Spelled the way a downstream that depends only on `basis` has to spell it,
 // which is what makes the stubs below a real check on the re-exports.
 use crate::runtime::{
