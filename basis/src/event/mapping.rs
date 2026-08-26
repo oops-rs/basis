@@ -170,6 +170,23 @@ pub(super) fn from_session_event(event: &SessionEvent) -> Option<Event> {
             reasoning_tokens: *reasoning_tokens,
             thoughts_tokens: *thoughts_tokens,
         },
+        SessionEvent::Notice { severity, message }
+            if is_refused_memory_write(severity, message) =>
+        {
+            // The one notice basis drops by decision rather than maps, and
+            // dropping it is the decision D2 already made: the file store
+            // refuses a long-term-memory write (mentra
+            // `runtime/file_store/delegated.rs`), and mentra reports the
+            // refusal after every compaction ingests its summary. basis
+            // switched mentra's memory engine off — nothing recalls from that
+            // store and no tool reaches it — so under SQLite the same write
+            // "succeeded" into a table nothing ever read, invisibly. A
+            // warning that the unused write now fails is a fact about a
+            // decision, not about the run, and its advice (enable a mentra
+            // cargo feature) is addressed to a mentra embedder, which a basis
+            // operator is not.
+            return None;
+        }
         SessionEvent::Notice { severity, message } => Event::Notice {
             severity: severity_of(*severity),
             message: message.clone(),
@@ -253,6 +270,32 @@ fn task_status_of(value: TaskLifecycleStatus) -> TaskStatus {
     }
 }
 
+/// Whether this notice is the file store refusing the memory write basis
+/// already decided not to use — the one notice the mapping drops.
+///
+/// Deliberately narrow on both axes, because a mapping that swallows an event
+/// is the one place a harness can hide something from its clients.
+///
+/// **Severity**: `Warning` only. mentra composes this notice in exactly one
+/// place (`SessionHookBridge`, on a failed `MemoryIngestFinished`) and sends
+/// it at `Warning`, so anything arriving at another severity did not come
+/// from there and is not this. `Info` is the only other severity mentra has;
+/// if a future one carries this text, it reaches the stream.
+///
+/// **Text**: the whole of what upstream composes around the store error —
+/// `RuntimeError::Store`'s own `runtime store error: ` prefix followed by the
+/// file store's sentence — rather than a loose phrase from the middle of it.
+/// A message merely *mentioning* long-term memory, or reporting a different
+/// failure that happens to quote this one, keeps its place on the stream.
+/// Matched as text because mentra gives the notice no structure to match on
+/// (upstream candidate); if the wording moves this fails open and the warning
+/// reappears, which is visible rather than dangerous.
+fn is_refused_memory_write(severity: &MentraNoticeSeverity, message: &str) -> bool {
+    const REFUSAL: &str = "runtime store error: FileRuntimeStore does not persist long-term memory";
+
+    matches!(severity, MentraNoticeSeverity::Warning) && message.contains(REFUSAL)
+}
+
 fn severity_of(value: MentraNoticeSeverity) -> NoticeSeverity {
     match value {
         MentraNoticeSeverity::Info => NoticeSeverity::Info,
@@ -271,6 +314,71 @@ mod tests {
         };
 
         assert_eq!(from_session_event(&event), None);
+    }
+
+    #[test]
+    fn the_refused_memory_write_is_a_decision_not_a_run_fact() {
+        // The file store refuses long-term-memory writes and mentra reports
+        // it after every compaction's summary ingest. basis switched that
+        // engine off (D2), so the warning describes a write nothing would
+        // ever have read — dropped by decision, see the mapping arm.
+        let refused = SessionEvent::Notice {
+            severity: MentraNoticeSeverity::Warning,
+            message: refused_memory_write(),
+        };
+
+        assert_eq!(from_session_event(&refused), None);
+    }
+
+    /// Exactly what mentra composes for this notice: `SessionHookBridge`
+    /// wraps the agent id around the failed ingest's error, and that error is
+    /// `RuntimeError::Store`'s Display around the file store's own sentence.
+    fn refused_memory_write() -> String {
+        "agent 'a-1': runtime store error: FileRuntimeStore does not persist long-term memory; \
+         enable mentra's `store-sqlite` feature and use SqliteRuntimeStore or HybridRuntimeStore \
+         for durable memory"
+            .to_string()
+    }
+
+    #[test]
+    fn only_a_warning_carrying_that_exact_refusal_is_dropped() {
+        // A mapping that swallows an event is the one place a harness can
+        // hide something from its clients, so the drop is narrow on both axes
+        // and each is pinned here. `Info` stands in for "any severity but the
+        // one upstream sends this at" — mentra's enum has no third.
+        let elsewhere = SessionEvent::Notice {
+            severity: MentraNoticeSeverity::Info,
+            message: refused_memory_write(),
+        };
+        assert_eq!(
+            from_session_event(&elsewhere),
+            Some(Event::Notice {
+                severity: NoticeSeverity::Info,
+                message: refused_memory_write(),
+            }),
+            "the same text at a severity upstream never sends it at did not come from there"
+        );
+
+        // A different memory failure that merely mentions the same subject —
+        // and any other notice at all — keeps its place on the stream.
+        for message in [
+            "agent 'a-1': runtime store error: could not save the memory cursor",
+            "agent 'a-1': long-term memory is unavailable here",
+            "something else worth hearing",
+        ] {
+            let ordinary = SessionEvent::Notice {
+                severity: MentraNoticeSeverity::Warning,
+                message: message.to_string(),
+            };
+            assert_eq!(
+                from_session_event(&ordinary),
+                Some(Event::Notice {
+                    severity: NoticeSeverity::Warning,
+                    message: message.to_string(),
+                }),
+                "{message}"
+            );
+        }
     }
 
     #[test]

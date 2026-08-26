@@ -358,24 +358,43 @@ fn failed(spec: &DeclaredToolSpec, code: i32, stdout: &str, stderr: &str) -> Str
     format!("{} exited {code}: {explanation}", spec.name)
 }
 
-/// The one thing left for this binding to check after mentra validates the
-/// call.
+/// The complement of mentra's root-shape rule, and nothing else.
 ///
 /// mentra reads a call against the `input_schema` its tool published before it
 /// authorizes anything, so `required`, scalar types, `enum` and a misspelled
-/// property are answered upstream now — with the field named, which is what a
-/// model can act on. basis re-implemented the `required` half while that was
-/// missing; keeping it would be two validators disagreeing about wording over
-/// a call the first one already refused.
+/// property are answered upstream — with the field named, which is what a
+/// model can act on. Since 0.21 (`5e16092`, moved upstream by this binding's
+/// own report) that includes a root that is not an object:
+/// `validate_tool_input`'s `root_shape_error` refuses one for a schema
+/// declaring `properties` or `required` without saying `type`
+/// (`mentra/src/tool/schema.rs`), and a schema that *does* say `type` is
+/// refused by the ordinary type check beside it.
 ///
-/// What survives is the case mentra's validator cannot see: a manifest may
-/// leave `type` off its schema ([`check_schema`](super::manifest)), and with
-/// no `type` to check, an input that is not an object at all passes every
-/// keyword the validator implements. This binding writes that input to a
-/// program's stdin, so it is worth naming the tool before a program is handed
-/// something its schema never described.
+/// What that rule deliberately leaves open is a schema describing nothing at
+/// all — `{}`, or `{"description": "…"}` — on the stated reasoning that a
+/// schema describing nothing is not describing an object either. Correct for
+/// mentra, whose tools may take anything; wrong here, because
+/// [`check_schema`](super::manifest) accepts exactly such a manifest and this
+/// binding writes whatever arrives to a program's **stdin**, where a bare
+/// string is not the JSON object the program was written to read.
+///
+/// So this fires exactly where upstream's rule does not — no `type`, no
+/// `properties`, no `required` — and names the tool, which is what makes the
+/// refusal something the model can act on. Anything upstream can see stays
+/// upstream's to word.
 fn check_input(spec: &DeclaredToolSpec, input: &Value) -> Result<(), String> {
     if input.is_object() {
+        return Ok(());
+    }
+
+    // A schema that says any of these three is one upstream's validator reads
+    // for itself, so a non-object call under it never reaches this binding.
+    let described = spec.input_schema.as_object().is_some_and(|schema| {
+        schema.contains_key("type")
+            || schema.contains_key("properties")
+            || schema.contains_key("required")
+    });
+    if described {
         return Ok(());
     }
 

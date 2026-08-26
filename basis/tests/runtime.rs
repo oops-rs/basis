@@ -119,8 +119,8 @@ async fn two_workspaces_minted_from_one_runtime_share_it() {
         "both workspaces must run on the very same mentra runtime"
     );
 
-    // One store handle: every conversation from every workspace lands in one
-    // file, where N private runtimes would have opened N.
+    // One store handle: every conversation from every workspace lands under
+    // one root, where N private runtimes would have opened N.
     let mut run_a = a.prepare("one").expect("mints");
     let mut run_b = b.prepare("two").expect("mints");
     let (left, right) = tokio::join!(
@@ -130,20 +130,12 @@ async fn two_workspaces_minted_from_one_runtime_share_it() {
     assert!(matches!(left.expect("completes").outcome, RunOutcome::Ok));
     assert!(matches!(right.expect("completes").outcome, RunOutcome::Ok));
 
-    let stored: Vec<String> = std::fs::read_dir(store_dir.path())
-        .expect("store dir")
-        .map(|entry| {
-            entry
-                .expect("entry")
-                .file_name()
-                .to_string_lossy()
-                .into_owned()
-        })
-        .collect();
+    let stored = std::fs::read_dir(store_dir.path().join("agents"))
+        .expect("one runtime lays its agents under the one store root it was pointed at")
+        .count();
     assert_eq!(
-        stored,
-        vec!["runtime.sqlite".to_string()],
-        "one runtime, one store file, both workspaces inside it"
+        stored, 2,
+        "one runtime, one store root, both workspaces' conversations inside it"
     );
 }
 

@@ -39,6 +39,7 @@ fn denying_entry(root: &Path, reason: &'static str) -> WorkspaceGuardEntry {
         ),
         shell: ShellAccess::Granted,
         root: canonical(root),
+        foreign_tools: Default::default(),
         shared: true,
     }
 }
@@ -48,6 +49,7 @@ fn permissive_entry(root: &Path, shell: ShellAccess) -> WorkspaceGuardEntry {
         runner: Arc::new(HookRunner::new(root, Vec::new())),
         shell,
         root: canonical(root),
+        foreign_tools: Default::default(),
         shared: true,
     }
 }
@@ -86,6 +88,7 @@ fn rewriting_entry(root: &Path, name: &'static str) -> WorkspaceGuardEntry {
         runner: Arc::new(HookRunner::new(root, Vec::new()).with_interceptor(Rewrites(name))),
         shell: ShellAccess::Granted,
         root: canonical(root),
+        foreign_tools: Default::default(),
         shared: true,
     }
 }
@@ -428,6 +431,7 @@ async fn a_broken_workspace_guard_fails_closed_through_the_dispatcher() {
         ),
         shell: ShellAccess::Granted,
         root: canonical(dir.path()),
+        foreign_tools: Default::default(),
         shared: true,
     });
 
@@ -451,6 +455,7 @@ async fn a_private_runtimes_workspace_leaves_the_guards_to_its_policy() {
         runner: Arc::new(HookRunner::new(dir.path(), Vec::new())),
         shell: ShellAccess::Denied,
         root: canonical(dir.path()),
+        foreign_tools: Default::default(),
         shared: false,
     });
 

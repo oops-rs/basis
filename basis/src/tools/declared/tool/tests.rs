@@ -124,24 +124,49 @@ fn no_credential_reaches_the_approver_or_the_rule_it_writes() {
 }
 
 #[test]
-fn an_input_that_is_not_an_object_is_refused_by_name() {
-    // The residue mentra's validator cannot see: a manifest may leave `type`
-    // off its schema, and with no `type` there is no keyword saying an input
-    // has to be an object. This binding writes that input to a program's
-    // stdin, so the refusal names the tool.
-    let loose = DeclaredToolSpec {
-        input_schema: json!({"properties": {"job": {"type": "string"}}}),
-        ..spec(vec!["./x"])
-    };
+fn a_schema_describing_nothing_still_gets_an_object() {
+    // Upstream's rule reads a schema's object intent from `type`,
+    // `properties` or `required`, and a schema declaring none of them is
+    // deliberately left alone — correct for mentra, wrong for a binding that
+    // writes the input to a program's stdin. `check_schema` accepts exactly
+    // this manifest, so the residue is reachable and this is where it stops.
+    for schema in [json!({}), json!({"description": "run the nightly job"})] {
+        let loose = DeclaredToolSpec {
+            input_schema: schema.clone(),
+            ..spec(vec!["./x"])
+        };
 
-    let refused = check_input(&loose, &json!("nightly")).expect_err("not an object");
+        let refused = check_input(&loose, &json!("nightly")).expect_err("not an object");
+        assert!(refused.contains("jenkins_job"), "{refused} ({schema})");
 
-    assert!(refused.contains("jenkins_job"), "{refused}");
+        check_input(&loose, &json!({"job": "nightly"})).expect("an object always fits");
+    }
+}
+
+#[test]
+fn a_schema_upstream_can_read_is_left_to_upstream() {
+    // The complement is strict: anything `root_shape_error` or the type check
+    // can see is refused before this binding is reached, so re-refusing it
+    // here would be two validators wording one refusal. Each of the three
+    // keys upstream reads is enough to hand the call back.
+    for schema in [
+        json!({"type": "object", "properties": {}}),
+        json!({"properties": {"job": {"type": "string"}}}),
+        json!({"required": ["job"]}),
+    ] {
+        let declared = DeclaredToolSpec {
+            input_schema: schema.clone(),
+            ..spec(vec!["./x"])
+        };
+
+        check_input(&declared, &json!("nightly"))
+            .unwrap_or_else(|error| panic!("upstream's to refuse, not ours: {error} ({schema})"));
+    }
 }
 
 #[test]
 fn a_call_that_fits_is_not_second_guessed_here() {
-    // `required` is mentra's now, checked before authorization and with the
+    // `required` is mentra's, checked before authorization and with the
     // missing field named. What is left here says nothing about a call that
     // is an object — including the empty one, which a schema requiring
     // nothing accepts.

@@ -42,7 +42,7 @@
 //! whether a call happens, and by then it has.
 
 use std::{
-    collections::HashMap,
+    collections::{BTreeSet, HashMap},
     path::{Component, Path, PathBuf},
     sync::{
         Arc, RwLock,
@@ -83,6 +83,20 @@ pub(crate) struct WorkspaceGuardEntry {
     /// denials keep coming from mentra's policy, word for word, exactly as
     /// before the split.
     pub(crate) shared: bool,
+    /// The names [`Workspace::minted_agent`](crate::Workspace) hid from this
+    /// workspace's model at its most recent mint: a sibling workspace's
+    /// bridged `mcp__*` tools and a sibling's declared tools.
+    ///
+    /// Published here because `spawn` needs it and cannot ask mentra for it:
+    /// a child spawned from a [`ChildSpec`](crate::ChildSpec) with a roster
+    /// override replaces the cloned config's `ToolProfile` wholesale, which
+    /// would hand the child the very names the parent is denied — and mentra
+    /// 0.21 exposes no reader for a template's or an agent's effective
+    /// profile (upstream candidate). Shared rather than copied so what
+    /// `spawn` reads is the set the *live* parent was minted with, since a
+    /// mint is exactly when both are settled: the agent's config freezes it
+    /// and this cell is written in the same breath.
+    pub(crate) foreign_tools: Arc<RwLock<BTreeSet<String>>>,
 }
 
 /// Removes its workspace's entry when dropped.
@@ -144,6 +158,31 @@ impl HookDispatch {
             key,
             id,
         }
+    }
+
+    /// What the workspace claiming `working_directory` hid from its own model
+    /// at its last mint — what a delegated child must therefore not be
+    /// offered either (see [`WorkspaceGuardEntry::foreign_tools`]).
+    ///
+    /// Empty on a miss, and that is the honest answer rather than a fallback:
+    /// a miss means no live workspace claims this directory, so there is no
+    /// sibling to be shielded from. Every private runtime — every
+    /// `Workspace::open(path)`, the CLI, the free functions — has no siblings
+    /// at all and reads empty here for the same reason.
+    pub(crate) fn foreign_tools(&self, working_directory: &Path) -> BTreeSet<String> {
+        let key = canonical(working_directory);
+        self.workspaces
+            .read()
+            .expect("workspace registry poisoned")
+            .get(&key)
+            .map(|held| {
+                held.entry
+                    .foreign_tools
+                    .read()
+                    .expect("foreign tool set poisoned")
+                    .clone()
+            })
+            .unwrap_or_default()
     }
 
     fn deregister(&self, key: &Path, id: u64) {

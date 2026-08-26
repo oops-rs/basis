@@ -49,8 +49,9 @@ mod builder;
 mod roster;
 mod spec;
 
+use std::collections::BTreeSet;
 use std::path::{Path, PathBuf};
-use std::sync::Arc;
+use std::sync::{Arc, RwLock};
 
 use mentra::{ModelInfo, Session, agent::AgentConfig, provider::ReasoningOptions};
 
@@ -132,6 +133,10 @@ pub struct Workspace {
     /// dispatcher; deregisters on drop.
     #[allow(dead_code, reason = "held for its Drop")]
     hook_registration: HookRegistration,
+    /// The other half of the registry entry's `foreign_tools` cell, written by
+    /// [`minted_agent`](Self::minted_agent) so `spawn` can read what this
+    /// workspace's model is currently denied.
+    foreign_tools: Arc<RwLock<BTreeSet<String>>>,
     #[cfg(feature = "mcp")]
     #[allow(dead_code, reason = "held for its Drop")]
     mcp_connections: McpConnections,
@@ -184,7 +189,7 @@ impl Workspace {
     /// conversation with nothing said yet is a real state — it is what ACP's
     /// `session/new` opens — so the emptiness check belongs where a prompt is
     /// actually sent, which is [`PreparedRun::execute`] and
-    /// [`PreparedRun::send`]. (The free [`prepare`](crate::run::prepare) keeps
+    /// [`PreparedRun::send`]. (The free [`run`](crate::run()) keeps
     /// its own up-front check, because a one-shot caller that passed nothing
     /// wants to hear about it before a session exists.)
     pub fn prepare(&self, spec: impl Into<RunSpec>) -> Result<PreparedRun, RunError> {
@@ -379,14 +384,25 @@ impl Workspace {
     /// these tools belong to a sibling that is still open and still serving
     /// them; what a *dropped* sibling registered is gone from the registry
     /// altogether, taken off with the claim it was held under.
+    ///
+    /// The same set is published to this workspace's dispatcher entry on the
+    /// way out, because one more consumer needs it and cannot ask mentra:
+    /// `spawn`, when a [`ChildSpec`](crate::ChildSpec) roster override
+    /// replaces the child's cloned `ToolProfile`, has to put these names back
+    /// or hand a delegated child the sibling tools its own parent is denied.
+    /// Written here rather than at open so both readers see one snapshot —
+    /// the config below freezes it for this mint, and the cell carries the
+    /// same names to whatever that mint delegates.
     fn minted_agent(&self) -> AgentConfig {
         let mut agent = self.agent.clone();
+        let mut foreign = BTreeSet::new();
 
         for name in self
             .runtime
             .foreign_declared_tools(self.declared_registration.root())
         {
-            agent.tool_profile.hidden_tools.insert(name);
+            agent.tool_profile.hidden_tools.insert(name.clone());
+            foreign.insert(name);
         }
 
         #[cfg(feature = "mcp")]
@@ -396,8 +412,14 @@ impl Workspace {
                 && !self.mcp_servers.iter().any(|own| own == server)
             {
                 agent.tool_profile.hidden_tools.insert(name.clone());
+                foreign.insert(name.clone());
             }
         }
+
+        *self
+            .foreign_tools
+            .write()
+            .expect("foreign tool set poisoned") = foreign;
 
         agent
     }

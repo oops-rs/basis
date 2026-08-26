@@ -39,8 +39,8 @@ use basis::{PersistedSession, RunError, provider::ProviderError};
 
 /// The conversations persisted for one workspace.
 ///
-/// Answers inline: this reads a SQLite table, which is the disk rather than the
-/// client, and touches no lock a turn can hold.
+/// Answers inline: this reads the store's files, which is the disk rather than
+/// the client, and touches no lock a turn can hold.
 pub(super) async fn list_sessions(
     config: &ServeConfig,
     request: ListSessionsRequest,

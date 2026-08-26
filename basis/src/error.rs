@@ -2,7 +2,7 @@
 //!
 //! [`RunError`] is the crate's universal error — opening a workspace,
 //! preparing a run, driving one — and it used to live in
-//! [`run`](crate::run), where history put it. Four of that module's in-edges
+//! [`run`](mod@crate::run), where history put it. Four of that module's in-edges
 //! (the store, the event mapping, the runtime, the budget) imported nothing
 //! from `run` *but* this type, which manufactured four of the crate's import
 //! cycles out of one name. At the root, an error is something every module
@@ -20,7 +20,7 @@ use crate::{context::ContextError, provider::ProviderError};
 ///
 /// One error type across all three, rather than a `WorkspaceError` beside it:
 /// opening a workspace exists to prepare runs, and every failure listed here is
-/// a failure a caller of [`run`] has always been able to receive.
+/// a failure a caller of [`run`](crate::run()) has always been able to receive.
 #[derive(Debug, Error)]
 #[non_exhaustive]
 pub enum RunError {
@@ -39,6 +39,30 @@ pub enum RunError {
 
     #[error("no session to resume")]
     NoSuchSession,
+
+    /// The directory named for this runtime's conversations holds a basis
+    /// ≤0.6 store — mentra's SQLite database — which this build neither links
+    /// nor migrates (ADR-0023).
+    ///
+    /// basis's own words rather than mentra's: the upstream file store
+    /// detects the same file and names its `store-sqlite` cargo feature,
+    /// which is advice for a mentra embedder, not for the person whose
+    /// conversations are in the file. Raised before any file store is opened
+    /// in the directory, because an empty store beside the database would
+    /// read as every conversation being lost. See
+    /// [`store`](crate::store)'s module docs for where the check runs.
+    #[error(
+        "'{}' holds conversations from basis 0.6 or earlier (runtime.sqlite, a SQLite \
+         database); this build persists conversations as plain files and the database is \
+         not migrated. To continue an old conversation, use basis 0.6. To start new work \
+         here, point the store somewhere fresh (`RuntimeBuilder::with_store_dir`; for the \
+         CLI, `BASIS_DATA_DIR`) or move the old store directory aside",
+        dir.display()
+    )]
+    LegacyStore {
+        /// The store directory holding the pre-0.7 database.
+        dir: std::path::PathBuf,
+    },
 
     #[error(transparent)]
     Config(#[from] crate::config::ConfigError),
@@ -60,7 +84,7 @@ pub enum RunError {
     /// deserializes it here, so a value that does not fit `T` is a schema or
     /// prompt problem — retry with a clearer schema — while a provider failure
     /// is not. The exchange stays in the session's transcript either way; see
-    /// [`PreparedRun::output`].
+    /// [`PreparedRun::output`](crate::PreparedRun::output).
     #[error("the run's output did not match the requested type: {0}")]
     OutputMismatch(#[source] serde_json::Error),
 

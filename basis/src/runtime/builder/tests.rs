@@ -10,9 +10,10 @@ use std::io::{Read, Write};
 use std::net::{TcpListener, TcpStream};
 use std::thread;
 
-use mentra::provider_core::AuthScheme;
+use mentra::{Provider, provider_core::AuthScheme};
 
 use super::*;
+use crate::tools::spawn::LOCAL_TARGET;
 // Spelled the way a downstream that depends only on `basis` has to spell it,
 // which is what makes the stubs below a real check on the re-exports.
 use crate::runtime::{
@@ -277,7 +278,9 @@ fn command_environment_is_scoped_and_redacted() {
     );
     let printed = format!("{builder:?}");
     assert!(printed.contains("BASIS_TASK_ID"), "{printed}");
-    assert!(!printed.contains("child"), "{printed}");
+    // The value would print as a quoted string; the bare word also appears in
+    // the `child_policy` field's own name, which is not a leak.
+    assert!(!printed.contains("\"child\""), "{printed}");
 }
 
 struct Named(&'static str);

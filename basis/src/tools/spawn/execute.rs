@@ -6,6 +6,8 @@
 //! model's string — they are handed a body, and a destination, that
 //! [`parse`](super::parse) already decided the meaning of.
 
+use std::collections::BTreeSet;
+
 use mentra::{
     ContentBlock, DelegationArtifact, DelegationEdge, DelegationKind, DelegationStatus,
     SpawnedAgentStatus, SpawnedAgentSummary,
@@ -13,7 +15,7 @@ use mentra::{
     tool::{ToolContext, ToolResult},
 };
 
-use super::depth::Depth;
+use super::{child::ChildSpec, depth::Depth};
 
 /// Runs a command on mentra's own execution path, at the place it named.
 ///
@@ -138,9 +140,11 @@ pub(super) async fn delegate(
     ctx: &mut ToolContext<'_>,
     prompt: &str,
     depth: usize,
+    spec: ChildSpec,
+    denied_to_parent: BTreeSet<String>,
 ) -> ToolResult {
-    let mut child = ctx
-        .spawn_subagent()
+    let mut child = spawn_child(ctx, spec, denied_to_parent)
+        .await
         .map_err(|error| format!("spawn could not start a subagent: {error}"))?;
     let child_id = child.id().to_string();
 
@@ -213,6 +217,77 @@ pub(super) async fn delegate(
     })?;
 
     outcome.map_err(|error| format!("the delegated run failed: {error}"))
+}
+
+/// Mints the child the spec describes: the parent's plain clone on the path
+/// this tool has always used, or mentra's disposable template with the
+/// policy's overrides applied (D4 — `super::child` has the contract).
+///
+/// The template is taken from and spawned through *one* `ToolContext`, so
+/// mentra's source binding — `RuntimeError::SubagentTemplateMismatch`, the
+/// named refusal for a template that crossed to a different agent or runtime
+/// — is structurally unreachable from here; if an upstream change ever made
+/// it reachable, the error would arrive at the model through the same
+/// "spawn could not start a subagent" wrapping as every other spawn failure,
+/// mentra's naming intact. A model override naming an unregistered provider
+/// arrives the same way (`ProviderNotFound`, at spawn, before anything runs).
+///
+/// `denied_to_parent` is what a roster override must not undo: see the
+/// `with_tool_profile` call below.
+async fn spawn_child(
+    ctx: &ToolContext<'_>,
+    spec: ChildSpec,
+    denied_to_parent: BTreeSet<String>,
+) -> Result<mentra::agent::Agent, mentra::error::RuntimeError> {
+    if spec.is_inherit() {
+        // Deliberately not the template path with zero overrides, though
+        // mentra documents the two as equivalent: this is the line every
+        // policy-free runtime has always run, and "byte-identical default"
+        // should be a fact about the code rather than a claim about upstream.
+        return ctx.spawn_subagent();
+    }
+
+    let ChildSpec {
+        roster,
+        model,
+        system,
+    } = spec;
+    let mut template = ctx.disposable_subagent_template();
+    if let Some(roster) = roster {
+        // The same mapping the workspace's own roster resolves through
+        // (`ToolRoster::into_profile`), so a policy narrows a child with the
+        // exact vocabulary a host narrows a workspace with — plus the one
+        // thing the mapping cannot know.
+        //
+        // mentra's `with_tool_profile` *replaces* the cloned config's
+        // profile, and part of what it would replace is not the parent's
+        // roster at all: `Workspace::minted_agent` adds every sibling
+        // workspace's bridged `mcp__*` and declared tools to `hidden_tools`
+        // at mint, because on a shared runtime one registry serves them all.
+        // Replacing that away would offer a *narrowed* child the very tools
+        // its parent is denied — `mcp__prod-db__query` belonging to another
+        // repository, reached through a child the policy meant to restrict.
+        // So the parent's denied set goes back into the profile here.
+        //
+        // Extending `hidden_tools` covers both roster shapes because
+        // `ToolProfile::allows` checks the denylist *after* the allow-list:
+        // a `hide` roster simply gains the names, and an `only` roster that
+        // happened to name one loses it. Dropping rather than refusing, and
+        // silently, is the rule `ToolRoster::only` already documents for the
+        // same collision on a workspace's own roster — one composition, one
+        // rule, stated in both places.
+        let mut profile = roster.into_profile();
+        profile.hidden_tools.extend(denied_to_parent);
+        template = template.with_tool_profile(profile);
+    }
+    if let Some(model) = model {
+        template = template.with_model(model);
+    }
+    if let Some(system) = system {
+        template = template.with_system(system);
+    }
+
+    ctx.spawn_subagent_from(template).await
 }
 
 /// What the model reads back, with a name for the case where a subagent

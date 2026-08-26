@@ -267,8 +267,8 @@ impl SessionSource for ConfiguredSource {
     }
 
     /// Reads mentra's store directly. Building a session to enumerate sessions
-    /// would resolve a model over the network to answer a question about a
-    /// SQLite table.
+    /// would resolve a model over the network to answer a question about files
+    /// on disk.
     ///
     /// This depends on a conversation being tagged with
     /// [`store::runtime_identifier`](basis::store::runtime_identifier) for
@@ -296,8 +296,8 @@ impl SessionSource for ConfiguredSource {
 
     /// Writes to mentra's store directly, for the reason
     /// [`list_sessions`](Self::list_sessions) reads it directly: opening a
-    /// workspace to delete a row would resolve a model over the network to
-    /// answer a question about SQLite — and would fail for want of a
+    /// workspace to delete a record would resolve a model over the network to
+    /// answer a question about files on disk — and would fail for want of a
     /// credential on a connection that has done nothing but list.
     async fn delete(&self, agent_id: &str) -> Result<(), RunError> {
         basis::store::forget(agent_id)

@@ -120,6 +120,13 @@ basis `e22aa63`, inside the **tally** too: the subagent runs on the parent's acc
 the child's usage is relayed onto the parent's stream, and `RunReport::usage` agrees with the
 figure the bound stops on. [docs/REDESIGN.md](docs/REDESIGN.md) records the gap as closed.
 
+Who that subagent *is* is a host decision since 0.7: `RuntimeBuilder::with_child_policy` maps
+each delegation (its prompt, the parent, the workspace) to a `ChildSpec` overriding the child's
+roster, model, or system prompt — cheap read-only triage beside a full-strength fixer is the
+shape it exists for (`examples/child_policy.rs`). Unset, every child stays an exact clone of its
+parent as it always has, and the approver's preview gains a `child` key only when a policy
+actually overrode something, so existing remembered rules keep matching.
+
 ### One stream for many runs
 
 Each run wants a sink of its own; a host wants one view of all of them without losing which run said
@@ -325,6 +332,18 @@ every handle obeys across processes (in process, concurrency is the host's tokio
   default deadline, since the submitter exits, and it binds an agent nobody attached to: the first
   attach after it lapses settles the task as failed with `stopped_by: deadline` instead of starting
   a run whose time is already spent.
+
+0.7 change note, for an upgrade from 0.6: conversations are plain files now, not SQLite. mentra
+0.21's file-backed store lands and basis links no database at all — the directory
+`with_store_dir` names (the CLI's `<data-dir>/workspaces/<key>/store`) holds `agents/`,
+`rules.json` and `runs.jsonl` instead of a `runtime.sqlite`, readable with ordinary tools
+(ADR-0023). The old database is **not migrated**, in either direction: continuing a pre-0.7
+conversation needs basis 0.6, and a store directory still holding one is refused by name —
+with the ways forward in the message — rather than quietly shadowed by an empty file store.
+New work proceeds by pointing `BASIS_DATA_DIR` (or `with_store_dir`) somewhere fresh, or by
+moving the old store directory aside. One new knob: `RuntimeBuilder::with_child_policy` decides
+per delegation who the spawned child is (roster, model, system prompt); unset is the exact
+clone-of-the-parent every earlier basis spawned.
 
 0.6 change note, for an upgrade from 0.4.x: the API got smaller and the knobs got real. `RunConfig`
 is gone — open a `Workspace` and mint a `RunSpec` (`basis::run(path, prompt)` covers the one-shot);

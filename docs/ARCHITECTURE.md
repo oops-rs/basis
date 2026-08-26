@@ -55,7 +55,7 @@ hot-reloadable extensions. Two pi decisions independently validate ours:
 |---|---|---|
 | Agent loop + tool calling | Mentra runtime, async tool traits | mentra |
 | Multi-provider LLM API | mentra-provider: OpenAI, Anthropic, Gemini, OpenRouter, Ollama, LM Studio — and any `chat/completions` endpoint by base URL, keyed or not (§8) ✅ | mentra |
-| Session persistence + resume | SQLite-backed sessions, snapshots | mentra |
+| Session persistence + resume | File-backed sessions (plain files under the store dir since 0.7, ADR-0023 — basis links no database), snapshots | mentra |
 | Compaction | mentra's compaction, configured by basis (`Compaction`) ✅ — every tool result the model was shown is kept, elision is opt-in by number, the trigger is a share of the model's window when the provider reports one, snapshots follow the store; `PreparedRun::compact` and ACP `/compact` run a pass on demand | built |
 | Session branching / tree | mentra's transcript tree, exposed on `PreparedRun` ✅ | built |
 | Builtin tools (files, shell, background exec, tasks) | Mentra builtins, with the roster basis's: `read`, `ls`, `grep`, `glob`, `write`, `edit` (mentra's split file tools, `RuntimeBuilder::with_file_tools`), `compact`, `load_skill`, and `spawn` for commands and delegation. `shell`, `background_run`, `check_background`, `task`, `task_*`, `team_*`, `idle` and — since D2 switched mentra's memory engine off — `memory_pin`/`memory_forget`/`memory_search` are registered but not offered ✅ | mentra + built |

@@ -124,6 +124,13 @@ impl ToolRoster {
     pub(crate) fn into_profile(self) -> ToolProfile {
         self.0
     }
+
+    /// The same profile, borrowed — what a child policy's preview reads to
+    /// describe an overriding roster without consuming the spec that carries
+    /// it (`crate::tools::spawn::child`).
+    pub(crate) fn as_profile(&self) -> &ToolProfile {
+        &self.0
+    }
 }
 
 /// Every name basis takes off the model's roster by default: what `spawn`
