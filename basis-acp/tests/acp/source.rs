@@ -18,7 +18,7 @@ use mentra::{
 };
 
 /// The runtime identifier every mock here files its agents under. Each mock
-/// still gets its own SQLite file, so sharing the name costs nothing and means
+/// still gets its own store root, so sharing the name costs nothing and means
 /// a test can ask for its own sessions back by a value it knows.
 pub(crate) const MOCK_RUNTIME: &str = "basis-acp-tests";
 

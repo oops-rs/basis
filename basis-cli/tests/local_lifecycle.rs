@@ -5,7 +5,7 @@
 use std::{
     fs,
     io::Read,
-    path::Path,
+    path::{Path, PathBuf},
     process::{Command, Output, Stdio},
     thread,
     time::{Duration, Instant},
@@ -43,8 +43,10 @@ fn a_pre_07_store_is_refused_on_stderr_in_basis_words() {
 
     // First run: resolves (and creates) this workspace's per-key store
     // directory before the bogus provider name stops anything else from
-    // happening — which is how the test finds the directory without
-    // re-deriving the CLI's key scheme.
+    // happening. `basis_tasks::Tasks::store_dir` is the CLI's own derivation
+    // but reads BASIS_DATA_DIR from *this* process, which a test must not
+    // set, so the directory is read back from the data root instead — see
+    // `sole_workspace_key` for what makes that deterministic.
     let resolved = run_bounded(
         Command::new(env!("CARGO_BIN_EXE_basis"))
             .env("BASIS_DATA_DIR", &data)
@@ -62,14 +64,7 @@ fn a_pre_07_store_is_refused_on_stderr_in_basis_words() {
     // What every pre-0.7 basis left in that directory. The `store/` subdir is
     // created here because 0.6 created it on first write, which is exactly
     // the state an upgrade finds.
-    let workspaces = data.join("workspaces");
-    let store = fs::read_dir(&workspaces)
-        .expect("the first run created the data layout")
-        .next()
-        .expect("one workspace key")
-        .expect("entry")
-        .path()
-        .join("store");
+    let store = sole_workspace_key(&data).join("store");
     fs::create_dir_all(&store).expect("the old store directory");
     fs::write(store.join("runtime.sqlite"), b"SQLite format 3\0").expect("plant the old database");
 
@@ -88,6 +83,38 @@ fn a_pre_07_store_is_refused_on_stderr_in_basis_words() {
     assert!(message.contains("basis 0.6 or earlier"), "{message}");
     assert!(message.contains("not migrated"), "{message}");
     assert!(message.contains("BASIS_DATA_DIR"), "{message}");
+}
+
+/// The one per-workspace directory under a data root this fixture has run
+/// exactly one workspace against.
+///
+/// The key is a hash of the workspace path that `basis-tasks` derives and
+/// does not expose without reading `BASIS_DATA_DIR` from the calling process,
+/// which a test sharing a process with other tests must not set. So the
+/// directory is read back — and the reading is made deterministic by saying
+/// what the fixture guarantees and failing by name when it stops being true,
+/// rather than by taking whichever entry happens to come first.
+fn sole_workspace_key(data: &Path) -> PathBuf {
+    let workspaces = data.join("workspaces");
+    let mut keys: Vec<PathBuf> = fs::read_dir(&workspaces)
+        .unwrap_or_else(|error| {
+            panic!(
+                "the fixture's first run should have created {}: {error}",
+                workspaces.display()
+            )
+        })
+        .map(|entry| entry.expect("read a workspace key").path())
+        .collect();
+    keys.sort();
+
+    assert_eq!(
+        keys.len(),
+        1,
+        "this fixture runs one workspace against a fresh data root, so exactly one key should \
+         exist under {}; found {keys:?} — the fixture changed, not the behaviour under test",
+        workspaces.display()
+    );
+    keys.remove(0)
 }
 
 #[test]
