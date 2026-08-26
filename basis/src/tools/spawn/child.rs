@@ -169,6 +169,18 @@ impl ChildSpec {
     /// [`Runtime::provider`](crate::Runtime::provider) reports. A model
     /// naming an unregistered provider fails the spawn with mentra's error
     /// naming it, which the model reads as the tool call's failure.
+    ///
+    /// **Say the context window if you know it.**
+    /// [`ModelInfo::new`](crate::ModelInfo::new) leaves it `None`, and mentra
+    /// fills a missing one by calling the provider's model *listing* — over
+    /// the network, on **every** delegation this override applies to, before
+    /// the child says a word. For most vendors that call cannot even answer:
+    /// neither Anthropic's listing nor OpenAI's reports a limit, so the
+    /// round-trip ends where it started and the child runs with no window
+    /// either way. `ModelInfo::new(id, provider).with_context_window(n)`
+    /// skips it entirely, and a window is also what lets window-relative
+    /// compaction work for the child at all — a triage policy firing on every
+    /// other prompt is the case where both matter most.
     #[must_use]
     pub fn with_model(self, model: ModelInfo) -> Self {
         Self {

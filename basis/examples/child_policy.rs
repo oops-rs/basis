@@ -22,16 +22,21 @@
 //! ```sh
 //! export BASIS_API_KEY=…                    # or ANTHROPIC_API_KEY, etc.
 //! cargo run -p basis --example child_policy -- /repo \
-//!     "the flaky retry test in tests/net.rs" gpt-5-mini openai
+//!     "the flaky retry test in tests/net.rs" gpt-5-mini
 //! ```
 //!
-//! The last two arguments are the triage child's model and the provider id it
-//! resolves against — the same id the runtime itself runs on, unless you have
-//! registered another.
+//! The last argument is the triage child's model **id**. The provider is not
+//! an argument and could not usefully be one: a basis-built runtime settles
+//! exactly one provider (`with_provider` / a base URL / the environment), so a
+//! child model naming any other would fail its spawn — after the parent had
+//! already spent a round deciding to delegate. The example resolves the one
+//! this run will use and names it, which is what a host should do too.
 
 use std::{env, error::Error, time::Duration};
 
-use basis::{ChildSpec, Event, FnSink, ModelInfo, RunSpec, Runtime, ToolRoster, Workspace};
+use basis::{
+    ChildSpec, Event, FnSink, ModelInfo, RunSpec, Runtime, ToolRoster, Workspace, provider,
+};
 
 /// The convention the policy matches on. Taught to the parent in its prompt,
 /// matched by the policy — one string, two readers, so it is named once.
@@ -44,19 +49,33 @@ const TRIAGE_TOOLS: [&str; 3] = ["read", "grep", "glob"];
 const TRIAGE_VOICE: &str = "You are a triage gate. Read only what you need, then answer in one \
      short paragraph starting with YES (worth fixing now) or NO, and say why.";
 
+/// The triage model's context window. Stated rather than left `None`, and it
+/// is worth a line of explanation: mentra fills a missing window by calling
+/// the provider's model listing over the network, on *every* delegation the
+/// override applies to — and for most vendors that call cannot even answer,
+/// since neither Anthropic's listing nor OpenAI's reports a limit. Saying a
+/// number skips the round trip and is also what lets the child's own
+/// compaction be window-relative. Set it to whatever the model you name
+/// actually has.
+const TRIAGE_WINDOW: usize = 128_000;
+
 #[tokio::main]
 async fn main() -> Result<(), Box<dyn Error>> {
     let mut args = env::args().skip(1);
-    let (Some(workspace), Some(task), Some(triage_model), Some(triage_provider)) =
-        (args.next(), args.next(), args.next(), args.next())
+    let (Some(workspace), Some(task), Some(triage_model)) = (args.next(), args.next(), args.next())
     else {
-        return Err("usage: child_policy <workspace> <task> <triage-model> <provider-id>".into());
+        return Err("usage: child_policy <workspace> <task> <triage-model>".into());
     };
+
+    // The one provider this runtime will settle on — resolved here so the
+    // child's model can name it. Anything else would fail at the spawn, with
+    // the parent's deciding round already spent.
+    let provider = provider::resolve(None, None)?.provider;
 
     // The policy is the whole feature: one function, runtime-scoped, consulted
     // for every delegation at every depth. Prompts carrying the convention get
     // the cheap shape; everything else is the inherit-everything default.
-    let triage = ModelInfo::new(triage_model, triage_provider.as_str());
+    let triage = ModelInfo::new(triage_model, provider).with_context_window(TRIAGE_WINDOW);
     let runtime = Runtime::builder().with_child_policy(move |child| {
         if child.prompt().trim_start().starts_with(TRIAGE) {
             ChildSpec::inherit()
