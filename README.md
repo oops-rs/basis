@@ -433,13 +433,12 @@ resume; durable `spawn`/`send`/`ask`/`wait`/`cancel`/`watch`/`inbox` over the fi
 `.mcp.json` and from the client; templates as commands; hooks and interceptors; the websocket
 bridge; branching; compaction, whose defaults are basis's own — every tool result the model was
 shown stays in front of it — and whose knobs are `WorkspaceBuilder::with_compaction`; and the SDK
-proper. Named honestly, still open: context-window awareness — nothing here knows how large a
-model's window is, so the summarizing trigger is a fixed token count rather than a fraction of it —
-the packages convention, and provider
-OAuth; the delegation bound-vs-tally gap above; and **nobody has driven this from Zed or JetBrains
-yet** — it is verified against the protocol and its official client library, not against the
-ecosystem. The three published crates are on crates.io at one version, as is mentra —
-`basis-tasks` joins them at the next release. CI runs fmt, clippy at
+proper — and since 0.7, conversations as plain files, a child a delegating parent can shape, and
+`basis-tasks` for a Rust host that wants durable handles. Named honestly, still open: the packages
+convention and provider OAuth; surfacing `team_*`, which stays hidden until a concrete use case
+asks for it; and **nobody has driven this from Zed or JetBrains yet** — it is verified against the
+protocol and its official client library, not against the ecosystem. The four published crates are
+on crates.io at one version, as is mentra. CI runs fmt, clippy at
 `-D warnings`, and the full suite on Linux, macOS and Windows, plus MSRV (1.88, edition 2024).
 
 Every addition faces one check: does it make embedding cheaper for a Rust host, is it a convention
