@@ -1064,13 +1064,12 @@ impl RuntimeBuilder {
             // (ADR-0021). With none registered, the default depth and no child
             // policy this is `SpawnTool::new()` in every observable respect,
             // including that the model is never told the prefix exists.
-            .with_tool(match self.child_policy {
-                Some(policy) => {
-                    SpawnTool::with_targets_and_depth(target_names, self.delegation_depth)
-                        .with_child_policy(move |child: &ChildContext<'_>| policy(child))
-                }
-                None => SpawnTool::with_targets_and_depth(target_names, self.delegation_depth),
-            })
+            .with_tool(spawn_tool(
+                target_names,
+                self.delegation_depth,
+                self.child_policy,
+                Arc::clone(&dispatch),
+            ))
             // The one pre-hook basis registers, always: mentra takes hooks at
             // build time only, and workspaces arrive later, through the
             // dispatcher (see `runtime::dispatch`).
@@ -1160,6 +1159,36 @@ impl RuntimeBuilder {
             mcp_claims: Mutex::new(HashMap::new()),
             declared_claims: Mutex::new(HashMap::new()),
         })
+    }
+}
+
+/// The one tool basis registers, assembled once.
+///
+/// Built here rather than inline so the two conditional facts — whether a
+/// child policy was set, and the workspace registry the roster guard reads —
+/// are attached to *one* construction. With no policy this is
+/// `SpawnTool::with_targets_and_depth` plus a registry handle that only a
+/// roster override ever reads, which is `SpawnTool::new()` in every
+/// observable respect for a runtime that registered no targets and kept the
+/// default depth.
+fn spawn_tool(
+    targets: Vec<String>,
+    delegation_depth: usize,
+    child_policy: Option<ChildPolicy>,
+    workspaces: Arc<HookDispatch>,
+) -> SpawnTool {
+    let tool = SpawnTool::with_targets_and_depth(targets, delegation_depth).with_workspaces(
+        // Read for one question — what is this delegation's workspace denied
+        // — so a narrowed child cannot be handed a sibling's tools (D4, R1).
+        workspaces,
+    );
+
+    match child_policy {
+        // The stored `Arc` goes straight through: re-wrapping it in a closure
+        // and a second `Arc` would add an indirection per delegation for
+        // nothing.
+        Some(policy) => tool.with_child_policy_arc(policy),
+        None => tool,
     }
 }
 

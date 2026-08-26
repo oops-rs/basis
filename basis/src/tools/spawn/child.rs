@@ -127,6 +127,26 @@ impl ChildSpec {
     /// omits `spawn` builds a child with no delegation door, and nothing is
     /// un-registered from the runtime underneath. mentra's `task` intrinsic
     /// stays hidden from a subagent whatever this roster says.
+    ///
+    /// **A roster can only narrow what the parent is offered, never widen
+    /// it past its workspace.** On a shared [`Runtime`](crate::Runtime) one
+    /// tool registry serves every open workspace, and
+    /// [`Workspace`](crate::Workspace) hides each *sibling's* bridged
+    /// `mcp__*` and declared tools from its own model at mint. Replacing the
+    /// child's profile would drop those hides along with the parent's roster,
+    /// so basis puts them back: the names the parent is denied are added to
+    /// the resulting profile's `hidden_tools` whichever constructor built it.
+    /// A [`hide`](ToolRoster::hide) roster simply gains them; an
+    /// [`only`](ToolRoster::only) roster that named one **loses that name,
+    /// silently** — `ToolProfile::allows` checks the denylist after the
+    /// allow-list — which is the same rule, stated the same way, that
+    /// [`ToolRoster::only`] already documents for a workspace's own roster
+    /// colliding with a sibling's tool. One composition, one outcome.
+    ///
+    /// This says nothing about *narrowing*: a policy may hand a child a
+    /// wider roster than its parent's within the workspace's own tools, and
+    /// mentra's template documents that it does not check either. What it
+    /// cannot do is reach another repository's.
     #[must_use]
     pub fn with_roster(self, roster: ToolRoster) -> Self {
         Self {
@@ -176,6 +196,12 @@ impl ChildSpec {
     /// delegation on the plain, template-free spawn path.
     pub(crate) fn is_inherit(&self) -> bool {
         self.roster.is_none() && self.model.is_none() && self.system.is_none()
+    }
+
+    /// Whether applying this spec replaces the child's cloned `ToolProfile`,
+    /// which is what makes the parent's per-mint hides basis's to restore.
+    pub(crate) fn overrides_roster(&self) -> bool {
+        self.roster.is_some()
     }
 
     /// The `child` key of the approver's preview, or `None` when there is

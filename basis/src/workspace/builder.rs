@@ -531,6 +531,11 @@ impl WorkspaceBuilder {
             HookRunner::new(&self.path, loaded_hooks),
             |runner, interceptor| runner.with_interceptor(interceptor),
         );
+        // Written by every mint, read by `spawn` when a child policy narrows a
+        // delegated child's roster — see `Workspace::minted_agent`. Empty
+        // until the first mint, which is correct: nothing has been offered a
+        // roster yet, so nothing has been denied one either.
+        let foreign_tools = Arc::new(std::sync::RwLock::new(std::collections::BTreeSet::new()));
         let hook_registration = runtime.register_workspace(dispatch::WorkspaceGuardEntry {
             runner: Arc::new(runner),
             shell: self.shell,
@@ -539,6 +544,7 @@ impl WorkspaceBuilder {
             // are already in policy; enforcing them in the dispatcher too
             // would change whose words a denial arrives in.
             shared,
+            foreign_tools: Arc::clone(&foreign_tools),
         });
 
         // Both lists reach the header whether or not this build has MCP in it:
@@ -594,6 +600,7 @@ impl WorkspaceBuilder {
             declared_tools: declared_tool_names,
             declared_registration: declared_tools,
             hook_registration,
+            foreign_tools,
             #[cfg(feature = "mcp")]
             mcp_connections,
         })

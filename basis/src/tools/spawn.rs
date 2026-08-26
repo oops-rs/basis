@@ -63,7 +63,7 @@ mod depth;
 mod execute;
 mod parse;
 
-use std::collections::BTreeSet;
+use std::{collections::BTreeSet, sync::Arc};
 
 use async_trait::async_trait;
 use mentra::tool::{
@@ -73,6 +73,7 @@ use mentra::tool::{
 };
 use serde_json::{Value, json};
 
+use crate::runtime::dispatch::HookDispatch;
 use parse::{INPUT_FIELD, Mode, Spawn, parse};
 
 // The runtime's hook dispatcher must know whether a `spawn` call is a command
@@ -154,6 +155,13 @@ pub struct SpawnTool {
     /// ordinary case — is inherit-everything on the exact code path this tool
     /// has always used.
     policy: Option<ChildPolicy>,
+    /// The runtime's workspace registry, read for one thing only: what the
+    /// delegating workspace's model is currently denied
+    /// ([`WorkspaceGuardEntry::foreign_tools`](crate::runtime::dispatch::WorkspaceGuardEntry)),
+    /// so a roster override cannot hand a child a sibling workspace's tools.
+    /// `None` for a host that built this tool itself against mentra, which
+    /// has no basis workspaces to shield from each other.
+    workspaces: Option<Arc<HookDispatch>>,
 }
 
 /// Hand-written for the policy field: a `dyn Fn` has no `Debug`, and presence
@@ -164,6 +172,10 @@ impl std::fmt::Debug for SpawnTool {
             .field("depth", &self.depth)
             .field("targets", &self.targets)
             .field("policy", &self.policy.as_ref().map(|_| "<child policy>"))
+            .field(
+                "workspaces",
+                &self.workspaces.as_ref().map(|_| "<registry>"),
+            )
             .finish()
     }
 }
@@ -216,6 +228,7 @@ impl SpawnTool {
                 .into_iter()
                 .collect(),
             policy: None,
+            workspaces: None,
         }
     }
 
@@ -235,10 +248,49 @@ impl SpawnTool {
     where
         F: Fn(&ChildContext<'_>) -> ChildSpec + Send + Sync + 'static,
     {
+        self.with_child_policy_arc(Arc::new(policy))
+    }
+
+    /// [`with_child_policy`](Self::with_child_policy) for a caller that
+    /// already holds the policy behind an `Arc` — basis's own
+    /// [`RuntimeBuilder`](crate::RuntimeBuilder), which stores one so its
+    /// `Debug` can say whether a policy is set. Wrapping that `Arc` in a
+    /// closure and a second `Arc` would be one more indirection per
+    /// delegation for nothing.
+    #[must_use]
+    pub(crate) fn with_child_policy_arc(self, policy: ChildPolicy) -> Self {
         Self {
-            policy: Some(std::sync::Arc::new(policy)),
+            policy: Some(policy),
             ..self
         }
+    }
+
+    /// Lets this tool read what the delegating workspace's model is denied, so
+    /// a roster override cannot grant a child more than its parent has (see
+    /// the [`workspaces`](Self::workspaces) field). basis's own
+    /// [`RuntimeBuilder`](crate::RuntimeBuilder) always says this; a host
+    /// registering `SpawnTool` on its own mentra runtime has no basis
+    /// workspaces and says nothing.
+    #[must_use]
+    pub(crate) fn with_workspaces(self, workspaces: Arc<HookDispatch>) -> Self {
+        Self {
+            workspaces: Some(workspaces),
+            ..self
+        }
+    }
+
+    /// The names the delegating workspace's own model is currently denied —
+    /// a sibling workspace's bridged and declared tools, as of the mint this
+    /// delegation belongs to.
+    ///
+    /// Empty whenever there is no registry to ask or no workspace claiming
+    /// this directory, which is the whole of the private-runtime case: one
+    /// workspace, no siblings, nothing foreign to shield a child from.
+    fn denied_to_parent(&self, workspace_dir: &std::path::Path) -> BTreeSet<String> {
+        self.workspaces
+            .as_ref()
+            .map(|registry| registry.foreign_tools(workspace_dir))
+            .unwrap_or_default()
     }
 
     /// What the policy says this delegation's child is — asked identically on
@@ -408,13 +460,21 @@ impl ToolExecutor for SpawnTool {
                 // working directory it reads is resolved only when there is a
                 // policy to read it, so the policy-free path stays exactly the
                 // path it has always been.
-                let spec = if self.policy.is_none() {
-                    ChildSpec::inherit()
+                let (spec, denied) = if self.policy.is_none() {
+                    (ChildSpec::inherit(), BTreeSet::new())
                 } else {
                     let cwd = ctx.resolve_working_directory(None)?;
-                    self.child_spec(spawn.body(), &ctx.agent_id, &cwd)
+                    let spec = self.child_spec(spawn.body(), &ctx.agent_id, &cwd);
+                    // Read only when a roster override is what would drop it:
+                    // every other spec keeps the parent's cloned profile,
+                    // per-mint hides and all.
+                    let denied = match spec.overrides_roster() {
+                        true => self.denied_to_parent(&cwd),
+                        false => BTreeSet::new(),
+                    };
+                    (spec, denied)
                 };
-                execute::delegate(&self.depth, &mut ctx, spawn.body(), depth, spec).await
+                execute::delegate(&self.depth, &mut ctx, spawn.body(), depth, spec, denied).await
             }
         }
     }

@@ -474,6 +474,149 @@ async fn the_bounds_still_bind_a_child_the_policy_reshaped() {
     );
 }
 
+/// A roster override must not hand a child the sibling-workspace tools its
+/// own parent is denied.
+///
+/// The hazard is specific to a shared runtime, so this one goes through
+/// basis's real front door — two `Workspace`s on one `Runtime`, the child
+/// policy on the builder — rather than the direct-to-mentra harness above:
+/// what is under test is the wiring between `Workspace::minted_agent`'s
+/// per-mint hiding and what `spawn` puts back after
+/// `with_tool_profile` replaces the child's cloned profile.
+///
+/// A **`hide`** roster is the sharp case and the one `only` structurally
+/// cannot show: an allow-list omits a sibling's tool by simply not naming it,
+/// while a denylist built from basis's own set carries no sibling names at
+/// all — so before the fix, a `hide` roster was the shortest path from
+/// "narrow this child" to "offer it another repository's tools". Declared
+/// tools stand in for the `mcp__*` half here because both land in one set by
+/// the same two loops in `minted_agent`, and a declared tool needs no server
+/// to exist.
+#[tokio::test]
+async fn a_narrowed_child_is_not_offered_a_siblings_tools() {
+    let sibling = tempfile::tempdir().expect("tempdir");
+    let mine = tempfile::tempdir().expect("tempdir");
+    let program = sibling.path().join("jenkins");
+    std::fs::write(&program, "#!/bin/sh\nprintf ok\n").expect("write program");
+    std::fs::set_permissions(
+        &program,
+        <std::fs::Permissions as std::os::unix::fs::PermissionsExt>::from_mode(0o755),
+    )
+    .expect("make it executable");
+    std::fs::create_dir_all(sibling.path().join(".basis")).expect("dir");
+    std::fs::write(
+        sibling.path().join(".basis/tools.json"),
+        format!(
+            r#"{{"schema": 1, "tools": {{"jenkins_job": {{
+                 "description": "Trigger a job.",
+                 "input_schema": {{"type": "object", "properties": {{}}}},
+                 "command": ["{}"]}}}}}}"#,
+            program.display()
+        ),
+    )
+    .expect("write manifest");
+
+    let (provider, asked) = ScriptedProvider::new(
+        BuiltinProvider::OpenAI,
+        vec![parent_model()],
+        vec![
+            Turn::calling("call-0", "triage: is this real?"),
+            Turn::saying("child done"),
+            Turn::saying("parent done"),
+        ],
+    );
+    let shared = Arc::new(
+        basis::Runtime::builder()
+            .with_provider_instance(provider)
+            .with_ephemeral_history()
+            // Narrows the child with a *denylist*, which keeps every name the
+            // parent could use except the one this host does not want a
+            // triage child running — and says nothing about a sibling's
+            // tools, because a policy author has no way to know they exist.
+            .with_child_policy(|child: &ChildContext<'_>| {
+                if child.prompt().starts_with("triage:") {
+                    ChildSpec::inherit().with_roster(ToolRoster::hide(["write"]))
+                } else {
+                    ChildSpec::inherit()
+                }
+            })
+            .build()
+            .expect("builds offline"),
+    );
+
+    let _declaring = offline_workspace(sibling.path(), Arc::clone(&shared))
+        .open()
+        .await
+        .expect("the sibling opens and claims its tool");
+    let workspace = offline_workspace(mine.path(), shared)
+        .open()
+        .await
+        .expect("opens");
+
+    let report = workspace
+        .prepare(basis::RunSpec::new("do the thing"))
+        .expect("mints")
+        .execute_with_approver(CollectingSink::new(), AllowAll)
+        .await
+        .expect("the run completes");
+    drop(report);
+
+    let rosters: Vec<Vec<String>> = asked
+        .lock()
+        .expect("not poisoned")
+        .iter()
+        .map(|request| request.tools.clone())
+        .collect();
+    assert_eq!(rosters.len(), 3, "parent, child, parent");
+    for (round, roster) in rosters.iter().enumerate() {
+        assert!(
+            !roster.contains(&"jenkins_job".to_string()),
+            "round {round} was offered a sibling repository's tool: {roster:?}"
+        );
+    }
+    assert!(
+        rosters[1].contains(&SPAWN.to_string()),
+        "the narrowed child keeps everything its parent had: {:?}",
+        rosters[1]
+    );
+    assert!(
+        !rosters[1].contains(&"write".to_string()),
+        "and loses exactly what the policy hid: {:?}",
+        rosters[1]
+    );
+}
+
+/// A workspace that looks nowhere except where the test put something.
+fn offline_workspace(path: &Path, runtime: Arc<basis::Runtime>) -> basis::WorkspaceBuilder {
+    basis::Workspace::builder(path)
+        .with_runtime(runtime)
+        .with_model(basis::ModelSelector::Id("parent-model".to_string()))
+        .with_context(basis::ContextConfig {
+            file_name: "AGENTS.md".to_string(),
+            global_dir: None,
+            walk_parents: false,
+        })
+        .with_skills(basis::skills::SkillsConfig {
+            workspace_subdir: Some(std::path::PathBuf::from(".basis/skills")),
+            shared_workspace_dir: true,
+            global_dir: None,
+            shared_home_dir: false,
+        })
+        .with_templates(basis::templates::TemplatesConfig {
+            workspace_subdir: std::path::PathBuf::from(".basis/templates"),
+            global_dir: None,
+        })
+        .with_hooks(basis::hooks::HooksConfig {
+            workspace_file: std::path::PathBuf::from(".basis/hooks.json"),
+            global_dir: None,
+        })
+        .with_tools(basis::tools::declared::ToolsConfig {
+            workspace_file: std::path::PathBuf::from(".basis/tools.json"),
+            global_dir: None,
+        })
+        .with_memory(basis::MemoryConfig::disabled())
+}
+
 #[tokio::test]
 async fn a_child_of_a_child_still_sees_one_door() {
     // The policy is runtime-scoped like the tool that consults it, so it
