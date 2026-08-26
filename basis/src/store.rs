@@ -286,53 +286,49 @@ pub fn forget_in(dir: &Path, agent_id: &str) -> Result<(), RunError> {
 /// read and write one file. The identifier is the other thing that has to
 /// agree, and it comes from [`runtime_identifier`] on both sides.
 fn enumerating_runtime(identifier: &str, dir: &Path) -> Result<Runtime, RunError> {
-    refuse_legacy_store(dir)?;
-
     Ok(Runtime::empty_builder()
         .with_runtime_identifier(identifier.to_string())
-        .with_store(store_in(dir))
+        .with_store(store_in(dir)?)
         .with_provider(BuiltinProvider::OpenAI, "unused-for-listing")
         .build()?)
 }
 
-/// The store basis keeps a workspace's conversations in, under `dir`.
+/// The store basis keeps a workspace's conversations in, under `dir` — or the
+/// refusal, when `dir` still holds a basis ≤0.6 conversation database.
 ///
 /// The one place the directory becomes a store root: `RuntimeBuilder` writes
 /// through this and [`list_in`] reads through it, so the two cannot drift.
 /// `dir` itself is the root — mentra lays `agents/`, `rules.json` and
 /// `runs.jsonl` inside it — which is what makes 0.7's layout land in exactly
-/// the directory 0.6's database sat in, and [`refuse_legacy_store`] the
-/// necessary guard beside it.
+/// the directory 0.6's database sat in.
+///
+/// **That is why this is fallible, and why the check lives here rather than
+/// beside each caller.** A file store started in a directory holding
+/// `runtime.sqlite` would look exactly like every conversation being lost, so
+/// the check has to happen every time one is opened — and a check a caller
+/// has to remember is one a future caller will forget. Constructing the store
+/// *is* the check: there is no way to reach a `FileRuntimeStore` for a named
+/// directory without passing it.
+///
+/// mentra's own file store detects the same file, and that is not enough on
+/// its own: it errors in mentra's words — naming its `store-sqlite` cargo
+/// feature, a fix for a mentra embedder rather than for the person whose
+/// history is sitting there — and it raises it from `prepare_recovery`, which
+/// `RuntimeHandle::prepare_recovery` treats as best-effort and discards, so
+/// nothing legible reaches anyone through `build`. [`RunError::LegacyStore`]
+/// says what actually happened and names both ways forward.
 ///
 /// Neither this store type nor [`volatile`]'s reaches basis's surface. A caller
 /// picks a *posture* — history in a directory, or history nowhere — and basis
 /// picks the backend that is it, rather than re-exporting `RuntimeStore` and
 /// the nine traits it composes (see
 /// [`RuntimeBuilder::with_store_dir`](crate::RuntimeBuilder::with_store_dir)).
-pub(crate) fn store_in(dir: &Path) -> FileRuntimeStore {
-    FileRuntimeStore::new(dir)
-}
-
-/// Refuses a store directory that holds a basis ≤0.6 conversation database.
-///
-/// mentra's own file store makes the same check at build time and errors in
-/// mentra's words — naming its `store-sqlite` cargo feature, which is a fix
-/// for a mentra embedder and not for a basis operator — and the runtime's
-/// recovery path treats that error as best-effort, so nothing legible ever
-/// reaches the person whose history is sitting right there. basis therefore
-/// checks for itself, at every surface that opens a store in a directory:
-/// [`RuntimeBuilder::build`](crate::RuntimeBuilder::build) for a workspace
-/// opening or a task attaching, and [`enumerating_runtime`] for `list`/
-/// `forget`. Starting an empty file store beside the database would look
-/// exactly like every conversation being lost; the error says what actually
-/// happened and names both ways forward instead.
-pub(crate) fn refuse_legacy_store(dir: &Path) -> Result<(), RunError> {
-    let database = dir.join(LEGACY_SQLITE_FILENAME);
-    if database.exists() {
+pub(crate) fn store_in(dir: &Path) -> Result<FileRuntimeStore, RunError> {
+    if dir.join(LEGACY_SQLITE_FILENAME).exists() {
         return Err(RunError::LegacyStore { dir: dir.into() });
     }
 
-    Ok(())
+    Ok(FileRuntimeStore::new(dir))
 }
 
 /// The store that keeps a workspace's conversations nowhere.
@@ -543,7 +539,7 @@ mod tests {
     fn a_chosen_directory_holds_the_layout_the_default_one_would_have() {
         // The identity that makes `with_store_dir` a relocation rather than a
         // second scheme: pointing it at the default directory is a no-op.
-        let store = store_in(&default_directory());
+        let store = store_in(&default_directory()).expect("the default directory is usable");
 
         assert_eq!(
             store.root(),

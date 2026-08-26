@@ -608,8 +608,8 @@ impl RuntimeBuilder {
     /// Unset, mentra chooses, and what it chooses is keyed by the **process's
     /// current directory** rather than by any workspace basis opened — so a host
     /// that opens two workspaces from one place writes both histories to one
-    /// file, and a test suite writes to a real database under the user's data
-    /// directory whatever temp directory it opened. Two callers want to say
+    /// place, and a test suite writes into the user's real data directory
+    /// whatever temp directory it opened. Two callers want to say
     /// otherwise: a host that keeps basis's history inside its own application
     /// data, and a test that wants no persistent side effect at all. Both are
     /// asking the same question — *where* — so that is what this takes.
@@ -617,24 +617,46 @@ impl RuntimeBuilder {
     /// *nowhere*, and is the last word between the two: whichever was called
     /// last decides.
     ///
-    /// Not the store itself, though mentra's `RuntimeBuilder::with_store` would
-    /// take one. `RuntimeStore` is a composition of nine traits, and under the
+    /// # What lands in the directory
+    ///
+    /// `dir` **is** the store's root, and since 0.7 what fills it is plain
+    /// files, no database (ADR-0023): `agents/<id>/` holding an `agent.json`,
+    /// a `state.json`, a `transcript.jsonl` and a `leaf`, plus a `rules.json`
+    /// and a `runs.jsonl` beside them — mentra's own file-store layout,
+    /// readable with `grep` and `jq`. Compaction snapshots go in a
+    /// `transcripts/` sibling under the same root, so this one call moves
+    /// both or neither. Nothing is created until the first write, and
+    /// pointing this at
+    /// [`store::default_directory`](crate::store::default_directory) is
+    /// exactly the default. [`store::list_in`](crate::store::list_in) is how
+    /// the same conversations are read back, and it is pointed at the same
+    /// directory.
+    ///
+    /// # A directory from basis 0.6 is refused, not adopted
+    ///
+    /// basis ≤0.6 kept conversations in a `runtime.sqlite` in this same
+    /// directory, and this build neither links SQLite nor migrates
+    /// (ADR-0023's E2 precedent). Naming a directory that still holds one
+    /// fails [`build`](Self::build) with
+    /// [`RunError::LegacyStore`](crate::RunError::LegacyStore) rather than
+    /// starting an empty store beside it, which would read as every
+    /// conversation having vanished. The ways forward are in the message:
+    /// basis 0.6 to continue an old conversation, or this knob pointed
+    /// somewhere fresh — `BASIS_DATA_DIR` for the CLI — to start new work.
+    ///
+    /// # Not the store itself
+    ///
+    /// Though mentra's `RuntimeBuilder::with_store` would take one.
+    /// `RuntimeStore` is a composition of nine traits, and under the
     /// rule written on [`CancellationToken`](crate::CancellationToken) — every
     /// mentra type basis's surface makes a caller *name*, basis re-exports — that
     /// shape would cost the re-export of all nine plus the record types they
-    /// pass. What it would buy is reachable without it: mentra ships two
-    /// stores, a SQLite file and an in-memory one, and between this and
+    /// pass. What it would buy is reachable without it: between this and
     /// [`with_ephemeral_history`](Self::with_ephemeral_history) a caller
-    /// already picks either without naming a mentra type. A caller that
-    /// genuinely wants its own backend still has one, on
+    /// already picks durable-here or nowhere-at-all without naming a mentra
+    /// type. A caller that genuinely wants its own backend still has one, on
     /// [`Runtime::mentra_runtime`]'s side of the bargain: build the mentra
     /// runtime and drive it directly.
-    ///
-    /// The directory is created on first write, and basis names the file inside
-    /// it — [`store::list_in`](crate::store::list_in) is how the same
-    /// conversations are read back, and it has to be able to find them.
-    /// Pointing this at [`store::default_directory`](crate::store::default_directory)
-    /// is exactly the default.
     ///
     /// Deliberately not a per-run knob: a run describes an invocation, and
     /// where a machine keeps its history is not something an invocation
@@ -653,7 +675,7 @@ impl RuntimeBuilder {
     ///
     /// The sibling of [`with_store_dir`](Self::with_store_dir), for the caller
     /// whose answer to *where* is *nowhere*. mentra's in-memory store backs it:
-    /// no database file is opened, no tool output is spilled, no directory is
+    /// nothing is written, no tool output is spilled, no directory is
     /// created, and dropping the [`Runtime`] takes the history with it.
     ///
     /// One file is still written, and only if a conversation gets long enough
@@ -991,23 +1013,24 @@ impl RuntimeBuilder {
     }
 
     fn build_with(self, identifier: String, policy: RuntimePolicy) -> Result<Runtime, RunError> {
-        // First, before even the credential is looked up: a store directory
-        // that still holds a basis ≤0.6 SQLite database is refused in basis's
-        // words (ADR-0023's no-migration ruling), never quietly shadowed with
-        // an empty file store that would read as every conversation being
-        // lost. First because it is the most fundamental fact an upgrade can
-        // trip over — a missing key is fixable in the environment, this needs
-        // a decision about the data — and checked by basis rather than left
-        // to mentra because mentra's own detection is swallowed by its
-        // best-effort recovery path and worded for a mentra embedder (see
-        // `store::refuse_legacy_store`). The default arm checks the directory
-        // mentra will choose, which is where a 0.6 host that never named one
-        // kept its history.
-        match &self.history {
-            Some(History::Directory(dir)) => store::refuse_legacy_store(dir)?,
-            Some(History::Ephemeral) => {}
-            None => store::refuse_legacy_store(&store::default_directory())?,
-        }
+        // First, before even the credential is looked up: opening the store
+        // is what refuses a directory still holding a basis ≤0.6 SQLite
+        // database (ADR-0023's no-migration ruling, and `store::store_in`'s
+        // own docs for why the check is the constructor). First because it is
+        // the most fundamental fact an upgrade can trip over — a missing key
+        // is fixable in the environment, this needs a decision about the
+        // data. The unsaid arm opens the directory mentra would have chosen,
+        // which is where a 0.6 host that named none kept its history, and
+        // discards the store: what is being asked is whether that directory
+        // is usable at all, and mentra's builder still picks its own default.
+        let history = match &self.history {
+            Some(History::Directory(dir)) => Some(store::store_in(dir)?),
+            Some(History::Ephemeral) => None,
+            None => {
+                store::store_in(&store::default_directory())?;
+                None
+            }
+        };
 
         // Before anything is resolved or assembled, because a name that cannot
         // be routed on is a configuration mistake and not a runtime condition.
@@ -1103,11 +1126,12 @@ impl RuntimeBuilder {
         // Left alone unless the caller said something, because mentra's default
         // is a real store a host may already have history in — moving it, or
         // dropping it on the floor, is a thing to be asked for and never a
-        // thing to happen by upgrade.
-        let builder = match &self.history {
-            Some(History::Directory(dir)) => builder.with_store(store::store_in(dir)),
-            Some(History::Ephemeral) => builder.with_store(store::volatile()),
-            None => builder,
+        // thing to happen by upgrade. `history` is the store opened above,
+        // already past the legacy-database refusal.
+        let builder = match (history, &self.history) {
+            (Some(store), _) => builder.with_store(store),
+            (None, Some(History::Ephemeral)) => builder.with_store(store::volatile()),
+            (None, _) => builder,
         };
 
         // The same answer applied to the other file mentra writes about a
