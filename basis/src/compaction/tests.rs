@@ -15,6 +15,7 @@ fn nothing_the_model_read_is_elided_by_default() {
     let config = Compaction::default().into_mentra(transcripts());
 
     assert_eq!(config.keep_recent_tool_results, usize::MAX);
+    assert_eq!(config.projected_tool_result_budget, None);
 }
 
 #[test]
@@ -42,10 +43,11 @@ fn the_summarizing_triggers_are_still_mentras() {
 }
 
 #[test]
-fn every_knob_basis_does_not_offer_stays_at_mentras_default() {
-    // The four-knob surface is only honest if the other six are genuinely
-    // untouched: a field basis quietly restated would be a second opinion to
-    // keep in step with upstream's first.
+fn every_inherited_knob_stays_at_mentras_default() {
+    // The four-knob surface is only honest if the remaining defaults are
+    // genuinely inherited. The projected byte budget is the deliberate
+    // exception: it is pinned off above because it conflicts with the count
+    // policy Basis exposes.
     let config = Compaction::default().into_mentra(transcripts());
     let mentra = mentra::agent::CompactionConfig::default();
 
@@ -66,6 +68,7 @@ fn every_knob_basis_does_not_offer_stays_at_mentras_default() {
         config.max_persisted_transcripts,
         mentra.max_persisted_transcripts
     );
+    assert_eq!(config.projected_tool_result_budget, None);
 }
 
 #[test]
@@ -75,6 +78,7 @@ fn a_host_that_asks_for_elision_by_number_gets_that_number() {
         .into_mentra(transcripts());
 
     assert_eq!(config.keep_recent_tool_results, 3);
+    assert_eq!(config.projected_tool_result_budget, None);
 }
 
 #[test]

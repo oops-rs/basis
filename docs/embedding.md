@@ -12,7 +12,7 @@ an embedding host compiles only what it runs
 
 ```toml
 [dependencies]
-basis = "0.1"   # unpublished so far — a git or path dependency until it isn't
+basis = "0.7"
 ```
 
 MCP is a default-on `mcp` feature rather than a fixed part of the core:
@@ -609,8 +609,7 @@ directly:
 
 ```toml
 [dependencies]
-basis-tasks = "0.6"   # joins the workspace version at the next release — a git or path
-                       # dependency until then, same as basis-acp and basis were before 0.6.0
+basis-tasks = "0.7"
 ```
 
 ```rust
@@ -634,11 +633,13 @@ caller plugs in per call rather than something the crate decides for you.
 
 Two unrelated things shorten a history, and only one of them is the one you would guess.
 
-**Every provider request** passes through micro-compaction, which blanks the content of
-older tool results — no token budget in the decision, no event when it fires, on the fourth
-tool call as readily as the four-hundredth. mentra's own default keeps them all, and basis
-agrees: a harness that silently blanks the file the model just read is worse at the job, and
-the tokens are ones you can already see and price.
+**Every provider request** passes through micro-compaction, which can blank the content of
+older tool results — no token budget in the decision, on the fourth tool call as readily as
+the four-hundredth. Mentra 0.22 reports each changed projection through
+`Event::RequestToolResultsElided`; the canonical transcript remains intact, but the model no
+longer sees those bodies. mentra's own default keeps them all, and basis agrees: a harness
+that blanks the file the model just read is worse at the job, and the tokens are ones you can
+already see and price.
 
 **A long conversation** gets summarized: the transcript is snapshotted to disk, an older
 prefix is replaced by a model-written summary, and the recent tail is preserved. It fires

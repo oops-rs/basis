@@ -23,13 +23,16 @@ basis-acp = { version = "0.7", path = "basis-acp" }
 # that is now merely their first client.
 basis-tasks = { version = "0.7", path = "basis-tasks" }
 
-# Mentra 0.21 is the runtime contract basis targets, and the floor is hard:
-# two of basis's surfaces stand on APIs that exist nowhere below it —
-# `FileRuntimeStore`, which is what `with_store_dir` opens now that basis
-# links no database (ADR-0023, D1), and the `DisposableSubagentTemplate` /
-# `spawn_subagent_from` family, which is how a child policy overrides a
-# subagent's roster, model or system prompt (D4). The 0.20 floor's reasons
-# still hold beneath it — `PermissionRequested.classification`, the
+# Mentra 0.22 is the runtime contract basis targets, and the floor is hard:
+# basis's exhaustive event normalizer owns the new
+# `RequestToolResultsElided` wire event, while its compaction adapter
+# deliberately leaves the mutually exclusive projected-byte budget disabled.
+# The 0.21 floor's reasons still hold beneath it — `FileRuntimeStore`, which
+# is what `with_store_dir` opens now that basis links no database (ADR-0023,
+# D1), and the `DisposableSubagentTemplate` / `spawn_subagent_from` family,
+# which is how a child policy overrides a subagent's roster, model or system
+# prompt (D4). The 0.20 floor's reasons still hold beneath those —
+# `PermissionRequested.classification`, the
 # `Box`/`Arc` implementations of the tool traits,
 # `McpManager::connect_streamable_http` — as do the 0.19 floor's (the
 # chat/completions wire `with_wire` defaults a base URL to and the keyless
@@ -49,7 +52,7 @@ basis-tasks = { version = "0.7", path = "basis-tasks" }
 # persistent store is the file-backed one, which is exactly ADR-0023's
 # posture — basis persists to files and links no database — so nothing
 # re-offers it.
-mentra = { version = "0.21.0", default-features = false }
+mentra = { version = "0.22.0", default-features = false }
 
 async-trait = "0.1"
 # ACP carries an image in a prompt as base64; basis's `PromptPart` carries the

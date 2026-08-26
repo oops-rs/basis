@@ -234,6 +234,19 @@ fn progress_line(event: &Event) -> Option<String> {
         // Both are pauses with a reason, and a terminal that does not name
         // them looks stuck for as long as they last.
         Event::CompactionStarted { .. } => "basis: compacting the conversation".to_string(),
+        Event::RequestToolResultsElided {
+            canonical_tool_result_content_bytes,
+            projected_tool_result_content_bytes,
+            results,
+            ..
+        } => format!(
+            "basis: {}",
+            tool_result_elision_line(
+                *canonical_tool_result_content_bytes,
+                *projected_tool_result_content_bytes,
+                results.len(),
+            )
+        ),
         Event::Retry {
             error,
             attempt,
@@ -248,6 +261,18 @@ fn progress_line(event: &Event) -> Option<String> {
         }
         _ => return None,
     })
+}
+
+fn tool_result_elision_line(
+    canonical_bytes: usize,
+    projected_bytes: usize,
+    changed: usize,
+) -> String {
+    let result = if changed == 1 { "result" } else { "results" };
+    format!(
+        "request tool results reduced: {canonical_bytes} -> {projected_bytes} bytes; \
+         {changed} {result} changed"
+    )
 }
 
 /// What the run reported spending, in one line, or `None` when it reported
@@ -434,7 +459,13 @@ fn write_hint(payload: &Value, err: &mut impl Write) -> io::Result<()> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use basis::{Mutability, RunOutcome, event::ContextFile};
+    use basis::{
+        Mutability, RunOutcome,
+        event::{
+            ContextFile, ElidedToolResult, RequestToolResultElisionPolicy, ToolResultContentKind,
+            ToolResultElisionAction,
+        },
+    };
     use serde_json::json;
 
     fn value(event: Event) -> Value {
@@ -637,6 +668,39 @@ mod tests {
 
         assert!(out.is_empty(), "and no answer was streamed to close");
         assert!(err.is_empty(), "{}", String::from_utf8_lossy(&err));
+    }
+
+    #[test]
+    fn request_tool_result_elision_is_progress_not_answer_text() {
+        let live = Live::when(true);
+        let (mut out, mut err) = (Vec::new(), Vec::new());
+        let event = value(Event::RequestToolResultsElided {
+            agent_id: "agent-1".to_string(),
+            policy: RequestToolResultElisionPolicy::KeepRecent {
+                configured_keep_recent_tool_results: 3,
+            },
+            canonical_tool_result_content_bytes: 8_192,
+            projected_tool_result_content_bytes: 512,
+            results: vec![ElidedToolResult {
+                tool_call_id: "call-1".to_string(),
+                tool_name: Some("read".to_string()),
+                is_error: false,
+                canonical_content_kind: ToolResultContentKind::Text,
+                action: ToolResultElisionAction::Marker,
+                canonical_content_bytes: 8_192,
+                projected_content_bytes: 32,
+            }],
+        });
+
+        live.show_to(&event, &mut out, &mut err)
+            .expect("writing to a vector");
+
+        assert!(out.is_empty(), "projection telemetry is not answer text");
+        assert_eq!(
+            String::from_utf8(err).expect("utf8"),
+            "basis: request tool results reduced: 8192 -> 512 bytes; 1 result changed\n"
+        );
+        assert!(!live.answered());
     }
 
     #[test]

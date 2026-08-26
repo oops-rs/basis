@@ -710,11 +710,11 @@ pub(crate) fn resolved_workspace(requested: &Path, context: &WorkspaceContext) -
 ///
 /// # Why compaction is not left at mentra's default
 ///
-/// Because that default is an opinion, and a costly one: mentra blanks every
-/// tool result but the three most recent on the way to *every* provider
-/// request, at any context size. See [`crate::compaction`]. The other eight
-/// fields of its `CompactionConfig` are still inherited — only what basis has
-/// a reason to state is stated.
+/// Because evidence retention is a Basis invariant, not an upstream default.
+/// Mentra currently also keeps every result, but Basis pins that posture so a
+/// future default cannot silently blank what the model just read. See
+/// [`crate::compaction`]. The mutually exclusive projected-byte policy is
+/// explicitly off; the remaining unexposed settings are inherited.
 ///
 /// # Which tools the model is offered
 ///

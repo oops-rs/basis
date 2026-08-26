@@ -9,6 +9,12 @@
 
 use mentra::{
     SessionEvent,
+    agent::{
+        ElidedToolResult as MentraElidedToolResult,
+        RequestToolResultElisionPolicy as MentraRequestToolResultElisionPolicy,
+        ToolResultContentKind as MentraToolResultContentKind,
+        ToolResultElisionAction as MentraToolResultElisionAction,
+    },
     session::{
         NoticeSeverity as MentraNoticeSeverity, PermissionOutcome as MentraPermissionOutcome,
         PermissionRuleScope, TaskKind as MentraTaskKind, TaskLifecycleStatus, ToolMutability,
@@ -17,7 +23,9 @@ use mentra::{
 use serde_json::Value;
 
 use super::{
-    Event, Mutability, NoticeSeverity, PermissionOutcome, RuleScope, TaskKind, TaskStatus,
+    ElidedToolResult, Event, Mutability, NoticeSeverity, PermissionOutcome,
+    RequestToolResultElisionPolicy, RuleScope, TaskKind, TaskStatus, ToolResultContentKind,
+    ToolResultElisionAction,
 };
 
 /// Maps one session event, or `None` when basis's stream already carries the
@@ -145,6 +153,19 @@ pub(super) fn from_session_event(event: &SessionEvent) -> Option<Event> {
             extracted_facts: *extracted_facts_count,
             summary_preview: summary_preview.clone(),
         },
+        SessionEvent::RequestToolResultsElided {
+            agent_id,
+            policy,
+            canonical_tool_result_content_bytes,
+            projected_tool_result_content_bytes,
+            results,
+        } => Event::RequestToolResultsElided {
+            agent_id: agent_id.clone(),
+            policy: elision_policy_of(policy),
+            canonical_tool_result_content_bytes: *canonical_tool_result_content_bytes,
+            projected_tool_result_content_bytes: *projected_tool_result_content_bytes,
+            results: results.iter().map(elided_tool_result_of).collect(),
+        },
         SessionEvent::MemoryUpdated {
             agent_id,
             stored_records,
@@ -267,6 +288,54 @@ fn task_status_of(value: TaskLifecycleStatus) -> TaskStatus {
         TaskLifecycleStatus::Running => TaskStatus::Running,
         TaskLifecycleStatus::Finished => TaskStatus::Finished,
         TaskLifecycleStatus::Failed => TaskStatus::Failed,
+    }
+}
+
+fn elision_policy_of(
+    value: &MentraRequestToolResultElisionPolicy,
+) -> RequestToolResultElisionPolicy {
+    match value {
+        MentraRequestToolResultElisionPolicy::KeepRecent {
+            configured_keep_recent_tool_results,
+        } => RequestToolResultElisionPolicy::KeepRecent {
+            configured_keep_recent_tool_results: *configured_keep_recent_tool_results,
+        },
+        MentraRequestToolResultElisionPolicy::ByteBudget {
+            configured_max_bytes,
+            configured_prioritize_recent_results,
+            configured_max_preview_bytes,
+        } => RequestToolResultElisionPolicy::ByteBudget {
+            configured_max_bytes: *configured_max_bytes,
+            configured_prioritize_recent_results: *configured_prioritize_recent_results,
+            configured_max_preview_bytes: *configured_max_preview_bytes,
+        },
+    }
+}
+
+fn elided_tool_result_of(value: &MentraElidedToolResult) -> ElidedToolResult {
+    ElidedToolResult {
+        tool_call_id: value.tool_call_id.clone(),
+        tool_name: value.tool_name.clone(),
+        is_error: value.is_error,
+        canonical_content_kind: content_kind_of(value.canonical_content_kind),
+        action: elision_action_of(value.action),
+        canonical_content_bytes: value.canonical_content_bytes,
+        projected_content_bytes: value.projected_content_bytes,
+    }
+}
+
+fn content_kind_of(value: MentraToolResultContentKind) -> ToolResultContentKind {
+    match value {
+        MentraToolResultContentKind::Text => ToolResultContentKind::Text,
+        MentraToolResultContentKind::Structured => ToolResultContentKind::Structured,
+    }
+}
+
+fn elision_action_of(value: MentraToolResultElisionAction) -> ToolResultElisionAction {
+    match value {
+        MentraToolResultElisionAction::Preview => ToolResultElisionAction::Preview,
+        MentraToolResultElisionAction::Marker => ToolResultElisionAction::Marker,
+        MentraToolResultElisionAction::Omitted => ToolResultElisionAction::Omitted,
     }
 }
 
@@ -396,6 +465,92 @@ mod tests {
                 text: "lo".to_string()
             })
         );
+    }
+
+    #[test]
+    fn byte_budget_elision_maps_every_public_fact_without_a_body() {
+        let event = SessionEvent::RequestToolResultsElided {
+            agent_id: "agent-1".to_string(),
+            policy: MentraRequestToolResultElisionPolicy::ByteBudget {
+                configured_max_bytes: 4_096,
+                configured_prioritize_recent_results: 2,
+                configured_max_preview_bytes: 512,
+            },
+            canonical_tool_result_content_bytes: 9_000,
+            projected_tool_result_content_bytes: 4_000,
+            results: vec![MentraElidedToolResult {
+                tool_call_id: "call-1".to_string(),
+                tool_name: Some("grep".to_string()),
+                is_error: false,
+                canonical_content_kind: MentraToolResultContentKind::Text,
+                action: MentraToolResultElisionAction::Preview,
+                canonical_content_bytes: 8_000,
+                projected_content_bytes: 3_000,
+            }],
+        };
+
+        assert_eq!(
+            from_session_event(&event),
+            Some(Event::RequestToolResultsElided {
+                agent_id: "agent-1".to_string(),
+                policy: RequestToolResultElisionPolicy::ByteBudget {
+                    configured_max_bytes: 4_096,
+                    configured_prioritize_recent_results: 2,
+                    configured_max_preview_bytes: 512,
+                },
+                canonical_tool_result_content_bytes: 9_000,
+                projected_tool_result_content_bytes: 4_000,
+                results: vec![ElidedToolResult {
+                    tool_call_id: "call-1".to_string(),
+                    tool_name: Some("grep".to_string()),
+                    is_error: false,
+                    canonical_content_kind: ToolResultContentKind::Text,
+                    action: ToolResultElisionAction::Preview,
+                    canonical_content_bytes: 8_000,
+                    projected_content_bytes: 3_000,
+                }],
+            })
+        );
+    }
+
+    #[test]
+    fn recent_count_elision_keeps_omitted_structured_result_metadata() {
+        let event = SessionEvent::RequestToolResultsElided {
+            agent_id: "agent-2".to_string(),
+            policy: MentraRequestToolResultElisionPolicy::KeepRecent {
+                configured_keep_recent_tool_results: 3,
+            },
+            canonical_tool_result_content_bytes: 1_024,
+            projected_tool_result_content_bytes: 24,
+            results: vec![MentraElidedToolResult {
+                tool_call_id: "call-2".to_string(),
+                tool_name: None,
+                is_error: true,
+                canonical_content_kind: MentraToolResultContentKind::Structured,
+                action: MentraToolResultElisionAction::Omitted,
+                canonical_content_bytes: 1_024,
+                projected_content_bytes: 0,
+            }],
+        };
+
+        let Some(Event::RequestToolResultsElided {
+            policy, results, ..
+        }) = from_session_event(&event)
+        else {
+            panic!("expected request_tool_results_elided");
+        };
+        assert_eq!(
+            policy,
+            RequestToolResultElisionPolicy::KeepRecent {
+                configured_keep_recent_tool_results: 3,
+            }
+        );
+        assert_eq!(
+            results[0].canonical_content_kind,
+            ToolResultContentKind::Structured
+        );
+        assert_eq!(results[0].action, ToolResultElisionAction::Omitted);
+        assert!(results[0].is_error);
     }
 
     #[test]

@@ -134,6 +134,21 @@ pub fn session_update(event: &Event) -> Option<SessionUpdate> {
         // watching a turn run in.
         Event::CompactionStarted { .. } => return None,
 
+        // Request-only elision changes what the model receives without
+        // rewriting the canonical transcript. ACP has no dedicated update for
+        // that distinction, so report only the aggregate effect as a thought;
+        // the detailed, body-free records remain available on the JSONL stream.
+        Event::RequestToolResultsElided {
+            canonical_tool_result_content_bytes,
+            projected_tool_result_content_bytes,
+            results,
+            ..
+        } => SessionUpdate::AgentThoughtChunk(chunk(&tool_result_elision_line(
+            *canonical_tool_result_content_bytes,
+            *projected_tool_result_content_bytes,
+            results.len(),
+        ))),
+
         // Housekeeping: real, and worth having on the JSONL stream, but not
         // something an ACP client renders. `UsageUpdate` is about the context
         // window rather than per-turn token counts, so basis does not pretend
@@ -189,6 +204,18 @@ fn chunk(text: &str) -> ContentChunk {
 
 fn text_block(text: &str) -> ContentBlock {
     ContentBlock::Text(TextContent::new(text.to_string()))
+}
+
+fn tool_result_elision_line(
+    canonical_bytes: usize,
+    projected_bytes: usize,
+    changed: usize,
+) -> String {
+    let result = if changed == 1 { "result" } else { "results" };
+    format!(
+        "request tool results reduced: {canonical_bytes} -> {projected_bytes} bytes; \
+         {changed} {result} changed"
+    )
 }
 
 /// What to call the tool call in a client's UI.
@@ -320,7 +347,10 @@ fn spawn_kind(input: &Value) -> ToolKind {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use basis::event::{NoticeSeverity, RunOutcome};
+    use basis::event::{
+        ElidedToolResult, NoticeSeverity, RequestToolResultElisionPolicy, RunOutcome,
+        ToolResultContentKind, ToolResultElisionAction,
+    };
     use serde_json::json;
 
     fn text_of(chunk: &ContentChunk) -> String {
@@ -527,6 +557,38 @@ mod tests {
                 agent_id: "agent-1".to_string()
             }),
             None
+        );
+    }
+
+    #[test]
+    fn request_tool_result_elision_is_a_concise_thought() {
+        let update = session_update(&Event::RequestToolResultsElided {
+            agent_id: "agent-1".to_string(),
+            policy: RequestToolResultElisionPolicy::ByteBudget {
+                configured_max_bytes: 4_096,
+                configured_prioritize_recent_results: 2,
+                configured_max_preview_bytes: 512,
+            },
+            canonical_tool_result_content_bytes: 8_192,
+            projected_tool_result_content_bytes: 4_096,
+            results: vec![ElidedToolResult {
+                tool_call_id: "call-1".to_string(),
+                tool_name: Some("grep".to_string()),
+                is_error: false,
+                canonical_content_kind: ToolResultContentKind::Text,
+                action: ToolResultElisionAction::Preview,
+                canonical_content_bytes: 8_192,
+                projected_content_bytes: 4_096,
+            }],
+        })
+        .expect("mapped");
+
+        let SessionUpdate::AgentThoughtChunk(chunk) = update else {
+            panic!("expected a thought chunk");
+        };
+        assert_eq!(
+            text_of(&chunk),
+            "request tool results reduced: 8192 -> 4096 bytes; 1 result changed"
         );
     }
 

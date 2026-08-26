@@ -15,7 +15,7 @@
 //! does not understand. The last line is always [`Event::RunFinished`].
 //!
 //! ```jsonl
-//! {"seq":0,"type":"run_started","schema":1,"basis":"0.1.0","workspace":"/repo",...}
+//! {"seq":0,"type":"run_started","schema":2,"basis":"0.1.0","workspace":"/repo",...}
 //! {"seq":1,"type":"assistant_delta","text":"Looking at "}
 //! {"seq":2,"type":"run_finished","status":"ok"}
 //! ```
@@ -34,7 +34,12 @@ pub use jsonl::JsonlWriter;
 
 /// Version of the JSONL wire format. Bumped when a change would break a
 /// consumer that reads the current shape.
-pub const EVENT_SCHEMA_VERSION: u32 = 1;
+///
+/// Schema 2 adds the `request_tool_results_elided` event. Unlike an optional
+/// field on an existing event, a new internally tagged enum variant makes a
+/// schema-1 serde reader reject that line, so the header must let a reader
+/// refuse the stream before encountering it.
+pub const EVENT_SCHEMA_VERSION: u32 = 2;
 
 /// One line of the stream: a sequence number and the event itself, flattened
 /// so a line is a single flat JSON object.
@@ -106,6 +111,75 @@ pub enum TaskStatus {
     Running,
     Finished,
     Failed,
+}
+
+/// The canonical representation a tool result had before request-only
+/// projection reduced it.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+#[non_exhaustive]
+pub enum ToolResultContentKind {
+    /// Text, possibly already shaped by the runtime's limiter or pager.
+    Text,
+    /// One complete structured JSON value.
+    Structured,
+}
+
+/// How a provider-request projection reduced one tool-result body.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+#[non_exhaustive]
+pub enum ToolResultElisionAction {
+    /// Canonical text survives at the head and tail around an omission marker.
+    Preview,
+    /// No canonical body bytes survive, but a marker names the earlier tool.
+    Marker,
+    /// No canonical body bytes survive; the projected body is opaque or empty.
+    Omitted,
+}
+
+/// The request-only policy that reduced tool-result bodies.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(tag = "kind", rename_all = "snake_case")]
+#[non_exhaustive]
+pub enum RequestToolResultElisionPolicy {
+    /// The legacy count policy preserved a suffix of recent results.
+    KeepRecent {
+        /// The configured number of newest results kept whole.
+        configured_keep_recent_tool_results: usize,
+    },
+    /// A strict aggregate byte budget shaped all projected result bodies.
+    ByteBudget {
+        /// The configured hard cap across projected tool-result bodies.
+        configured_max_bytes: usize,
+        /// How many newest results received first priority for whole bodies.
+        configured_prioritize_recent_results: usize,
+        /// The largest generated head/tail preview, including its separator.
+        configured_max_preview_bytes: usize,
+    },
+}
+
+/// One tool result changed only in the provider-request projection.
+///
+/// The canonical body remains in the transcript and is deliberately absent
+/// here, so event journals do not duplicate potentially sensitive tool output.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct ElidedToolResult {
+    /// The provider tool-call id whose result was changed.
+    pub tool_call_id: String,
+    /// The preceding tool's name when it could be correlated with the result.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub tool_name: Option<String>,
+    /// Whether the canonical result represented a tool failure.
+    pub is_error: bool,
+    /// Whether the canonical body was text or structured JSON.
+    pub canonical_content_kind: ToolResultContentKind,
+    /// How the projection reduced the canonical body.
+    pub action: ToolResultElisionAction,
+    /// UTF-8 text bytes or compact serialized JSON bytes before projection.
+    pub canonical_content_bytes: usize,
+    /// Body bytes that remain in the provider-neutral projection.
+    pub projected_content_bytes: usize,
 }
 
 /// How a run ended.
@@ -280,6 +354,21 @@ pub enum Event {
         extracted_facts: usize,
         summary_preview: String,
     },
+    /// Tool-result bodies were reduced only in one provider-request projection.
+    ///
+    /// This is distinct from canonical compaction: the stored transcript stays
+    /// unchanged, and the event carries byte counts and actions but no body
+    /// snippets.
+    RequestToolResultsElided {
+        agent_id: String,
+        policy: RequestToolResultElisionPolicy,
+        /// Sum across every canonical tool-result body in the request.
+        canonical_tool_result_content_bytes: usize,
+        /// Sum across every projected tool-result body, including markers.
+        projected_tool_result_content_bytes: usize,
+        /// Changed results in request order.
+        results: Vec<ElidedToolResult>,
+    },
     MemoryUpdated {
         agent_id: String,
         stored_records: usize,
@@ -390,6 +479,7 @@ impl Event {
             Event::TaskUpdated { .. } => "task_updated",
             Event::CompactionStarted { .. } => "compaction_started",
             Event::CompactionCompleted { .. } => "compaction_completed",
+            Event::RequestToolResultsElided { .. } => "request_tool_results_elided",
             Event::MemoryUpdated { .. } => "memory_updated",
             Event::Usage { .. } => "usage",
             Event::Notice { .. } => "notice",
@@ -425,6 +515,15 @@ mod tests {
             Event::Notice {
                 severity: NoticeSeverity::Info,
                 message: "m".to_string(),
+            },
+            Event::RequestToolResultsElided {
+                agent_id: "a-1".to_string(),
+                policy: RequestToolResultElisionPolicy::KeepRecent {
+                    configured_keep_recent_tool_results: 3,
+                },
+                canonical_tool_result_content_bytes: 1_024,
+                projected_tool_result_content_bytes: 128,
+                results: Vec::new(),
             },
             Event::RunFinished {
                 outcome: RunOutcome::Ok,
@@ -479,12 +578,53 @@ mod tests {
         let json = serde_json::to_value(&line).expect("serializes");
 
         assert_eq!(json["type"], "run_started");
-        assert_eq!(json["schema"], EVENT_SCHEMA_VERSION);
+        assert_eq!(json["schema"], 2, "the new event tag requires schema 2");
         assert_eq!(json["context_files"][0]["scope"], "workspace");
         assert!(
             json.get("skills_dirs").is_none() && json.get("skills").is_none(),
             "a run without skills must not mention them"
         );
+    }
+
+    #[test]
+    fn request_tool_result_elision_json_is_typed_and_body_free() {
+        let line = EventLine::new(
+            9,
+            Event::RequestToolResultsElided {
+                agent_id: "agent-1".to_string(),
+                policy: RequestToolResultElisionPolicy::ByteBudget {
+                    configured_max_bytes: 4_096,
+                    configured_prioritize_recent_results: 2,
+                    configured_max_preview_bytes: 512,
+                },
+                canonical_tool_result_content_bytes: 8_192,
+                projected_tool_result_content_bytes: 4_096,
+                results: vec![ElidedToolResult {
+                    tool_call_id: "call-1".to_string(),
+                    tool_name: Some("grep".to_string()),
+                    is_error: false,
+                    canonical_content_kind: ToolResultContentKind::Text,
+                    action: ToolResultElisionAction::Preview,
+                    canonical_content_bytes: 8_192,
+                    projected_content_bytes: 4_096,
+                }],
+            },
+        );
+
+        let json = serde_json::to_value(&line).expect("serializes");
+        assert_eq!(json["seq"], 9);
+        assert_eq!(json["type"], "request_tool_results_elided");
+        assert_eq!(json["policy"]["kind"], "byte_budget");
+        assert_eq!(json["policy"]["configured_max_bytes"], 4_096);
+        assert_eq!(json["results"][0]["canonical_content_kind"], "text");
+        assert_eq!(json["results"][0]["action"], "preview");
+        assert!(
+            json["results"][0].get("content").is_none(),
+            "the event must not duplicate the canonical or projected body"
+        );
+
+        let restored: EventLine = serde_json::from_value(json).expect("round trips");
+        assert_eq!(restored, line);
     }
 
     #[test]

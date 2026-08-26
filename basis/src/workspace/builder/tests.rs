@@ -529,6 +529,7 @@ fn an_unconfigured_workspace_keeps_every_tool_result() {
         "mentra's off switch for micro-compaction is what basis defaults to"
     );
     assert_eq!(agent.compaction.auto_compact_threshold_tokens, Some(50_000));
+    assert_eq!(agent.compaction.projected_tool_result_budget, None);
 }
 
 #[test]
@@ -549,6 +550,7 @@ fn what_a_host_says_about_compaction_is_what_the_agent_carries() {
     );
 
     assert_eq!(agent.compaction.keep_recent_tool_results, 2);
+    assert_eq!(agent.compaction.projected_tool_result_budget, None);
     assert_eq!(
         agent.compaction.auto_compact_threshold_tokens,
         Some(400_000)
@@ -617,13 +619,11 @@ fn reading_all_five(workspace: &Path) -> MockRuntime {
 
 #[tokio::test]
 async fn every_tool_result_the_model_read_is_still_in_front_of_it() {
-    // The defect this pins. mentra's `keep_recent_tool_results` defaults to 3,
-    // so from the fourth tool call on, every older result is replaced by
-    // `[Previous: used files]` on the way to the provider — silently, with no
-    // event, at any context size, on any model. A coding agent that reads five
-    // files and then edits one would be editing from a transcript where the
-    // first two are gone. basis keeps them all unless a host asks for elision
-    // by number.
+    // The invariant this pins. A finite `keep_recent_tool_results` replaces
+    // older bodies with `[Previous: used files]` on the way to the provider,
+    // at any context size and on any model. Mentra now reports that projection,
+    // but the model still loses the body. Basis keeps every result unless a
+    // host asks for elision by number.
     let workspace = workspace_of_five_files();
     let mock = reading_all_five(workspace.path());
     let mut session = mock

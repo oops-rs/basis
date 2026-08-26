@@ -109,8 +109,9 @@ pub use context::{
 };
 pub use error::RunError;
 pub use event::{
-    EVENT_SCHEMA_VERSION, Event, EventLine, JsonlWriter, Mutability, RunOutcome, SkillSummary,
-    TemplateSummary,
+    EVENT_SCHEMA_VERSION, ElidedToolResult, Event, EventLine, JsonlWriter, Mutability,
+    RequestToolResultElisionPolicy, RunOutcome, SkillSummary, TemplateSummary,
+    ToolResultContentKind, ToolResultElisionAction,
 };
 // `fingerprint::snapshot` keeps its module: at the crate root `snapshot` would
 // not say a snapshot of what, and the two types beside it are only meaningful

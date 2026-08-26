@@ -8,9 +8,11 @@
 //! each call). It walks the tool results in the transcript and replaces the
 //! content of every one past the most recent `keep_recent_tool_results` with
 //! `[Previous: used <tool>]`, for any result over 100 bytes. There is no token
-//! budget in that decision and no event when it fires: it happens on the fourth
-//! tool call of a conversation as readily as on the four-hundredth, on a
-//! 1M-token model as readily as on a small one. mentra's own default is
+//! budget in that decision: it happens on the fourth tool call of a conversation
+//! as readily as on the four-hundredth, on a 1M-token model as readily as on a
+//! small one. Mentra 0.22 makes the request-only rewrite observable through
+//! [`Event::RequestToolResultsElided`](crate::Event::RequestToolResultsElided),
+//! without changing the canonical transcript. mentra's own default is
 //! `usize::MAX` — keep everything — and basis agrees, so this is one knob
 //! basis states only to make the same default explicit: elision is opt-in a
 //! host asks for **by number**
@@ -51,12 +53,14 @@
 //!
 //! # What is not here
 //!
-//! mentra's `CompactionConfig` has ten fields. This exposes four: the three
+//! mentra's `CompactionConfig` has eleven fields. This exposes four: the three
 //! triggers above and how much recent user text a summarizing pass must leave
-//! alone. The rest — the summary's input and output caps, local versus remote
-//! summarization, how many snapshots are kept — are defaults nobody has had a
-//! reason to move, and a knob basis offers is a knob basis has to keep
-//! meaning. They arrive when a host asks, with the case that asked.
+//! alone. The mutually exclusive projected-byte budget is pinned off: exposing
+//! it needs a Basis-owned policy shape rather than two knobs that can disagree.
+//! The summary's input and output caps, local versus remote summarization, and
+//! how many snapshots are kept remain defaults nobody has had a reason to move.
+//! A knob basis offers is a knob basis has to keep meaning; they arrive when a
+//! host asks, with the case that asked.
 //!
 //! `transcript_dir` is deliberately not a knob at all: where a workspace's
 //! files go is settled by
@@ -124,9 +128,9 @@ impl Compaction {
     /// A host asks for this by number when it knows something basis does not:
     /// that its tool results are large, repetitive, and cheaply re-derived, and
     /// that the tokens are worth more than the transcript. What it costs is
-    /// stated plainly — the model stops being able to see results it was shown,
-    /// with no event marking the moment, and any turn that depends on comparing
-    /// an early result against a late one becomes unreliable.
+    /// stated plainly — the model stops being able to see results it was shown.
+    /// The request-only event reports that loss, but any turn that depends on
+    /// comparing an early result against a late one still becomes unreliable.
     ///
     /// `Some(0)` elides every tool result over 100 bytes, including the one
     /// that just came back.
@@ -217,6 +221,10 @@ impl Compaction {
             // `usize::MAX`), which is what makes "keep everything" a
             // configuration of upstream rather than a fork of it.
             keep_recent_tool_results: self.keep_recent_tool_results.unwrap_or(usize::MAX),
+            // Basis exposes the established count policy only. Mentra 0.22's
+            // byte-budget mode is mutually exclusive with it, so inheriting a
+            // future non-None default would silently ignore the value above.
+            projected_tool_result_budget: None,
             auto_compact_threshold_tokens: self.auto_threshold_tokens,
             auto_compact_threshold_percent: self.auto_threshold_percent,
             preserve_recent_user_tokens: self.preserve_recent_user_tokens,
