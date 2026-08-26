@@ -494,22 +494,26 @@ fn preview(
     // What an approver renders, what a pattern rule globs against, and what the
     // audit trail keeps.
     //
-    // `target` is additive in the strict sense: the three older keys keep their
-    // spellings and their values, and serde_json serializes a map in key order,
-    // so `"target"` sorts after all three and a rule an operator already wrote
-    // still matches exactly what it matched before. It reads `"local"` rather
-    // than `null` when no target was named, because *here* is a value an
-    // operator will want to write a rule about and a glob against a JSON null
-    // is a spelling nobody notices missing.
+    // `target` is additive in the strict sense: the three older keys keep
+    // their spellings and their values, and it is written last here, so a
+    // rule an operator already wrote still matches exactly what it matched
+    // before. It reads `"local"` rather than `null` when no target was named,
+    // because *here* is a value an operator will want to write a rule about
+    // and a glob against a JSON null is a spelling nobody notices missing.
     //
-    // `child` (D4) is additive in a narrower sense than `target` could be: it
-    // sorts *between* `body` and `cwd`, so it appears only when a child
-    // policy actually overrode something — a delegation whose answer is
-    // inherit, which is every delegation on a policy-free runtime, presents
-    // the four-key shape byte for byte and every rule written against it
-    // keeps matching. On a runtime whose policy does override, the key is the
-    // point: a remembered rule about delegation can match on what the child
-    // will be — `ChildSpec::preview_value` has the shape.
+    // Where in the serialization a key lands is not something to reason from,
+    // and an earlier version of this comment did: `serde_json` orders a map
+    // by insertion when `preserve_order` is on and alphabetically when it is
+    // not, and the shipped binary has it on — `agent-client-protocol` enables
+    // it, which is a transitive dependency's choice basis does not control
+    // and an embedder may not share. So `child` (D4) is additive on the one
+    // ground that holds either way: **it is absent unless a child policy
+    // actually overrode something.** Every delegation on a policy-free
+    // runtime, and every inherit answer on a policied one, serializes the
+    // same four keys it always did, whatever order this build puts them in.
+    // When the key is there it is the point: a remembered rule about
+    // delegation can match on what the child will be —
+    // `ChildSpec::preview_value` has the shape.
     let mut structured_input = json!({
         "mode": spawn.mode().as_str(),
         "body": spawn.body(),
