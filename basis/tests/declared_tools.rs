@@ -529,3 +529,46 @@ async fn a_non_object_call_under_a_typeless_schema_is_refused_upstream() {
         "an input the schema never described must not reach the program"
     );
 }
+
+#[tokio::test]
+async fn a_non_object_call_under_a_schema_describing_nothing_is_refused_by_name() {
+    // The residue upstream's rule deliberately leaves open: a schema that
+    // declares neither `type` nor `properties` nor `required` describes
+    // nothing, so mentra lets any value through — right for a runtime whose
+    // tools may take anything, wrong for a binding that writes the value to a
+    // program's stdin. `check_schema` accepts this manifest, so basis's own
+    // guard is what stands between a bare string and the program.
+    let fixture = Fixture::new();
+    let ran = fixture.path().join("it-ran");
+    let program = fixture.program("jenkins", &format!("touch {}", ran.display()));
+    fixture.manifest(&format!(
+        r#"{{
+            "schema": 1,
+            "tools": {{
+                "jenkins_job": {{
+                    "description": "Trigger a job and return its build number.",
+                    "input_schema": {{"description": "the job to run"}},
+                    "command": ["{program}"]
+                }}
+            }}
+        }}"#
+    ));
+
+    let mock = runtime_calling(json!("nightly"));
+    for tool in fixture.tools() {
+        mock.runtime().register_tool(tool);
+    }
+    let mut session = session_in(&mock, fixture.path());
+
+    let _ = session.append_turn(vec![ContentBlock::text("go")]).await;
+
+    let results = tool_results(&session);
+    assert!(
+        results.contains("jenkins_job"),
+        "basis's own refusal names the tool: {results}"
+    );
+    assert!(
+        !ran.exists(),
+        "a bare string must never reach the program's stdin"
+    );
+}

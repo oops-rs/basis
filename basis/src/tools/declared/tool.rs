@@ -192,6 +192,11 @@ fn preview(
     descriptor: &RuntimeToolDescriptor,
     input: &Value,
 ) -> Result<ToolAuthorizationPreview, String> {
+    // Refused here, ahead of the approver: a call that cannot run is not worth
+    // a person's attention, and asking about one teaches them that approving is
+    // what makes errors go away.
+    check_input(spec, input)?;
+
     let cwd = spec.working_directory(workspace);
 
     Ok(ToolAuthorizationPreview {
@@ -218,6 +223,11 @@ async fn run(
     runtime_environment: &[(String, String)],
     input: Value,
 ) -> ToolResult {
+    // Asked again rather than trusted from the preview: the preview is only
+    // reached when an authorizer is installed, and a check that a missing
+    // authorizer removes is not a check.
+    check_input(&spec, &input)?;
+
     let payload = serde_json::to_string(&input).map_err(|error| {
         format!(
             "{} was called with input basis could not serialize: {error}",
@@ -348,16 +358,51 @@ fn failed(spec: &DeclaredToolSpec, code: i32, stdout: &str, stderr: &str) -> Str
     format!("{} exited {code}: {explanation}", spec.name)
 }
 
-// Nothing is left for this binding to check before running: mentra reads a
-// call against the `input_schema` its tool published before it authorizes
-// anything — `required`, scalar types, `enum`, a misspelled property, and,
-// since 0.21 (upstream `5e16092`), a root that is not an object under a schema
-// that declares `properties` or `required` without saying `type`. That last
-// case was the one residue a hand-written guard covered here, and it was this
-// binding's report that moved it upstream; keeping the guard would be two
-// validators disagreeing about wording over a call the first one already
-// refused. `tests/declared_tools.rs` pins that the upstream refusal reaches
-// the model legibly and the program never starts.
+/// The complement of mentra's root-shape rule, and nothing else.
+///
+/// mentra reads a call against the `input_schema` its tool published before it
+/// authorizes anything, so `required`, scalar types, `enum` and a misspelled
+/// property are answered upstream — with the field named, which is what a
+/// model can act on. Since 0.21 (`5e16092`, moved upstream by this binding's
+/// own report) that includes a root that is not an object:
+/// `validate_tool_input`'s `root_shape_error` refuses one for a schema
+/// declaring `properties` or `required` without saying `type`
+/// (`mentra/src/tool/schema.rs`), and a schema that *does* say `type` is
+/// refused by the ordinary type check beside it.
+///
+/// What that rule deliberately leaves open is a schema describing nothing at
+/// all — `{}`, or `{"description": "…"}` — on the stated reasoning that a
+/// schema describing nothing is not describing an object either. Correct for
+/// mentra, whose tools may take anything; wrong here, because
+/// [`check_schema`](super::manifest) accepts exactly such a manifest and this
+/// binding writes whatever arrives to a program's **stdin**, where a bare
+/// string is not the JSON object the program was written to read.
+///
+/// So this fires exactly where upstream's rule does not — no `type`, no
+/// `properties`, no `required` — and names the tool, which is what makes the
+/// refusal something the model can act on. Anything upstream can see stays
+/// upstream's to word.
+fn check_input(spec: &DeclaredToolSpec, input: &Value) -> Result<(), String> {
+    if input.is_object() {
+        return Ok(());
+    }
+
+    // A schema that says any of these three is one upstream's validator reads
+    // for itself, so a non-object call under it never reaches this binding.
+    let described = spec.input_schema.as_object().is_some_and(|schema| {
+        schema.contains_key("type")
+            || schema.contains_key("properties")
+            || schema.contains_key("required")
+    });
+    if described {
+        return Ok(());
+    }
+
+    Err(format!(
+        "{} takes a JSON object matching its input schema",
+        spec.name
+    ))
+}
 
 #[cfg(test)]
 mod tests;
