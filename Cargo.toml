@@ -5,7 +5,7 @@ resolver = "3"
 [workspace.package]
 # One version across the four: they are one product split by dependency
 # weight (ADR-0011), not four things that release on their own schedules.
-version = "0.6.0"
+version = "0.7.0"
 edition = "2024"
 rust-version = "1.88"
 license = "MIT"
@@ -16,12 +16,12 @@ homepage = "https://github.com/oops-rs/basis"
 [workspace.dependencies]
 # The layers of ADR-0011, named here so each crate states which of them it is
 # built on and cargo resolves one version of each.
-basis = { version = "0.6", path = "basis" }
-basis-acp = { version = "0.6", path = "basis-acp" }
+basis = { version = "0.7", path = "basis" }
+basis-acp = { version = "0.7", path = "basis-acp" }
 # The durable task layer (ADR-0017 over ADR-0019's substrate, D8): one crate
 # so the rules live once and are reachable from Rust, not only from the CLI
 # that is now merely their first client.
-basis-tasks = { version = "0.6", path = "basis-tasks" }
+basis-tasks = { version = "0.7", path = "basis-tasks" }
 
 # Mentra 0.21 is the runtime contract basis targets, and the floor is hard:
 # two of basis's surfaces stand on APIs that exist nowhere below it —
