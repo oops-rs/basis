@@ -539,10 +539,12 @@ mod tests {
     fn a_chosen_directory_holds_the_layout_the_default_one_would_have() {
         // The identity that makes `with_store_dir` a relocation rather than a
         // second scheme: pointing it at the default directory is a no-op.
-        let store = store_in(&default_directory()).expect("the default directory is usable");
-
+        // Asserted as path identity rather than by opening: a machine that ran
+        // basis 0.6 has a database in exactly that directory, so opening it is
+        // a legitimate refusal (`store_in`'s own guard) and would say nothing
+        // about where the two schemes put their roots.
         assert_eq!(
-            store.root(),
+            default_directory(),
             mentra::runtime::FileRuntimeStore::default().root(),
             "basis's root must be mentra's, or moving the store would relocate it"
         );

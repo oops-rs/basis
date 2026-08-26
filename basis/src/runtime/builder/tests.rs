@@ -224,16 +224,24 @@ fn the_default_snapshot_directory_is_the_one_mentra_would_have_used() {
     // Relocation, not a second scheme: a runtime that said nothing must land
     // where it always did, or an upgrade would strand every transcript already
     // written.
-    let runtime = RuntimeBuilder::default()
+    let built = RuntimeBuilder::default()
         .with_base_url("http://127.0.0.1:1/v1")
         .with_api_key("test-key")
-        .build()
-        .expect("builds offline");
+        .build();
 
-    assert_eq!(
-        runtime.transcripts_dir(),
-        store::default_directory().join("transcripts")
-    );
+    match built {
+        Ok(runtime) => assert_eq!(
+            runtime.transcripts_dir(),
+            store::default_directory().join("transcripts")
+        ),
+        // A machine that ran basis 0.6 has a database in exactly that
+        // directory, and the guard refuses it by name -- which is the same
+        // derivation the `Ok` arm asserts, reached from the other side.
+        Err(crate::RunError::LegacyStore { dir }) => {
+            assert_eq!(dir, store::default_directory());
+        }
+        Err(other) => panic!("builds offline: {other}"),
+    }
 }
 
 #[test]
