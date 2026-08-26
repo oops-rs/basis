@@ -245,7 +245,7 @@ fn a_child_the_policy_shaped_is_in_front_of_the_approver() {
         json!({
             "mode": "agent",
             "body": "triage: is this real?",
-            "child": { "model": "cheap-model" },
+            "child": { "model": { "id": "cheap-model", "provider": "openai" } },
             "cwd": "/repo",
             "target": "local",
         })

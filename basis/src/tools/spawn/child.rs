@@ -213,9 +213,23 @@ impl ChildSpec {
     /// rule was written against. When present, it describes what the child
     /// *will be*, which is what a rule about delegation wants to match:
     /// `roster` as `{"offered": [..]}` for an allow-list or `{"hidden": [..]}`
-    /// for a denylist, `model` as the overriding id, `system` as the word
-    /// `"replaced"` — never the text, because a preview travels further than
-    /// a glance and a system prompt can carry anything the host knows.
+    /// for a denylist, `model` as `{"id": .., "provider": ..}`, `system` as
+    /// the word `"replaced"` — never the text, because a preview travels
+    /// further than a glance and a system prompt can carry anything the host
+    /// knows.
+    ///
+    /// The model is **provider-qualified**, and that is the load-bearing half
+    /// rather than a decoration: a policy may route a child to an entirely
+    /// different vendor, and an id alone leaves the one fact an operator
+    /// would refuse on — *this delegation leaves the provider the run
+    /// reported* — invisible to them and unmatchable by a remembered rule.
+    /// Two fields rather than a `"provider/id"` string, because mentra globs
+    /// a rule's pattern with `glob-match`, where a single `*` does not cross
+    /// `/`: the `cwd` key already carries that trap for paths, and a second
+    /// spelling of it here would make `"model":"*"` a pattern that silently
+    /// matched nothing. Serialization order is the same either way — `id`
+    /// sorts before `provider`, and it is inserted first — so a rule written
+    /// against this cannot move under a build that orders maps differently.
     pub(crate) fn preview_value(&self) -> Option<Value> {
         if self.is_inherit() {
             return None;
@@ -223,7 +237,10 @@ impl ChildSpec {
 
         let mut child = serde_json::Map::new();
         if let Some(model) = &self.model {
-            child.insert("model".to_string(), json!(model.id));
+            child.insert(
+                "model".to_string(),
+                json!({ "id": model.id, "provider": model.provider.as_str() }),
+            );
         }
         if let Some(roster) = &self.roster {
             let profile = roster.as_profile();
@@ -267,7 +284,11 @@ mod tests {
             .with_system("secret internal triage instructions");
 
         let child = spec.preview_value().expect("overrides are described");
-        assert_eq!(child["model"], "cheap-model");
+        assert_eq!(
+            child["model"],
+            json!({ "id": "cheap-model", "provider": "openai" }),
+            "an id alone would hide a vendor switch from the operator"
+        );
         assert_eq!(child["roster"], json!({ "offered": ["grep", "read"] }));
         assert_eq!(
             child["system"], "replaced",

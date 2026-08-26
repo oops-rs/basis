@@ -388,7 +388,10 @@ async fn the_approver_reads_what_the_child_will_be() {
     assert_eq!(
         input["child"],
         json!({
-            "model": "cheap-model",
+            // The policy routes this child to a different vendor than the run
+            // reported, and that is exactly the fact an operator would refuse
+            // on — so the preview names the provider, not just the id.
+            "model": { "id": "cheap-model", "provider": "anthropic" },
             "roster": { "offered": ["read", SPAWN] },
             "system": "replaced",
         }),
