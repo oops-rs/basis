@@ -459,14 +459,14 @@ fn commands_are_available_unless_the_caller_says_otherwise() {
 }
 
 #[test]
-fn a_fresh_builder_carries_a_private_default_runtime_and_no_model_override() {
+fn a_fresh_builder_carries_a_private_default_runtime_and_an_inherited_model() {
     // The sugar's shape: `Workspace::open(path)` must behave as it always
     // has, so the default source is a default private recipe — and the model
     // is *unsaid*, deferring to that runtime's policy.
     let builder = WorkspaceBuilder::new("/repo");
 
     assert!(matches!(builder.runtime, RuntimeSource::Private(_)));
-    assert_eq!(builder.model, None);
+    assert!(matches!(builder.model, WorkspaceModel::Inherited));
 }
 
 #[test]
@@ -474,12 +474,36 @@ fn builders_return_new_values() {
     let base = WorkspaceBuilder::new("/repo");
     let derived = base.with_model(ModelSelector::Id("pinned".to_string()));
 
-    assert!(matches!(derived.model, Some(ModelSelector::Id(ref id)) if id == "pinned"));
-    assert_eq!(
+    assert!(matches!(
+        derived.model,
+        WorkspaceModel::Selector(ModelSelector::Id(ref id)) if id == "pinned"
+    ));
+    assert!(matches!(
         WorkspaceBuilder::new("/repo").model,
-        None,
-        "a fresh builder defers to the runtime's policy"
-    );
+        WorkspaceModel::Inherited
+    ));
+}
+
+#[test]
+fn model_inputs_are_mutually_exclusive_and_last_call_wins() {
+    let mut resolved = ModelInfo::new("resolved", "openai").with_context_window(200_000);
+    resolved.display_name = Some("Resolved model".to_string());
+
+    let selector_last = WorkspaceBuilder::new("/repo")
+        .with_resolved_model(resolved.clone())
+        .with_model(ModelSelector::Id("selected".to_string()));
+    assert!(matches!(
+        selector_last.model,
+        WorkspaceModel::Selector(ModelSelector::Id(ref id)) if id == "selected"
+    ));
+
+    let resolved_last = WorkspaceBuilder::new("/repo")
+        .with_model(ModelSelector::Id("selected".to_string()))
+        .with_resolved_model(resolved.clone());
+    assert!(matches!(
+        resolved_last.model,
+        WorkspaceModel::Resolved(ref held) if held == &resolved
+    ));
 }
 
 #[tokio::test]

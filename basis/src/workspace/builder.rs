@@ -24,7 +24,7 @@ use std::{
     sync::Arc,
 };
 
-use mentra::ModelSelector;
+use mentra::{ModelInfo, ModelSelector};
 
 #[cfg(feature = "mcp")]
 use crate::mcp::{self, McpConfig, connections::McpConnections};
@@ -61,8 +61,8 @@ use super::{Workspace, roster::ToolRoster};
 pub struct WorkspaceBuilder {
     path: PathBuf,
     runtime: RuntimeSource,
-    /// An override; `None` defers to the runtime's model policy.
-    model: Option<ModelSelector>,
+    /// Inherited policy, a selector override, or complete host-resolved metadata.
+    model: WorkspaceModel,
     context: ContextConfig,
     /// What `config.json` said; `None` means discover it at
     /// [`open`](WorkspaceBuilder::open).
@@ -81,6 +81,17 @@ pub struct WorkspaceBuilder {
     tools: ToolsConfig,
     shell: ShellAccess,
     compaction: Compaction,
+}
+
+/// The one mutually-exclusive source of this workspace's model.
+///
+/// A sum rather than parallel optional fields makes last-call-wins exact: a
+/// selector and resolved metadata cannot both survive on one builder.
+#[derive(Debug)]
+enum WorkspaceModel {
+    Inherited,
+    Selector(ModelSelector),
+    Resolved(ModelInfo),
 }
 
 /// Where this workspace's runtime comes from: borrowed from the host, or
@@ -133,7 +144,7 @@ impl WorkspaceBuilder {
             // the third noun (ADR-0018): `Workspace::open(path)` behaves as it
             // always has.
             runtime: RuntimeSource::Private(Box::default()),
-            model: None,
+            model: WorkspaceModel::Inherited,
             context: ContextConfig::default(),
             // Unset, so `open` reads the convention where convention says it
             // is — the same default every other discovery on this builder has.
@@ -200,7 +211,28 @@ impl WorkspaceBuilder {
     /// fact, fixed at open and reported by every run it mints.
     pub fn with_model(self, model: ModelSelector) -> Self {
         Self {
-            model: Some(model),
+            model: WorkspaceModel::Selector(model),
+            ..self
+        }
+    }
+
+    /// Supplies the complete model metadata this workspace must use.
+    ///
+    /// Unlike [`with_model`](Self::with_model), this is an answer rather than
+    /// a selection policy: [`open`](Self::open) does not list or resolve
+    /// models. The metadata, including its context window, reaches every
+    /// session minted by the workspace unchanged.
+    ///
+    /// The model must name the same provider as the workspace's runtime. A
+    /// mismatch is refused by [`open`](Self::open) before provider or tool
+    /// activity with
+    /// [`RunError::ResolvedModelProviderMismatch`](crate::RunError::ResolvedModelProviderMismatch).
+    /// Calling this after [`with_model`](Self::with_model), or vice versa,
+    /// replaces the earlier value.
+    #[must_use]
+    pub fn with_resolved_model(self, model: ModelInfo) -> Self {
+        Self {
+            model: WorkspaceModel::Resolved(model),
             ..self
         }
     }
@@ -487,10 +519,23 @@ impl WorkspaceBuilder {
 
         // The workspace's own override first, then the file, then the runtime's
         // policy — which on the private path is already the file's answer, so
-        // the two agree by construction rather than by luck.
-        let model = runtime
-            .resolve_model(self.model.or_else(|| config.model_selector()))
-            .await?;
+        // the two agree by construction rather than by luck. A resolved model
+        // is already the final answer: preserve it whole and never consult the
+        // provider's catalogue.
+        let model = match self.model {
+            WorkspaceModel::Inherited => runtime.resolve_model(config.model_selector()).await?,
+            WorkspaceModel::Selector(selector) => runtime.resolve_model(Some(selector)).await?,
+            WorkspaceModel::Resolved(model) => {
+                if model.provider.as_str() != runtime.provider() {
+                    return Err(RunError::ResolvedModelProviderMismatch {
+                        model: model.id.clone(),
+                        model_provider: model.provider.as_str().to_string(),
+                        runtime_provider: runtime.provider().to_string(),
+                    });
+                }
+                model
+            }
+        };
 
         // Skills must be registered on the runtime before any session spawns,
         // so every agent's tool roster includes `load_skill`.

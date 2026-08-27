@@ -70,6 +70,24 @@ pub enum RunError {
     #[error(transparent)]
     Context(#[from] ContextError),
 
+    /// Host-resolved model metadata names a provider other than the runtime's.
+    ///
+    /// Raised while opening the workspace, before model catalogue, model
+    /// request, or tool activity. The mismatch cannot be repaired by looking
+    /// up the id: provider identity is part of the host's resolved contract.
+    #[error(
+        "resolved model `{model}` belongs to provider `{model_provider}`, but the runtime uses \
+         `{runtime_provider}`"
+    )]
+    ResolvedModelProviderMismatch {
+        /// The host-resolved model id.
+        model: String,
+        /// The provider named by the model metadata.
+        model_provider: String,
+        /// The provider registered on the runtime.
+        runtime_provider: String,
+    },
+
     #[error(transparent)]
     Provider(#[from] ProviderError),
 
