@@ -113,12 +113,14 @@ exposing raw mentra control as the normal embedding path.**
 
 ## Implementation note (Basis 0.8)
 
-Basis 0.8 implements this decision against Mentra 0.23.2. The public seams are
+Basis 0.8 implements this decision against Mentra 0.23.3. The public seams are
 `PreparedRun::register_agent_event_tap` and its opaque guard,
 `RuntimeBuilder::with_reusable_registered_provider` /
 `into_reusable_recipe`, `WorkspaceBuilder::with_runtime_recipe`, the consuming
 `Workspace::bind_host_tools`, and the async consuming
-`Workspace::rebuild_for_reuse`.
+`Workspace::rebuild_for_reuse`. `BudgetPool::with_token_allowance` derives a
+tighter nested view without allocating a second counter or widening the parent
+allowance.
 
 The reuse proof covers Basis-attached runs, observer guards, event forwarders,
 workspace registrations, and ephemeral history. Basis enforces the declared

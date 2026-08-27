@@ -308,7 +308,7 @@ flowchart LR
   die with it while the tool registry underneath is the runtime's, so each is claimed by name
   at open, released at drop, and hidden from every other workspace's roster.
 - **A reusable private runtime is consumed, never reset in place** (ADR-0024). Basis 0.8 uses
-  Mentra 0.23.2 for the underlying observer and fresh provider-session primitives.
+  Mentra 0.23.3 for the underlying observer and fresh provider-session primitives.
   `RuntimeBuilder::with_reusable_registered_provider(provider_id, make, warm)` records the host's
   provider factory and the async warm step for its ordinary clone;
   `into_reusable_recipe` accepts it only with explicit ephemeral history and without one-shot

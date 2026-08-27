@@ -69,7 +69,7 @@ run's `Approver` — is a `Runtime` ([ADR-0018](docs/adr/0018-the-runtime-owns-t
 the split; a host opening N of them builds `Runtime::builder().build()?` once and hands each
 workspace an `Arc` of it, so N repositories cost one provider resolution and one history store.
 
-**A strict host can rebuild a private runtime between checkouts.** Basis 0.8 uses Mentra 0.23.2
+**A strict host can rebuild a private runtime between checkouts.** Basis 0.8 uses Mentra 0.23.3
 for the consume/rebuild path from ADR-0024. The provider is a repeatable factory plus an async warm
 step; the recipe requires ephemeral history and rejects one-shot provider or host-tool values. The
 host is responsible for returning a fresh provider/session scope from each factory call:

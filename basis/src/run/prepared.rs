@@ -241,11 +241,13 @@ impl PreparedRun {
     ///
     /// The callback executes inline on the operation emitting the event. It
     /// must return promptly and must not block or panic: blocking stalls that
-    /// operation, and a panic propagates through it.
+    /// operation, and a panic propagates through it. It must not re-enter an
+    /// event-emitting operation or drop a tap guard from inside the callback.
     ///
     /// Keep the returned [`AgentEventTapGuard`] alive for as long as observation
-    /// is required. Dropping it unregisters the callback immediately;
-    /// registration does not replay earlier events.
+    /// is required. Dropping it waits for any invocation already in flight and
+    /// then unregisters; do not drop it while holding a resource that callback
+    /// needs. Registration does not replay earlier events.
     pub fn register_agent_event_tap(
         &self,
         tap: impl Fn(&AgentEvent) + Send + Sync + 'static,

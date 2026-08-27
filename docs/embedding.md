@@ -152,7 +152,7 @@ workspace in hand.
 
 A strict embedding host can turn Basis's conventions into explicit inputs instead of
 depending on ambient repository or home files
-([ADR-0024](adr/0024-host-defined-runtime-contracts.md)). Basis 0.8 uses Mentra 0.23.2. For an
+([ADR-0024](adr/0024-host-defined-runtime-contracts.md)). Basis 0.8 uses Mentra 0.23.3. For an
 ordinary one-shot private runtime, the builder accepts a provider-core implementation directly;
 a retained concrete Responses provider clone shares the registered session used for connection
 prewarm. `ToolResultPolicy::unlimited()` separately pins unlimited bytes and physical lines with no
@@ -570,6 +570,11 @@ per concurrent run. `pool.spent()` reads the live number the turns are actually 
 against. A turn drawing on a spent pool is refused with `RunError::BudgetExhausted` before
 its prompt is sent — a decision with its own name, so a fan-out stops minting on it instead
 of retrying it like a provider error.
+
+For nested work, `pool.with_token_allowance(n)` shares the same counter but
+stops at the smaller of the parent limit and the current spend plus `n`.
+Sibling usage therefore consumes the nested allowance instead of creating a
+second budget.
 
 Both the pool and `RunReport::usage` count what providers *report*. One that reports
 nothing spends nothing as far as either is concerned. Work a run delegates through `spawn`
