@@ -50,6 +50,24 @@ pub struct TurnOptions {
     /// from a provider's. `basis`'s `tests/token_budget.rs` drives exactly
     /// that shape.
     pub bounds: Bounds,
+    /// An exact wall-clock deadline for this turn.
+    ///
+    /// The absolute sibling of [`Bounds::deadline`]. Builder calls treat the
+    /// two as one last-writer-wins dimension; if a direct struct literal sets
+    /// both, the absolute value wins when the Mentra options are built.
+    pub absolute_deadline: Option<SystemTime>,
+    /// Maximum main-model requests this turn may issue, including retries.
+    ///
+    /// `Some(0)` is meaningful: refuse before the first provider request.
+    pub model_budget: Option<usize>,
+    /// Per-turn override for the runtime's provider retry schedule.
+    pub provider_retry: Option<ProviderRetry>,
+    /// Per-turn override for the runtime's retry count after the initial call.
+    ///
+    /// `Some(0)` disables retries. The schedule and count override
+    /// independently so changing one retains the runtime fallback for the
+    /// other.
+    pub retry_budget: Option<usize>,
     /// An allowance this turn shares with every other run drawing on it.
     ///
     /// The other kind of token bound, and the two compose rather than compete:
@@ -103,6 +121,10 @@ impl std::fmt::Debug for TurnOptions {
             .field("cancel", &self.cancel)
             .field("stop", &self.stop)
             .field("bounds", &self.bounds)
+            .field("absolute_deadline", &self.absolute_deadline)
+            .field("model_budget", &self.model_budget)
+            .field("provider_retry", &self.provider_retry)
+            .field("retry_budget", &self.retry_budget)
             .field("budget", &self.budget)
             .field(
                 "round_strategy",
@@ -173,6 +195,46 @@ impl TurnOptions {
     pub fn with_deadline(self, deadline: Duration) -> Self {
         Self {
             bounds: self.bounds.with_deadline(deadline),
+            absolute_deadline: None,
+            ..self
+        }
+    }
+
+    /// Gives up at the exact wall-clock `deadline`.
+    ///
+    /// Clears a relative deadline already present; a later
+    /// [`with_deadline`](Self::with_deadline) clears this in turn.
+    pub fn with_absolute_deadline(self, deadline: SystemTime) -> Self {
+        Self {
+            bounds: Bounds {
+                deadline: None,
+                ..self.bounds
+            },
+            absolute_deadline: Some(deadline),
+            ..self
+        }
+    }
+
+    /// Caps how many main-model requests this turn may issue.
+    pub fn with_model_budget(self, model_budget: usize) -> Self {
+        Self {
+            model_budget: Some(model_budget),
+            ..self
+        }
+    }
+
+    /// Overrides the runtime's provider retry schedule for this turn.
+    pub fn with_provider_retry(self, provider_retry: ProviderRetry) -> Self {
+        Self {
+            provider_retry: Some(provider_retry),
+            ..self
+        }
+    }
+
+    /// Overrides how many retries this turn gets after its initial call.
+    pub fn with_retry_budget(self, retry_budget: usize) -> Self {
+        Self {
+            retry_budget: Some(retry_budget),
             ..self
         }
     }
@@ -217,12 +279,10 @@ impl TurnOptions {
         }
     }
 
-    /// `provider_retry` and `retry_budget` are the *runtime's*, not this
-    /// turn's: how patiently a failing provider is waited out describes the
-    /// provider connection (ADR-0018), so both arrive from
-    /// [`Runtime`](crate::Runtime) through the run rather than from knobs on
-    /// this type. They are parameters rather than fields for exactly that
-    /// reason — a `TurnOptions` a caller built has no business carrying them.
+    /// Builds Mentra's controls around the runtime's retry fallbacks.
+    ///
+    /// A turn-level schedule or count overrides its corresponding fallback
+    /// independently; omission retains the runtime's answer.
     pub(super) fn into_run_options(
         self,
         provider_retry: ProviderRetry,
@@ -231,12 +291,15 @@ impl TurnOptions {
         let options = RunOptions {
             cancellation: self.cancel,
             stop: self.stop,
-            deadline: self.bounds.deadline.map(|after| SystemTime::now() + after),
+            deadline: self
+                .absolute_deadline
+                .or_else(|| self.bounds.deadline.map(|after| SystemTime::now() + after)),
             tool_budget: self.bounds.tool_budget,
+            model_budget: self.model_budget,
             token_budget: self.bounds.token_budget,
             round_strategy: self.round_strategy,
-            provider_retry,
-            retry_budget,
+            provider_retry: self.provider_retry.unwrap_or(provider_retry),
+            retry_budget: self.retry_budget.unwrap_or(retry_budget),
             ..RunOptions::default()
         };
 
@@ -264,9 +327,24 @@ pub(super) fn bounded(options: TurnOptions, configured: &TurnOptions) -> TurnOpt
     // `options` partially moved and the `..options` below could not finish the
     // job. It is an `Arc` either way.
     let budget = options.budget.clone().or_else(|| configured.budget.clone());
+    let explicit_deadline =
+        options.absolute_deadline.is_some() || options.bounds.deadline.is_some();
+    let mut bounds = options.bounds.or(configured.bounds);
+    let absolute_deadline = if explicit_deadline {
+        options.absolute_deadline
+    } else {
+        configured.absolute_deadline
+    };
+    if absolute_deadline.is_some() {
+        bounds.deadline = None;
+    }
 
     TurnOptions {
-        bounds: options.bounds.or(configured.bounds),
+        bounds,
+        absolute_deadline,
+        model_budget: options.model_budget.or(configured.model_budget),
+        provider_retry: options.provider_retry.or(configured.provider_retry),
+        retry_budget: options.retry_budget.or(configured.retry_budget),
         budget,
         ..options
     }
@@ -377,6 +455,97 @@ mod tests {
             bounded(explicit, &configured).bounds.deadline,
             Some(Duration::from_secs(30))
         );
+    }
+
+    #[test]
+    fn an_absolute_deadline_reaches_mentra_byte_for_byte() {
+        let deadline = SystemTime::UNIX_EPOCH + Duration::from_secs(1_900_000_000);
+        let options = TurnOptions {
+            // A direct conflicting literal still resolves deterministically.
+            bounds: Bounds::default().with_deadline(Duration::from_secs(1)),
+            absolute_deadline: Some(deadline),
+            ..TurnOptions::default()
+        };
+
+        assert_eq!(as_mentra_would(options).deadline, Some(deadline));
+    }
+
+    #[test]
+    fn relative_and_absolute_deadline_builders_are_last_call_wins() {
+        let absolute = SystemTime::UNIX_EPOCH + Duration::from_secs(1_900_000_000);
+        let absolute_last = TurnOptions::default()
+            .with_deadline(Duration::from_secs(60))
+            .with_absolute_deadline(absolute);
+        assert_eq!(absolute_last.absolute_deadline, Some(absolute));
+        assert_eq!(absolute_last.bounds.deadline, None);
+
+        let relative_last = TurnOptions::default()
+            .with_absolute_deadline(absolute)
+            .with_deadline(Duration::from_secs(30));
+        assert_eq!(relative_last.absolute_deadline, None);
+        assert_eq!(relative_last.bounds.deadline, Some(Duration::from_secs(30)));
+    }
+
+    #[test]
+    fn model_and_retry_controls_map_exactly_and_inherit_by_half() {
+        let runtime_retry = ProviderRetry {
+            base_delay: Duration::from_secs(7),
+            max_delay: Duration::from_secs(11),
+            retry_after_cap: Duration::from_secs(13),
+        };
+        let turn_retry = ProviderRetry {
+            base_delay: Duration::from_millis(1),
+            max_delay: Duration::from_millis(2),
+            retry_after_cap: Duration::from_millis(3),
+        };
+
+        let schedule_only = TurnOptions::default()
+            .with_model_budget(0)
+            .with_provider_retry(turn_retry)
+            .into_run_options(runtime_retry, 17);
+        assert_eq!(schedule_only.model_budget, Some(0));
+        assert_eq!(schedule_only.provider_retry, turn_retry);
+        assert_eq!(schedule_only.retry_budget, 17);
+
+        let count_only = TurnOptions::default()
+            .with_retry_budget(0)
+            .into_run_options(runtime_retry, 17);
+        assert_eq!(count_only.provider_retry, runtime_retry);
+        assert_eq!(count_only.retry_budget, 0);
+    }
+
+    #[test]
+    fn explicit_turn_controls_beat_configured_and_omissions_inherit() {
+        let configured_deadline = SystemTime::UNIX_EPOCH + Duration::from_secs(1_900_000_000);
+        let configured_retry = ProviderRetry {
+            base_delay: Duration::from_secs(1),
+            max_delay: Duration::from_secs(2),
+            retry_after_cap: Duration::from_secs(3),
+        };
+        let configured = TurnOptions::default()
+            .with_absolute_deadline(configured_deadline)
+            .with_model_budget(8)
+            .with_provider_retry(configured_retry)
+            .with_retry_budget(9);
+
+        let explicit = TurnOptions::default()
+            .with_deadline(Duration::from_secs(5))
+            .with_model_budget(2)
+            .with_retry_budget(1);
+        let merged = bounded(explicit, &configured);
+        assert_eq!(merged.absolute_deadline, None);
+        assert_eq!(merged.bounds.deadline, Some(Duration::from_secs(5)));
+        assert_eq!(merged.model_budget, Some(2));
+        assert_eq!(merged.provider_retry, Some(configured_retry));
+        assert_eq!(merged.retry_budget, Some(1));
+
+        let inherited = bounded(TurnOptions::default().with_token_budget(500), &configured);
+        assert_eq!(inherited.absolute_deadline, Some(configured_deadline));
+        assert_eq!(inherited.bounds.deadline, None);
+        assert_eq!(inherited.model_budget, Some(8));
+        assert_eq!(inherited.provider_retry, Some(configured_retry));
+        assert_eq!(inherited.retry_budget, Some(9));
+        assert_eq!(inherited.bounds.token_budget, Some(500));
     }
 
     #[test]

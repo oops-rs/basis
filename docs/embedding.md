@@ -236,9 +236,10 @@ a host serving many repositories off one shared `Runtime` can give each its own 
 ## How patiently a failing provider is waited out
 
 mentra retries a transient provider error on a doubling backoff and gives up when the budget
-runs out. Its default — five attempts, from 500ms, capped at 5s — spends about **twelve and
-a half seconds**, which is shaped for a blip: a connection reset, a tunnel restart, a 502
-from a proxy already coming back. A rate limit is a different failure. It lasts as long as
+runs out. Its default — five retries after the initial call, from 500ms, capped at 5s —
+permits six calls and waits about **twelve and a half seconds**, which is shaped for a blip:
+a connection reset, a tunnel restart, a 502 from a proxy already coming back. A rate limit
+is a different failure. It lasts as long as
 the window it belongs to, routinely a minute, so the whole default schedule elapses inside a
 limit that was never going to lift and the caller reads a provider failure where the honest
 answer was *wait*.
@@ -257,21 +258,42 @@ let runtime = basis::Runtime::builder()
     .build()?;
 ```
 
+Those are defaults, not a ceiling on an individual call. A latency-sensitive
+turn can override either half independently. `model_budget` separately caps
+all main-model calls in that turn: the initial call, retries, and later rounds.
+
+```rust
+use std::time::Duration;
+use basis::{CollectingSink, TurnOptions};
+use basis::runtime::ProviderRetry;
+
+let options = TurnOptions::default()
+    .with_provider_retry(ProviderRetry {
+        base_delay: Duration::from_millis(100),
+        max_delay: Duration::from_secs(1),
+        ..ProviderRetry::default()
+    })
+    .with_retry_budget(2)
+    .with_model_budget(3);
+let report = run.execute_with_options(CollectingSink::default(), options).await?;
+```
+
 Two knobs because mentra keeps the two questions apart, and both are usually needed: widening
-the schedule without raising the count still gives up after five tries, and raising the count
-against the default 5s ceiling reaches only about 27 seconds in total, short of the minute a
-rate-limit window wants. Do the arithmetic before choosing.
+the schedule without raising the count still gives up after five retries (six calls), and
+raising the count against the default 5s ceiling reaches only about 27 seconds in total,
+short of the minute a rate-limit window wants. Do the arithmetic before choosing.
 
 What a host knows that basis cannot is how long its own caller will hold still. An editor
 session should fail fast, because somebody is watching a cursor blink; a chat bot whose turn
 already takes eight minutes can afford one of them waiting, and would far rather do that than
 hand back an error the user has to re-ask. That judgement is why the number is the host's.
 
-The scope is the runtime's (ADR-0018): this describes the connection to the provider, the
-same kind of fact as the credential beside it, not something one prompt decides. Every run
-minted on the runtime carries it, and so does every subagent a run delegates to through
-`spawn` — a delegated run that reset to the default would be quietly less patient than the
-run that delegated it, against the same gateway. `ProviderRetry` is mentra's own type,
+The default scope is the runtime's (ADR-0018): this describes the connection to the provider,
+the same kind of fact as the credential beside it. Every run minted on the runtime carries
+it, and so does every subagent a run delegates to through `spawn` — a delegated run that
+reset to Mentra's default would be quietly less patient than the run that delegated it,
+against the same gateway. `TurnOptions` is the explicit exception for one call.
+`ProviderRetry` is mentra's own type,
 re-exported as `basis::runtime::ProviderRetry`, and `retry_after_cap` on it bounds how long a
 server's own `Retry-After` may make this process wait. None of it is a deadline:
 `TurnOptions::with_deadline` still bounds the whole turn, and a generous schedule inside a

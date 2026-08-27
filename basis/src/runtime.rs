@@ -185,16 +185,17 @@ pub struct Runtime {
     /// The default model *policy*; a workspace may override the selector, and
     /// the resolved id is always the workspace's own fact.
     model: ModelSelector,
-    /// How patiently every run minted here waits out a failing provider, from
+    /// Default retry schedule for runs minted here, from
     /// [`RuntimeBuilder::with_provider_retry`].
     ///
     /// Runtime-scoped for ADR-0018's reason: it describes the *connection* to
     /// the provider, like the credential and the base URL beside it, and not
     /// what one prompt may spend. Kept here because mentra takes it on each
     /// run's options rather than on its runtime, so this is the value every
-    /// [`PreparedRun`](crate::PreparedRun) minted on this runtime copies.
+    /// [`PreparedRun`](crate::PreparedRun) minted on this runtime copies. A
+    /// turn may override it through [`TurnOptions`](crate::TurnOptions).
     provider_retry: ProviderRetry,
-    /// How many attempts that schedule gets, from
+    /// Default retry count after the initial provider call, from
     /// [`RuntimeBuilder::with_provider_retry_budget`]. Kept beside the
     /// schedule and travelling with it for the same reason: mentra splits the
     /// count from the waits, and a runtime that widened one without the other
@@ -286,8 +287,8 @@ impl Runtime {
         &self.transcripts
     }
 
-    /// The retry schedule and attempt count every run minted on this runtime
-    /// carries.
+    /// The retry schedule and retry-count fallbacks every run minted on this
+    /// runtime carries.
     ///
     /// Read at mint by `Workspace::minted`, which is what makes a
     /// runtime-scoped knob reach a per-run option. The two travel together

@@ -252,10 +252,11 @@ impl RuntimeBuilder {
     /// that is failing transiently.
     ///
     /// mentra retries a transient provider error on a doubling backoff and
-    /// gives up when the budget runs out. Its default — five attempts, from
-    /// 500ms, capped at 5s — spends about **12.5 seconds** before the run
-    /// fails, which is tuned for a provider that hiccups and not for one that
-    /// is rate-limiting you: a gateway's 429 routinely names a window longer
+    /// gives up when the budget runs out. Its default — five retries after the
+    /// initial call, from 500ms, capped at 5s — permits six calls and waits
+    /// about **12.5 seconds** before the run fails, which is tuned for a
+    /// provider that hiccups and not for one that is rate-limiting you: a
+    /// gateway's 429 routinely names a window longer
     /// than that, so the whole schedule elapses inside a limit that was never
     /// going to lift, and the caller reads a provider failure where the honest
     /// answer was *wait*.
@@ -270,9 +271,10 @@ impl RuntimeBuilder {
     ///
     /// Runtime-scoped (ADR-0018) because it describes the *connection to the
     /// provider* — the same kind of fact as the credential and the base URL
-    /// beside it, and not the kind of fact one prompt decides. Every run
-    /// [`Workspace`](crate::Workspace) mints on this runtime carries it, and
-    /// so does every subagent a run delegates to through
+    /// beside it. Every run [`Workspace`](crate::Workspace) mints on this
+    /// runtime carries it as its default; an exceptional turn can override it
+    /// with [`TurnOptions::with_provider_retry`](crate::TurnOptions::with_provider_retry).
+    /// It also reaches every subagent a run delegates to through
     /// [`spawn`](crate::tools::spawn): a child that reset to the default would
     /// be a delegated run quietly less patient than the run that delegated it,
     /// against the same rate limit.
@@ -286,9 +288,9 @@ impl RuntimeBuilder {
     /// still bounds the whole turn, and a generous schedule inside a short
     /// deadline is bounded by the deadline. Set both, and set them knowingly.
     ///
-    /// **Sets the waits, not the count.** mentra keeps *how many* attempts a
-    /// run gets on its own `RunOptions::retry_budget`, so widening the
-    /// schedule alone still gives up after five tries —
+    /// **Sets the waits, not the count.** mentra keeps how many retries follow
+    /// the initial call on `RunOptions::retry_budget`, so widening the
+    /// schedule alone still gives up after five retries (six calls) —
     /// [`with_provider_retry_budget`](Self::with_provider_retry_budget) is the
     /// other half, and the rate-limit case above needs both.
     #[must_use]
@@ -306,7 +308,7 @@ impl RuntimeBuilder {
     /// separate because mentra keeps the two apart: the schedule is a value
     /// with a type, the count is a bare number on each run's options. They are
     /// two knobs here rather than one because they are genuinely two questions
-    /// — *how long between tries* and *how many tries* — and because the
+    /// — *how long between retries* and *how many retries* — and because the
     /// commonest adjustment is this one alone, which should not require
     /// constructing a [`ProviderRetry`] to express.
     ///
@@ -316,9 +318,9 @@ impl RuntimeBuilder {
     /// minute a rate-limit window usually wants. Widening the schedule is what
     /// makes a larger count worth having.
     ///
-    /// Runtime-scoped and inherited by delegated runs, exactly as the schedule
-    /// is; see [`with_provider_retry`](Self::with_provider_retry) for why that
-    /// scope is the right one.
+    /// Runtime-scoped by default and inherited by delegated runs, exactly as
+    /// the schedule is; a turn may override the count with
+    /// [`TurnOptions::with_retry_budget`](crate::TurnOptions::with_retry_budget).
     #[must_use]
     pub fn with_provider_retry_budget(self, budget: usize) -> Self {
         Self {
