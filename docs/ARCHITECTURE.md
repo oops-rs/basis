@@ -58,6 +58,8 @@ hot-reloadable extensions. Two pi decisions independently validate ours:
 | Session persistence + resume | File-backed sessions (plain files under the store dir since 0.7, ADR-0023 — basis links no database), snapshots | mentra |
 | Compaction | mentra's compaction, configured by basis (`Compaction`) ✅ — every tool result the model was shown is kept, elision is opt-in by number, the trigger is a share of the model's window when the provider reports one, snapshots follow the store; `PreparedRun::compact` and ACP `/compact` run a pass on demand | built |
 | Session branching / tree | mentra's transcript tree, exposed on `PreparedRun` ✅ | built |
+| Lossless host observation | `PreparedRun::register_agent_event_tap` forwards complete Mentra `AgentEvent`s in occurrence order behind an opaque Basis guard; JSONL remains summary-only ✅ | mentra + built |
+| Strict private-runtime reuse | Repeatable registered-provider recipe, discovery-off/fresh-only/resolved-model/exact-roster workspace, explicit per-generation host-tool bind, consuming async rebuild ✅ | built |
 | Builtin tools (files, shell, background exec, tasks) | Mentra builtins, with the roster basis's: `read`, `ls`, `grep`, `glob`, `write`, `edit` (mentra's split file tools, `RuntimeBuilder::with_file_tools`), `compact`, `load_skill`, and `spawn` for commands and delegation. `shell`, `background_run`, `check_background`, `task`, `task_*`, `team_*`, `idle` and — since D2 switched mentra's memory engine off — `memory_pin`/`memory_forget`/`memory_search` are registered but not offered ✅ | mentra + built |
 | Context files (AGENTS.md) | Loader: workspace + global, parent-dir walk; `CLAUDE.md` per directory where there is no `AGENTS.md` | build |
 | Skills (on-demand) | SKILL.md discovery, description-first loading, four roots — `.basis/skills` and `.agents/skills` in the workspace, `skills/` in the global config dir and `~/.agents/skills` | build |
@@ -305,6 +307,35 @@ flowchart LR
   declared tools, and its MCP connections. The last two are minted from its own config and
   die with it while the tool registry underneath is the runtime's, so each is claimed by name
   at open, released at drop, and hidden from every other workspace's roster.
+- **A reusable private runtime is consumed, never reset in place** (ADR-0024). Basis 0.8 uses
+  Mentra 0.23.2 for the underlying observer and fresh provider-session primitives.
+  `RuntimeBuilder::with_reusable_registered_provider(provider_id, make, warm)` records the host's
+  provider factory and the async warm step for its ordinary clone;
+  `into_reusable_recipe` accepts it only with explicit ephemeral history and without one-shot
+  providers or host tools. `WorkspaceBuilder::with_runtime_recipe` then requires discovery off,
+  fresh-only, a resolved model whose provider matches the recipe, and an exact
+  `ToolRoster::only` roster. Each opened or rebuilt generation starts unbound, and the consuming
+  `Workspace::bind_host_tools` supplies the set the host declares complete before that checkout's
+  one independent mint. Basis validates supplied names and collisions, not completeness or roster
+  correspondence; a failed consuming bind returns no entry. The async consuming
+  `Workspace::rebuild_for_reuse` seals the generation, drops workspace registrations and the
+  uniquely owned old runtime before invoking the provider factory and host warm step, and returns
+  that replacement unbound. Basis enforces provider identity and call order. A Responses host must
+  return `fresh_session_scope()` from every factory call and make `warm` prewarm its
+  session-sharing clone. A live run, opaque `AgentEventTapGuard`, or detached Basis event forwarder
+  refuses rebuild and consumes the entry; failed ownership, provider construction, runtime build,
+  or warm likewise returns no entry. Raw access through `mentra_runtime` or a prepared run's
+  session accessors permanently disables reuse for that generation. The proof does not cover
+  Mentra team/background/`spawn` execution or a custom tool that returns before detached work
+  finishes. Basis does not reject those routes automatically; a reusable host excludes them from
+  the exact roster and awaits every bound-tool effect.
+- **Lossless observation is a separate in-process seam.**
+  `PreparedRun::register_agent_event_tap` forwards Mentra's complete provider-neutral
+  `AgentEvent` values synchronously, unchanged, and in occurrence order before the bounded event
+  stream. Its Basis-owned `AgentEventTapGuard` is opaque and unregisters on drop. Because the
+  callback runs inline it must be prompt and non-panicking; because the guard holds a reusable
+  lifecycle lease, a rebuild cannot race an observer that is still registered. Complete tool
+  bodies stay out of the versioned JSONL surface.
 - **A run answers with a value when asked.** `PreparedRun::output::<T>()` runs a turn that
   must answer through a generated terminal tool whose input *is* the answer, which is what
   makes a workflow composable in host Rust rather than in prose-parsing. The stream is
@@ -328,7 +359,7 @@ flowchart LR
   until a per-session override lands upstream. Where the rows live is the caller's to say,
   on the runtime that owns them: `RuntimeBuilder::with_store_dir` names a directory, and
   `with_ephemeral_history` says nowhere and takes an in-memory store instead.
-- **The mentra/basis split** (same author owns both): anything a *different* harness could also
+- **The mentra/basis split**: anything a *different* harness could also
   want — session branching, compaction lifecycle, hook points, MCP client — belongs in mentra.
   basis keeps conventions and protocol: AGENTS.md/skills/template discovery, ACP mapping, the
   CLI grammar.

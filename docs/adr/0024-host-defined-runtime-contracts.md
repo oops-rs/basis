@@ -3,8 +3,7 @@
 > Status: Accepted · 2026-08-27
 > Precedent: [`0005-mentra-coevolution-discipline.md`](0005-mentra-coevolution-discipline.md)
 > and [`0013-the-host-owns-the-boundary.md`](0013-the-host-owns-the-boundary.md).
-> Source: Nous proposal 0116 and ADR-0117, accepted by the owner on
-> 2026-08-27.
+> Source: Nous proposal 0116 and ADR-0117, accepted 2026-08-27.
 
 ## Context
 
@@ -63,11 +62,12 @@ exposing raw mentra control as the normal embedding path.**
    produced. Callers never parse an error string to recover behavior.
 
 5. **Lossless observation is an in-process channel, not a wire expansion.**
-   `PreparedRun` exposes complete occurrence-ordered model/tool/usage/terminal
-   facts by forwarding mentra's synchronous Session event tap. The existing
-   JSONL/Event surface remains summary-oriented and body-free. Observation must
-   retain a completed parallel result even when cancellation prevents later
-   post-execution hooks from running.
+   `PreparedRun::register_agent_event_tap` forwards mentra's complete
+   occurrence-ordered `AgentEvent` values unchanged. The returned
+   `AgentEventTapGuard` is a Basis-owned opaque guard that unregisters on drop.
+   The existing JSONL/Event surface remains summary-oriented and body-free.
+   Observation must retain a completed parallel result even when cancellation
+   prevents later post-execution hooks from running.
 
 6. **Discovery can be disabled as one coherent posture.**
    `WorkspaceBuilder::without_discovery()` skips repository/home config,
@@ -102,14 +102,35 @@ exposing raw mentra control as the normal embedding path.**
   requires a minor release and a downstream public-API/package probe.
 - mentra remains the owner of generic event and provider-session primitives;
   basis remains the owner of embedding conventions and discovery posture.
-- Fresh-only execution can ship before safe reuse. Pooling and full cutover
-  remain blocked until the consume/rebuild contract and A→B/B→A isolation
-  probes pass.
+- At acceptance, fresh-only execution could ship before safe reuse; pooling and
+  full cutover remained blocked until the consume/rebuild contract and A→B/B→A
+  isolation probes passed. The implementation note below records that closure.
 - The public JSONL schema remains compatible because complete tool bodies stay
   on the in-process observation channel.
 - Supporting strict hosts increases the conformance matrix: registered
   provider, result policy, profiles, controls, typed failure, observation,
   roster denial, discovery-off, and lifecycle each require focused tests.
+
+## Implementation note (Basis 0.8)
+
+Basis 0.8 implements this decision against Mentra 0.23.2. The public seams are
+`PreparedRun::register_agent_event_tap` and its opaque guard,
+`RuntimeBuilder::with_reusable_registered_provider` /
+`into_reusable_recipe`, `WorkspaceBuilder::with_runtime_recipe`, the consuming
+`Workspace::bind_host_tools`, and the async consuming
+`Workspace::rebuild_for_reuse`.
+
+The reuse proof covers Basis-attached runs, observer guards, event forwarders,
+workspace registrations, and ephemeral history. Basis enforces the declared
+provider id and the factory/build/warm call order; a Responses host must return
+`fresh_session_scope()` from each factory call and make `warm` prewarm that
+session-sharing clone. Raw mentra access permanently disables reuse. Mentra
+team/background/`spawn` execution and custom tools that detach work are
+excluded; Basis does not reject those names automatically. A reusable host must
+omit those routes from its exact roster and await every bound-tool effect.
+`bind_host_tools` validates the supplied names and collisions, while the host
+owns completeness and correspondence with that roster. Because binding
+consumes the workspace, failure returns no reusable entry.
 
 ## Alternatives considered
 

@@ -11,7 +11,7 @@ over it ([ADR-0022](docs/adr/0022-the-task-layer-is-a-crate.md)), and `basis-acp
 are thin shells.
 
 ```rust
-// [dependencies] basis = "0.4"
+// [dependencies] basis = "0.8"
 let workspace = basis::Workspace::open("/repo").await?;
 let mut run = workspace.prepare("what does this repo do?")?;
 let report = run.execute(basis::CollectingSink::default()).await?;
@@ -68,6 +68,41 @@ run's `Approver` — is a `Runtime` ([ADR-0018](docs/adr/0018-the-runtime-owns-t
 `Workspace::open("/repo")` builds a private one bound to that repository and is unchanged by
 the split; a host opening N of them builds `Runtime::builder().build()?` once and hands each
 workspace an `Arc` of it, so N repositories cost one provider resolution and one history store.
+
+**A strict host can rebuild a private runtime between checkouts.** Basis 0.8 uses Mentra 0.23.2
+for the consume/rebuild path from ADR-0024. The provider is a repeatable factory plus an async warm
+step; the recipe requires ephemeral history and rejects one-shot provider or host-tool values. The
+host is responsible for returning a fresh provider/session scope from each factory call:
+
+```rust
+let recipe = basis::Runtime::builder()
+    .with_reusable_registered_provider(provider_id, make_provider, warm_provider)
+    .with_tool_result_policy(basis::ToolResultPolicy::unlimited())
+    .with_ephemeral_history()
+    .into_reusable_recipe()?;
+
+let workspace = basis::Workspace::builder("/repo")
+    .with_runtime_recipe(recipe)
+    .without_discovery()
+    .fresh_only()
+    .with_resolved_model(resolved_model)
+    .with_tool_roster(basis::ToolRoster::only(["search", "finish"]))
+    .open()
+    .await?
+    .bind_host_tools(checkout_tools)?;
+```
+
+Every generation starts unbound, including the value returned by the consuming async
+`Workspace::rebuild_for_reuse`. The host must call the consuming `bind_host_tools` with the set it
+declares complete for that checkout, even when the set is empty. Basis validates supplied names and
+collisions, not semantic completeness or correspondence with the allow-list; a failed consuming
+bind returns no entry. Rebuild refuses and consumes an entry with a live run,
+`AgentEventTapGuard`, or detached Basis event forwarder; provider build or warm failure also returns
+no entry. Any raw Mentra access permanently disables reuse for that generation. Mentra
+team/background/`spawn` execution and custom tools that detach their own
+work are outside the proof; the host must omit those routes from its exact roster. The full boundary
+and pooling sequence are in
+[the embedding guide](docs/embedding.md#a-host-can-pin-the-whole-run-contract).
 
 Keep the run and send again for a conversation — `run.send("and which of those is riskiest?", sink,
 AllowAll)` — because the session survives the turn, and `run.agent_id()` is the handle
@@ -143,6 +178,14 @@ The tag rides outside `Event`, so the versioned wire schema stays what its numbe
 stream ends when the last sink is dropped — and a finished run hands its sink back inside its report,
 so a report held past the join is a branch of the stream held open. That is the one sharp edge in the
 design: hold the answers, drop the reports.
+
+For durable evidence that cannot lose tool bodies to the summary stream,
+`PreparedRun::register_agent_event_tap` forwards Mentra's complete `AgentEvent` values unchanged,
+synchronously and in occurrence order. Keep the returned opaque Basis `AgentEventTapGuard` alive
+for the observation window; dropping it waits for any invocation already in flight and then
+unregisters. The callback runs inline and must return promptly. It must not re-enter an
+event-emitting operation or drop a tap guard, and the guard must not be dropped while holding a
+resource that an in-flight callback needs. This in-process seam does not expand the JSONL schema.
 
 ### Structured concurrency
 
@@ -434,9 +477,10 @@ resume; durable `spawn`/`send`/`ask`/`wait`/`cancel`/`watch`/`inbox` over the fi
 bridge; branching; compaction, whose defaults are basis's own — every tool result the model was
 shown stays in front of it — and whose knobs are `WorkspaceBuilder::with_compaction`; and the SDK
 proper — and since 0.7, conversations as plain files, a child a delegating parent can shape, and
-`basis-tasks` for a Rust host that wants durable handles. Named honestly, still open: the packages
-convention and provider OAuth; surfacing `team_*`, which stays hidden until a concrete use case
-asks for it; and **nobody has driven this from Zed or JetBrains yet** — it is verified against the
+`basis-tasks` for a Rust host that wants durable handles; since 0.8, a lossless in-process event tap
+and strict private-runtime consume/rebuild for host-defined checkouts. Named honestly, still open:
+the packages convention and provider OAuth; surfacing `team_*`, which stays hidden until a concrete
+use case asks for it; and **nobody has driven this from Zed or JetBrains yet** — it is verified against the
 protocol and its official client library, not against the ecosystem. The four published crates are
 on crates.io at one version, as is mentra. CI runs fmt, clippy at
 `-D warnings`, and the full suite on Linux, macOS and Windows, plus MSRV (1.88, edition 2024).
@@ -450,7 +494,7 @@ for `--effort`, custom endpoints, and the hooks `shell`→`spawn` migration) ·
 [conventions.md](docs/conventions.md) (every file and variable basis reads, in precedence order) ·
 [embedding.md](docs/embedding.md) (the SDK in detail) · [targets.md](docs/targets.md) (running a
 command somewhere else) · [REDESIGN.md](docs/REDESIGN.md) (ledger) ·
-[adr/](docs/adr/) (23 locked decisions) · [proposals/](docs/proposals/) (deferred ideas).
+[adr/](docs/adr/) (24 locked decisions) · [proposals/](docs/proposals/) (deferred ideas).
 
 ## License
 
