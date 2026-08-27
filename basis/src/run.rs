@@ -51,6 +51,11 @@ pub use sink::{
 pub use turn::TurnOptions;
 pub use usage::RunUsage;
 
+/// Recoverability classification for a retained [`RunFailure`].
+pub use mentra::error::ErrorCategory as RunFailureCategory;
+/// Mentra's original typed terminal failure retained by [`RunReport`].
+pub use mentra::error::RuntimeError as RunFailure;
+
 /// The signal a caller trips to stop a turn.
 ///
 /// Re-exported rather than restated, and the reason is the one thing basis cannot
@@ -215,6 +220,9 @@ pub struct RunReport<S> {
     /// [`OutputReport::value`] rather than prose.
     pub final_message: Option<String>,
     pub outcome: RunOutcome,
+    /// Original typed runtime failure, before [`RunOutcome`] display/wire
+    /// projection. `None` on success and on Basis-owned output-shape mismatch.
+    pub failure: Option<RunFailure>,
     /// Which bound ended the run, when one did rather than the work.
     ///
     /// Neither field implies the other: a bounded run usually failed for want

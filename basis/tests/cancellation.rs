@@ -21,8 +21,9 @@ use std::{
 
 use async_trait::async_trait;
 use basis::{
-    ApprovalAnswer, ApprovalDecision, ApprovalRequest, Approver, CancellationToken, CollectingSink,
-    Event, RunOutcome, TurnOptions, approval::ApprovalGate, run::prepare_with_session,
+    ApprovalAnswer, ApprovalDecision, ApprovalRequest, Approver, Bound, CancellationToken,
+    CollectingSink, Event, RunFailure, RunFailureCategory, RunOutcome, TurnOptions,
+    approval::ApprovalGate, run::prepare_with_session,
 };
 use mentra::{
     BuiltinProvider, ContentBlock, ModelInfo, Role, Runtime, RuntimePolicy, Session,
@@ -197,6 +198,14 @@ async fn a_turn_cancelled_mid_flight_reports_a_failed_run() {
     );
     assert!(!report.succeeded());
     assert_eq!(report.final_message, None);
+    assert!(matches!(
+        report.failure.as_ref(),
+        Some(RunFailure::Cancelled)
+    ));
+    assert_eq!(
+        report.failure.as_ref().map(RunFailure::category),
+        Some(RunFailureCategory::Terminal)
+    );
 
     // Deliberately *not* a `Bound`. A deadline or a tool budget is an allowance
     // the run was given and used up, and a script that retried on one would be
@@ -246,10 +255,47 @@ async fn a_token_already_tripped_stops_the_turn_before_it_starts() {
     .expect("cancelling ends the run, it does not break it");
 
     assert!(!report.succeeded());
+    assert!(matches!(
+        report.failure.as_ref(),
+        Some(RunFailure::Cancelled)
+    ));
     assert_eq!(report.stopped_by, None);
     assert!(
         !dir.path().join("made.txt").exists(),
         "nothing the scripted turn would have done may happen"
+    );
+}
+
+#[tokio::test]
+async fn a_tool_budget_failure_retains_its_exact_typed_count() {
+    let dir = workspace();
+    let (runtime, model) = scripted_write(dir.path());
+    let mut prepared = prepare_with_session(
+        session(&runtime, dir.path(), model),
+        dir.path(),
+        "make a file",
+        &context(),
+        "openai",
+        "scripted-model",
+    )
+    .expect("prepared");
+
+    let report = prepared
+        .execute_with_options(
+            CollectingSink::new(),
+            TurnOptions::default().with_tool_budget(0),
+        )
+        .await
+        .expect("a tool budget ends in a completed report");
+
+    assert!(matches!(
+        report.failure.as_ref(),
+        Some(RunFailure::ToolBudgetExceeded(0))
+    ));
+    assert_eq!(report.stopped_by, Some(Bound::ToolBudget));
+    assert!(
+        !dir.path().join("made.txt").exists(),
+        "the zero-budget tool call must never execute"
     );
 }
 

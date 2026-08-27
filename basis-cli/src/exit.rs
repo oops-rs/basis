@@ -56,6 +56,7 @@ mod tests {
             provider: "openai".to_string(),
             final_message: None,
             outcome,
+            failure: None,
             stopped_by,
             usage: basis::RunUsage::default(),
             sink: (),

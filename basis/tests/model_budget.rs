@@ -9,8 +9,8 @@ use std::{
 };
 
 use basis::{
-    CollectingSink, Event, ModelInfo, Provider, RunOutcome, Runtime, TurnOptions, Workspace,
-    async_trait,
+    CollectingSink, Event, ModelInfo, Provider, RunFailure, RunFailureCategory, RunOutcome,
+    Runtime, TurnOptions, Workspace, async_trait,
     runtime::{
         ProviderCapabilities, ProviderDescriptor, ProviderError, ProviderEventStream,
         ProviderRetry, Request,
@@ -90,6 +90,14 @@ async fn model_budget_counts_retry_attempts_and_preserves_the_wire_outcome() {
     };
 
     assert_eq!(requests.load(Ordering::SeqCst), 2);
+    assert!(matches!(
+        report.failure.as_ref(),
+        Some(RunFailure::ModelBudgetExceeded(2))
+    ));
+    assert_eq!(
+        report.failure.as_ref().map(RunFailure::category),
+        Some(RunFailureCategory::Terminal)
+    );
     assert_eq!(report.outcome, expected);
     assert_eq!(report.final_message, None);
     assert_eq!(report.stopped_by, None);
@@ -101,4 +109,49 @@ async fn model_budget_counts_retry_attempts_and_preserves_the_wire_outcome() {
             ..
         }) if outcome == &expected
     ));
+}
+
+#[tokio::test]
+async fn retryable_provider_category_and_source_survive_without_string_parsing() {
+    let requests = Arc::new(AtomicUsize::new(0));
+    let fixture = tempfile::tempdir().expect("workspace");
+    let workspace = Workspace::builder(fixture.path())
+        .without_discovery()
+        .with_runtime_builder(
+            Runtime::builder()
+                .with_provider_instance(AlwaysRetryable {
+                    requests: Arc::clone(&requests),
+                })
+                .with_ephemeral_history(),
+        )
+        .with_resolved_model(ModelInfo::new(MODEL, PROVIDER))
+        .open()
+        .await
+        .expect("retry-category workspace opens");
+    let mut run = workspace.prepare("fail once").expect("mints");
+
+    let report = run
+        .execute_with_options(
+            CollectingSink::default(),
+            TurnOptions::default().with_retry_budget(0),
+        )
+        .await
+        .expect("provider failure is a completed Basis report");
+    let failure = report.failure.as_ref().expect("typed provider failure");
+
+    assert_eq!(requests.load(Ordering::SeqCst), 1);
+    assert!(matches!(
+        failure,
+        RunFailure::FailedToStreamResponse(ProviderError::Retryable {
+            message,
+            delay: None,
+        }) if message == "retry the scripted request"
+    ));
+    assert_eq!(failure.category(), RunFailureCategory::Retryable);
+    assert_eq!(
+        report.outcome,
+        RunOutcome::Error {
+            message: failure.to_string(),
+        }
+    );
 }

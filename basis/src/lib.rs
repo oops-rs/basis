@@ -136,7 +136,8 @@ pub use run::{
     EventSink, FnSink, MergedEvents, ModelInfo, NullSink, OutputReport, OutputSpec, PreparedRun,
     PromptPart, ReasoningChange, ReasoningOptions, ReasoningSummary, RoundAdjustment,
     RoundBoundary, RoundContext, RoundDecision, RoundStrategy, RoundToolResult, RunContext,
-    RunReport, RunUsage, TaggedEvent, TaggedSink, TurnOptions, run, run_with_approver,
+    RunFailure, RunFailureCategory, RunReport, RunUsage, TaggedEvent, TaggedSink, TurnOptions, run,
+    run_with_approver,
 };
 pub use runtime::{Runtime, RuntimeBuilder, ToolResultPolicy};
 pub use shell::ShellAccess;

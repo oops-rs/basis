@@ -11,7 +11,8 @@
 use std::path::PathBuf;
 
 use basis::{
-    Bound, CollectingSink, Event, JsonlWriter, RunOutcome, RunSpec, run::prepare_with_session,
+    Bound, CollectingSink, Event, JsonlWriter, RunFailure, RunFailureCategory, RunOutcome, RunSpec,
+    run::prepare_with_session,
 };
 use mentra::{
     RuntimePolicy,
@@ -70,6 +71,7 @@ async fn a_run_streams_deltas_between_the_bookends() {
         .expect("run completes");
 
     assert!(report.succeeded());
+    assert!(report.failure.is_none());
     assert_eq!(report.final_message.as_deref(), Some("Hello world"));
 
     let events = report.sink.into_events();
@@ -374,6 +376,14 @@ async fn a_failing_turn_still_closes_the_stream() {
 
     assert!(!report.succeeded());
     assert_eq!(report.final_message, None);
+    assert!(matches!(
+        report.failure.as_ref(),
+        Some(RunFailure::FailedToStreamResponse(_))
+    ));
+    assert_eq!(
+        report.failure.as_ref().map(RunFailure::category),
+        Some(RunFailureCategory::Terminal)
+    );
 
     let events = report.sink.into_events();
     assert!(matches!(events.first(), Some(Event::RunStarted { .. })));
@@ -469,6 +479,10 @@ async fn a_tripped_bound_is_reported_as_a_bound_not_just_a_failure() {
     // is what the exit code needs — ADR-0015 asks a shell script to tell "out
     // of time" from "the provider refused" without parsing a message.
     assert!(!report.succeeded());
+    assert!(matches!(
+        report.failure.as_ref(),
+        Some(RunFailure::DeadlineExceeded)
+    ));
     assert_eq!(report.stopped_by, Some(Bound::Deadline));
 
     assert!(

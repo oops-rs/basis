@@ -641,7 +641,10 @@ impl PreparedRun {
             Ok(message) => Ended::Answered(Some(message.text())),
             Err(error) => Ended::Failed(error),
         };
-        self.finish(turn, ended, &observed).await
+        let mut report = self.finish(turn, ended, &observed).await?;
+        report.failure = result.err();
+
+        Ok(report)
     }
 
     /// Opens a turn: checks the prompt, emits the header, starts forwarding.
@@ -751,6 +754,7 @@ impl PreparedRun {
             provider: self.run.provider.clone(),
             final_message,
             outcome,
+            failure: None,
             stopped_by,
             usage,
             sink,
