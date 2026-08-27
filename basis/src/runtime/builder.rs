@@ -140,11 +140,12 @@ pub struct RuntimeBuilder {
     /// decision D4). `None` — the default — is inherit-everything, on the code
     /// path every runtime has always used.
     child_policy: Option<ChildPolicy>,
-    /// A provider the host constructed itself
-    /// ([`with_provider_instance`](Self::with_provider_instance)). When set,
-    /// the provider question is answered: resolution never runs, the
-    /// environment is never read, and [`build`](Self::build) refuses the
-    /// knobs resolution would have read beside it.
+    /// A provider the host constructed itself, through either the runtime-level
+    /// [`with_provider_instance`](Self::with_provider_instance) seam or the
+    /// provider-core [`with_registered_provider`](Self::with_registered_provider)
+    /// seam. When set, the provider question is answered: resolution never
+    /// runs, the environment is never read, and [`build`](Self::build) refuses
+    /// the knobs resolution would have read beside it.
     host_provider: Option<HostProvider>,
 }
 

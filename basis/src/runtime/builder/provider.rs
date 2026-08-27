@@ -3,10 +3,10 @@
 //!
 //! Every knob that answers *which service, at which endpoint, with which
 //! credential, spoken to how*: the closed enum and the host-constructed
-//! instance that replaces it, the base URL and the key, the model policy,
-//! the retry schedule a failing provider is waited out on, and the two wire
-//! questions (request format, and the transport the Responses format
-//! streams over).
+//! instance that replaces it (at either of mentra's provider abstraction
+//! levels), the base URL and the key, the model policy, the retry schedule a
+//! failing provider is waited out on, and the two wire questions (request
+//! format, and the transport the Responses format streams over).
 //!
 //! Sits beside [`provider_settlement`](super::provider_settlement), which is
 //! where these fields are *read*: the ambiguity rule that refuses an
@@ -23,9 +23,10 @@ impl RuntimeBuilder {
     /// against — one of the three knobs [`crate::provider`]'s resolution
     /// reads, beside [`with_base_url`](Self::with_base_url) and
     /// [`with_api_key`](Self::with_api_key). Like them it cannot sit beside a
-    /// [`with_provider_instance`](Self::with_provider_instance): the instance
-    /// already answers what this chooses, so [`build`](Self::build) refuses
-    /// the pair by name rather than ranking it.
+    /// either [`with_provider_instance`](Self::with_provider_instance) or
+    /// [`with_registered_provider`](Self::with_registered_provider): the
+    /// supplied provider already answers what this chooses, so
+    /// [`build`](Self::build) refuses the pair by name rather than ranking it.
     pub fn with_provider(self, provider: BuiltinProvider) -> Self {
         Self {
             provider: Some(provider),
@@ -83,6 +84,46 @@ impl RuntimeBuilder {
         }
     }
 
+    /// Runs this runtime on a low-level provider-core implementation the host
+    /// constructed, instead of one basis resolves.
+    ///
+    /// This is mentra's registered-provider seam, surfaced without another
+    /// adapter: a customized
+    /// [`provider_core::responses::ResponsesProvider`](crate::provider_core::responses::ResponsesProvider)
+    /// or
+    /// [`provider_core::anthropic::AnthropicProvider`](crate::provider_core::anthropic::AnthropicProvider)
+    /// goes straight through mentra's own bridge. It is distinct from
+    /// [`with_provider_instance`](Self::with_provider_instance), whose
+    /// [`Provider`](crate::Provider) is mentra's higher-level runtime trait.
+    ///
+    /// A host that needs the concrete Responses session after construction may
+    /// clone the provider before passing one clone here. `ResponsesProvider`'s
+    /// clone shares its session state, so opening a WebSocket through the
+    /// retained clone prewarms the same connection the registered clone's real
+    /// runs use; basis neither wraps that clone in a second provider nor
+    /// reimplements mentra's bridge.
+    ///
+    /// Like a runtime-level instance, a registered provider is an answer, not a
+    /// preference. Provider resolution and environment lookup are skipped, and
+    /// [`with_provider`](Self::with_provider),
+    /// [`with_base_url`](Self::with_base_url), and
+    /// [`with_api_key`](Self::with_api_key) are refused beside it at build time.
+    /// Calling either host-provider method again replaces the earlier answer.
+    #[must_use]
+    pub fn with_registered_provider<P>(self, provider: P) -> Self
+    where
+        P: mentra::provider_core::Provider + 'static,
+    {
+        let id = provider.descriptor().id;
+        Self {
+            host_provider: Some(HostProvider {
+                id,
+                install: Box::new(move |builder| builder.with_registered_provider(provider)),
+            }),
+            ..self
+        }
+    }
+
     /// Points the runtime at an OpenAI-compatible endpoint.
     ///
     /// Paste the URL the server publishes. A trailing `/v1` is stripped during
@@ -99,9 +140,9 @@ impl RuntimeBuilder {
     /// such an endpoint then uses complete local replay rather than automatic
     /// `previous_response_id` chaining.
     ///
-    /// Beside a [`with_provider_instance`](Self::with_provider_instance) this
-    /// is refused at [`build`](Self::build): an instance reaches its endpoint
-    /// itself, so a base URL next to one has nowhere left to point.
+    /// Beside either host-provider seam this is refused at
+    /// [`build`](Self::build): an instance reaches its endpoint itself, so a
+    /// base URL next to one has nowhere left to point.
     pub fn with_base_url(self, base_url: impl Into<String>) -> Self {
         Self {
             base_url: Some(base_url.into()),
@@ -123,10 +164,10 @@ impl RuntimeBuilder {
     /// at — with nothing to attribute it to, basis would be picking a service to
     /// send someone's credential to.
     ///
-    /// Beside a [`with_provider_instance`](Self::with_provider_instance) this
-    /// is refused at [`build`](Self::build) for the same reason: an instance
-    /// authenticates itself, so a key basis cannot hand it is a credential on
-    /// its way to being ignored.
+    /// Beside either host-provider seam this is refused at
+    /// [`build`](Self::build) for the same reason: an instance authenticates
+    /// itself, so a key basis cannot hand it is a credential on its way to
+    /// being ignored.
     pub fn with_api_key(self, api_key: impl Into<String>) -> Self {
         Self {
             api_key: Some(api_key.into()),
@@ -175,12 +216,13 @@ impl RuntimeBuilder {
     /// host building a shared [`Runtime`](crate::Runtime) states its own process facts and
     /// calls this itself if it wants a file to speak for them.
     ///
-    /// **A provider instance leaves the file's `provider` and `base_url`
-    /// unread.** [`with_provider_instance`](Self::with_provider_instance)
-    /// answers the question those keys answer, and this method only ever
-    /// fills emptiness — so they yield silently where an explicit builder
-    /// call is refused by name. The model policy still arrives: which model
-    /// is asked for is orthogonal to who answers.
+    /// **A host-supplied provider leaves the file's `provider` and `base_url`
+    /// unread.** [`with_provider_instance`](Self::with_provider_instance) and
+    /// [`with_registered_provider`](Self::with_registered_provider) answer the
+    /// question those keys answer, and this method only ever fills emptiness —
+    /// so they yield silently where an explicit builder call is refused by
+    /// name. The model policy still arrives: which model is asked for is
+    /// orthogonal to who answers.
     #[must_use]
     pub fn with_config(self, config: &crate::Config) -> Self {
         // See the doc above: with an instance supplied the provider question

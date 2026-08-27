@@ -6,6 +6,7 @@
 //! Split out of `builder.rs` only for that function's size (whole-wave
 //! review, G6): the *knobs* that feed this ([`RuntimeBuilder::with_provider`],
 //! [`RuntimeBuilder::with_provider_instance`],
+//! [`RuntimeBuilder::with_registered_provider`],
 //! [`RuntimeBuilder::with_base_url`], [`RuntimeBuilder::with_api_key`]) stay
 //! there, because they are its public surface; what moved is the settling
 //! ([`settle`]) and the assembly ([`assemble`]), which are `build_with`'s own
@@ -13,6 +14,7 @@
 //!
 //! [`RuntimeBuilder::with_provider`]: super::RuntimeBuilder::with_provider
 //! [`RuntimeBuilder::with_provider_instance`]: super::RuntimeBuilder::with_provider_instance
+//! [`RuntimeBuilder::with_registered_provider`]: super::RuntimeBuilder::with_registered_provider
 //! [`RuntimeBuilder::with_base_url`]: super::RuntimeBuilder::with_base_url
 //! [`RuntimeBuilder::with_api_key`]: super::RuntimeBuilder::with_api_key
 
@@ -25,15 +27,18 @@ use crate::{error::RunError, provider, runtime::credential::Credential};
 
 use super::Wire;
 
-/// A provider instance the host built, held until [`assemble`] hands it to
-/// mentra.
+/// A provider instance the host built, held until [`assemble`] hands it to the
+/// matching mentra registration seam.
 ///
 /// Two parts because they are needed at two times. The `id` is read out of
-/// the instance's descriptor at the `with_provider_instance` call: it is what
+/// the instance's descriptor at either host-provider call: it is what
 /// `Runtime::provider` reports and what models resolve under, and holding it
 /// here is what lets `RuntimeBuilder`'s `Debug` and the ambiguity refusal name
-/// the instance without asking it again. The installer is `FnOnce` because
-/// mentra takes the instance by value, and boxing that move is what keeps
+/// the instance without asking it again. The installer preserves which of
+/// mentra's two provider abstractions the host supplied: the runtime-level
+/// trait goes through `with_provider_instance`, while the provider-core trait
+/// goes through `with_registered_provider`. It is `FnOnce` because mentra
+/// takes either instance by value, and boxing that move is what keeps
 /// `RuntimeBuilder` free of a generic parameter a half-configured one would
 /// otherwise have to carry.
 pub(super) struct HostProvider {
@@ -54,13 +59,14 @@ pub(super) enum ProviderSource {
 /// Settles which provider this runtime runs on, refusing an ambiguous
 /// statement before anything is resolved or assembled.
 ///
-/// A host-supplied instance is an answer rather than a preference: with one
-/// present, resolution — and with it the environment — is skipped entirely,
-/// and `provider`/`base_url`/`api_key` set beside it are each refused by name
-/// with [`provider::ProviderError::AmbiguousProviderSource`], whichever was
-/// set. A silent priority here would be a `with_provider` that silently
-/// stopped meaning anything, so this checks all three before choosing either
-/// path rather than letting one win quietly.
+/// A host-supplied instance, at either provider abstraction level, is an answer
+/// rather than a preference: with one present, resolution — and with it the
+/// environment — is skipped entirely, and `provider`/`base_url`/`api_key` set
+/// beside it are each refused by name with
+/// [`provider::ProviderError::AmbiguousProviderSource`], whichever was set. A
+/// silent priority here would be a `with_provider` that silently stopped
+/// meaning anything, so this checks all three before choosing either path
+/// rather than letting one win quietly.
 pub(super) fn settle(
     host_provider: Option<HostProvider>,
     provider: Option<BuiltinProvider>,
@@ -89,8 +95,8 @@ pub(super) fn settle(
 }
 
 /// Builds the mentra runtime on whichever provider `source` names: the host's
-/// own door for an instance, registered under the id its descriptor reports,
-/// or basis's resolved choice, dispatched on `wire` the way
+/// matching door for an instance, registered under the id its descriptor
+/// reports, or basis's resolved choice, dispatched on `wire` the way
 /// [`RuntimeBuilder::with_wire`](super::RuntimeBuilder::with_wire) documents.
 ///
 /// `build`, not `build_async`: no MCP server is ever registered at the
