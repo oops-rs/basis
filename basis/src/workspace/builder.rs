@@ -37,7 +37,7 @@ use crate::{
     hooks::{self, HookRunner, HooksConfig},
     memory::{self, MemoryConfig},
     run::LoadedSkill,
-    runtime::{Runtime, RuntimeBuilder, dispatch},
+    runtime::{Runtime, RuntimeBuilder, RuntimeRecipe, dispatch},
     shell::ShellAccess,
     skills::{self, SkillsConfig},
     store,
@@ -45,7 +45,7 @@ use crate::{
     tools::declared::{self, DeclaredTools, ToolsConfig},
 };
 
-use super::{Workspace, lifecycle::MintPosture, roster::ToolRoster};
+use super::{Workspace, WorkspaceReuse, lifecycle::MintPosture, roster::ToolRoster};
 
 /// How a workspace is opened.
 ///
@@ -109,6 +109,7 @@ enum WorkspaceModel {
 enum RuntimeSource {
     Shared(Arc<Runtime>),
     Private(Box<RuntimeBuilder>),
+    Reusable(Box<RuntimeRecipe>),
 }
 
 /// Hand-written for the reason [`RuntimeBuilder`]'s is: the private recipe can
@@ -122,6 +123,7 @@ impl std::fmt::Debug for WorkspaceBuilder {
                 match &self.runtime {
                     RuntimeSource::Shared(runtime) => runtime,
                     RuntimeSource::Private(recipe) => &**recipe,
+                    RuntimeSource::Reusable(recipe) => recipe,
                 },
             )
             .field("discovery_enabled", &self.discovery_enabled)
@@ -208,6 +210,31 @@ impl WorkspaceBuilder {
     pub fn with_runtime_builder(self, runtime: RuntimeBuilder) -> Self {
         Self {
             runtime: RuntimeSource::Private(Box::new(runtime)),
+            ..self
+        }
+    }
+
+    /// Supplies the repeatable private-runtime recipe for consume/rebuild.
+    ///
+    /// Opening this source is intentionally stricter than an ordinary private
+    /// builder: discovery must be disabled, fresh-only must be explicit, and
+    /// complete resolved model metadata must be supplied. The resulting
+    /// workspace starts unbound and cannot mint until
+    /// [`Workspace::bind_host_tools`](crate::Workspace::bind_host_tools)
+    /// consumes it with the checkout's complete host-tool set (including an
+    /// explicitly empty set).
+    ///
+    /// The supported reuse proof is intentionally narrower than everything
+    /// Mentra can run: a discovery-off host supplies an exact allow-list
+    /// roster and does not escape through raw Mentra APIs or execute team,
+    /// background, `spawn`, detached custom-tool, or other work whose lifetime
+    /// Basis cannot track. Such use poisons reuse where Basis can observe the
+    /// escape; the remaining execution limits are part of the host contract,
+    /// not inferred cleanup.
+    #[must_use]
+    pub fn with_runtime_recipe(self, recipe: RuntimeRecipe) -> Self {
+        Self {
+            runtime: RuntimeSource::Reusable(Box::new(recipe)),
             ..self
         }
     }
@@ -484,6 +511,21 @@ impl WorkspaceBuilder {
     /// **not** travel: every roster minted here hides the `mcp__*` tools of
     /// servers this workspace does not own.
     pub async fn open(self) -> Result<Workspace, RunError> {
+        if matches!(&self.runtime, RuntimeSource::Reusable(_)) {
+            if self.discovery_enabled {
+                return Err(RunError::ReusableWorkspaceRequiresDiscoveryOff);
+            }
+            if !self.fresh_only {
+                return Err(RunError::ReusableWorkspaceRequiresFreshOnly);
+            }
+            if !matches!(&self.model, WorkspaceModel::Resolved(_)) {
+                return Err(RunError::ReusableWorkspaceRequiresResolvedModel);
+            }
+            if self.roster.as_profile().allowed_tools.is_none() {
+                return Err(RunError::ReusableWorkspaceRequiresExactRoster);
+            }
+        }
+
         let context = if self.discovery_enabled {
             WorkspaceContext::discover_with(&self.path, &self.context)?
         } else {
@@ -567,6 +609,7 @@ impl WorkspaceBuilder {
         let store_dir = match &self.runtime {
             RuntimeSource::Shared(_) => None,
             RuntimeSource::Private(recipe) => recipe.named_store_dir().map(Path::to_path_buf),
+            RuntimeSource::Reusable(_) => None,
         };
         // This wave's own I/O — `roots`, the per-file reads `load` does, and
         // the `canonicalize` inside `crate::paths::same_dir` — goes to a
@@ -595,7 +638,7 @@ impl WorkspaceBuilder {
             .collect();
 
         let shared = matches!(self.runtime, RuntimeSource::Shared(_));
-        let runtime = match self.runtime {
+        let (runtime, reusable_recipe) = match self.runtime {
             // A shared runtime's provider, credential and endpoint are the
             // host's process facts and were settled before this workspace
             // existed, so a file's `provider` and `base_url` have nothing to
@@ -603,12 +646,23 @@ impl WorkspaceBuilder {
             // decided the connection, and applies `RuntimeBuilder::with_config`
             // itself if it wants a file to speak for it. What still applies is
             // `model`, below, which ADR-0018 already makes a workspace override.
-            RuntimeSource::Shared(runtime) => runtime,
-            RuntimeSource::Private(recipe) => Arc::new(recipe.with_config(&config).build_for(
-                &self.path,
-                self.shell,
-                &memory_roots,
-            )?),
+            RuntimeSource::Shared(runtime) => (runtime, None),
+            RuntimeSource::Private(recipe) => (
+                Arc::new(recipe.with_config(&config).build_for(
+                    &self.path,
+                    self.shell,
+                    &memory_roots,
+                )?),
+                None,
+            ),
+            RuntimeSource::Reusable(recipe) => {
+                let runtime = Arc::new(
+                    recipe
+                        .build_for(&self.path, self.shell, &memory_roots)
+                        .await?,
+                );
+                (runtime, Some(recipe))
+            }
         };
 
         // The workspace's own override first, then the file, then the runtime's
@@ -634,9 +688,10 @@ impl WorkspaceBuilder {
         // Skills must be registered on the runtime before any session spawns,
         // so every agent's tool roster includes `load_skill`.
         let (skills_dirs, skills) = if self.discovery_enabled {
-            let dirs = register_skills(runtime.mentra_runtime(), &self.path, &self.skills)?;
+            let dirs =
+                register_skills(runtime.mentra_runtime_internal(), &self.path, &self.skills)?;
             let loaded = runtime
-                .mentra_runtime()
+                .mentra_runtime_internal()
                 .skills()
                 .into_iter()
                 .map(|skill| LoadedSkill {
@@ -719,6 +774,8 @@ impl WorkspaceBuilder {
         #[cfg(not(feature = "mcp"))]
         let (mcp_files, mcp_servers): (Vec<ContextFile>, Vec<String>) = (Vec::new(), Vec::new());
 
+        let reuse = reusable_recipe.map(|recipe| WorkspaceReuse::new(recipe, self.shell));
+
         Ok(Workspace {
             root: resolved_workspace(&self.path, &context),
             // Compaction is two statements from two owners, joined here: the
@@ -738,6 +795,7 @@ impl WorkspaceBuilder {
             path: self.path,
             provider: runtime.provider().to_string(),
             runtime,
+            reuse,
             mint_posture: MintPosture::new(fresh_only),
             model,
             // The last thing the file still has to say, and the one this

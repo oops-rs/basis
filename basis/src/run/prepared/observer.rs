@@ -1,6 +1,6 @@
 //! Lifetime guard for one lossless session observer.
 
-use std::any::Any;
+use crate::workspace::lifecycle::ReuseLease;
 
 /// Keeps one [`PreparedRun`](super::PreparedRun) agent-event tap registered.
 ///
@@ -20,15 +20,18 @@ struct ObserverRegistration {
     // Fields drop in declaration order: unregister the callback before a
     // future lifecycle lease is released.
     _tap: mentra::agent::AgentEventTapGuard,
-    _lifecycle_lease: Option<Box<dyn Any + Send + Sync>>,
+    _lifecycle_lease: Option<ReuseLease>,
 }
 
 impl AgentEventTapGuard {
-    pub(super) fn new(tap: mentra::agent::AgentEventTapGuard) -> Self {
+    pub(super) fn new(
+        tap: mentra::agent::AgentEventTapGuard,
+        lifecycle_lease: Option<ReuseLease>,
+    ) -> Self {
         Self {
             _registration: ObserverRegistration {
                 _tap: tap,
-                _lifecycle_lease: None,
+                _lifecycle_lease: lifecycle_lease,
             },
         }
     }

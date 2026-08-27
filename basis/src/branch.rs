@@ -127,7 +127,7 @@ impl PreparedRun {
             return Vec::new();
         };
 
-        self.session()
+        self.session_internal()
             .children(&id)
             .into_iter()
             .map(TranscriptEntry::from_item)
@@ -151,14 +151,14 @@ impl PreparedRun {
             return Err(BranchError::UnknownEntry(entry.to_string()));
         };
 
-        self.session_mut()
+        self.session_mut_internal()
             .branch_from(&target)
             .map_err(|error| BranchError::Failed(error.to_string()))
     }
 
     /// The conversation's transcript tree, active path and all.
     fn replay(&self) -> &AgentTranscript {
-        self.session().replay()
+        self.session_internal().replay()
     }
 }
 

@@ -193,6 +193,68 @@ pub enum RunError {
     #[error("the reusable runtime provider warm-up failed: {0}")]
     RuntimeRecipeProviderWarm(#[source] Box<dyn std::error::Error + Send + Sync + 'static>),
 
+    /// A reusable workspace was opened without the only supported discovery
+    /// posture for consume/rebuild.
+    #[error("reusable workspaces require WorkspaceBuilder::without_discovery")]
+    ReusableWorkspaceRequiresDiscoveryOff,
+
+    /// A reusable workspace was opened without the one-independent-mint gate.
+    #[error("reusable workspaces require WorkspaceBuilder::fresh_only")]
+    ReusableWorkspaceRequiresFreshOnly,
+
+    /// A reusable workspace was opened with a selector or inherited model
+    /// policy instead of complete host-resolved metadata.
+    #[error("reusable workspaces require WorkspaceBuilder::with_resolved_model")]
+    ReusableWorkspaceRequiresResolvedModel,
+
+    /// A reusable workspace used a deny-list/default roster whose effective
+    /// tool set can widen when runtime registrations change.
+    #[error("reusable workspaces require an exact ToolRoster::only allow-list")]
+    ReusableWorkspaceRequiresExactRoster,
+
+    /// Checkout tools have not yet been explicitly bound to this generation.
+    #[error("this reusable workspace generation has not bound its host tools")]
+    ReusableWorkspaceToolsUnbound,
+
+    /// Checkout tools were already bound once for this generation.
+    #[error("this reusable workspace generation already bound its host tools")]
+    ReusableWorkspaceAlreadyBound,
+
+    /// A raw Mentra runtime or session handle escaped this generation.
+    #[error("this reusable workspace generation exposed raw Mentra state and cannot be reused")]
+    ReusableWorkspaceRawAccess,
+
+    /// Rebuild sealed this generation, so it cannot mint another run.
+    #[error("this reusable workspace generation is sealed for rebuild")]
+    ReusableWorkspaceSealed,
+
+    /// One or more runs, observer guards, or detached event forwarders still
+    /// retain this generation.
+    #[error("this reusable workspace generation still has {leases} outstanding lifecycle lease(s)")]
+    ReusableWorkspaceOutstanding {
+        /// Number of live run-derived leases at the rebuild boundary.
+        leases: usize,
+    },
+
+    /// The operation requires a workspace opened from a reusable recipe.
+    #[error("this workspace was not opened from a reusable runtime recipe")]
+    WorkspaceNotReusable,
+
+    /// Basis could not recover unique ownership of the old runtime after all
+    /// tracked workspace registrations were dropped.
+    #[error("the old reusable runtime still has outstanding Basis owners")]
+    ReusableRuntimeNotUnique,
+
+    /// A reusable checkout supplied a host tool name the provider wire cannot
+    /// carry safely.
+    #[error("`{name}` cannot be a reusable host tool name: {reason}")]
+    ReusableHostToolName {
+        /// The complete name returned by the tool descriptor.
+        name: String,
+        /// Which provider-safe name rule it violated.
+        reason: &'static str,
+    },
+
     #[error(transparent)]
     Provider(#[from] ProviderError),
 

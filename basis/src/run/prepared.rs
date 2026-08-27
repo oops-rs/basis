@@ -32,7 +32,7 @@ use crate::{
     context::WorkspaceContext,
     event::{ContextFile, EVENT_SCHEMA_VERSION, Event, RunOutcome, SkillSummary, TemplateSummary},
     templates::Template,
-    workspace::Workspace,
+    workspace::{Workspace, lifecycle::ReuseLease},
 };
 
 mod compact;
@@ -84,6 +84,9 @@ pub struct PreparedRun {
     /// deliberately: the two answer different questions and a shared name
     /// would blur them at every call site.
     context_snapshot: ContextSnapshot,
+    /// Keeps one reusable runtime generation unavailable for rebuild until
+    /// this run and every observer/forwarder derived from it are gone.
+    reuse_lease: Option<ReuseLease>,
 }
 
 /// Hand-written because mentra's `Session` is not `Debug`, and because the
@@ -114,6 +117,7 @@ impl PreparedRun {
             provider_retry: ProviderRetry::default(),
             retry_budget: RunOptions::default().retry_budget,
             context_snapshot: ContextSnapshot::default(),
+            reuse_lease: None,
         }
     }
 
@@ -144,6 +148,13 @@ impl PreparedRun {
         Self {
             provider_retry,
             retry_budget,
+            ..self
+        }
+    }
+
+    pub(crate) fn with_reuse_lease(self, reuse_lease: Option<ReuseLease>) -> Self {
+        Self {
+            reuse_lease,
             ..self
         }
     }
@@ -211,6 +222,7 @@ impl PreparedRun {
     /// The session this run drives, for a host that wants mentra's own surface
     /// — branching, the transcript tree, subagents — alongside basis's.
     pub fn session(&self) -> &Session {
+        self.poison_reuse();
         &self.session
     }
 
@@ -233,10 +245,22 @@ impl PreparedRun {
         &self,
         tap: impl Fn(&AgentEvent) + Send + Sync + 'static,
     ) -> AgentEventTapGuard {
-        AgentEventTapGuard::new(self.session.register_agent_event_tap(tap))
+        AgentEventTapGuard::new(
+            self.session.register_agent_event_tap(tap),
+            self.reuse_lease.clone(),
+        )
     }
 
     pub fn session_mut(&mut self) -> &mut Session {
+        self.poison_reuse();
+        &mut self.session
+    }
+
+    pub(crate) fn session_internal(&self) -> &Session {
+        &self.session
+    }
+
+    pub(crate) fn session_mut_internal(&mut self) -> &mut Session {
         &mut self.session
     }
 
@@ -247,7 +271,14 @@ impl PreparedRun {
     /// rest of the run, and its hooks and MCP connections end with it — the
     /// session that comes back is mentra's alone.
     pub fn into_session(self) -> Session {
+        self.poison_reuse();
         self.session
+    }
+
+    fn poison_reuse(&self) {
+        if let Some(lease) = &self.reuse_lease {
+            lease.poison();
+        }
     }
 
     /// The session's id, which changes every time a session is created —
@@ -699,13 +730,11 @@ impl PreparedRun {
         sink.emit(header_for(&session_id, &self.run))?;
 
         let (done, done_rx) = oneshot::channel();
-        let forwarder = tokio::spawn(forward_events(
-            receiver,
-            sink,
-            done_rx,
-            approver,
-            permissions,
-        ));
+        let reuse_lease = self.reuse_lease.clone();
+        let forwarder = tokio::spawn(async move {
+            let _reuse_lease = reuse_lease;
+            forward_events(receiver, sink, done_rx, approver, permissions).await
+        });
 
         Ok(Turn {
             session_id,
