@@ -509,15 +509,19 @@ async fn a_narrowed_child_is_not_offered_a_siblings_tools() {
             .expect("make it executable");
     }
     std::fs::create_dir_all(sibling.path().join(".basis")).expect("dir");
+    let manifest = json!({
+        "schema": 1,
+        "tools": {
+            "jenkins_job": {
+                "description": "Trigger a job.",
+                "input_schema": {"type": "object", "properties": {}},
+                "command": [program],
+            },
+        },
+    });
     std::fs::write(
         sibling.path().join(".basis/tools.json"),
-        format!(
-            r#"{{"schema": 1, "tools": {{"jenkins_job": {{
-                 "description": "Trigger a job.",
-                 "input_schema": {{"type": "object", "properties": {{}}}},
-                 "command": ["{}"]}}}}}}"#,
-            program.display()
-        ),
+        serde_json::to_vec(&manifest).expect("serialize manifest"),
     )
     .expect("write manifest");
 
