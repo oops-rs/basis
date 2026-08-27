@@ -35,7 +35,9 @@ use crate::{
 /// because the allowance lives behind an [`Arc`] and moves under an atomic.
 /// [`Clone`] here means "another handle", never "another allowance", and
 /// [`PartialEq`] says so — two handles compare equal when they meter the same
-/// money, not when they happen to name the same number.
+/// counter against the same limit, not when they happen to name the same
+/// number. A capped view shares the counter but carries its own tighter limit,
+/// so it is deliberately not equal to its parent.
 ///
 /// # There is no reservation, and none is possible
 ///
@@ -195,6 +197,25 @@ impl BudgetPool {
         self.limit
     }
 
+    /// A view that allows at most `additional_tokens` more spending from now.
+    ///
+    /// The view shares this pool's counter: spending through this pool, the
+    /// view, or any sibling handle consumes the same allowance. Its stopping
+    /// threshold is the smaller of this pool's limit and the current spend
+    /// plus `additional_tokens`, so deriving a view can tighten an allowance
+    /// but can never extend its parent. Addition saturates at [`u64::MAX`].
+    ///
+    /// This is a live bound, not a reservation. Concurrent sibling spending
+    /// therefore leaves fewer tokens for work using the view.
+    pub fn with_token_allowance(&self, additional_tokens: u64) -> Self {
+        Self {
+            limit: self
+                .limit
+                .min(self.spent().saturating_add(additional_tokens)),
+            spent: Arc::clone(&self.spent),
+        }
+    }
+
     /// What every run drawing on this pool has reported spending so far.
     ///
     /// Live: a fan-out still in flight moves this between two reads.
@@ -306,16 +327,19 @@ impl std::fmt::Debug for BudgetPool {
     }
 }
 
-/// Identity, not arithmetic: two handles are equal when they are handles on one
-/// pool.
+/// Accounting identity plus bound: two handles are equal when they share one
+/// counter and stop it at the same limit.
 ///
 /// Comparing the numbers instead would make two independent 500k allowances
 /// equal while they are both untouched and unequal a moment later, which
-/// describes no useful question. It also lets [`RunSpec`] keep its derived
-/// `PartialEq` — two specs drawing on the same pool are the same spec.
+/// describes no useful question. Comparing only the counter would make a
+/// tighter [`BudgetPool::with_token_allowance`] view equal to its parent even
+/// though the two stop at different thresholds. This definition lets
+/// [`RunSpec`] keep its derived `PartialEq`: two specs are equal only when their
+/// accounting and bound are both the same.
 impl PartialEq for BudgetPool {
     fn eq(&self, other: &Self) -> bool {
-        Arc::ptr_eq(&self.spent, &other.spent)
+        self.limit == other.limit && Arc::ptr_eq(&self.spent, &other.spent)
     }
 }
 
@@ -414,6 +438,37 @@ mod tests {
         assert_eq!(pool.spent(), 400, "one pool, seen through two handles");
         assert_eq!(pool.remaining(), handle.remaining());
         assert_eq!(pool, handle);
+    }
+
+    #[test]
+    fn a_token_allowance_view_shares_spending_without_extending_its_parent() {
+        let pool = BudgetPool::new(1_000);
+        pool.record(spent(200));
+
+        let view = pool.with_token_allowance(300);
+        let sibling = pool.clone();
+        sibling.record(spent(250));
+
+        assert_eq!(view.limit(), 500, "the allowance starts at current spend");
+        assert_eq!(view.spent(), 450, "the view reads the shared counter");
+        assert_eq!(view.remaining(), 50, "sibling usage consumes the view");
+        assert_eq!(pool.remaining(), 550, "the parent keeps its outer bound");
+        assert_ne!(pool, view, "a tighter bound is not the same pool view");
+
+        let view = pool.with_token_allowance(u64::MAX);
+        assert_eq!(view.limit(), 1_000);
+        assert_eq!(
+            view.remaining(),
+            550,
+            "a large allowance cannot extend the parent"
+        );
+
+        let saturated = BudgetPool::new(u64::MAX);
+        saturated.record(spent(u64::MAX - 10));
+        let view = saturated.with_token_allowance(100);
+
+        assert_eq!(view.limit(), u64::MAX, "addition cannot wrap the bound");
+        assert_eq!(view.remaining(), 10);
     }
 
     #[test]
