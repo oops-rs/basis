@@ -200,6 +200,13 @@ pub struct Runtime {
     /// count from the waits, and a runtime that widened one without the other
     /// would be half a statement.
     provider_retry_budget: usize,
+    /// Whether the builder explicitly selected in-memory, process-local
+    /// history with `with_ephemeral_history`.
+    ///
+    /// Kept as a posture fact because a per-run provider header is persisted
+    /// inside Mentra's `AgentConfig`. A host may put credentials there only
+    /// when this says no agent record can reach disk.
+    ephemeral_history: bool,
     /// Where a compaction snapshot goes, derived once from the history posture
     /// this runtime was built with.
     ///
@@ -241,6 +248,7 @@ impl std::fmt::Debug for Runtime {
         f.debug_struct("Runtime")
             .field("provider", &self.provider.as_str())
             .field("model", &self.model)
+            .field("ephemeral_history", &self.ephemeral_history)
             .finish_non_exhaustive()
     }
 }
@@ -286,6 +294,11 @@ impl Runtime {
     /// because they are one statement about one provider connection.
     pub(crate) fn provider_retry(&self) -> (ProviderRetry, usize) {
         (self.provider_retry, self.provider_retry_budget)
+    }
+
+    /// Whether this runtime was explicitly built with ephemeral history.
+    pub(crate) const fn has_ephemeral_history(&self) -> bool {
+        self.ephemeral_history
     }
 
     /// Resolves the model a workspace will use: its own override when it has

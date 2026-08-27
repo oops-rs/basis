@@ -491,6 +491,7 @@ impl RuntimeBuilder {
         // in the environment, this needs a decision about the data.
         // `History::open` has the rest.
         let history = History::open(self.history.as_ref())?;
+        let ephemeral_history = matches!(self.history.as_ref(), Some(History::Ephemeral));
 
         // Before anything is resolved or assembled, because a name that cannot
         // be routed on is a configuration mistake and not a runtime condition.
@@ -630,6 +631,7 @@ impl RuntimeBuilder {
             model: self.model.unwrap_or(ModelSelector::NewestAvailable),
             provider_retry: self.provider_retry,
             provider_retry_budget: self.provider_retry_budget,
+            ephemeral_history,
             transcripts,
             dispatch,
             #[cfg(feature = "mcp")]

@@ -13,10 +13,14 @@
 
 use std::time::Duration;
 
+use mentra::ModelInfo;
+
 use crate::{
     budget::BudgetPool,
     run::{Bounds, Effort, TurnOptions},
 };
+
+use super::RunProfile;
 
 /// Default name for the session a run creates. Sessions are named so a client
 /// can tell them apart; the name carries no behavior.
@@ -64,6 +68,9 @@ pub struct RunSpec {
     /// point. See [`BudgetPool`] for why that exception exists and what it
     /// costs.
     pub budget: Option<BudgetPool>,
+    /// The complete host-owned overrides for this mint. An empty profile
+    /// inherits every workspace default.
+    pub profile: RunProfile,
 }
 
 impl RunSpec {
@@ -74,6 +81,7 @@ impl RunSpec {
             effort: None,
             bounds: Bounds::default(),
             budget: None,
+            profile: RunProfile::default(),
         }
     }
 
@@ -92,6 +100,10 @@ impl RunSpec {
     }
 
     /// Asks the model to think harder, where the provider supports it.
+    ///
+    /// This is the compatibility fallback. A [`RunProfile`] carrying complete
+    /// provider request options or a dedicated reasoning set/clear overrides
+    /// it regardless of which builder method is called later.
     pub fn with_effort(self, effort: Effort) -> Self {
         Self {
             effort: Some(effort),
@@ -155,6 +167,23 @@ impl RunSpec {
     pub fn with_budget(self, budget: BudgetPool) -> Self {
         Self {
             budget: Some(budget),
+            ..self
+        }
+    }
+
+    /// Applies a complete immutable host profile to this run.
+    #[must_use]
+    pub fn with_profile(self, profile: RunProfile) -> Self {
+        Self { profile, ..self }
+    }
+
+    /// Convenience for changing only the complete resolved model metadata.
+    ///
+    /// Preserves every other field already present in this spec's profile.
+    #[must_use]
+    pub fn with_resolved_model(self, model: ModelInfo) -> Self {
+        Self {
+            profile: self.profile.clone().with_resolved_model(model),
             ..self
         }
     }
@@ -225,6 +254,21 @@ mod tests {
         assert_eq!(base.effort, None, "the original must be untouched");
         assert_eq!(derived.session_name, "named");
         assert_eq!(derived.effort, Some(Effort::High));
+    }
+
+    #[test]
+    fn resolved_model_convenience_preserves_the_rest_of_the_profile() {
+        use crate::context::SystemPrompt;
+
+        let spec = RunSpec::new("prompt")
+            .with_profile(
+                RunProfile::new().with_system_prompt(SystemPrompt::Replace("host".to_string())),
+            )
+            .with_resolved_model(ModelInfo::new("model", "provider"));
+
+        let debug = format!("{:?}", spec.profile);
+        assert!(debug.contains("model"));
+        assert!(debug.contains("<replace redacted>"));
     }
 
     #[test]

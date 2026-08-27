@@ -115,11 +115,12 @@ impl PreparedRun {
 
     /// Records the system prompt this run's mint opened with.
     ///
-    /// [`Workspace::minted`](crate::workspace::Workspace) is the only caller:
-    /// the rendered prompt is data only a workspace holds, so
-    /// [`prepare_with_session`](super::prepare_with_session), the path with no
-    /// workspace, leaves this at its `None` default, honestly: basis was not
-    /// the party that built that session's request either.
+    /// [`Workspace::minted`](crate::workspace::Workspace) is the only caller.
+    /// A fresh prepare records the final per-run prompt Basis handed Mentra;
+    /// resume records `None`, because Mentra 0.22 exposes no reader for the
+    /// persisted agent config and its prompt may differ from the workspace's
+    /// current default. [`prepare_with_session`](super::prepare_with_session),
+    /// the path with no workspace, also leaves this unknown.
     pub(crate) fn with_context_snapshot(self, system_prompt: Option<String>) -> Self {
         Self {
             context_snapshot: ContextSnapshot::new(system_prompt),
@@ -290,13 +291,14 @@ impl PreparedRun {
     /// ([`mentra::memory::estimated_request_tokens`]) — the same one mentra's
     /// auto-compaction threshold is compared against.
     ///
-    /// **A floor, not the real number.** mentra's actual request adds a
-    /// task-reminder banner and a skill-description block on top of the
-    /// system prompt basis configured, when either applies — both are
-    /// computed inside mentra's own `Agent::effective_system_prompt`, which is
-    /// private, so nothing outside it can include them. The gap is largest
-    /// for a run with many skills registered or an overdue task reminder, and
-    /// zero for a run with neither. Useful beside
+    /// **A floor, not the real number.** On a freshly prepared workspace run,
+    /// Mentra may add a task-reminder banner and a skill-description block on
+    /// top of the system prompt Basis configured. On a resumed run the floor
+    /// excludes the entire system prompt: Mentra 0.22 exposes no persisted
+    /// `AgentConfig` reader, and substituting the current workspace default
+    /// would be wrong when the original run carried a profile override. The
+    /// effective prompt is private, so nothing outside Mentra can close either
+    /// gap. Useful beside
     /// [`context_window`](Self::context_window) for a host deciding whether to
     /// compact or warn before mentra's own trigger would.
     pub fn estimated_context_tokens(&self) -> usize {

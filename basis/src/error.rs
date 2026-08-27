@@ -72,9 +72,10 @@ pub enum RunError {
 
     /// Host-resolved model metadata names a provider other than the runtime's.
     ///
-    /// Raised while opening the workspace, before model catalogue, model
-    /// request, or tool activity. The mismatch cannot be repaired by looking
-    /// up the id: provider identity is part of the host's resolved contract.
+    /// Raised while opening a workspace or applying a per-run profile, before
+    /// model catalogue, model request, or tool activity. The mismatch cannot
+    /// be repaired by looking up the id: provider identity is part of the
+    /// host's resolved contract.
     #[error(
         "resolved model `{model}` belongs to provider `{model_provider}`, but the runtime uses \
          `{runtime_provider}`"
@@ -87,6 +88,46 @@ pub enum RunError {
         /// The provider registered on the runtime.
         runtime_provider: String,
     },
+
+    /// Complete provider request options contain one or more extra headers,
+    /// but this runtime can persist its Mentra agent configs.
+    ///
+    /// Header names and values are deliberately absent: either can itself be
+    /// sensitive. Use an explicitly ephemeral runtime for request-scoped
+    /// credentials, or configure durable connection credentials on the
+    /// provider instead.
+    #[error(
+        "run profile request headers require a runtime built with \
+         RuntimeBuilder::with_ephemeral_history"
+    )]
+    RunProfileHeadersRequireEphemeralHistory,
+
+    /// A [`RunProfile`](crate::RunProfile) field Mentra cannot change on an
+    /// already persisted agent.
+    ///
+    /// Refused before the session is looked up or resumed, rather than
+    /// projecting the supported subset and silently dropping part of the
+    /// host's contract. Resolved model metadata and the dedicated reasoning
+    /// override are each supported alone through Mentra's exact session
+    /// setters; every other field is named here when present.
+    #[error("run profile field `{field}` cannot be applied while resuming a session")]
+    UnsupportedResumeProfile {
+        /// The first unsupported field in deterministic profile order.
+        field: &'static str,
+    },
+
+    /// A resumed profile model would require separately persisting both model
+    /// and reasoning changes, because the profile or an effective legacy
+    /// effort also changes reasoning.
+    ///
+    /// Mentra 0.22 exposes one setter for each but no atomic combined update.
+    /// Refused before session lookup so a failed second write can never leave
+    /// half of the host's profile in force.
+    #[error(
+        "a resumed run profile cannot change model and reasoning together; \
+         apply only one persisted override"
+    )]
+    NonAtomicResumeProfile,
 
     /// Discovery was disabled on a builder borrowing a shared runtime.
     ///

@@ -46,6 +46,7 @@
 //! resolution path, and this is it.
 
 mod builder;
+mod profile;
 mod roster;
 mod spec;
 
@@ -56,6 +57,7 @@ use std::sync::{Arc, RwLock};
 use mentra::{ModelInfo, Session, agent::AgentConfig, provider::ReasoningOptions};
 
 pub use builder::WorkspaceBuilder;
+pub use profile::RunProfile;
 pub use roster::ToolRoster;
 pub(crate) use spec::DEFAULT_SESSION_NAME;
 pub use spec::RunSpec;
@@ -194,15 +196,28 @@ impl Workspace {
     /// wants to hear about it before a session exists.)
     pub fn prepare(&self, spec: impl Into<RunSpec>) -> Result<PreparedRun, RunError> {
         let spec = spec.into();
-        let mut session = self.runtime.mint(
-            spec.session_name.clone(),
-            self.model.clone(),
-            self.minted_agent(),
-            &self.identifier,
-        )?;
-        apply_effort(&mut session, spec.effort.or(self.effort))?;
+        if let Some(model) = spec.profile.resolved_model() {
+            validate_model_provider(model, &self.provider)?;
+        }
+        if spec.profile.has_extra_headers() && !self.runtime.has_ephemeral_history() {
+            return Err(RunError::RunProfileHeadersRequireEphemeralHistory);
+        }
+        let model = spec
+            .profile
+            .resolved_model()
+            .cloned()
+            .unwrap_or_else(|| self.model.clone());
+        let model_id = model.id.clone();
+        let agent = self.minted_agent(&spec.profile);
+        let context_snapshot = agent.system.clone();
+        let mut session =
+            self.runtime
+                .mint(spec.session_name.clone(), model, agent, &self.identifier)?;
+        if !spec.profile.decides_reasoning() {
+            apply_effort(&mut session, spec.effort.or(self.effort))?;
+        }
 
-        Ok(self.minted(session, spec))
+        Ok(self.minted(session, spec, model_id, context_snapshot))
     }
 
     /// Picks up a conversation a previous process left behind.
@@ -220,10 +235,12 @@ impl Workspace {
     /// mentra does not persist a model's context window
     /// (`Agent::from_loaded` always resumes at `None` — `set_model` is the
     /// only way back), so a resumed session starts with an unknown one. This
-    /// reapplies this workspace's own resolved model exactly when the
-    /// resumed conversation is still on it — the same model [`prepare`](Self::prepare) would
-    /// have minted — which restores mentra's own compaction threshold as well
-    /// as [`PreparedRun::context_window`]. A conversation
+    /// reapplies this workspace's own resolved model exactly when the resumed
+    /// conversation is still on it and this resume is not also changing
+    /// reasoning — the same model [`prepare`](Self::prepare) would have minted
+    /// — which restores mentra's own compaction threshold as well as
+    /// [`PreparedRun::context_window`]. A reasoning-changing resume leaves the
+    /// window unknown so it performs one persisted mutation rather than two. A conversation
     /// [`PreparedRun::set_model`] had already moved elsewhere keeps whatever
     /// that call left it at instead: basis has no window for a model it does
     /// not resolve, and forcing this one back would silently undo a choice
@@ -234,13 +251,40 @@ impl Workspace {
         spec: impl Into<RunSpec>,
     ) -> Result<PreparedRun, RunError> {
         let spec = spec.into();
-        let mut session = self.runtime.resume_minted(agent_id)?;
-        apply_effort(&mut session, spec.effort.or(self.effort))?;
-        if session_on_resolved_model(&session, &self.model) {
-            session.set_model(self.model.clone())?;
+        if let Some(model) = spec.profile.resolved_model() {
+            validate_model_provider(model, &self.provider)?;
+        }
+        if let Some(field) = spec.profile.unsupported_on_resume() {
+            return Err(RunError::UnsupportedResumeProfile { field });
+        }
+        let legacy_effort = spec.effort.or(self.effort);
+        let changes_reasoning = spec.profile.reasoning().is_some() || legacy_effort.is_some();
+        if spec.profile.resolved_model().is_some() && changes_reasoning {
+            return Err(RunError::NonAtomicResumeProfile);
         }
 
-        Ok(self.minted(session, spec))
+        let mut session = self.runtime.resume_minted(agent_id)?;
+        let model = if let Some(model) = spec.profile.resolved_model() {
+            session.set_model(model.clone())?;
+            model.id.clone()
+        } else if !changes_reasoning && session_on_resolved_model(&session, &self.model) {
+            session.set_model(self.model.clone())?;
+            self.model.id.clone()
+        } else {
+            session.metadata().model.clone()
+        };
+
+        if let Some(reasoning) = spec.profile.reasoning() {
+            session.set_reasoning(reasoning.clone())?;
+        } else {
+            apply_effort(&mut session, legacy_effort)?;
+        }
+
+        // Mentra 0.22 exposes no resumed AgentConfig reader. The persisted
+        // agent may carry a per-run system override that differs from this
+        // workspace's current default, so substituting `self.agent.system`
+        // would turn an unknown estimate into a confidently wrong one.
+        Ok(self.minted(session, spec, model, None))
     }
 
     /// A cheap stand-in for everything in this workspace a run could see.
@@ -393,8 +437,12 @@ impl Workspace {
     /// Written here rather than at open so both readers see one snapshot —
     /// the config below freezes it for this mint, and the cell carries the
     /// same names to whatever that mint delegates.
-    fn minted_agent(&self) -> AgentConfig {
-        let mut agent = self.agent.clone();
+    fn minted_agent(&self, profile: &RunProfile) -> AgentConfig {
+        // A run profile replaces workspace defaults first. Foreign tools are
+        // then denied against the live shared registry, so an exact roster can
+        // narrow what the workspace offered but can never grant a sibling's
+        // capability.
+        let mut agent = profile.apply_to(self.agent.clone());
         let mut foreign = BTreeSet::new();
 
         for name in self
@@ -429,7 +477,13 @@ impl Workspace {
     ///
     /// Shared by [`prepare`](Self::prepare) and [`resume`](Self::resume) so the
     /// two cannot disagree about what a run from this workspace reports.
-    fn minted(&self, session: Session, spec: RunSpec) -> PreparedRun {
+    fn minted(
+        &self,
+        session: Session,
+        spec: RunSpec,
+        model: String,
+        context_snapshot: Option<String>,
+    ) -> PreparedRun {
         let bounds = spec.turn_options();
 
         PreparedRun::new(
@@ -438,7 +492,7 @@ impl Workspace {
                 workspace: self.root.clone(),
                 prompt: spec.prompt,
                 provider: self.provider.clone(),
-                model: self.model.id.clone(),
+                model,
                 context: self.context.clone(),
                 skills_dirs: self.skills_dirs.clone(),
                 skills: self.skills.clone(),
@@ -455,8 +509,25 @@ impl Workspace {
         // takes it per run, so the mint is where a runtime-scoped knob becomes
         // a per-run option.
         .with_provider_retry(self.runtime.provider_retry())
-        .with_context_snapshot(self.agent.system.clone())
+        .with_context_snapshot(context_snapshot)
     }
+}
+
+/// Ensures host-resolved model metadata names the provider this workspace's
+/// runtime actually registered.
+///
+/// Kept in the synchronous prepare/resume path so the refusal precedes mint,
+/// session lookup, provider requests, and tool activity.
+fn validate_model_provider(model: &ModelInfo, runtime_provider: &str) -> Result<(), RunError> {
+    if model.provider.as_str() == runtime_provider {
+        return Ok(());
+    }
+
+    Err(RunError::ResolvedModelProviderMismatch {
+        model: model.id.clone(),
+        model_provider: model.provider.as_str().to_string(),
+        runtime_provider: runtime_provider.to_string(),
+    })
 }
 
 /// Whether `session`'s live model is still the one this workspace resolved.

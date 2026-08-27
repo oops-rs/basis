@@ -142,17 +142,19 @@ pub use runtime::{Runtime, RuntimeBuilder, ToolResultPolicy};
 pub use shell::ShellAccess;
 // Mentra's, deliberately. These are the types basis's own surface asks a
 // caller to *name* — a model to resolve, a provider to prefer, a provider to
-// *be* ([`RuntimeBuilder::with_provider_instance`]), or the provider-core
-// family a host customizes before
-// [`RuntimeBuilder::with_registered_provider`] — or a token to stop a turn
-// with. Re-exporting them is what keeps that from meaning "add mentra to your
-// manifest, pinned to whatever version basis happens to resolve". A skew there
-// is a type error with no explanation in it. Everything else mentra owns stays
-// behind `mentra::`, where an embedder that wants the runtime itself already is
-// — except what implementing `Provider` touches, which is [`runtime`]'s
+// *be* ([`RuntimeBuilder::with_provider_instance`]), the complete request and
+// paging options a [`RunProfile`] carries, or the provider-core family a host
+// customizes before [`RuntimeBuilder::with_registered_provider`]. Re-exporting
+// them is what keeps that from meaning "add mentra to your manifest, pinned to
+// whatever version basis happens to resolve". A skew there is a type error
+// with no explanation in it. Everything else mentra owns stays behind
+// `mentra::`, where an embedder that wants the runtime itself already is —
+// except what implementing `Provider` touches, which is [`runtime`]'s
 // provider-authoring re-export, beside the executor set and for its reason.
 pub use mentra::provider_core;
-pub use mentra::{BuiltinProvider, ModelSelector, Provider};
+pub use mentra::{
+    BuiltinProvider, ModelSelector, Provider, ProviderRequestOptions, ToolResultPagingConfig,
+};
 // The attribute both of basis's async traits make an implementor spell:
 // `Approver` and `Interceptor` are `#[async_trait]`, so without this line
 // writing either impl means adding `async-trait` to the host's own manifest —
@@ -181,4 +183,4 @@ pub use tools::declared::{
     DEFAULT_GLOBAL_TOOLS_FILE, DEFAULT_WORKSPACE_TOOLS_FILE, DeclaredToolError,
     TOOLS_SCHEMA_VERSION, ToolsConfig, ToolsSource,
 };
-pub use workspace::{RunSpec, ToolRoster, Workspace, WorkspaceBuilder};
+pub use workspace::{RunProfile, RunSpec, ToolRoster, Workspace, WorkspaceBuilder};
