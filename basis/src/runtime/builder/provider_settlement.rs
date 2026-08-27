@@ -41,10 +41,29 @@ use super::Wire;
 /// takes either instance by value, and boxing that move is what keeps
 /// `RuntimeBuilder` free of a generic parameter a half-configured one would
 /// otherwise have to carry.
-pub(super) struct HostProvider {
+pub(in crate::runtime) struct HostProvider {
     pub(super) id: ProviderId,
     pub(super) install:
         Box<dyn FnOnce(mentra::RuntimeBuilder) -> mentra::RuntimeBuilder + Send + Sync>,
+}
+
+impl HostProvider {
+    /// Preserves the registered-provider door for one generated instance.
+    ///
+    /// The reusable recipe creates the instance; this type still owns the
+    /// one-time move into Mentra, exactly as it does for the ordinary builder
+    /// API. Keeping that move here prevents the replay path from inventing a
+    /// second provider adapter.
+    pub(in crate::runtime) fn registered<P>(provider: P) -> Self
+    where
+        P: mentra::provider_core::Provider + 'static,
+    {
+        let id = provider.descriptor().id;
+        Self {
+            id,
+            install: Box::new(move |builder| builder.with_registered_provider(provider)),
+        }
+    }
 }
 
 /// Where the provider a runtime runs on came from: an instance the host
@@ -75,15 +94,11 @@ pub(super) fn settle(
 ) -> Result<ProviderSource, RunError> {
     match host_provider {
         Some(host) => {
-            for (also_set, knob) in [
-                (provider.is_some(), "with_provider"),
-                (base_url.is_some(), "with_base_url"),
-                (api_key.is_some(), "with_api_key"),
-            ] {
-                if also_set {
-                    return Err(provider::ProviderError::AmbiguousProviderSource { knob }.into());
-                }
-            }
+            validate_host_provider_source(
+                provider.as_ref(),
+                base_url.as_deref(),
+                api_key.as_deref(),
+            )?;
             Ok(ProviderSource::Host(host))
         }
         None => Ok(ProviderSource::Resolved(provider::resolve_with(
@@ -92,6 +107,30 @@ pub(super) fn settle(
             api_key.as_deref(),
         )?)),
     }
+}
+
+/// Applies the one ambiguity rule shared by one-shot and repeatable host
+/// providers.
+///
+/// A repeatable provider is settled only when a recipe is built, so it cannot
+/// call [`settle`] without first consuming its factory. Validation lives here
+/// so both paths refuse the same knob in the same deterministic order without
+/// creating a provider merely to inspect the builder.
+pub(super) fn validate_host_provider_source(
+    provider: Option<&BuiltinProvider>,
+    base_url: Option<&str>,
+    api_key: Option<&str>,
+) -> Result<(), RunError> {
+    for (also_set, knob) in [
+        (provider.is_some(), "with_provider"),
+        (base_url.is_some(), "with_base_url"),
+        (api_key.is_some(), "with_api_key"),
+    ] {
+        if also_set {
+            return Err(provider::ProviderError::AmbiguousProviderSource { knob }.into());
+        }
+    }
+    Ok(())
 }
 
 /// Builds the mentra runtime on whichever provider `source` names: the host's

@@ -160,6 +160,39 @@ pub enum RunError {
     )]
     FreshOnlyRunAlreadyAttempted,
 
+    /// A runtime builder contains state that has exactly one owner and cannot
+    /// honestly be reconstructed for a second runtime.
+    ///
+    /// Raised by [`RuntimeBuilder::into_reusable_recipe`](crate::RuntimeBuilder::into_reusable_recipe)
+    /// before a provider factory is called or a runtime is built. The named
+    /// component is deliberately coarse: provider and tool instances may
+    /// close over credentials or request state that must not reach an error.
+    #[error("a reusable runtime recipe cannot replay one-shot {component}")]
+    NonReusableRuntimeComponent {
+        /// The one-shot part of the builder (`provider`, `host tools`, or
+        /// `history`).
+        component: &'static str,
+    },
+
+    /// A repeatable provider was configured on a builder consumed through the
+    /// synchronous one-shot build path.
+    ///
+    /// Warming is asynchronous and part of the reusable contract, so silently
+    /// skipping it would construct a different runtime than the host asked
+    /// for. Convert the builder to a [`RuntimeRecipe`](crate::runtime::RuntimeRecipe)
+    /// and let the workspace lifecycle drive it instead.
+    #[error("a reusable registered provider requires RuntimeBuilder::into_reusable_recipe")]
+    ReusableProviderRequiresRuntimeRecipe,
+
+    /// The host's repeatable provider factory failed before a runtime existed.
+    #[error("the reusable runtime provider factory failed: {0}")]
+    RuntimeRecipeProviderFactory(#[source] Box<dyn std::error::Error + Send + Sync + 'static>),
+
+    /// The host could not warm the provider clone installed in a newly built
+    /// runtime; the runtime is dropped before this error is returned.
+    #[error("the reusable runtime provider warm-up failed: {0}")]
+    RuntimeRecipeProviderWarm(#[source] Box<dyn std::error::Error + Send + Sync + 'static>),
+
     #[error(transparent)]
     Provider(#[from] ProviderError),
 

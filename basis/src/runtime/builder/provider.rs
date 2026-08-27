@@ -17,6 +17,7 @@
 use mentra::{BuiltinProvider, ModelSelector, Provider};
 
 use super::{HostProvider, ProviderRetry, ResponsesTransport, RuntimeBuilder, Wire};
+use crate::runtime::reuse::ReusableProvider;
 
 impl RuntimeBuilder {
     /// Names the provider basis resolves the credential and the models
@@ -80,6 +81,7 @@ impl RuntimeBuilder {
                 id,
                 install: Box::new(move |builder| builder.with_provider_instance(provider)),
             }),
+            reusable_host_provider: None,
             ..self
         }
     }
@@ -120,6 +122,50 @@ impl RuntimeBuilder {
                 id,
                 install: Box::new(move |builder| builder.with_registered_provider(provider)),
             }),
+            reusable_host_provider: None,
+            ..self
+        }
+    }
+
+    /// Supplies the repeatable registered-provider generation used when a
+    /// private runtime is consumed and rebuilt for reuse.
+    ///
+    /// `make` creates exactly one fresh provider for each runtime. Basis takes
+    /// one ordinary [`Clone`] for `warm`, moves the other clone through
+    /// Mentra's registered-provider seam, completes the runtime build, and
+    /// only then calls and awaits `warm`. This ordering matters for connection
+    /// prewarm: the clone and the installed provider share one newly created
+    /// session scope, while no warm side effect occurs for a runtime that did
+    /// not build. A factory or warm failure returns no runtime.
+    ///
+    /// This method is a recipe input, not a synchronous-build variant. Finish
+    /// with [`into_reusable_recipe`](Self::into_reusable_recipe); calling
+    /// [`build`](Self::build) would have no honest way to await `warm` and is
+    /// refused. The builder must also use explicit ephemeral history and may
+    /// not contain one-shot host tools.
+    ///
+    /// The host-provider setters are one single-valued question. Calling this
+    /// after [`with_provider_instance`](Self::with_provider_instance) or
+    /// [`with_registered_provider`](Self::with_registered_provider) replaces
+    /// it; calling either one-shot method afterward replaces this factory and
+    /// makes conversion to a reusable recipe fail.
+    #[must_use]
+    pub fn with_reusable_registered_provider<P, Make, MakeError, Warm, WarmFuture, WarmError>(
+        self,
+        make: Make,
+        warm: Warm,
+    ) -> Self
+    where
+        P: mentra::provider_core::Provider + Clone + 'static,
+        Make: Fn() -> Result<P, MakeError> + Send + Sync + 'static,
+        MakeError: std::error::Error + Send + Sync + 'static,
+        Warm: Fn(P) -> WarmFuture + Send + Sync + 'static,
+        WarmFuture: std::future::Future<Output = Result<(), WarmError>> + Send + 'static,
+        WarmError: std::error::Error + Send + Sync + 'static,
+    {
+        Self {
+            host_provider: None,
+            reusable_host_provider: Some(ReusableProvider::new(make, warm)),
             ..self
         }
     }
@@ -227,7 +273,8 @@ impl RuntimeBuilder {
     pub fn with_config(self, config: &crate::Config) -> Self {
         // See the doc above: with an instance supplied the provider question
         // is not empty, and emptiness is all a file may fill.
-        let provider_unanswered = self.host_provider.is_none();
+        let provider_unanswered =
+            self.host_provider.is_none() && self.reusable_host_provider.is_none();
         Self {
             provider: self.provider.or_else(|| {
                 config
