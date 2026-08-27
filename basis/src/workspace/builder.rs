@@ -511,18 +511,25 @@ impl WorkspaceBuilder {
     /// **not** travel: every roster minted here hides the `mcp__*` tools of
     /// servers this workspace does not own.
     pub async fn open(self) -> Result<Workspace, RunError> {
-        if matches!(&self.runtime, RuntimeSource::Reusable(_)) {
+        if let RuntimeSource::Reusable(recipe) = &self.runtime {
             if self.discovery_enabled {
                 return Err(RunError::ReusableWorkspaceRequiresDiscoveryOff);
             }
             if !self.fresh_only {
                 return Err(RunError::ReusableWorkspaceRequiresFreshOnly);
             }
-            if !matches!(&self.model, WorkspaceModel::Resolved(_)) {
+            let WorkspaceModel::Resolved(model) = &self.model else {
                 return Err(RunError::ReusableWorkspaceRequiresResolvedModel);
-            }
+            };
             if self.roster.as_profile().allowed_tools.is_none() {
                 return Err(RunError::ReusableWorkspaceRequiresExactRoster);
+            }
+            if model.provider.as_str() != recipe.provider().as_str() {
+                return Err(RunError::ResolvedModelProviderMismatch {
+                    model: model.id.clone(),
+                    model_provider: model.provider.as_str().to_string(),
+                    runtime_provider: recipe.provider().as_str().to_string(),
+                });
             }
         }
 

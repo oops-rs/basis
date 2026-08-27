@@ -569,6 +569,11 @@ impl Workspace {
     /// and reaching past basis's surface is a supported thing to do rather than
     /// a workaround. Renamed from `runtime()` when ADR-0018 gave basis a
     /// `Runtime` of its own, so the name says whose surface comes back.
+    ///
+    /// On a reusable workspace, calling this method permanently prevents the
+    /// current generation from being rebuilt. The returned runtime can mint or
+    /// retain state through handles Basis cannot count, so raw access and safe
+    /// reuse are deliberately mutually exclusive for that generation.
     pub fn mentra_runtime(&self) -> &mentra::Runtime {
         if let Some(reuse) = &self.reuse {
             reuse.lifecycle.poison();

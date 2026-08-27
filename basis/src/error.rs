@@ -188,6 +188,18 @@ pub enum RunError {
     #[error("the reusable runtime provider factory failed: {0}")]
     RuntimeRecipeProviderFactory(#[source] Box<dyn std::error::Error + Send + Sync + 'static>),
 
+    /// A repeatable provider factory returned a provider under a different id
+    /// from the immutable id declared by its recipe.
+    #[error(
+        "the reusable runtime provider factory declared `{declared}` but generated `{generated}`"
+    )]
+    RuntimeRecipeProviderMismatch {
+        /// Provider id fixed when the recipe was created.
+        declared: String,
+        /// Provider id returned by this generation's factory.
+        generated: String,
+    },
+
     /// The host could not warm the provider clone installed in a newly built
     /// runtime; the runtime is dropped before this error is returned.
     #[error("the reusable runtime provider warm-up failed: {0}")]

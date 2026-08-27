@@ -37,11 +37,12 @@ fn provider() -> provider_core::responses::ResponsesProvider<provider_core::Stat
     )
 }
 
-fn recipe(activity: &Activity) -> basis::runtime::RuntimeRecipe {
+fn recipe(activity: &Activity) -> basis::RuntimeRecipe {
     let makes = Arc::clone(&activity.makes);
     let warms = Arc::clone(&activity.warms);
     Runtime::builder()
         .with_reusable_registered_provider(
+            PROVIDER,
             move || {
                 makes.fetch_add(1, Ordering::SeqCst);
                 Ok::<_, io::Error>(provider().fresh_session_scope())
@@ -56,11 +57,12 @@ fn recipe(activity: &Activity) -> basis::runtime::RuntimeRecipe {
         .expect("repeatable provider and ephemeral history form a recipe")
 }
 
-fn recipe_failing_second_warm(activity: &Activity) -> basis::runtime::RuntimeRecipe {
+fn recipe_failing_second_warm(activity: &Activity) -> basis::RuntimeRecipe {
     let makes = Arc::clone(&activity.makes);
     let warms = Arc::clone(&activity.warms);
     Runtime::builder()
         .with_reusable_registered_provider(
+            PROVIDER,
             move || {
                 makes.fetch_add(1, Ordering::SeqCst);
                 Ok::<_, io::Error>(provider().fresh_session_scope())
@@ -154,6 +156,23 @@ async fn reusable_open_requires_every_fail_closed_posture() {
         error,
         RunError::ReusableWorkspaceRequiresExactRoster
     ));
+
+    let activity = Activity::default();
+    let error = Workspace::builder(root.path())
+        .with_runtime_recipe(recipe(&activity))
+        .without_discovery()
+        .fresh_only()
+        .with_resolved_model(ModelInfo::new(MODEL, "different-provider"))
+        .with_tool_roster(ToolRoster::only(std::iter::empty::<String>()))
+        .open()
+        .await
+        .expect_err("provider identity is refused before building or warming");
+    assert!(matches!(
+        error,
+        RunError::ResolvedModelProviderMismatch { .. }
+    ));
+    assert_eq!(activity.makes.load(Ordering::SeqCst), 0);
+    assert_eq!(activity.warms.load(Ordering::SeqCst), 0);
 }
 
 #[tokio::test]
@@ -436,6 +455,71 @@ async fn binding_failure_consumes_and_drops_the_generation() {
         .expect_err("complete preflight sees the existing name");
     assert!(matches!(error, RunError::HostTool(_)));
     assert!(context.upgrade().is_none(), "failed entry was dropped");
+}
+
+#[tokio::test]
+async fn invalid_and_duplicate_tool_sets_are_refused_before_registration() {
+    let root = tempfile::tempdir().expect("workspace");
+    let workspace = reusable_builder(root.path(), &Activity::default())
+        .open()
+        .await
+        .expect("opens");
+    let (invalid, invalid_context) = probe_tool("not valid");
+    let error = workspace
+        .bind_host_tools(vec![invalid])
+        .expect_err("invalid names are refused before registration");
+    assert!(matches!(error, RunError::ReusableHostToolName { .. }));
+    assert!(invalid_context.upgrade().is_none());
+
+    let workspace = reusable_builder(root.path(), &Activity::default())
+        .open()
+        .await
+        .expect("opens again");
+    let (first, first_context) = probe_tool("duplicate");
+    let (second, second_context) = probe_tool("duplicate");
+    let error = workspace
+        .bind_host_tools(vec![first, second])
+        .expect_err("duplicates are refused before the first registration");
+    assert!(matches!(error, RunError::HostTool(_)));
+    assert!(first_context.upgrade().is_none());
+    assert!(second_context.upgrade().is_none());
+}
+
+#[tokio::test]
+async fn unbound_rebuild_second_bind_and_drop_never_create_a_replacement() {
+    let root = tempfile::tempdir().expect("workspace");
+
+    let activity = Activity::default();
+    let workspace = reusable_builder(root.path(), &activity)
+        .open()
+        .await
+        .expect("opens");
+    let error = workspace
+        .rebuild_for_reuse()
+        .await
+        .expect_err("an unbound generation cannot be parked");
+    assert!(matches!(error, RunError::ReusableWorkspaceToolsUnbound));
+    assert_eq!(activity.makes.load(Ordering::SeqCst), 1);
+    assert_eq!(activity.warms.load(Ordering::SeqCst), 1);
+
+    let activity = Activity::default();
+    let workspace = open_bound(root.path(), &activity).await;
+    let error = workspace
+        .bind_host_tools(Vec::new())
+        .expect_err("a generation binds exactly once");
+    assert!(matches!(error, RunError::ReusableWorkspaceAlreadyBound));
+    assert_eq!(activity.makes.load(Ordering::SeqCst), 1);
+    assert_eq!(activity.warms.load(Ordering::SeqCst), 1);
+
+    let activity = Activity::default();
+    let workspace = reusable_builder(root.path(), &activity)
+        .open()
+        .await
+        .expect("opens for drop");
+    drop(workspace);
+    tokio::task::yield_now().await;
+    assert_eq!(activity.makes.load(Ordering::SeqCst), 1);
+    assert_eq!(activity.warms.load(Ordering::SeqCst), 1);
 }
 
 #[tokio::test]

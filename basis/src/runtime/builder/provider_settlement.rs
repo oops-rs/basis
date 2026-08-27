@@ -48,6 +48,10 @@ pub(in crate::runtime) struct HostProvider {
 }
 
 impl HostProvider {
+    pub(in crate::runtime) fn id(&self) -> &ProviderId {
+        &self.id
+    }
+
     /// Preserves the registered-provider door for one generated instance.
     ///
     /// The reusable recipe creates the instance; this type still owns the

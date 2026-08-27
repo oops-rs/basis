@@ -34,11 +34,13 @@ struct ProviderGeneration {
 
 /// Type-erased repeatable provider generation retained by a runtime recipe.
 pub(super) struct ReusableProvider {
+    id: mentra::ProviderId,
     make: Arc<dyn Fn() -> Result<ProviderGeneration, BoxRecipeError> + Send + Sync + 'static>,
 }
 
 impl ReusableProvider {
     pub(super) fn new<P, Make, MakeError, Warm, WarmOutput, WarmError>(
+        id: mentra::ProviderId,
         make: Make,
         warm: Warm,
     ) -> Self
@@ -52,6 +54,7 @@ impl ReusableProvider {
     {
         let warm = Arc::new(warm);
         Self {
+            id,
             make: Arc::new(move || {
                 let provider = make().map_err(boxed)?;
                 let warm_provider = provider.clone();
@@ -70,8 +73,19 @@ impl ReusableProvider {
         }
     }
 
-    fn generate(&self) -> Result<ProviderGeneration, BoxRecipeError> {
-        (self.make)()
+    fn generate(&self) -> Result<ProviderGeneration, RunError> {
+        let generation = (self.make)().map_err(RunError::RuntimeRecipeProviderFactory)?;
+        if generation.host_provider.id() != &self.id {
+            return Err(RunError::RuntimeRecipeProviderMismatch {
+                declared: self.id.as_str().to_string(),
+                generated: generation.host_provider.id().as_str().to_string(),
+            });
+        }
+        Ok(generation)
+    }
+
+    fn id(&self) -> &mentra::ProviderId {
+        &self.id
     }
 }
 
@@ -99,7 +113,7 @@ impl std::fmt::Debug for RuntimeRecipe {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         f.debug_struct("RuntimeRecipe")
             .field("template", &self.template)
-            .field("provider", &"<provider factory>")
+            .field("provider", &self.provider.id().as_str())
             .finish()
     }
 }
@@ -107,6 +121,10 @@ impl std::fmt::Debug for RuntimeRecipe {
 impl RuntimeRecipe {
     pub(super) fn new(template: RuntimeBuilder, provider: ReusableProvider) -> Self {
         Self { template, provider }
+    }
+
+    pub(crate) fn provider(&self) -> &mentra::ProviderId {
+        self.provider.id()
     }
 
     /// Builds the workspace-agnostic form used by focused recipe tests.
@@ -138,10 +156,7 @@ impl RuntimeRecipe {
         let ProviderGeneration {
             host_provider,
             warm,
-        } = self
-            .provider
-            .generate()
-            .map_err(RunError::RuntimeRecipeProviderFactory)?;
+        } = self.provider.generate()?;
 
         // Build must finish before even invoking the host closure. Besides
         // preserving the stated order, this guarantees invalid policy or
@@ -182,6 +197,7 @@ mod tests {
 
     fn reusable(builder: RuntimeBuilder) -> RuntimeBuilder {
         builder.with_reusable_registered_provider(
+            "repeatable",
             || Ok::<_, io::Error>(provider("repeatable")),
             |_provider| async { Ok::<_, io::Error>(()) },
         )
@@ -244,6 +260,7 @@ mod tests {
         RuntimeBuilder::default()
             .with_registered_provider(provider("replaced"))
             .with_reusable_registered_provider(
+                "repeatable",
                 || Ok::<_, io::Error>(provider("repeatable")),
                 |_provider| async { Ok::<_, io::Error>(()) },
             )
@@ -272,9 +289,10 @@ mod tests {
         let warmed_ids = Arc::clone(&warmed);
         let recipe = RuntimeBuilder::default()
             .with_reusable_registered_provider(
+                "repeatable",
                 move || {
-                    let generation = make_count.fetch_add(1, Ordering::SeqCst) + 1;
-                    Ok::<_, io::Error>(provider(format!("repeatable-{generation}")))
+                    make_count.fetch_add(1, Ordering::SeqCst);
+                    Ok::<_, io::Error>(provider("repeatable"))
                 },
                 move |provider: TestProvider| {
                     let warmed_ids = Arc::clone(&warmed_ids);
@@ -292,15 +310,15 @@ mod tests {
             .expect("recipe");
 
         let first = recipe.build().await.expect("first runtime");
-        assert_eq!(first.provider(), "repeatable-1");
+        assert_eq!(first.provider(), "repeatable");
         drop(first);
         let second = recipe.build().await.expect("second runtime");
-        assert_eq!(second.provider(), "repeatable-2");
+        assert_eq!(second.provider(), "repeatable");
 
         assert_eq!(makes.load(Ordering::SeqCst), 2);
         assert_eq!(
             *warmed.lock().expect("warm recorder"),
-            ["repeatable-1", "repeatable-2"]
+            ["repeatable", "repeatable"]
         );
     }
 
@@ -310,6 +328,7 @@ mod tests {
         let warm_count = Arc::clone(&warms);
         let recipe = RuntimeBuilder::default()
             .with_reusable_registered_provider(
+                "repeatable",
                 || -> Result<TestProvider, io::Error> { Err(io::Error::other("factory refused")) },
                 move |_provider| {
                     warm_count.fetch_add(1, Ordering::SeqCst);
@@ -329,12 +348,44 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn a_factory_cannot_change_the_declared_provider_identity() {
+        let warms = Arc::new(AtomicUsize::new(0));
+        let warm_count = Arc::clone(&warms);
+        let recipe = RuntimeBuilder::default()
+            .with_reusable_registered_provider(
+                "declared",
+                || Ok::<_, io::Error>(provider("generated")),
+                move |_provider| {
+                    warm_count.fetch_add(1, Ordering::SeqCst);
+                    async { Ok::<_, io::Error>(()) }
+                },
+            )
+            .with_ephemeral_history()
+            .into_reusable_recipe()
+            .expect("recipe validation does not call the factory");
+
+        let error = recipe
+            .build()
+            .await
+            .expect_err("a generation cannot change provider identity");
+        assert!(matches!(
+            error,
+            RunError::RuntimeRecipeProviderMismatch {
+                declared,
+                generated,
+            } if declared == "declared" && generated == "generated"
+        ));
+        assert_eq!(warms.load(Ordering::SeqCst), 0);
+    }
+
+    #[tokio::test]
     async fn a_build_failure_happens_before_the_warm_closure_is_called() {
         let warms = Arc::new(AtomicUsize::new(0));
         let warm_count = Arc::clone(&warms);
         let recipe = RuntimeBuilder::default()
             .with_command_target("not a valid target", crate::runtime::LocalRuntimeExecutor)
             .with_reusable_registered_provider(
+                "repeatable",
                 || Ok::<_, io::Error>(provider("repeatable")),
                 move |_provider| {
                     warm_count.fetch_add(1, Ordering::SeqCst);
@@ -359,6 +410,7 @@ mod tests {
         let recorded = Arc::clone(&lifetime);
         let recipe = RuntimeBuilder::default()
             .with_reusable_registered_provider(
+                "tracked",
                 move || {
                     let token = Arc::new(());
                     *recorded.lock().expect("lifetime recorder") = Some(Arc::downgrade(&token));

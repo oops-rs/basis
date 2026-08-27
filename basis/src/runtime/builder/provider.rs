@@ -14,7 +14,7 @@
 //! source won into a registered provider. Setting and settling are one
 //! responsibility split at the build boundary, and this is its near half.
 
-use mentra::{BuiltinProvider, ModelSelector, Provider};
+use mentra::{BuiltinProvider, ModelSelector, Provider, ProviderId};
 
 use super::{HostProvider, ProviderRetry, ResponsesTransport, RuntimeBuilder, Wire};
 use crate::runtime::reuse::ReusableProvider;
@@ -130,6 +130,11 @@ impl RuntimeBuilder {
     /// Supplies the repeatable registered-provider generation used when a
     /// private runtime is consumed and rebuilt for reuse.
     ///
+    /// `provider_id` fixes the provider identity before any factory or warm
+    /// activity, so a workspace can reject mismatched resolved model metadata
+    /// without calling either closure. Every generated provider must report
+    /// that same id or the generation is dropped before build and warm.
+    ///
     /// `make` creates exactly one fresh provider for each runtime. Basis takes
     /// one ordinary [`Clone`] for `warm`, moves the other clone through
     /// Mentra's registered-provider seam, completes the runtime build, and
@@ -152,6 +157,7 @@ impl RuntimeBuilder {
     #[must_use]
     pub fn with_reusable_registered_provider<P, Make, MakeError, Warm, WarmFuture, WarmError>(
         self,
+        provider_id: impl Into<ProviderId>,
         make: Make,
         warm: Warm,
     ) -> Self
@@ -165,7 +171,7 @@ impl RuntimeBuilder {
     {
         Self {
             host_provider: None,
-            reusable_host_provider: Some(ReusableProvider::new(make, warm)),
+            reusable_host_provider: Some(ReusableProvider::new(provider_id.into(), make, warm)),
             ..self
         }
     }

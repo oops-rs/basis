@@ -221,6 +221,11 @@ impl PreparedRun {
 
     /// The session this run drives, for a host that wants mentra's own surface
     /// — branching, the transcript tree, subagents — alongside basis's.
+    ///
+    /// On a reusable workspace, calling this method permanently prevents the
+    /// current generation from returning to the pool. Even a shared reference
+    /// can create Mentra-owned handles whose lifetime Basis cannot count; use
+    /// Basis transcript and branch helpers when reuse must remain possible.
     pub fn session(&self) -> &Session {
         self.poison_reuse();
         &self.session
@@ -251,6 +256,10 @@ impl PreparedRun {
         )
     }
 
+    /// Mutably exposes Mentra's session.
+    ///
+    /// On a reusable workspace this permanently prevents reuse of the current
+    /// generation, for the same ownership reason as [`session`](Self::session).
     pub fn session_mut(&mut self) -> &mut Session {
         self.poison_reuse();
         &mut self.session
@@ -270,6 +279,9 @@ impl PreparedRun {
     /// ([`with_workspace`](Self::with_workspace)) is dropped here with the
     /// rest of the run, and its hooks and MCP connections end with it — the
     /// session that comes back is mentra's alone.
+    ///
+    /// Taking the session permanently prevents a reusable generation from
+    /// being rebuilt, even if the returned session is dropped before release.
     pub fn into_session(self) -> Session {
         self.poison_reuse();
         self.session

@@ -111,17 +111,20 @@ impl ReuseLifecycle {
 
     /// Seals this generation and reports every outstanding run-derived lease.
     pub(crate) fn seal_for_rebuild(&self) -> Result<(), RunError> {
-        {
-            let mut state = self.lock();
-            state.sealed = true;
-            if !state.bound {
-                return Err(RunError::ReusableWorkspaceToolsUnbound);
-            }
-            if state.poisoned {
-                return Err(RunError::ReusableWorkspaceRawAccess);
-            }
+        let mut state = self.lock();
+        state.sealed = true;
+        if !state.bound {
+            return Err(RunError::ReusableWorkspaceToolsUnbound);
+        }
+        if state.poisoned {
+            return Err(RunError::ReusableWorkspaceRawAccess);
         }
 
+        // Keep the state lock through the ownership decision. A concurrent
+        // raw accessor must retain its lease while it waits to set `poisoned`,
+        // so the strong count refuses this rebuild. Unlocking before sampling
+        // would let that accessor poison, drop its lease, and leave a stale
+        // successful decision based on the earlier `poisoned` read.
         let leases = Arc::strong_count(&self.state).saturating_sub(1);
         if leases == 0 {
             Ok(())
