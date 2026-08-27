@@ -580,10 +580,11 @@ async fn a_missing_workspace_is_refused() {
 #[tokio::test]
 async fn a_write_into_git_hooks_is_refused() {
     let workspace = workspace_with_context("rules");
-    std::fs::create_dir_all(workspace.path().join(".git").join("hooks")).expect("hooks dir");
+    let workspace_path = workspace.path().canonicalize().expect("resolved workspace");
+    std::fs::create_dir_all(workspace_path.join(".git").join("hooks")).expect("hooks dir");
 
-    let policy = mentra::RuntimePolicy::workspace_bounded(workspace.path())
-        .with_denied_write_root(workspace.path().join(".git").join("hooks"));
+    let policy = mentra::RuntimePolicy::workspace_bounded(&workspace_path)
+        .with_denied_write_root(workspace_path.join(".git").join("hooks"));
 
     let mock = MockRuntime::builder()
         .model("mock-model", "openai")
@@ -609,7 +610,7 @@ async fn a_write_into_git_hooks_is_refused() {
             mock.model(),
             mentra::agent::AgentConfig {
                 workspace: mentra::agent::WorkspaceConfig {
-                    base_dir: workspace.path().to_path_buf(),
+                    base_dir: workspace_path.clone(),
                     ..Default::default()
                 },
                 ..Default::default()
@@ -619,7 +620,7 @@ async fn a_write_into_git_hooks_is_refused() {
 
     let report = prepare_with_session(
         session,
-        workspace.path(),
+        &workspace_path,
         "install a hook",
         &context(),
         "openai",
@@ -642,7 +643,7 @@ async fn a_write_into_git_hooks_is_refused() {
 
     assert!(failed, "writing a git hook must fail");
     assert!(
-        !workspace.path().join(".git/hooks/pre-commit").exists(),
+        !workspace_path.join(".git/hooks/pre-commit").exists(),
         "and must not reach the disk"
     );
 }
