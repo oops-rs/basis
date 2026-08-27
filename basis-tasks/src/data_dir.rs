@@ -7,10 +7,13 @@
 //! condition and the task-handle grammar (`<16 hex>/<32 hex>`) stays stable.
 
 use std::{
-    fs::{self, File},
+    fs,
     io::{self, Write},
     path::{Path, PathBuf},
 };
+
+#[cfg(unix)]
+use std::fs::File;
 
 use tempfile::NamedTempFile;
 
