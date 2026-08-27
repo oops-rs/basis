@@ -180,6 +180,12 @@ impl ScriptedEndpoint {
             while !stopped.load(Ordering::SeqCst) {
                 match listener.accept() {
                     Ok((mut stream, _)) => {
+                        stream
+                            .set_nonblocking(false)
+                            .expect("accepted request stream should be blocking");
+                        stream
+                            .set_read_timeout(Some(Duration::from_secs(5)))
+                            .expect("accepted request stream should have a read timeout");
                         let request = read_http_request(&mut stream);
                         recorded.lock().expect("requests").push(request.clone());
                         if request.starts_with("GET ") {
