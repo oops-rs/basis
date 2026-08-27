@@ -11,7 +11,7 @@
 
 use std::{
     fs::{File, OpenOptions},
-    io::{self, Write},
+    io::{self, Seek, Write},
     path::Path,
 };
 
@@ -30,6 +30,7 @@ impl Lock {
     /// lock lives on the open handle, and replacing the file would orphan it.
     pub(crate) fn write_fingerprint(&mut self) {
         let _ = self.file.set_len(0);
+        let _ = self.file.rewind();
         let _ = writeln!(self.file, "{}{}", std::process::id(), start_time_suffix());
         let _ = self.file.flush();
     }
@@ -139,12 +140,16 @@ mod tests {
 
     #[test]
     fn the_fingerprint_is_written_without_recreating_the_lock_file() {
+        use std::io::Read as _;
+
         let dir = tempfile::tempdir().unwrap();
         let path = dir.path().join("attach.lock");
         let mut held = try_exclusive(&path).unwrap().expect("holder");
         held.write_fingerprint();
 
-        let written = std::fs::read_to_string(&path).unwrap();
+        held.file.rewind().unwrap();
+        let mut written = String::new();
+        held.file.read_to_string(&mut written).unwrap();
         assert!(
             written.starts_with(&std::process::id().to_string()),
             "{written}"
