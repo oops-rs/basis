@@ -501,11 +501,13 @@ async fn a_narrowed_child_is_not_offered_a_siblings_tools() {
     let mine = tempfile::tempdir().expect("tempdir");
     let program = sibling.path().join("jenkins");
     std::fs::write(&program, "#!/bin/sh\nprintf ok\n").expect("write program");
-    std::fs::set_permissions(
-        &program,
-        <std::fs::Permissions as std::os::unix::fs::PermissionsExt>::from_mode(0o755),
-    )
-    .expect("make it executable");
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt as _;
+
+        std::fs::set_permissions(&program, std::fs::Permissions::from_mode(0o755))
+            .expect("make it executable");
+    }
     std::fs::create_dir_all(sibling.path().join(".basis")).expect("dir");
     std::fs::write(
         sibling.path().join(".basis/tools.json"),
