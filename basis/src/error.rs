@@ -72,10 +72,11 @@ pub enum RunError {
 
     /// Host-resolved model metadata names a provider other than the runtime's.
     ///
-    /// Raised while opening a workspace or applying a per-run profile, before
-    /// model catalogue, model request, or tool activity. The mismatch cannot
-    /// be repaired by looking up the id: provider identity is part of the
-    /// host's resolved contract.
+    /// Raised while opening a workspace, applying a per-run profile, or
+    /// switching an attached [`PreparedRun`](crate::PreparedRun), before model
+    /// catalogue, model request, or tool activity. The mismatch cannot be
+    /// repaired by looking up the id: provider identity is part of the host's
+    /// resolved contract.
     #[error(
         "resolved model `{model}` belongs to provider `{model_provider}`, but the runtime uses \
          `{runtime_provider}`"

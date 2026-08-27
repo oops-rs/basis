@@ -22,7 +22,8 @@ use self::{
     outcome::{Ended, chain_message, ended_on},
 };
 use super::{
-    Bound, Effort, EventSink, OutputReport, OutputSpec, RunError, RunReport, RunUsage, TurnOptions,
+    Bound, Effort, EventSink, ModelInfo, OutputReport, OutputSpec, ReasoningOptions, RunError,
+    RunReport, RunUsage, TurnOptions,
     turn::{bounded, drawable},
 };
 use crate::{
@@ -277,8 +278,11 @@ impl PreparedRun {
     /// `config.json` and `WorkspaceBuilder::with_model` all get a window when the
     /// provider publishes one. Gemini's listing does, as `inputTokenLimit`;
     /// Anthropic's and the OpenAI wires' do not, and neither does a server
-    /// that cannot list. `None` for a run [`set_model`](Self::set_model) has
-    /// since moved onto a model named by id alone, and for a resumed
+    /// that cannot list. `None` for a run whose lossy
+    /// [`set_model`](Self::set_model) wrapper has since moved onto a model
+    /// named by id alone; the complete
+    /// [`set_resolved_model`](Self::set_resolved_model) preserves a supplied
+    /// window. Also `None` for a resumed
     /// conversation that is no longer on the model its workspace resolved —
     /// mentra does not persist a window, and `Workspace::resume` reapplies
     /// the workspace's model only while the conversation is still on it.
@@ -311,8 +315,8 @@ impl PreparedRun {
         &self.run
     }
 
-    /// Switches the model this conversation's later turns run on, keeping the
-    /// provider it was opened with.
+    /// Switches the complete resolved model this conversation's later turns
+    /// run on, keeping the provider it was opened with.
     ///
     /// Takes effect from the next turn: mentra threads the model into each
     /// model request as it builds it, so a turn already in flight finishes on
@@ -320,27 +324,58 @@ impl PreparedRun {
     /// record — so a session resumed in another process comes back on the model
     /// it was last set to.
     ///
-    /// `model` is not checked against the provider's catalogue, and
-    /// deliberately: mentra does not check either, listing models is a network
-    /// round trip, and a caller naming a model basis has never heard of is the
-    /// ordinary case for a self-hosted endpoint. An id the provider rejects
-    /// fails on the next turn, where the provider can say why.
+    /// The [`ModelInfo`] is handed to mentra unchanged, including its context
+    /// window. It is not checked against a catalogue: listing would be provider
+    /// activity at switch time, and host-resolved metadata is already the
+    /// caller's contract. An id the provider rejects fails on the next turn,
+    /// where that provider can say why. Mentra currently retains the id,
+    /// provider, and context window but neither exposes nor persists the
+    /// display name, description, or creation time, so those display fields
+    /// cannot be read back through this API.
     ///
-    /// The provider is *not* switchable here. mentra resolves a provider from
-    /// the runtime's registry, and a run built on one provider's credential and
-    /// endpoint (ADR-0018) has no second connection to move to.
-    pub fn set_model(&mut self, model: impl Into<String>) -> Result<(), RunError> {
-        let model = model.into();
+    /// The provider is *not* switchable here. Its identity must equal this
+    /// run's provider exactly; a mismatch is refused before mentra, catalogue,
+    /// model-request, or tool activity. A run built on one provider's
+    /// credential and endpoint (ADR-0018) has no second connection to move to.
+    ///
+    /// This is a between-turn API. A [`RoundStrategy`](crate::RoundStrategy)
+    /// may make its own in-turn model adjustment, but that does not pass
+    /// through this method and does not rewrite basis's header/report context.
+    ///
+    /// Mentra's setter mutates its live agent before persisting the record. If
+    /// that write fails, the returned error can therefore leave mentra's live
+    /// session changed while basis's [`RunContext`] still names the old model.
+    /// A host that needs failure-atomic phase switches should use volatile
+    /// history; the Nous Gate 1a attached lifecycle does so.
+    pub fn set_resolved_model(&mut self, model: ModelInfo) -> Result<(), RunError> {
+        if model.provider.as_str() != self.run.provider {
+            return Err(RunError::ResolvedModelProviderMismatch {
+                model: model.id.clone(),
+                model_provider: model.provider.as_str().to_string(),
+                runtime_provider: self.run.provider.clone(),
+            });
+        }
 
-        self.session
-            .set_model(mentra::ModelInfo::new(model.clone(), &self.run.provider))?;
+        let model_id = model.id.clone();
+        self.session.set_model(model)?;
         // The context is what `header()` and every report read the model from.
         // Leaving it stale would have the stream describe a run that is no
-        // longer happening. (`ModelInfo::new` above carries no window, so
-        // `context_window()` answers `None` from here on, from the session.)
-        self.run.model = model;
+        // longer happening. This assignment deliberately follows the session
+        // call, so a rejected switch cannot rewrite the public header/report.
+        self.run.model = model_id;
 
         Ok(())
+    }
+
+    /// Switches later turns to `model` by id, keeping the current provider.
+    ///
+    /// Compatibility wrapper over [`set_resolved_model`](Self::set_resolved_model).
+    /// It is deliberately lossy: an id carries no context window or display
+    /// metadata, so [`context_window`](Self::context_window) becomes `None`.
+    /// Hosts that already resolved a [`ModelInfo`] should use the complete API.
+    pub fn set_model(&mut self, model: impl Into<String>) -> Result<(), RunError> {
+        let provider = self.run.provider.clone();
+        self.set_resolved_model(ModelInfo::new(model, provider))
     }
 
     /// Renames this conversation, and persists the new name.
@@ -366,23 +401,42 @@ impl PreparedRun {
         self.session.name()
     }
 
-    /// Asks the model to think harder, or less hard, from the next turn on.
+    /// Sets complete provider-neutral reasoning options from the next turn on.
     ///
-    /// `None` clears the request and restores the provider's own default.
-    /// Persisted and deferred exactly as [`set_model`](Self::set_model) is, and
-    /// for the same reason: mentra reads the level live when it builds each
-    /// model request.
+    /// `None` clears the request and restores the provider's own default. The
+    /// options are forwarded whole without rewriting any other
+    /// [`ProviderRequestOptions`](crate::ProviderRequestOptions) field. They
+    /// are provider-neutral: adapters that support summaries map
+    /// [`ReasoningOptions::summary`] to their wire, while adapters without a
+    /// summary control ignore that field.
     ///
-    /// A provider or model that does not offer the requested level fails the
-    /// turn rather than quietly running at a lower one — see [`Effort`].
-    pub fn set_effort(&mut self, effort: Option<Effort>) -> Result<(), RunError> {
-        self.session
-            .set_reasoning(effort.map(|effort| mentra::provider::ReasoningOptions {
-                effort: Some(effort.into()),
-                summary: None,
-            }))?;
+    /// Persisted and deferred exactly as
+    /// [`set_resolved_model`](Self::set_resolved_model) is. Mentra likewise
+    /// mutates the live reasoning posture before its persistence write, so an
+    /// error can leave that live value changed; the Nous Gate 1a lifecycle
+    /// avoids that persistence edge with volatile history.
+    pub fn set_reasoning(&mut self, reasoning: Option<ReasoningOptions>) -> Result<(), RunError> {
+        self.session.set_reasoning(reasoning)?;
 
         Ok(())
+    }
+
+    /// The complete reasoning options this session's next turn will receive.
+    pub fn reasoning(&self) -> Option<&ReasoningOptions> {
+        self.session.reasoning()
+    }
+
+    /// Asks the model for one effort level from the next turn on.
+    ///
+    /// Compatibility wrapper over [`set_reasoning`](Self::set_reasoning).
+    /// It is deliberately lossy: changing effort through this method clears
+    /// any configured reasoning summary. A caller preserving complete options
+    /// should use [`set_reasoning`](Self::set_reasoning).
+    pub fn set_effort(&mut self, effort: Option<Effort>) -> Result<(), RunError> {
+        self.set_reasoning(effort.map(|effort| ReasoningOptions {
+            effort: Some(effort.into()),
+            summary: None,
+        }))
     }
 
     /// The level this session's next turn will be sent with.
@@ -399,8 +453,7 @@ impl PreparedRun {
     /// has no name for also reads as `None`, because reporting the wrong one
     /// is worse than reporting none; see [`Effort`]'s `TryFrom`.
     pub fn effort(&self) -> Option<Effort> {
-        self.session
-            .reasoning()
+        self.reasoning()
             .and_then(|reasoning| reasoning.effort)
             .and_then(|effort| Effort::try_from(effort).ok())
     }

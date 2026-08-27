@@ -73,6 +73,13 @@ pub use usage::RunUsage;
 /// gracefully.
 pub use mentra::runtime::CancellationToken;
 
+/// How much provider-generated reasoning summary to request.
+///
+/// Re-exported because [`ReasoningOptions::summary`] makes a caller name it;
+/// like the other complete reasoning types below, a Basis caller should not
+/// need a separately version-pinned Mentra dependency to construct it.
+pub use mentra::provider_core::ReasoningSummary;
+
 /// The per-turn steering seam, whole: the trait a host implements and every
 /// type its signatures make that host *name*.
 ///
