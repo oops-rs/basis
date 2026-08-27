@@ -46,6 +46,7 @@
 //! resolution path, and this is it.
 
 mod builder;
+mod lifecycle;
 mod profile;
 mod roster;
 mod spec;
@@ -63,6 +64,7 @@ pub(crate) use spec::DEFAULT_SESSION_NAME;
 pub use spec::RunSpec;
 
 pub(crate) use builder::{load_templates, resolved_workspace};
+use lifecycle::MintPosture;
 
 #[cfg(feature = "mcp")]
 use crate::mcp::connections::McpConnections;
@@ -100,6 +102,9 @@ pub struct Workspace {
     /// place.
     root: PathBuf,
     runtime: Arc<Runtime>,
+    /// Whether supported Basis APIs may mint more than one independent
+    /// session from this workspace.
+    mint_posture: MintPosture,
     model: ModelInfo,
     /// The reasoning effort a [`RunSpec`] gets when it asked for none, as
     /// `config.json` set it. `None` leaves the provider's own default, which
@@ -153,6 +158,7 @@ impl std::fmt::Debug for Workspace {
             .field("root", &self.root)
             .field("provider", &self.provider)
             .field("model", &self.model.id)
+            .field("fresh_only", &self.mint_posture.is_fresh_only())
             .field("config_files", &self.config.files)
             .field("context_files", &self.context.documents().len())
             .field("memories", &self.memories.len())
@@ -196,6 +202,7 @@ impl Workspace {
     /// wants to hear about it before a session exists.)
     pub fn prepare(&self, spec: impl Into<RunSpec>) -> Result<PreparedRun, RunError> {
         let spec = spec.into();
+        self.mint_posture.claim()?;
         if let Some(model) = spec.profile.resolved_model() {
             validate_model_provider(model, &self.provider)?;
         }
@@ -251,6 +258,7 @@ impl Workspace {
         spec: impl Into<RunSpec>,
     ) -> Result<PreparedRun, RunError> {
         let spec = spec.into();
+        self.mint_posture.claim()?;
         if let Some(model) = spec.profile.resolved_model() {
             validate_model_provider(model, &self.provider)?;
         }

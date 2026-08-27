@@ -146,6 +146,20 @@ pub enum RunError {
     )]
     DiscoveryDisabledSharedRuntime,
 
+    /// Fresh-only ownership was requested with a borrowed runtime.
+    #[error(
+        "fresh-only workspaces cannot borrow a shared runtime; supply a fresh private runtime \
+         recipe with WorkspaceBuilder::with_runtime_builder"
+    )]
+    FreshOnlySharedRuntime,
+
+    /// The workspace's one independent mint/resume attempt was already used.
+    #[error(
+        "this fresh-only workspace has already attempted its one independent prepare or resume; \
+         open a new workspace with a fresh private runtime to try again"
+    )]
+    FreshOnlyRunAlreadyAttempted,
+
     #[error(transparent)]
     Provider(#[from] ProviderError),
 

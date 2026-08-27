@@ -185,6 +185,7 @@ fn gather_options() -> ProviderRequestOptions {
 async fn workspace(path: &std::path::Path, activity: Activity) -> Workspace {
     Workspace::builder(path)
         .without_discovery()
+        .fresh_only()
         .with_runtime_builder(
             Runtime::builder()
                 .with_provider_instance(ScriptedProvider {

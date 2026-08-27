@@ -45,7 +45,7 @@ use crate::{
     tools::declared::{self, DeclaredTools, ToolsConfig},
 };
 
-use super::{Workspace, roster::ToolRoster};
+use super::{Workspace, lifecycle::MintPosture, roster::ToolRoster};
 
 /// How a workspace is opened.
 ///
@@ -63,6 +63,8 @@ pub struct WorkspaceBuilder {
     runtime: RuntimeSource,
     /// One coherent, sticky switch over every repository/home convention.
     discovery_enabled: bool,
+    /// Whether this workspace permits only one independent prepare/resume.
+    fresh_only: bool,
     /// Inherited policy, a selector override, or complete host-resolved metadata.
     model: WorkspaceModel,
     context: ContextConfig,
@@ -123,6 +125,7 @@ impl std::fmt::Debug for WorkspaceBuilder {
                 },
             )
             .field("discovery_enabled", &self.discovery_enabled)
+            .field("fresh_only", &self.fresh_only)
             .field("model", &self.model)
             .field("context", &self.context)
             .field("config", &self.config)
@@ -148,6 +151,7 @@ impl WorkspaceBuilder {
             // always has.
             runtime: RuntimeSource::Private(Box::default()),
             discovery_enabled: true,
+            fresh_only: false,
             model: WorkspaceModel::Inherited,
             context: ContextConfig::default(),
             // Unset, so `open` reads the convention where convention says it
@@ -204,6 +208,27 @@ impl WorkspaceBuilder {
     pub fn with_runtime_builder(self, runtime: RuntimeBuilder) -> Self {
         Self {
             runtime: RuntimeSource::Private(Box::new(runtime)),
+            ..self
+        }
+    }
+
+    /// Allows exactly one independent [`Workspace::prepare`] or
+    /// [`Workspace::resume`] attempt from the opened workspace.
+    ///
+    /// Subsequent turns on the returned [`crate::PreparedRun`] remain
+    /// attached and unrestricted. The claim is irreversible even if the first
+    /// attempt fails: without Gate 1b's scrub contract, Basis cannot prove a
+    /// partly minted/resumed runtime is clean enough to retry.
+    ///
+    /// Requires a private runtime recipe. A shared runtime could be minted by
+    /// another workspace through a different `Arc`, bypassing this workspace's
+    /// gate, so [`open`](Self::open) refuses that ownership shape.
+    /// Direct session creation through [`Workspace::mentra_runtime`] is the
+    /// raw Mentra escape hatch and is outside this supported Basis lifecycle.
+    #[must_use]
+    pub fn fresh_only(self) -> Self {
+        Self {
+            fresh_only: true,
             ..self
         }
     }
@@ -476,6 +501,10 @@ impl WorkspaceBuilder {
         if !self.discovery_enabled && matches!(&self.runtime, RuntimeSource::Shared(_)) {
             return Err(RunError::DiscoveryDisabledSharedRuntime);
         }
+        if self.fresh_only && matches!(&self.runtime, RuntimeSource::Shared(_)) {
+            return Err(RunError::FreshOnlySharedRuntime);
+        }
+        let fresh_only = self.fresh_only;
 
         // Read before the runtime is acquired, for the reason the hooks file
         // below is: a config that does not parse must fail the open rather
@@ -709,6 +738,7 @@ impl WorkspaceBuilder {
             path: self.path,
             provider: runtime.provider().to_string(),
             runtime,
+            mint_posture: MintPosture::new(fresh_only),
             model,
             // The last thing the file still has to say, and the one this
             // builder cannot say for it: an effort is a per-turn request, so
