@@ -243,6 +243,7 @@ name = "basis"
 version = "0.7.1"
 dependencies = [
  "async-trait",
+ "futures",
  "mentra",
  "serde",
  "serde_json",
@@ -250,6 +251,7 @@ dependencies = [
  "tempfile",
  "thiserror",
  "tokio",
+ "tokio-tungstenite",
 ]
 
 [[package]]

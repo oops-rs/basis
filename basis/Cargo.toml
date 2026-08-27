@@ -55,6 +55,8 @@ thiserror.workspace = true
 tokio.workspace = true
 
 [dev-dependencies]
+futures.workspace = true
 mentra = { workspace = true, features = ["test-utils"] }
 tokio = { workspace = true, features = ["time"] }
+tokio-tungstenite.workspace = true
 tempfile.workspace = true
