@@ -138,7 +138,7 @@ pub use run::{
     RoundDecision, RoundStrategy, RoundToolResult, RunContext, RunReport, RunUsage, TaggedEvent,
     TaggedSink, TurnOptions, run, run_with_approver,
 };
-pub use runtime::{Runtime, RuntimeBuilder};
+pub use runtime::{Runtime, RuntimeBuilder, ToolResultPolicy};
 pub use shell::ShellAccess;
 // Mentra's, deliberately. These are the types basis's own surface asks a
 // caller to *name* — a model to resolve, a provider to prefer, a provider to

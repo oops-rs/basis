@@ -36,6 +36,7 @@ pub(crate) mod builder;
 mod credential;
 pub(crate) mod dispatch;
 mod executor;
+mod tool_results;
 
 use std::collections::HashMap;
 use std::path::{Path, PathBuf};
@@ -44,6 +45,7 @@ use std::sync::{Arc, Mutex};
 use mentra::{ModelSelector, Session, agent::AgentConfig, runtime::SessionOptions};
 
 pub use builder::RuntimeBuilder;
+pub use tool_results::ToolResultPolicy;
 
 /// The types a **command target's executor** is written against.
 ///

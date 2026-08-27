@@ -40,7 +40,8 @@ pub(crate) use history::History;
 use provider_settlement::HostProvider;
 
 use super::{
-    FileToolProfile, ProviderRetry, ResponsesTransport, Runtime, RuntimeExecutor, Wire,
+    FileToolProfile, ProviderRetry, ResponsesTransport, Runtime, RuntimeExecutor, ToolResultPolicy,
+    Wire,
     dispatch::{DispatchHook, HookDispatch},
     executor::{CommandTargets, TargetedExecutor},
 };
@@ -140,6 +141,10 @@ pub struct RuntimeBuilder {
     /// decision D4). `None` — the default — is inherit-everything, on the code
     /// path every runtime has always used.
     child_policy: Option<ChildPolicy>,
+    /// How completed tool results are bounded before the next provider
+    /// request. `None` preserves the Mentra policy derived for this runtime;
+    /// `Some` overlays only bytes, physical lines, and spill posture.
+    tool_result_policy: Option<ToolResultPolicy>,
     /// A provider the host constructed itself, through either the runtime-level
     /// [`with_provider_instance`](Self::with_provider_instance) seam or the
     /// provider-core [`with_registered_provider`](Self::with_registered_provider)
@@ -178,6 +183,7 @@ impl std::fmt::Debug for RuntimeBuilder {
             .field("wire", &self.wire)
             .field("file_tools", &self.file_tools)
             .field("delegation_depth", &self.delegation_depth)
+            .field("tool_result_policy", &self.tool_result_policy)
             // Presence is all a `dyn` policy can honestly print.
             .field(
                 "child_policy",
@@ -218,6 +224,7 @@ impl Default for RuntimeBuilder {
             host_tools: Vec::new(),
             delegation_depth: crate::tools::DEFAULT_DELEGATION_DEPTH,
             child_policy: None,
+            tool_result_policy: None,
             host_provider: None,
         }
     }
@@ -264,6 +271,23 @@ impl RuntimeBuilder {
     #[must_use]
     pub fn with_file_tools(self, file_tools: FileToolProfile) -> Self {
         Self { file_tools, ..self }
+    }
+
+    /// Sets the limits applied to completed tool results before the next
+    /// provider request.
+    ///
+    /// This is intentionally narrower than Mentra's [`RuntimePolicy`]: Basis
+    /// continues to derive filesystem, command, timeout, and process posture.
+    /// Only the result byte limit, physical-line limit, and spill posture from
+    /// `tool_result_policy` replace that derived policy's corresponding
+    /// values. If this method is never called, existing Mentra defaults remain
+    /// untouched.
+    #[must_use]
+    pub fn with_tool_result_policy(self, tool_result_policy: ToolResultPolicy) -> Self {
+        Self {
+            tool_result_policy: Some(tool_result_policy),
+            ..self
+        }
     }
 
     /// Gives the host's own code a say over each tool call, on every workspace
@@ -455,6 +479,11 @@ impl RuntimeBuilder {
     }
 
     fn build_with(self, identifier: String, policy: RuntimePolicy) -> Result<Runtime, RunError> {
+        let policy = match self.tool_result_policy {
+            Some(tool_result_policy) => tool_result_policy.apply_to(policy),
+            None => policy,
+        };
+
         // First, before even the credential is looked up, because opening the
         // store is what refuses a directory still holding a basis ≤0.6
         // database (ADR-0023's no-migration ruling) and that is the most
