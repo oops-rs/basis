@@ -689,7 +689,7 @@ fn workspace_of_five_files() -> tempfile::TempDir {
 }
 
 /// One tool-calling turn per file, then the sentence the model ends on.
-fn reading_all_five(workspace: &Path) -> MockRuntime {
+fn reading_all_five() -> MockRuntime {
     let mut builder = MockRuntime::builder().model("mock-model", "openai");
 
     for index in 1..=5 {
@@ -699,7 +699,7 @@ fn reading_all_five(workspace: &Path) -> MockRuntime {
                 serde_json::json!({
                     "operations": [{
                         "op": "read",
-                        "path": workspace.join(format!("file{index}.txt")),
+                        "path": format!("file{index}.txt"),
                     }],
                 }),
             )
@@ -721,7 +721,7 @@ async fn every_tool_result_the_model_read_is_still_in_front_of_it() {
     // but the model still loses the body. Basis keeps every result unless a
     // host asks for elision by number.
     let workspace = workspace_of_five_files();
-    let mock = reading_all_five(workspace.path());
+    let mock = reading_all_five();
     let mut session = mock
         .runtime()
         .create_session_with_config(
