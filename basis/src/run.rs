@@ -44,7 +44,9 @@ use crate::{
 
 pub use bounds::Bounds;
 pub use output::{OutputReport, OutputSpec};
-pub use prepared::{Compacted, LoadedSkill, PreparedRun, PromptPart, RunContext};
+pub use prepared::{
+    AgentEventTapGuard, Compacted, LoadedSkill, PreparedRun, PromptPart, RunContext,
+};
 pub use sink::{
     CollectingSink, EventFanIn, EventSink, FnSink, MergedEvents, NullSink, TaggedEvent, TaggedSink,
 };
@@ -111,6 +113,14 @@ pub use mentra::{
     ContentBlock, ModelInfo, ReasoningChange, ReasoningOptions, RoundAdjustment, RoundBoundary,
     RoundContext, RoundDecision, RoundStrategy, RoundToolResult,
 };
+
+/// Mentra's complete provider-neutral agent event, forwarded unchanged by
+/// [`PreparedRun::register_agent_event_tap`].
+///
+/// Re-exported under the same rule as [`CancellationToken`]: this public
+/// callback asks a Basis host to name the type, so the host should not need a
+/// separately version-pinned Mentra dependency just to spell its signature.
+pub use mentra::agent::AgentEvent;
 
 /// How hard the model should think before answering.
 ///

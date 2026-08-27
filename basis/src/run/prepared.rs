@@ -11,6 +11,7 @@ use std::sync::Arc;
 
 use mentra::{
     Session,
+    agent::AgentEvent,
     runtime::{ProviderRetry, RunOptions},
 };
 use tokio::sync::oneshot;
@@ -38,12 +39,14 @@ mod compact;
 mod context;
 mod forward;
 mod header;
+mod observer;
 mod outcome;
 mod prompt;
 mod typed;
 
 pub use compact::Compacted;
 pub use header::{LoadedSkill, RunContext};
+pub use observer::AgentEventTapGuard;
 pub use prompt::PromptPart;
 
 /// A session and the prompt to send it. Nothing has been sent yet.
@@ -209,6 +212,28 @@ impl PreparedRun {
     /// — branching, the transcript tree, subagents — alongside basis's.
     pub fn session(&self) -> &Session {
         &self.session
+    }
+
+    /// Registers a lossless in-process observer for this run's agent events.
+    ///
+    /// The callback receives Mentra's complete [`AgentEvent`] values unchanged,
+    /// synchronously and in occurrence order, before they enter the bounded
+    /// broadcast stream. In particular, tool calls and results retain their
+    /// complete provider-neutral input, structured content, and error payloads.
+    /// A cancellation ends the sequence with [`AgentEvent::RunFailed`].
+    ///
+    /// The callback executes inline on the operation emitting the event. It
+    /// must return promptly and must not block or panic: blocking stalls that
+    /// operation, and a panic propagates through it.
+    ///
+    /// Keep the returned [`AgentEventTapGuard`] alive for as long as observation
+    /// is required. Dropping it unregisters the callback immediately;
+    /// registration does not replay earlier events.
+    pub fn register_agent_event_tap(
+        &self,
+        tap: impl Fn(&AgentEvent) + Send + Sync + 'static,
+    ) -> AgentEventTapGuard {
+        AgentEventTapGuard::new(self.session.register_agent_event_tap(tap))
     }
 
     pub fn session_mut(&mut self) -> &mut Session {

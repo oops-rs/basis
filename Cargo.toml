@@ -23,8 +23,12 @@ basis-acp = { version = "0.7", path = "basis-acp" }
 # that is now merely their first client.
 basis-tasks = { version = "0.7", path = "basis-tasks" }
 
-# Mentra 0.22 is the runtime contract basis targets, and the floor is hard:
-# basis's exhaustive event normalizer owns the new
+# Mentra 0.23.1 is the runtime contract basis targets, and the floor is hard:
+# its Session exposes the lossless synchronous agent-event tap Basis forwards,
+# mentra-provider can mint fresh Responses session scopes for safe rebuilds,
+# and dropping a minted runtime releases its background observer state. The
+# 0.22 floor's reasons still hold beneath it: basis's exhaustive event
+# normalizer owns the
 # `RequestToolResultsElided` wire event, while its compaction adapter
 # deliberately leaves the mutually exclusive projected-byte budget disabled.
 # The 0.21 floor's reasons still hold beneath it — `FileRuntimeStore`, which
@@ -52,7 +56,7 @@ basis-tasks = { version = "0.7", path = "basis-tasks" }
 # persistent store is the file-backed one, which is exactly ADR-0023's
 # posture — basis persists to files and links no database — so nothing
 # re-offers it.
-mentra = { version = "0.22.0", default-features = false }
+mentra = { version = "0.23.1", default-features = false }
 
 async-trait = "0.1"
 # ACP carries an image in a prompt as base64; basis's `PromptPart` carries the

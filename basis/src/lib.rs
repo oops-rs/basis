@@ -132,12 +132,12 @@ pub use mcp::{
 // kind stay in `memory`, next to the convention they only make sense beside.
 pub use memory::{MemoryConfig, WorkspaceMemoryRoot};
 pub use run::{
-    Bound, Bounds, CancellationToken, CollectingSink, Compacted, ContentBlock, Effort, EventFanIn,
-    EventSink, FnSink, MergedEvents, ModelInfo, NullSink, OutputReport, OutputSpec, PreparedRun,
-    PromptPart, ReasoningChange, ReasoningOptions, ReasoningSummary, RoundAdjustment,
-    RoundBoundary, RoundContext, RoundDecision, RoundStrategy, RoundToolResult, RunContext,
-    RunFailure, RunFailureCategory, RunReport, RunUsage, TaggedEvent, TaggedSink, TurnOptions, run,
-    run_with_approver,
+    AgentEvent, AgentEventTapGuard, Bound, Bounds, CancellationToken, CollectingSink, Compacted,
+    ContentBlock, Effort, EventFanIn, EventSink, FnSink, MergedEvents, ModelInfo, NullSink,
+    OutputReport, OutputSpec, PreparedRun, PromptPart, ReasoningChange, ReasoningOptions,
+    ReasoningSummary, RoundAdjustment, RoundBoundary, RoundContext, RoundDecision, RoundStrategy,
+    RoundToolResult, RunContext, RunFailure, RunFailureCategory, RunReport, RunUsage, TaggedEvent,
+    TaggedSink, TurnOptions, run, run_with_approver,
 };
 pub use runtime::{Runtime, RuntimeBuilder, ToolResultPolicy};
 pub use shell::ShellAccess;
