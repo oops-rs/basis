@@ -59,6 +59,22 @@ pub(crate) struct McpConnections {
 }
 
 impl McpConnections {
+    /// Owns no manager, claims, tools, or reported names.
+    ///
+    /// Discovery-off workspaces use this instead of `connect(Vec::new())` so
+    /// their invariant is represented directly and cannot acquire connection
+    /// setup as an incidental effect of the normal connection path.
+    pub(crate) fn empty(runtime: Arc<Runtime>, root: &Path) -> Self {
+        Self {
+            runtime,
+            manager: None,
+            claimed: Vec::new(),
+            bridged: Vec::new(),
+            root: root.to_path_buf(),
+            names: Vec::new(),
+        }
+    }
+
     /// Connects `servers` for the workspace at `root`, bridging each tool onto
     /// the runtime's registry under the claimed name.
     pub(crate) async fn connect(
@@ -336,6 +352,26 @@ mod tests {
             !registers(&runtime, "mcp__docs__search"),
             "a registry a host keeps for its whole process must not grow by one \
              server's worth of tools per workspace open"
+        );
+    }
+
+    #[test]
+    fn an_empty_owner_has_no_manager_claims_tools_or_names() {
+        let runtime = runtime();
+        let connections = McpConnections::empty(Arc::clone(&runtime), Path::new("/repo"));
+
+        assert!(connections.manager.is_none());
+        assert!(connections.claimed.is_empty());
+        assert!(connections.bridged.is_empty());
+        assert!(connections.names().is_empty());
+
+        drop(connections);
+        assert!(
+            runtime
+                .mentra_runtime()
+                .tools()
+                .iter()
+                .all(|tool| !tool.provider.name.starts_with("mcp__"))
         );
     }
 }

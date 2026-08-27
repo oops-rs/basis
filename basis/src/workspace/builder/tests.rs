@@ -459,6 +459,36 @@ fn commands_are_available_unless_the_caller_says_otherwise() {
 }
 
 #[test]
+fn discovery_is_enabled_until_the_caller_turns_it_off() {
+    assert!(WorkspaceBuilder::new("/repo").discovery_enabled);
+    assert!(
+        !WorkspaceBuilder::new("/repo")
+            .without_discovery()
+            .discovery_enabled
+    );
+}
+
+#[test]
+fn discovery_stays_off_after_later_discovery_setters() {
+    let builder = WorkspaceBuilder::new("/repo")
+        .without_discovery()
+        .with_context(ContextConfig::default())
+        .with_config(Config::default())
+        .with_skills(SkillsConfig::default())
+        .with_memory(MemoryConfig::default())
+        .with_templates(TemplatesConfig::default())
+        .with_hooks(HooksConfig::default())
+        .with_tools(ToolsConfig::default());
+    #[cfg(feature = "mcp")]
+    let builder = builder.with_mcp(McpConfig::default());
+
+    assert!(
+        !builder.discovery_enabled,
+        "a later source-specific setter must not reactivate discovery"
+    );
+}
+
+#[test]
 fn a_fresh_builder_carries_a_private_default_runtime_and_an_inherited_model() {
     // The sugar's shape: `Workspace::open(path)` must behave as it always
     // has, so the default source is a default private recipe — and the model

@@ -88,6 +88,22 @@ pub enum RunError {
         runtime_provider: String,
     },
 
+    /// Discovery was disabled on a builder borrowing a shared runtime.
+    ///
+    /// Mentra's runtime-global skill loader can be changed after an `Arc` is
+    /// borrowed, and its model-visible descriptions are read on every round.
+    /// No one-time inspection can therefore prove that a shared runtime stays
+    /// discovery-free. Gate 1a's fresh-only lifecycle fails closed before
+    /// runtime acquisition, model resolution, provider requests, workspace
+    /// tool registration, or interception; use
+    /// [`WorkspaceBuilder::with_runtime_builder`](crate::WorkspaceBuilder::with_runtime_builder)
+    /// so opening privately constructs the runtime it owns.
+    #[error(
+        "discovery-disabled workspaces cannot borrow a shared runtime; supply a fresh private \
+         runtime recipe with WorkspaceBuilder::with_runtime_builder"
+    )]
+    DiscoveryDisabledSharedRuntime,
+
     #[error(transparent)]
     Provider(#[from] ProviderError),
 
