@@ -129,12 +129,9 @@ claimed once and suffixed for the second. Hooks, `ShellAccess`, and the `.git` c
 remain per workspace as well, enforced on a shared runtime by the one dispatch hook basis
 registers.
 
-One thing does not work yet on a shared runtime: mentra fixes the persistence tag per
-*runtime* at build time, so conversations minted there are filed under `"basis:runtime"`
-instead of under their workspace, and `store::list` — ACP's `session/list` — does not find
-them for it. Nothing is stranded, because resume takes an agent id and never a tag, and a
-row re-files itself the next time it persists under a runtime that knows its workspace. The
-private path is unaffected: every `Workspace::open` tags exactly as it always did.
+Conversations on a shared runtime are still tagged per minted session with the workspace's
+identifier. `store::list` — and ACP's `session/list` over it — therefore returns only that
+workspace's conversations even though provider, store handle, and runtime are shared.
 
 The knobs ADR-0018 moved are `RuntimeBuilder`'s now — `with_provider`, `with_base_url`,
 `with_api_key`, `with_store_dir`, `with_ephemeral_history`, `with_interceptor`,
@@ -150,6 +147,75 @@ to `WorkspaceBuilder::with_runtime_builder`, which configures the private runtim
 surface is still unhidden, under a name that now says whose it is:
 `Runtime::mentra_runtime()`, and `Workspace::mentra_runtime()` for a host that has only the
 workspace in hand.
+
+## A host can pin the whole run contract
+
+A strict embedding host can turn Basis's conventions into explicit inputs instead of
+depending on ambient repository or home files
+([ADR-0024](adr/0024-host-defined-runtime-contracts.md)). The runtime recipe accepts a
+provider-core implementation directly, so a retained concrete Responses provider clone still
+shares the registered session used for connection prewarm. `ToolResultPolicy::unlimited()`
+separately pins unlimited bytes and physical lines with no spill:
+
+```rust
+let runtime_recipe = basis::Runtime::builder()
+    .with_registered_provider(provider.clone())
+    .with_tool_result_policy(basis::ToolResultPolicy::unlimited())
+    .with_ephemeral_history();
+```
+
+The workspace then takes an already-resolved model, disables every config/context/hook/tool/
+memory/skill/template/MCP discovery lane as one posture, and can opt into Gate 1a's one-mint
+lifecycle:
+
+```rust
+let workspace = basis::Workspace::builder("/repo")
+    .with_runtime_builder(runtime_recipe)
+    .with_resolved_model(resolved_model)
+    .without_discovery()
+    .fresh_only()
+    .open()
+    .await?;
+```
+
+Both postures require a private runtime recipe. A borrowed `Arc<Runtime>` can be mutated or
+minted through another holder, so it cannot prove either zero runtime-global skill leakage or
+one independent mint. `fresh_only` consumes its claim on the first `prepare` or `resume`
+attempt even if that attempt fails; follow-up turns on the returned `PreparedRun` remain
+attached and allowed. Direct calls through `mentra_runtime()` are the raw escape hatch and
+outside these Basis guarantees.
+
+`RunProfile` states the per-mint half without changing the workspace defaults. Omitted fields
+inherit; `with_max_output_tokens(None)`, `with_reasoning(None)`, and
+`with_tool_result_paging(None)` are explicit clears:
+
+```rust
+let profile = basis::RunProfile::new()
+    .with_resolved_model(gather_model)
+    .with_tool_roster(basis::ToolRoster::only(["search", "finish"]))
+    .with_provider_request_options(request_options)
+    .with_reasoning(Some(reasoning))
+    .with_max_output_tokens(Some(4_096))
+    .with_compaction(compaction)
+    .with_tool_result_paging(None)
+    .with_system_prompt(basis::SystemPrompt::Replace(system_prompt));
+
+let mut run = workspace.prepare(
+    basis::RunSpec::new("gather the evidence").with_profile(profile),
+)?;
+```
+
+Complete request options and the dedicated reasoning override follow ordinary builder order:
+whichever is called last decides reasoning. Nonempty `session.extra_headers` are accepted only
+on an explicitly ephemeral runtime, because Mentra persists its agent config and a durable
+store must never receive request credentials.
+
+One attached conversation can switch phases without losing its committed transcript:
+`set_resolved_model` preserves the new context window, and `set_reasoning` preserves every
+non-reasoning request option. Legacy `set_model` and `set_effort` remain intentionally lossy
+wrappers. When a turn fails, `RunReport::failure` retains the original typed Mentra variant and
+recoverability category before `RunOutcome` projects it to display/wire text; callers do not
+parse that text to decide whether to retry.
 
 ## What the repository says about its model
 
