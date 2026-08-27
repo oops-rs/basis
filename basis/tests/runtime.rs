@@ -503,6 +503,7 @@ enum Reply {
     /// A finished assistant message, numbered by connection.
     Text,
     /// A single tool call; the next connection is expected to wrap up.
+    #[cfg(unix)]
     ToolCall { name: String, arguments: String },
 }
 
@@ -512,6 +513,7 @@ impl Reply {
     /// [`basis::RuntimeBuilder`] registers mentra's split file tools by
     /// default, so a scripted `files` call would name a tool that is not
     /// there and the run would prove nothing about hooks.
+    #[cfg(unix)]
     fn write_file(path: &str) -> Self {
         Self::ToolCall {
             name: "write".to_string(),
@@ -625,6 +627,7 @@ fn sse_body(index: usize, reply: &Reply) -> String {
                 "choices": [{"index": 0, "delta": {}, "finish_reason": "stop"}]
             }));
         }
+        #[cfg(unix)]
         Reply::ToolCall { name, arguments } => {
             events.push(json!({
                 "id": id, "model": "test-model",
