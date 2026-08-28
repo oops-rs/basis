@@ -360,6 +360,7 @@ mod tests {
             cache_creation_tokens: 1_000,
             reasoning_tokens: 1_000,
             thoughts_tokens: 1_000,
+            model_responses: 1,
         }
     }
 

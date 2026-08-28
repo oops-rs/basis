@@ -17,9 +17,8 @@ use serde::{Deserialize, Serialize};
 /// Three things to know before treating this as a bill.
 ///
 /// It is *reported*, not measured. A provider that says nothing leaves this at
-/// zero, and a stream that lagged — the [`Notice`](crate::Event::Notice) says
-/// how many events were dropped — may have lost a report along with everything
-/// else, which undercounts.
+/// zero. Basis records the reports through the run's synchronous observer, so
+/// a lagging presentation stream cannot make the in-process tally undercount.
 ///
 /// It counts the rounds of the run's own agent *and* of the work that agent
 /// delegates. A delegating tool — basis's [`spawn`](crate::tools::spawn), or
@@ -72,6 +71,11 @@ pub struct RunUsage {
     /// split, both read as zero.
     #[serde(default)]
     pub thoughts_tokens: u64,
+    /// Completed model responses that reported usage. This distinguishes a
+    /// provider-reported all-zero response from a provider that reported no
+    /// usage at all.
+    #[serde(default, skip_serializing_if = "is_zero")]
+    pub model_responses: u32,
 }
 
 impl RunUsage {
@@ -98,25 +102,20 @@ impl RunUsage {
             cache_creation_tokens: self.cache_creation_tokens + other.cache_creation_tokens,
             reasoning_tokens: self.reasoning_tokens + other.reasoning_tokens,
             thoughts_tokens: self.thoughts_tokens + other.thoughts_tokens,
+            model_responses: self.model_responses.saturating_add(other.model_responses),
         }
     }
 
-    /// This total plus whatever `event` reported, unchanged when it reported
-    /// nothing.
-    ///
-    /// Read from the session event rather than from basis's mapped
-    /// [`Event::Usage`](crate::Event::Usage) so that a sink which stopped
-    /// accepting events still gets an honest total: what the run spent is not
-    /// contingent on anyone having listened.
-    pub(crate) fn recording(self, event: &mentra::SessionEvent) -> Self {
-        let mentra::SessionEvent::UsageReport {
+    /// Losslessly records one complete agent event before it enters the
+    /// bounded presentation stream.
+    pub(crate) fn recording_agent(self, event: &mentra::agent::AgentEvent) -> Self {
+        let mentra::agent::AgentEvent::UsageReport {
             input_tokens,
             output_tokens,
             cache_read_tokens,
             cache_creation_tokens,
             reasoning_tokens,
             thoughts_tokens,
-            ..
         } = event
         else {
             return self;
@@ -129,17 +128,21 @@ impl RunUsage {
             cache_creation_tokens: self.cache_creation_tokens + *cache_creation_tokens,
             reasoning_tokens: self.reasoning_tokens + *reasoning_tokens,
             thoughts_tokens: self.thoughts_tokens + *thoughts_tokens,
+            model_responses: self.model_responses.saturating_add(1),
         }
     }
+}
+
+fn is_zero(value: &u32) -> bool {
+    *value == 0
 }
 #[cfg(test)]
 mod tests {
     use super::*;
 
     /// One round's worth of reported usage, as mentra emits it.
-    fn usage_report(input: u64, output: u64) -> mentra::SessionEvent {
-        mentra::SessionEvent::UsageReport {
-            agent_id: "a1".to_string(),
+    fn usage_report(input: u64, output: u64) -> mentra::agent::AgentEvent {
+        mentra::agent::AgentEvent::UsageReport {
             input_tokens: input,
             output_tokens: output,
             cache_read_tokens: 1,
@@ -155,8 +158,8 @@ mod tests {
         // own token budget adds the reports up, and a basis that treated the
         // last one as the total would under-report every multi-round turn.
         let usage = RunUsage::default()
-            .recording(&usage_report(100, 20))
-            .recording(&usage_report(150, 30));
+            .recording_agent(&usage_report(100, 20))
+            .recording_agent(&usage_report(150, 30));
 
         assert_eq!(usage.input_tokens, 250);
         assert_eq!(usage.output_tokens, 50);
@@ -164,16 +167,14 @@ mod tests {
         assert_eq!(usage.cache_creation_tokens, 4);
         assert_eq!(usage.reasoning_tokens, 6);
         assert_eq!(usage.thoughts_tokens, 8);
+        assert_eq!(usage.model_responses, 2);
         assert_eq!(usage.total_tokens(), 300, "the budget counts these two");
     }
 
     #[test]
     fn an_event_that_reports_no_usage_changes_nothing() {
-        let counted = RunUsage::default().recording(&usage_report(10, 5));
-        let after = counted.recording(&mentra::SessionEvent::UserMessage {
-            text: "hello".to_string(),
-            image_count: 0,
-        });
+        let counted = RunUsage::default().recording_agent(&usage_report(10, 5));
+        let after = counted.recording_agent(&mentra::agent::AgentEvent::RunFinished);
 
         assert_eq!(after, counted);
     }
@@ -190,8 +191,8 @@ mod tests {
     #[test]
     fn usage_adds_up_across_runs() {
         // What a shared budget folds: neither run knows about the other.
-        let one = RunUsage::default().recording(&usage_report(100, 10));
-        let two = RunUsage::default().recording(&usage_report(200, 20));
+        let one = RunUsage::default().recording_agent(&usage_report(100, 10));
+        let two = RunUsage::default().recording_agent(&usage_report(200, 20));
 
         assert_eq!(one.plus(two).total_tokens(), 330);
         assert_eq!(one.total_tokens(), 110, "the originals are untouched");

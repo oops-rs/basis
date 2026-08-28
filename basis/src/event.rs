@@ -720,6 +720,7 @@ mod tests {
                     cache_creation_tokens: 5,
                     reasoning_tokens: 300,
                     thoughts_tokens: 0,
+                    model_responses: 2,
                 }),
             },
         ))

@@ -523,6 +523,7 @@ mod tests {
             cache_creation_tokens: 3,
             reasoning_tokens: 0,
             thoughts_tokens: 0,
+            model_responses: 1,
         };
         let payload = record.terminal_payload().unwrap();
         assert_eq!(payload["usage"]["input_tokens"], 900);

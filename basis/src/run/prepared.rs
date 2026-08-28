@@ -7,7 +7,7 @@
 //! whole pipeline against a scripted runtime, so the event contract is checked
 //! without a network call.
 
-use std::sync::Arc;
+use std::sync::{Arc, Mutex, PoisonError};
 
 use mentra::{
     Session,
@@ -119,6 +119,21 @@ impl PreparedRun {
             context_snapshot: ContextSnapshot::default(),
             reuse_lease: None,
         }
+    }
+
+    fn observe_usage(&self) -> (Arc<Mutex<RunUsage>>, AgentEventTapGuard) {
+        let usage = Arc::new(Mutex::new(RunUsage::default()));
+        let observed = Arc::clone(&usage);
+        let tap = self.register_agent_event_tap(move |event| {
+            let mut tally = observed.lock().unwrap_or_else(PoisonError::into_inner);
+            *tally = tally.recording_agent(event);
+        });
+        (usage, tap)
+    }
+
+    fn finish_usage(usage: Arc<Mutex<RunUsage>>, tap: AgentEventTapGuard) -> RunUsage {
+        drop(tap);
+        *usage.lock().unwrap_or_else(PoisonError::into_inner)
     }
 
     /// Records the system prompt this run's mint opened with.
@@ -695,6 +710,7 @@ impl PreparedRun {
         let options = bounded(options, &self.bounds);
         drawable(&options)?;
         let turn = self.begin(&parts, sink, approver)?;
+        let (usage, usage_tap) = self.observe_usage();
 
         // Kept rather than passed straight in: mentra takes the options by
         // value, and the clone is how the run's own account of why it ended
@@ -706,12 +722,13 @@ impl PreparedRun {
             .session
             .append_turn_with_options(prompt::into_blocks(parts), run_options)
             .await;
+        let usage = Self::finish_usage(usage, usage_tap);
 
         let ended = match &result {
             Ok(message) => Ended::Answered(Some(message.text())),
             Err(error) => Ended::Failed(error),
         };
-        let mut report = self.finish(turn, ended, &observed).await?;
+        let mut report = self.finish(turn, ended, &observed, usage).await?;
         report.failure = result.err();
 
         Ok(report)
@@ -770,6 +787,7 @@ impl PreparedRun {
         turn: Turn<S>,
         ended: Ended<'_>,
         observed: &RunOptions,
+        usage: RunUsage,
     ) -> Result<RunReport<S>, RunError> {
         let Turn {
             session_id,
@@ -781,7 +799,7 @@ impl PreparedRun {
         // closing, so a sender clone held elsewhere in the runtime cannot
         // strand the task.
         let _ = done.send(());
-        let (mut sink, usage) = forwarder.await?;
+        let mut sink = forwarder.await?;
 
         let (final_message, outcome, stopped_by) = match ended {
             Ended::Answered(final_message) => {
@@ -834,5 +852,5 @@ impl PreparedRun {
 struct Turn<S> {
     session_id: String,
     done: oneshot::Sender<()>,
-    forwarder: tokio::task::JoinHandle<(S, RunUsage)>,
+    forwarder: tokio::task::JoinHandle<S>,
 }

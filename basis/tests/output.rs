@@ -528,6 +528,7 @@ async fn a_typed_turn_reports_what_it_spent() {
     assert_eq!(output.report.usage.input_tokens, 120);
     assert_eq!(output.report.usage.output_tokens, 34);
     assert_eq!(output.report.usage.total_tokens(), 154);
+    assert_eq!(output.report.usage.model_responses, 1);
 }
 
 #[tokio::test]
@@ -617,6 +618,7 @@ async fn usage_is_summed_across_every_round_of_a_turn() {
     assert_eq!(output.report.usage.output_tokens, 68);
     assert_eq!(output.report.usage.cache_read_tokens, 2);
     assert_eq!(output.report.usage.cache_creation_tokens, 4);
+    assert_eq!(output.report.usage.model_responses, 2);
 }
 
 #[tokio::test]

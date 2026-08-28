@@ -168,6 +168,7 @@ impl PreparedRun {
         drawable(&options)?;
         let parts = vec![PromptPart::Text(prompt)];
         let turn = self.begin(&parts, sink, approver)?;
+        let (usage, usage_tap) = self.observe_usage();
 
         // The same clone the untyped turn keeps, for the same reason: a typed
         // turn is boundable like any other and owes the same account of why it
@@ -183,6 +184,7 @@ impl PreparedRun {
                 spec.into_terminal_spec(),
             )
             .await;
+        let usage = Self::finish_usage(usage, usage_tap);
 
         let typed = match result {
             Ok(output) => Ok(serde_json::from_value::<T>(output.value)),
@@ -194,7 +196,7 @@ impl PreparedRun {
             Err(error) => Ended::Failed(error),
         };
 
-        let report = self.finish(turn, ended, &observed).await?;
+        let report = self.finish(turn, ended, &observed, usage).await?;
 
         match typed {
             Ok(Ok(value)) => Ok(OutputReport { value, report }),

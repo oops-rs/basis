@@ -19,12 +19,11 @@ use tokio::sync::{
 use crate::{
     approval::{ApprovalAnswer, ApprovalDecision, ApprovalRequest, Approver},
     event::{Event, NoticeSeverity},
-    run::{EventSink, RunUsage},
+    run::EventSink,
 };
 
 /// Drains the session's event stream into the sink until the turn is done,
-/// then drains whatever is still queued and hands the sink back — with what the
-/// turn reported spending, tallied on the way past.
+/// then drains whatever is still queued and hands the sink back.
 ///
 /// This task also answers permission requests, and mentra blocks the turn until
 /// one is answered — so it runs to the end of the turn even when the sink stops
@@ -37,13 +36,11 @@ pub(super) async fn forward_events<S: EventSink, A: Approver>(
     done: oneshot::Receiver<()>,
     mut approver: A,
     permissions: SessionPermissionHandle,
-) -> (S, RunUsage) {
+) -> S {
     tokio::pin!(done);
     // Cleared by the first failed write, and never set again: a sink that
     // refused one event is not asked to take the rest.
     let mut writing = true;
-    let mut usage = RunUsage::default();
-
     loop {
         tokio::select! {
             // Biased so queued events always win over the shutdown signal:
@@ -53,33 +50,30 @@ pub(super) async fn forward_events<S: EventSink, A: Approver>(
             received = receiver.recv() => {
                 match received {
                     Ok(event) => {
-                        usage = usage.recording(&event);
                         resolve_if_permission(&event, &mut approver, &permissions).await;
                         writing = writing && emit_session_event(&mut sink, &event);
                     }
                     // Lagging is recoverable — the receiver keeps working, it
-                    // just skipped ahead. Say so and carry on. Whatever usage
-                    // those events reported is lost with them, which is why
-                    // `RunUsage` promises a tally rather than an invoice.
+                    // just skipped ahead. Say so and carry on. The lossless
+                    // usage observer is independent of this presentation path.
                     Err(RecvError::Lagged(dropped)) => {
                         writing = writing && emit(&mut sink, lag_notice(dropped));
                     }
                     // A closed channel means the session is gone; nothing more
                     // can arrive, so stop without waiting for the signal.
-                    Err(RecvError::Closed) => return (sink, usage),
+                    Err(RecvError::Closed) => return sink,
                 }
             }
             _ = &mut done => {
-                let usage = drain(
+                drain(
                     &mut receiver,
                     &mut sink,
                     &mut approver,
                     &permissions,
                     writing,
-                    usage,
                 )
                 .await;
-                return (sink, usage);
+                return sink;
             }
         }
     }
@@ -92,19 +86,17 @@ async fn drain<S: EventSink, A: Approver>(
     approver: &mut A,
     permissions: &SessionPermissionHandle,
     mut writing: bool,
-    mut usage: RunUsage,
-) -> RunUsage {
+) {
     loop {
         match receiver.try_recv() {
             Ok(event) => {
-                usage = usage.recording(&event);
                 resolve_if_permission(&event, approver, permissions).await;
                 writing = writing && emit_session_event(sink, &event);
             }
             Err(TryRecvError::Lagged(dropped)) => {
                 writing = writing && emit(sink, lag_notice(dropped));
             }
-            Err(TryRecvError::Empty | TryRecvError::Closed) => return usage,
+            Err(TryRecvError::Empty | TryRecvError::Closed) => return,
         }
     }
 }
