@@ -12,11 +12,76 @@ use serde::de::DeserializeOwned;
 use serde_json::Value;
 
 use super::{
-    Approver, Ended, EventSink, OutputReport, OutputSpec, PreparedRun, PromptPart, RunError,
-    TurnOptions, bounded, drawable, prompt,
+    Approver, Ended, EventSink, OutputAttempt, OutputAttemptReport, OutputDecision, OutputReport,
+    OutputReservation, OutputSpec, PreparedRun, PromptPart, RunError, TurnOptions, bounded,
+    drawable, prompt,
 };
 
 impl PreparedRun {
+    /// Drive one multipart working or shaping turn whose candidate output is
+    /// validated before its generated tool may terminate the run.
+    ///
+    /// Once the turn begins, every in-turn ending returns an
+    /// [`OutputAttemptReport`], including a decode mismatch, a missing output,
+    /// a tripped bound, or a runtime failure. Only setup and stream-forwarding
+    /// failures remain outer [`RunError`]s.
+    pub async fn output_parts_validated_with_options<T, S, A, V>(
+        &mut self,
+        parts: Vec<PromptPart>,
+        reservation: OutputReservation,
+        validator: V,
+        sink: S,
+        approver: A,
+        options: TurnOptions,
+    ) -> Result<OutputAttemptReport<T, S>, RunError>
+    where
+        T: DeserializeOwned,
+        S: EventSink,
+        A: Approver,
+        V: Fn(&Value) -> OutputDecision + Send + Sync + 'static,
+    {
+        let options = bounded(options, &self.bounds);
+        drawable(&options)?;
+        let turn = self.begin(&parts, sink, approver)?;
+        let (usage, usage_tap) = self.observe_usage();
+        let run_options = self.run_options(options);
+        let observed = run_options.clone();
+
+        let result = self
+            .session
+            .append_turn_to_reserved_output::<Value, _>(
+                prompt::into_blocks(parts),
+                run_options,
+                reservation.into_inner(),
+                move |candidate| match validator(candidate) {
+                    OutputDecision::Accept(value) => mentra::TerminalOutputDecision::Accept(value),
+                    OutputDecision::Reject(reason) => {
+                        mentra::TerminalOutputDecision::Reject(reason)
+                    }
+                },
+            )
+            .await;
+        let usage = Self::finish_usage(usage, usage_tap);
+
+        let (output, failure) = match result {
+            Ok(output) => match serde_json::from_value::<T>(output.value) {
+                Ok(value) => (OutputAttempt::Accepted(value), None),
+                Err(error) => (OutputAttempt::Mismatch(error), None),
+            },
+            Err(error) => (OutputAttempt::Missing, Some(error)),
+        };
+        let ended = match (&output, &failure) {
+            (OutputAttempt::Accepted(_), _) => Ended::Answered(None),
+            (OutputAttempt::Mismatch(error), _) => Ended::Mismatched(error),
+            (OutputAttempt::Missing, Some(error)) => Ended::Failed(error),
+            (OutputAttempt::Missing, None) => unreachable!("a missing value carries its failure"),
+        };
+        let mut report = self.finish(turn, ended, &observed, usage).await?;
+        report.failure = failure;
+
+        Ok(OutputAttemptReport { output, report })
+    }
+
     /// Sends a prompt whose answer must be a value of type `T` rather than
     /// prose.
     ///

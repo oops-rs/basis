@@ -30,7 +30,7 @@
 //! is a *prompt*: its descriptions are what the model reads to decide what to
 //! put in each field, and nobody writes those by deriving them.
 
-use mentra::TerminalOutputSpec;
+use mentra::{TerminalOutputReservation as MentraOutputReservation, TerminalOutputSpec};
 use serde_json::Value;
 
 use super::RunReport;
@@ -102,6 +102,16 @@ impl OutputSpec {
         }
     }
 
+    /// Reserve the exact generated output tool for one future validated run.
+    ///
+    /// Reservation has no runtime side effect. The generated name is exposed
+    /// so a host can identify protocol events before the run starts.
+    pub fn reserve(self) -> OutputReservation {
+        OutputReservation {
+            inner: self.into_terminal_spec().reserve(),
+        }
+    }
+
     pub(crate) fn into_terminal_spec(self) -> TerminalOutputSpec {
         let Self {
             name,
@@ -113,6 +123,50 @@ impl OutputSpec {
         let spec = TerminalOutputSpec::new(name, description, schema);
         if keeps_tools { spec.with_tools() } else { spec }
     }
+}
+
+/// One generated output tool reserved for a validated run.
+#[derive(Debug)]
+pub struct OutputReservation {
+    inner: MentraOutputReservation,
+}
+
+impl OutputReservation {
+    /// The exact generated tool name the provider will see.
+    pub fn tool_name(&self) -> &str {
+        self.inner.tool_name()
+    }
+
+    pub(crate) fn into_inner(self) -> MentraOutputReservation {
+        self.inner
+    }
+}
+
+/// A host's decision over one schema-shaped candidate before termination.
+#[derive(Debug, Clone, PartialEq)]
+pub enum OutputDecision {
+    /// Commit this (possibly normalized) JSON value and terminate the run.
+    Accept(Value),
+    /// Return this model-visible tool error and continue the same run.
+    Reject(String),
+}
+
+/// What a validated typed attempt produced.
+#[derive(Debug)]
+pub enum OutputAttempt<T> {
+    /// The validator accepted a value and it decoded as `T`.
+    Accepted(T),
+    /// The validator accepted JSON that did not decode as `T`.
+    Mismatch(serde_json::Error),
+    /// The run ended without an accepted terminal value.
+    Missing,
+}
+
+/// A validated typed attempt alongside the ordinary run report.
+#[derive(Debug)]
+pub struct OutputAttemptReport<T, S> {
+    pub output: OutputAttempt<T>,
+    pub report: RunReport<S>,
 }
 
 /// A typed turn's answer, alongside everything a plain turn reports.
