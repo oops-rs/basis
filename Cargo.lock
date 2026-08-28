@@ -240,7 +240,7 @@ checksum = "72b3254f16251a8381aa12e40e3c4d2f0199f8c6508fbecb9d91f575e0fbb8c6"
 
 [[package]]
 name = "basis"
-version = "0.8.0"
+version = "0.8.1"
 dependencies = [
  "async-trait",
  "futures",
@@ -256,7 +256,7 @@ dependencies = [
 
 [[package]]
 name = "basis-acp"
-version = "0.8.0"
+version = "0.8.1"
 dependencies = [
  "agent-client-protocol",
  "async-trait",
@@ -273,7 +273,7 @@ dependencies = [
 
 [[package]]
 name = "basis-cli"
-version = "0.8.0"
+version = "0.8.1"
 dependencies = [
  "agent-client-protocol",
  "async-trait",
@@ -294,7 +294,7 @@ dependencies = [
 
 [[package]]
 name = "basis-tasks"
-version = "0.8.0"
+version = "0.8.1"
 dependencies = [
  "basis",
  "fs2",
