@@ -10,7 +10,7 @@
 //! `[Previous: used <tool>]`, for any result over 100 bytes. There is no token
 //! budget in that decision: it happens on the fourth tool call of a conversation
 //! as readily as on the four-hundredth, on a 1M-token model as readily as on a
-//! small one. Mentra 0.22 makes the request-only rewrite observable through
+//! small one. Mentra 0.23 makes the request-only rewrite observable through
 //! [`Event::RequestToolResultsElided`](crate::Event::RequestToolResultsElided),
 //! without changing the canonical transcript. mentra's own default is
 //! `usize::MAX` — keep everything — and basis agrees, so this is one knob
@@ -221,7 +221,7 @@ impl Compaction {
             // `usize::MAX`), which is what makes "keep everything" a
             // configuration of upstream rather than a fork of it.
             keep_recent_tool_results: self.keep_recent_tool_results.unwrap_or(usize::MAX),
-            // Basis exposes the established count policy only. Mentra 0.22's
+            // Basis exposes the established count policy only. Mentra 0.23's
             // byte-budget mode is mutually exclusive with it, so inheriting a
             // future non-None default would silently ignore the value above.
             projected_tool_result_budget: None,

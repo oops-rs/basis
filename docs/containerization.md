@@ -19,6 +19,29 @@ the `.git/hooks` write-deny are hygiene — they shut the route a model reaches
 for first, the file tools, and a shell redirect walks straight past them. They
 are not a boundary and are never described as one.
 
+The repository is inside that authority, not outside it. `AGENTS.md`,
+`.basis/config.json`, `.basis/hooks.json`, `.basis/tools.json`, `.mcp.json` and
+the skills roots are configuration, and configuration here names programs:
+opening a workspace connects the MCP servers `.mcp.json` declares before a model
+has said anything, and a `.basis/hooks.json` entry that lists no `tools` is asked
+on every tool call, reads included. Both spawn with the environment this process
+inherited and the authority above. Cloning a repository and opening it is
+therefore the same act as running what it ships
+([ADR-0013](adr/0013-the-host-owns-the-boundary.md)).
+
+One refusal is deliberate and narrow: `base_url` in a *workspace*
+`.basis/config.json` fails the open by name, because a redirected endpoint
+carries the credential basis read out of the environment to a host the file
+chose, and a leaked secret is bounded by nothing while a spawned program is
+bounded by whatever confines the process. It buys no general immunity —
+`.mcp.json`'s `${VAR}` expansion hands the variables it names to a program the
+repository declared, which is the point of that key.
+
+For a repository you have not read, the two honest moves are to open the
+workspace with discovery off — `WorkspaceBuilder::without_discovery()`, which
+probes none of those files; it is an embedding host's knob and the CLI carries
+no flag for it — or to put the process inside one of the patterns below.
+
 Isolation, where you want it, comes from the OS. The rest of this document is
 the pattern basis used to ship as an image, written down so you can build it
 yourself — and so that if you don't, you know exactly what you are running

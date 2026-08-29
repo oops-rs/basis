@@ -812,7 +812,7 @@ Two unrelated things shorten a history, and only one of them is the one you woul
 
 **Every provider request** passes through micro-compaction, which can blank the content of
 older tool results — no token budget in the decision, on the fourth tool call as readily as
-the four-hundredth. Mentra 0.22 reports each changed projection through
+the four-hundredth. Mentra 0.23 reports each changed projection through
 `Event::RequestToolResultsElided`; the canonical transcript remains intact, but the model no
 longer sees those bodies. mentra's own default keeps them all, and basis agrees: a harness
 that blanks the file the model just read is worse at the job, and the tokens are ones you can

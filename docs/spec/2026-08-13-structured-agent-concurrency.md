@@ -1,8 +1,15 @@
 # Structured Agent Concurrency
 
-Status: approved  
+Status: superseded by [ADR-0019](../adr/0019-the-filesystem-is-the-coordination-surface.md) (2026-08-15)  
 Owner: basis  
 Date: 2026-08-13
+
+> What survived: the CLI grammar, the inbox/reply/event bounds, and one durable
+> correlated reply per accepted message. What did not: the per-workspace daemon
+> this document's execution model rests on, and the live wait graph deleted with
+> it — a wait is now a process observing a file, bounded by its deadline. The
+> successor is
+> [`2026-08-15-runtime-and-filesystem-coordination.md`](2026-08-15-runtime-and-filesystem-coordination.md).
 
 ## Problem
 

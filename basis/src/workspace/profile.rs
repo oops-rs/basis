@@ -214,7 +214,7 @@ impl RunProfile {
         self.reasoning.as_ref()
     }
 
-    /// The first field Mentra 0.22 cannot change on an already resumed agent.
+    /// The first field Mentra 0.23 cannot change on an already resumed agent.
     ///
     /// Model and dedicated reasoning are deliberately absent: `Session`
     /// exposes exact setters for both. Full provider options are present even
