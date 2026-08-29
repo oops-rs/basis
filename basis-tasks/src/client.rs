@@ -768,6 +768,37 @@ mod tests {
         assert!(error.to_string().contains("ask"), "{error}");
     }
 
+    /// `is_attached` is documented as a read, and `list` asks the same
+    /// question of every task it reports. A read that leaves a file behind is
+    /// not one: probing a task nothing has ever attached must find no lock
+    /// and mint none, so a listing of a workspace is not also a write to
+    /// every task directory in it.
+    #[test]
+    fn probing_attachment_does_not_mint_the_lock_file() {
+        let (_data_dir, _workspace, tasks) = tasks();
+        let handle = tasks
+            .spawn(
+                RunSpec::new("hello")
+                    .with_approve(Approve::Always)
+                    .detached(),
+            )
+            .expect("spawns");
+        let paths = attach::resolve(&tasks.data, handle.as_str()).expect("agent dir");
+        assert!(
+            !paths.attach_lock().exists(),
+            "a task nothing has attached starts with no lock file"
+        );
+
+        assert!(!tasks.is_attached(&handle).expect("probes"));
+        let listed = tasks.list().expect("lists");
+        assert!(listed.iter().any(|task| task.task == handle.as_str()));
+
+        assert!(
+            !paths.attach_lock().exists(),
+            "observing a task must leave its directory as it found it"
+        );
+    }
+
     /// T3: `wait`'s own lock and fs work — the poll loop's `resolve`,
     /// `read_terminal`, `try_attach`, all of it — runs off the tokio worker
     /// thread this test's (deliberately single-threaded) executor is. A

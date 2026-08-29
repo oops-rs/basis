@@ -356,6 +356,30 @@ impl PreparedRun {
             .count()
     }
 
+    /// The newest assistant text this run's history has committed, if any.
+    ///
+    /// The text [`answered_turns`](Self::answered_turns) only counts. A host
+    /// recovering from a crash mid-turn asks two questions in sequence — did
+    /// the recorded prompt already get answered, and *what was the answer* —
+    /// and both are questions about `mentra::Role` that basis can settle
+    /// without pulling the caller into matching on it (ADR-0003: the
+    /// in-process Rust consumer is what the API is judged by; `basis-tasks`
+    /// carried a whole `mentra` dependency for this one match before this
+    /// existed).
+    ///
+    /// `None` when nothing has answered yet, which a fresh run and a resumed
+    /// conversation with no assistant turn both are. Owned rather than
+    /// borrowed because the text is assembled from the message's parts, not
+    /// stored as one string.
+    pub fn last_assistant_text(&self) -> Option<String> {
+        self.session
+            .history()
+            .iter()
+            .rev()
+            .find(|message| matches!(message.role, mentra::Role::Assistant))
+            .map(|message| message.text())
+    }
+
     /// This run's model's context window, when it is known.
     ///
     /// Read from the live session, so it is whatever mentra is compacting

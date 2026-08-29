@@ -511,13 +511,8 @@ async fn run_model(
     let mut last_stopped_by: Option<Bound> = None;
     if reattached {
         initial_done = run.answered_turns() > meta.answered_before;
-        if let Some(message) = run
-            .history()
-            .iter()
-            .rev()
-            .find(|message| matches!(message.role, mentra::Role::Assistant))
-        {
-            last_result = message.text();
+        if let Some(text) = run.last_assistant_text() {
+            last_result = text;
         }
     }
 
@@ -809,6 +804,11 @@ fn run_parts(meta: &TaskMeta) -> (WorkspaceBuilder, RunSpec) {
 /// The recipe for this task's own runtime: the process half of the recorded
 /// options, plus the identity a spawned command needs to find the same data
 /// directory and name its own children.
+///
+/// The exported `BASIS_DATA_DIR` is absolute because `DataDir` resolves its
+/// root once at construction (see `data_dir::absolutize`): a child re-reads
+/// this variable from its own working directory, so a relative value here
+/// would name a second data directory rather than this one.
 ///
 /// One runtime per task (ADR-0018): the environment below names *this* task,
 /// and a runtime's command environment is fixed for every workspace on it, so

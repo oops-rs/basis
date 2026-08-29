@@ -77,8 +77,29 @@ pub(crate) fn exclusive(path: &Path) -> io::Result<Lock> {
 }
 
 /// Whether a live executor currently holds `path`, without disturbing it.
+///
+/// Opens without `create`, unlike [`try_exclusive`] above: this is the read
+/// side of `list` and `is_attached`, both documented as observing a task
+/// rather than touching it, and routing it through the attach open made that
+/// untrue — probing a task that had never attached minted an `attach.lock`
+/// nothing had ever locked. A missing file is the answer, not an obstacle: no
+/// file means no holder, exactly as an unlockable one does.
+///
+/// Any other open error is also "not held". This probe reports on live
+/// executors, and a path it cannot open holds none; the callers that need an
+/// error — the ones actually taking the lock — go through [`try_exclusive`],
+/// which still surfaces every one.
 pub(crate) fn is_held(path: &Path) -> bool {
-    matches!(try_exclusive(path), Ok(None))
+    let Ok(file) = OpenOptions::new().read(true).write(true).open(path) else {
+        return false;
+    };
+    match file.try_lock_exclusive() {
+        Ok(()) => {
+            let _ = FileExt::unlock(&file);
+            false
+        }
+        Err(error) => is_lock_contended(&error),
+    }
 }
 
 pub(crate) fn is_lock_contended(error: &io::Error) -> bool {
@@ -136,6 +157,24 @@ mod tests {
         drop(held);
         assert!(!is_held(&path));
         assert!(try_exclusive(&path).unwrap().is_some());
+    }
+
+    /// `is_held` is the read side of `list` and `is_attached`, both of which
+    /// are documented as observing a task rather than touching it. A probe
+    /// that opened with `create(true)` made that false — reading a task that
+    /// had never attached left an `attach.lock` behind that nothing had ever
+    /// locked.
+    #[test]
+    fn probing_a_lock_that_was_never_taken_leaves_no_file_behind() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("attach.lock");
+
+        assert!(!is_held(&path));
+
+        assert!(
+            !path.exists(),
+            "a read-only probe must not mint the lock file it is asking about"
+        );
     }
 
     #[test]
