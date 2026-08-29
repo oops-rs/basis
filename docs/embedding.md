@@ -850,7 +850,7 @@ let workspace = basis::Workspace::builder("/repo")
     .with_compaction(
         basis::Compaction::default()
             .with_keep_recent_tool_results(Some(5))       // elide older ones; default None keeps all
-            .with_auto_threshold_tokens(Some(400_000))    // default Some(50_000); None turns both triggers off
+            .with_auto_threshold_tokens(Some(400_000))    // default Some(50_000); None leaves the share alone in charge
             .with_auto_threshold_percent(Some(80))        // default Some(75); wins when the window is known
             .with_preserve_recent_user_tokens(20_000),
     )
@@ -868,11 +868,20 @@ model itself how big it is, and it wins whenever the window *is* known — 50,00
 most of a small model's window and a rounding error in a 1M-token one, so no single constant
 was ever going to be right for both.
 
-The two are one setting, though, not two independent triggers. mentra resolves them
-together and treats a cleared `auto_threshold_tokens` as *off* before it looks at the
-percentage at all, so clearing the absolute number disables the window-relative trigger
-with it. A host that wants the percentage to be what decides leaves a large absolute
-number in place rather than clearing it.
+The two are one setting, though, not two independent triggers: mentra resolves them
+together, and the pair also says *which* posture you mean.
+
+| `auto_threshold_tokens` | `auto_threshold_percent` | what fires |
+| --- | --- | --- |
+| set | either | the percentage of a known window, else the absolute number |
+| cleared | set | the percentage of a known window, and nothing when the window is unknown |
+| cleared | cleared | nothing, at any window |
+
+The middle row is the one to reach for when you do not want to name a token count you
+cannot justify: an absolute fallback goes live on exactly the models whose window nobody
+reports, which is where a wrong guess costs the most. Before mentra 0.24 it had no
+spelling — a cleared `auto_threshold_tokens` was the off switch for the whole feature, so
+wanting the window share meant leaving a large absolute number in place. It no longer does.
 
 A run reads the same two figures a host would need to decide this for itself:
 
@@ -894,7 +903,7 @@ the *effective* prompt, which nothing outside mentra can read.
 
 Third, independent of both thresholds: a provider that refuses a request as too long
 (`ProviderError::ContextLengthExceeded`) gets exactly one compaction and one retry, even with
-`auto_threshold_tokens` cleared — a second overflow after that is not retried again. So
+both thresholds cleared — a second overflow after that is not retried again. So
 turning the first trigger off means basis never compacts *ahead of* running out of room, not
 that an oversized conversation is guaranteed to fail outright.
 
