@@ -170,10 +170,14 @@ pub(super) fn stop_reason_for(ended: Ended, cancelled: bool) -> Result<PromptRes
 /// conversation does one thing at a time: compacting while a turn is mid-flight
 /// would rewrite the transcript out from under it.
 ///
-/// It does **not** arm a cancellation token. `session/cancel` trips a token a
-/// running turn checks between rounds, and there is no such boundary inside a
-/// summarizing pass — arming one would tell a client its stop button applies
-/// where nothing would read it.
+/// It does **not** arm a cancellation token — and the reason it did not is no
+/// longer the reason it does not. There used to be no boundary inside a
+/// summarizing pass for a token to be read at, so arming one would have told a
+/// client its stop button applied where nothing would read it. mentra 0.24
+/// polls the token inside the pass itself and basis carries it there
+/// (`PreparedRun::compact_with_options`), so a `/compact` here *could* now be
+/// stopped; wiring `session/cancel` to it is work this crate has not done, and
+/// a client's stop is still ignored until it is.
 async fn run_builtin(
     session: &crate::session::AcpSession,
     connection: &ConnectionTo<Client>,
