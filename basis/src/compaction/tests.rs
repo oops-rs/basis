@@ -2,6 +2,8 @@
 
 use std::path::Path;
 
+use mentra::agent::AutoCompactTrigger;
+
 use super::*;
 
 fn transcripts() -> PathBuf {
@@ -97,37 +99,61 @@ fn every_knob_reaches_the_config_mentra_reads() {
 }
 
 #[test]
-fn clearing_the_absolute_threshold_turns_the_percent_trigger_off_with_it() {
-    // The two fields are not two independent triggers, and this test used to
-    // say they were. mentra resolves them together
-    // (`CompactionConfig::auto_compact_threshold`) and reads a cleared
-    // absolute number as "off" before it ever looks at the percentage, so a
-    // known context window does not switch it back on. Asserted against the
-    // resolved threshold rather than the two fields: the fields arriving
-    // intact is all the previous version proved, while the behaviour its name
-    // claimed was upstream's opposite.
+fn clearing_the_absolute_threshold_leaves_the_window_share_as_the_whole_trigger() {
+    // The posture that had no spelling until mentra 0.24: compact at a share
+    // of a known window, and invent no absolute number for a model whose
+    // window nobody reports. Before the trigger enum existed, clearing this
+    // number *was* mentra's off switch and took the percentage down with it,
+    // and basis documented that faithfully; the pair of tests named for that
+    // behaviour is replaced by this one and the one below.
     let config = Compaction::default()
         .with_auto_threshold_tokens(None)
         .into_mentra(transcripts());
 
+    assert_eq!(
+        config.auto_compact_trigger,
+        AutoCompactTrigger::WindowShareOnly
+    );
     assert_eq!(config.auto_compact_threshold_tokens, None);
     assert_eq!(config.auto_compact_threshold_percent, Some(75));
     assert_eq!(
         config.auto_compact_threshold(Some(200_000)),
-        None,
-        "a known window must not revive a cleared trigger"
+        Some(150_000),
+        "a known window is now the whole trigger rather than a revived one"
     );
+    assert_eq!(
+        config.auto_compact_threshold(None),
+        None,
+        "and an unknown window compacts at nothing, rather than at a guess"
+    );
+    assert!(config.auto_compact_enabled());
+}
+
+#[test]
+fn clearing_both_numbers_is_the_only_spelling_of_off() {
+    // The other half: with no share to take and no number to fall back on
+    // there is nothing to arm, and mentra is told so by name rather than left
+    // to infer it from a cleared field that also means something else.
+    let config = Compaction::default()
+        .with_auto_threshold_tokens(None)
+        .with_auto_threshold_percent(None)
+        .into_mentra(transcripts());
+
+    assert_eq!(config.auto_compact_trigger, AutoCompactTrigger::Off);
+    assert!(!config.auto_compact_enabled());
+    assert_eq!(config.auto_compact_threshold(Some(200_000)), None);
     assert_eq!(config.auto_compact_threshold(None), None);
 }
 
 #[test]
 fn a_known_window_is_what_the_percent_trigger_reads_when_both_are_set() {
-    // The other half of the pair, so the correction above cannot be read as
-    // "the percentage never does anything": with the absolute number left in
-    // place it is the percentage that decides, and 75% of the window is what
-    // mentra resolves to.
+    // basis's default, and the one posture the trigger enum did not move: with
+    // both numbers set the pair resolves exactly as it always has — the
+    // percentage decides when the window is known, the absolute number when it
+    // is not.
     let config = Compaction::default().into_mentra(transcripts());
 
+    assert_eq!(config.auto_compact_trigger, AutoCompactTrigger::Thresholds);
     assert_eq!(config.auto_compact_threshold(Some(200_000)), Some(150_000));
     assert_eq!(
         config.auto_compact_threshold(None),
@@ -142,8 +168,10 @@ fn an_unset_percent_pins_the_trigger_to_the_absolute_number() {
         .with_auto_threshold_percent(None)
         .into_mentra(transcripts());
 
+    assert_eq!(config.auto_compact_trigger, AutoCompactTrigger::Thresholds);
     assert_eq!(config.auto_compact_threshold_percent, None);
     assert_eq!(config.auto_compact_threshold_tokens, Some(50_000));
+    assert_eq!(config.auto_compact_threshold(Some(200_000)), Some(50_000));
 }
 
 #[test]

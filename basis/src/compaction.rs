@@ -44,21 +44,39 @@
 //!   trigger fires first.
 //!
 //!   The two are one setting resolved together, not two triggers that fire
-//!   independently: mentra reads a cleared `auto_threshold_tokens` as *off*
-//!   before it consults the percentage at all
-//!   (`CompactionConfig::auto_compact_threshold`), so the absolute number is
-//!   the switch for both and the percentage only ever chooses *where* an
-//!   already-armed trigger sits. basis said the opposite here until the
-//!   behaviour was checked against upstream; the pair of tests named for it
-//!   in this module's `tests` now pins each half.
+//!   independently — but *which* of them is armed is something a host states
+//!   rather than something it encodes by leaving a number in. mentra 0.24
+//!   splits the switch out of the number
+//!   (`CompactionConfig::auto_compact_trigger`, an
+//!   [`AutoCompactTrigger`](mentra::agent::AutoCompactTrigger)), and basis's
+//!   two knobs are read onto it, three states for three spellings:
+//!
+//!   | `auto_threshold_tokens` | `auto_threshold_percent` | what mentra is told | what fires |
+//!   | --- | --- | --- | --- |
+//!   | set | either | `Thresholds` | the percentage of a known window, else the absolute number |
+//!   | cleared | set | `WindowShareOnly` | the percentage of a known window, and *nothing* when the window is unknown |
+//!   | cleared | cleared | `Off` | nothing, at any window |
+//!
+//!   The middle row is the one that had no spelling before 0.24, and it is
+//!   what [`ARCHITECTURE.md`]'s compaction row has always promised: a trigger
+//!   that is a share of the model's window when the provider reports one. Until
+//!   then a cleared `auto_threshold_tokens` was mentra's off switch for the
+//!   whole feature, read before the percentage was consulted at all, so a host
+//!   that wanted the window share had to leave behind an absolute number it did
+//!   not believe in — and that invented number went live on exactly the models
+//!   whose window nobody reports, which is where a wrong guess does the damage.
+//!   basis documented that faithfully while it was true; the tests named for it
+//!   in this module's `tests` are replaced by the three rows above.
+//!
+//!   [`ARCHITECTURE.md`]: https://github.com/oops-rs/basis/blob/main/docs/ARCHITECTURE.md
 //! - Or the provider refuses a request as too long
 //!   (`ProviderError::ContextLengthExceeded`), regardless of either threshold —
-//!   including with `auto_threshold_tokens` cleared. mentra compacts once and
+//!   including with automatic summarizing off. mentra compacts once and
 //!   retries the same request; a second overflow after that is not retried
-//!   again. So `with_auto_threshold_tokens(None)` still means basis never
-//!   compacts *ahead of* running out of room, not that a conversation which
-//!   does is guaranteed to fail — the provider's own refusal gets the one
-//!   attempt basis's own trigger would have spent earlier.
+//!   again. So an `Off` posture means basis never compacts *ahead of* running
+//!   out of room, not that a conversation which does is guaranteed to fail —
+//!   the provider's own refusal gets the one attempt basis's own trigger would
+//!   have spent earlier.
 //!
 //! # What a failed automatic pass looks like
 //!
@@ -67,12 +85,25 @@
 //! one `ContextCompacted` a finished pass emits, so there is no "started" line
 //! to leave dangling — and no line of any kind when the pass does not finish.
 //! An automatic pass that fails is retried up to three times and then dropped
-//! (`Agent::auto_compact_if_needed`, mentra 0.23.4 `src/agent/compact.rs`),
+//! (`Agent::auto_compact_if_needed`, mentra 0.24.0 `src/agent/compact.rs`),
 //! which is a reasonable posture — the run continues on an unshortened
 //! history rather than dying over a summary — but it is taken silently: no
 //! event, no hook, nothing a sink can see. The retries in between surface as
 //! [`Event::Retry`](crate::Event::Retry), indistinguishable from a model
 //! request's own.
+//!
+//! With one exception, and it is the one that matters for control: since
+//! mentra 0.24 an automatic pass inherits the bounds of the turn it happens
+//! inside, and a cancellation or a deadline reached *during* it ends the run
+//! instead of being degraded past. Silently continuing after a caller asked
+//! the run to stop would have made the stop button a suggestion. basis names
+//! that ending exactly as it names the same bound reached anywhere else in the
+//! turn — [`Bound::Deadline`](crate::Bound::Deadline) for the deadline, and
+//! for a cancel the run's own
+//! [`RunFailure::Cancelled`](crate::RunFailure::Cancelled) with no `Bound`,
+//! because a stop somebody asked for is not an allowance the run outgrew. No
+//! basis-side mapping was needed for that; `basis`'s `tests/compact.rs` pins
+//! both so a change to either is noticed.
 //!
 //! basis does not paper over that. Inferring a failure from an estimate that
 //! crossed a threshold with no compaction after it would be a guess dressed as
@@ -86,10 +117,15 @@
 //!
 //! # What is not here
 //!
-//! mentra's `CompactionConfig` has eleven fields. This exposes four: the three
+//! mentra's `CompactionConfig` has twelve fields. This exposes four: the three
 //! triggers above and how much recent user text a summarizing pass must leave
-//! alone. The mutually exclusive projected-byte budget is pinned off: exposing
-//! it needs a Basis-owned policy shape rather than two knobs that can disagree.
+//! alone — and *derives* a fifth, `auto_compact_trigger`, from two of them
+//! rather than offering it, because the numbers already say which posture a
+//! host means and a switch beside them could disagree with them (the private
+//! `Compaction::trigger` is where the three rows above are read off — it stays
+//! private for that reason, so there is nothing to link to). The mutually
+//! exclusive projected-byte budget is pinned off: exposing it needs a
+//! Basis-owned policy shape rather than two knobs that can disagree.
 //! The summary's input and output caps, local versus remote summarization, and
 //! how many snapshots are kept remain defaults nobody has had a reason to move.
 //! A knob basis offers is a knob basis has to keep meaning; they arrive when a
@@ -117,15 +153,14 @@ pub struct Compaction {
     /// to the provider. `None` — basis's default — keeps every one of them.
     keep_recent_tool_results: Option<usize>,
     /// The estimated request size that triggers a summarizing pass, for a
-    /// model whose context window is unknown, and the switch for the
-    /// window-relative trigger too: `None` turns automatic summarizing off
-    /// outright, including through
-    /// [`auto_threshold_percent`](Self::auto_threshold_percent).
+    /// model whose context window is unknown — and, cleared, the statement
+    /// that no absolute number should be invented for one.
     auto_threshold_tokens: Option<usize>,
     /// The percentage of a *known* context window that triggers a summarizing
-    /// pass, winning over `auto_threshold_tokens` when both apply. `None`
-    /// pins the trigger to the absolute number even when the window is known.
-    /// Only consulted while `auto_threshold_tokens` is set.
+    /// pass. Wins over `auto_threshold_tokens` when both are set, and is the
+    /// whole trigger when that one is cleared. `None` pins the trigger to the
+    /// absolute number even when the window is known; `None` on both is how
+    /// automatic summarizing is turned off.
     auto_threshold_percent: Option<u8>,
     /// How much recent user text a summarizing pass must leave verbatim.
     preserve_recent_user_tokens: usize,
@@ -177,8 +212,8 @@ impl Compaction {
     }
 
     /// Triggers a summarizing pass once an estimated request reaches `tokens`,
-    /// for a model whose context window basis does not know — or turns
-    /// automatic summarizing off entirely, with `None`.
+    /// for a model whose context window basis does not know — or, with `None`,
+    /// declines to name a number for one at all.
     ///
     /// The estimate is mentra's, over the serialized messages plus the system
     /// prompt, and it is not the provider's accounting.
@@ -187,16 +222,16 @@ impl Compaction {
     /// host sets for a model it cannot ask, or the only number that matters
     /// once the percentage is cleared.
     ///
-    /// `None` is the off switch for *both* triggers, not just for this one.
-    /// mentra resolves the pair together and returns "no threshold" as soon as
-    /// this is cleared, without ever reading the percentage
-    /// (`CompactionConfig::auto_compact_threshold`), so a host that wants the
-    /// window-relative trigger and no absolute one has to leave a number here
-    /// — a large one, if it wants the percentage to be what decides. There is
-    /// no basis-side repair for that and there should not be one: the
-    /// threshold is the runtime's to resolve (ADR-0005).
+    /// `None` here is no longer the off switch for the whole mechanism, which
+    /// is what it meant until mentra 0.24 separated the switch from the number
+    /// (`AutoCompactTrigger`). Cleared while the percentage stands, it now
+    /// asks for the posture that used to be unspellable: compact at a share of
+    /// a *known* window, and do not compact at all for a model whose window
+    /// nobody reports — rather than falling back on a figure a host had to
+    /// invent precisely for the case where inventing one is worst. Clearing
+    /// both numbers is the off switch, and the only spelling of it.
     ///
-    /// `None` is a real posture, not a way of saying *later*: nothing here
+    /// Off is a real posture, not a way of saying *later*: nothing then
     /// shortens the history ahead of time, and a conversation that outgrows
     /// the window gets exactly the recovery every other posture also gets — the
     /// provider's own refusal triggers one compaction and one retry (see this
@@ -222,10 +257,11 @@ impl Compaction {
     /// and the Responses transport do not report one, so this has no effect for
     /// them until they do. Values above 100 are treated as 100.
     ///
-    /// It has no effect either while
-    /// [`with_auto_threshold_tokens`](Self::with_auto_threshold_tokens) is
-    /// `None`, which is that knob's off switch for the whole mechanism — see
-    /// there.
+    /// With [`with_auto_threshold_tokens`](Self::with_auto_threshold_tokens)
+    /// cleared this is the *whole* trigger: a model that reports no window
+    /// then never auto-compacts, instead of falling back on an absolute number
+    /// the host declined to give. Clearing this one as well is how automatic
+    /// summarizing is turned off — see there.
     ///
     /// basis reads mentra's own default (75) here rather than choosing one:
     /// unlike the absolute number, a percentage is not a guess about any
@@ -270,6 +306,7 @@ impl Compaction {
             // `usize::MAX`), which is what makes "keep everything" a
             // configuration of upstream rather than a fork of it.
             keep_recent_tool_results: self.keep_recent_tool_results.unwrap_or(usize::MAX),
+            auto_compact_trigger: self.trigger(),
             // Basis exposes the established count policy only. Mentra 0.23's
             // byte-budget mode is mutually exclusive with it, so inheriting a
             // future non-None default would silently ignore the value above.
@@ -279,6 +316,35 @@ impl Compaction {
             preserve_recent_user_tokens: self.preserve_recent_user_tokens,
             transcript_dir,
             ..Default::default()
+        }
+    }
+
+    /// Which of mentra's triggers basis's two numbers are describing.
+    ///
+    /// Derived rather than offered as a fifth knob. The pair already says
+    /// which posture a host means — a number is a threshold, no number is a
+    /// refusal to invent one — and a switch standing beside them could
+    /// contradict them, leaving basis to have an opinion about what "off, at
+    /// 50,000 tokens" ought to do. mentra needs the enum because a runtime has
+    /// to be able to name every reachable state; basis needs a host to be able
+    /// to say *when* it wants a summarizing pass, not to name the mechanism
+    /// that decides (ADR-0003).
+    ///
+    /// Three states, three spellings, and the mapping is the whole of what
+    /// this type adds over mentra's config here.
+    fn trigger(self) -> mentra::agent::AutoCompactTrigger {
+        use mentra::agent::AutoCompactTrigger;
+
+        match (self.auto_threshold_tokens, self.auto_threshold_percent) {
+            // A number to fall back on: mentra resolves the pair exactly as it
+            // did before the enum existed, which is why this is the default
+            // and why a config written against basis ≤0.9 behaves unchanged.
+            (Some(_), _) => AutoCompactTrigger::Thresholds,
+            // A share of a known window and nothing for an unknown one — the
+            // posture this whole mapping exists for.
+            (None, Some(_)) => AutoCompactTrigger::WindowShareOnly,
+            // Nothing to take a share of and nothing to fall back on.
+            (None, None) => AutoCompactTrigger::Off,
         }
     }
 }

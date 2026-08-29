@@ -25,7 +25,7 @@ use serde::{Deserialize, Serialize};
 /// intrinsic, or [`PreparedRun::compact`](crate::PreparedRun::compact) — is
 /// billed by the provider and absent here, because mentra reports no usage
 /// for it: its compaction engine reads the response's content and drops its
-/// `usage` (mentra 0.23.4 `src/compaction.rs`, `summarize_locally`), and the
+/// `usage` (mentra 0.24.0 `src/compaction.rs`, `summarize_locally`), and the
 /// provider-native remote path returns a response type with no usage on it at
 /// all. No `UsageReport` is emitted, so nothing reaches this tally, mentra's
 /// own `token_budget` counter, or a [`BudgetPool`](crate::BudgetPool). A

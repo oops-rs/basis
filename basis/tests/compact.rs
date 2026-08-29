@@ -18,12 +18,13 @@ use std::{
     path::{Path, PathBuf},
     sync::{Arc, Mutex},
     thread,
+    time::{Duration, SystemTime},
 };
 
 use basis::{
-    CollectingSink, ContextConfig, Event, MemoryConfig, Runtime, Workspace, WorkspaceBuilder,
-    hooks::HooksConfig, skills::SkillsConfig, store, templates::TemplatesConfig,
-    tools::declared::ToolsConfig,
+    Bound, CancellationToken, CollectingSink, Compaction, ContextConfig, Event, MemoryConfig,
+    RunError, RunFailure, Runtime, TurnOptions, Workspace, WorkspaceBuilder, hooks::HooksConfig,
+    skills::SkillsConfig, store, templates::TemplatesConfig, tools::declared::ToolsConfig,
 };
 use mentra::{BuiltinProvider, ModelSelector};
 
@@ -166,6 +167,337 @@ async fn a_compaction_that_fails_says_so_on_the_stream() {
 }
 
 #[tokio::test]
+async fn a_compaction_past_its_deadline_never_reaches_the_summarizer() {
+    // Bounding the pass is what makes a `/compact` behind a UI abandonable:
+    // it is a full provider round trip over the longest transcript the
+    // conversation has ever had, which is exactly when someone reaches for
+    // stop. The deadline is checked before the request goes out, so the proof
+    // is on the wire — the endpoint is never asked a second time.
+    let endpoint = ScriptedEndpoint::start();
+    let dir = tempfile::tempdir().expect("tempdir");
+    let store_dir = tempfile::tempdir().expect("tempdir");
+
+    let workspace = offline(dir.path())
+        .with_runtime(endpoint.runtime(store_dir.path()))
+        .open()
+        .await
+        .expect("opens");
+
+    let mut run = workspace.prepare("go").expect("mints");
+    run.execute(CollectingSink::default())
+        .await
+        .expect("the scripted turn runs");
+
+    let transcript_before = run.history().len();
+    let asked_before = endpoint.requests().len();
+
+    let mut sink = CollectingSink::default();
+    let failure = run
+        .compact_with_options(
+            None,
+            &mut sink,
+            TurnOptions::default()
+                .with_absolute_deadline(SystemTime::now() - Duration::from_secs(1)),
+        )
+        .await
+        .expect_err("a pass past its deadline does not run");
+
+    assert!(
+        matches!(
+            failure,
+            RunError::Runtime(mentra::error::RuntimeError::DeadlineExceeded)
+        ),
+        "the bound must reach the caller as the bound, not as a summarizer \
+         failure: {failure:?}"
+    );
+    assert_eq!(
+        run.history().len(),
+        transcript_before,
+        "an abandoned pass must leave the conversation exactly as it found it"
+    );
+    assert_eq!(
+        endpoint.requests().len(),
+        asked_before,
+        "and must not have spent a model call on its way to giving up"
+    );
+
+    // One line, and it reads as the bound rather than as a refused
+    // summarizer: `recoverable` is false because waiting and trying again is
+    // not what a deadline calls for.
+    match &sink.into_events()[..] {
+        [
+            Event::Error {
+                recoverable,
+                message,
+            },
+        ] => {
+            assert!(!recoverable, "a bound is not something to retry into");
+            assert_eq!(message, "deadline exceeded");
+        }
+        other => panic!("expected one bound on the stream, got {other:?}"),
+    }
+}
+
+#[tokio::test]
+async fn a_cancelled_compaction_reports_the_cancel_rather_than_a_summarizer_failure() {
+    // The other bound, and the one a person actually trips. What a client
+    // needs to be able to tell apart is "the summarizer refused you" from "you
+    // asked for this to stop" — the first is worth surfacing as a problem, the
+    // second is the stop button working.
+    let endpoint = ScriptedEndpoint::start();
+    let dir = tempfile::tempdir().expect("tempdir");
+    let store_dir = tempfile::tempdir().expect("tempdir");
+
+    let workspace = offline(dir.path())
+        .with_runtime(endpoint.runtime(store_dir.path()))
+        .open()
+        .await
+        .expect("opens");
+
+    let mut run = workspace.prepare("go").expect("mints");
+    run.execute(CollectingSink::default())
+        .await
+        .expect("the scripted turn runs");
+
+    let transcript_before = run.history().len();
+    let asked_before = endpoint.requests().len();
+
+    let (options, token) = TurnOptions::cancellable();
+    token.cancel();
+
+    let mut sink = CollectingSink::default();
+    let failure = run
+        .compact_with_options(Some("keep the migration plan"), &mut sink, options)
+        .await
+        .expect_err("an already-cancelled pass does not run");
+
+    assert!(
+        matches!(
+            failure,
+            RunError::Runtime(mentra::error::RuntimeError::Cancelled)
+        ),
+        "{failure:?}"
+    );
+    assert_eq!(run.history().len(), transcript_before);
+    assert_eq!(endpoint.requests().len(), asked_before);
+
+    match &sink.into_events()[..] {
+        [
+            Event::Error {
+                recoverable,
+                message,
+            },
+        ] => {
+            assert!(!recoverable);
+            assert_eq!(message, "operation cancelled");
+        }
+        other => panic!("expected one cancellation on the stream, got {other:?}"),
+    }
+}
+
+#[tokio::test]
+async fn an_unbounded_pass_is_what_compact_still_asks_for() {
+    // `compact_with_options` is additive: the older verb is it with nothing
+    // attached, and a conversation on a run whose config names no deadline
+    // compacts exactly as it always has.
+    let endpoint = ScriptedEndpoint::start();
+    let dir = tempfile::tempdir().expect("tempdir");
+    let store_dir = tempfile::tempdir().expect("tempdir");
+
+    let workspace = offline(dir.path())
+        .with_runtime(endpoint.runtime(store_dir.path()))
+        .open()
+        .await
+        .expect("opens");
+
+    let mut run = workspace.prepare("go").expect("mints");
+    run.execute(CollectingSink::default())
+        .await
+        .expect("the scripted turn runs");
+
+    let compacted = run
+        .compact_with_options(None, &mut CollectingSink::default(), TurnOptions::default())
+        .await
+        .expect("an unbounded pass runs")
+        .expect("there is older history to summarize");
+
+    assert!(compacted.replaced_items > 0, "{compacted:?}");
+}
+
+#[tokio::test]
+async fn the_older_verb_inherits_the_deadline_the_run_was_configured_with() {
+    // The other half of "additive", and the half that is a behaviour change:
+    // `compact` is `compact_with_options` with nothing attached, and nothing
+    // attached is filled in from `with_bounds` — so a run configured with a
+    // deadline now has one on its manual passes too, where before 0.24 they
+    // ran to completion whatever the run was allowed. Asserted through the old
+    // verb on purpose: a refactor that stopped merging `self.bounds` would
+    // leave every `compact_with_options` test above passing.
+    let endpoint = ScriptedEndpoint::start();
+    let dir = tempfile::tempdir().expect("tempdir");
+    let store_dir = tempfile::tempdir().expect("tempdir");
+
+    let workspace = offline(dir.path())
+        .with_runtime(endpoint.runtime(store_dir.path()))
+        .open()
+        .await
+        .expect("opens");
+
+    // Configured *after* the turn, because a deadline already in the past
+    // would have refused the turn that gives the pass something to summarize.
+    let mut run = workspace.prepare("go").expect("mints");
+    run.execute(CollectingSink::default())
+        .await
+        .expect("the scripted turn runs");
+    let mut run = run.with_bounds(
+        TurnOptions::default().with_absolute_deadline(SystemTime::now() - Duration::from_secs(1)),
+    );
+
+    let transcript_before = run.history().len();
+    let asked_before = endpoint.requests().len();
+
+    let mut sink = CollectingSink::default();
+    let failure = run
+        .compact(Some("keep the migration plan"), &mut sink)
+        .await
+        .expect_err("a run already past its deadline does not get a summarizing pass");
+
+    assert!(
+        matches!(
+            failure,
+            RunError::Runtime(mentra::error::RuntimeError::DeadlineExceeded)
+        ),
+        "{failure:?}"
+    );
+    assert_eq!(run.history().len(), transcript_before);
+    assert_eq!(
+        endpoint.requests().len(),
+        asked_before,
+        "a pass refused by a bound is a pass the provider never hears about"
+    );
+
+    match &sink.into_events()[..] {
+        [
+            Event::Error {
+                recoverable,
+                message,
+            },
+        ] => {
+            assert!(!recoverable);
+            assert_eq!(message, "deadline exceeded");
+        }
+        other => panic!("expected one deadline on the stream, got {other:?}"),
+    }
+}
+
+#[tokio::test]
+async fn a_deadline_reached_inside_an_automatic_pass_is_the_runs_own_bound() {
+    // The half of 0.24 basis does not call: auto-compaction happens *inside* a
+    // turn and now inherits that turn's bounds, so a run can end on a bound it
+    // reached while summarizing rather than while answering. What has to hold
+    // is that basis reports it as the same bound it reports anywhere else — a
+    // script that reads `stopped_by` to decide whether to retry with more time
+    // must not be told "the provider broke" because the time ran out during a
+    // summary.
+    let endpoint = ScriptedEndpoint::start_stalling_compaction();
+    let dir = tempfile::tempdir().expect("tempdir");
+    let store_dir = tempfile::tempdir().expect("tempdir");
+
+    let workspace = offline(dir.path())
+        .with_compaction(eager_compaction())
+        .with_runtime(endpoint.runtime(store_dir.path()))
+        .open()
+        .await
+        .expect("opens");
+
+    let mut run = workspace.prepare("go").expect("mints");
+    run.execute(CollectingSink::default())
+        .await
+        .expect("the first turn has nothing older to summarize and is answered");
+
+    let report = tokio::time::timeout(
+        PROMPTLY,
+        run.send_with_options(
+            "again",
+            CollectingSink::default(),
+            basis::AllowAll,
+            TurnOptions::default().with_deadline(DEADLINE_INSIDE_THE_STALL),
+        ),
+    )
+    .await
+    .expect("a bounded pass must not wait for a summarizer that never answers")
+    .expect("a bound ends the run, it does not break it");
+
+    assert_eq!(
+        report.stopped_by,
+        Some(Bound::Deadline),
+        "the run's own bound, named — not a summarizer failure: {report:?}"
+    );
+    assert!(matches!(
+        report.failure.as_ref(),
+        Some(RunFailure::DeadlineExceeded)
+    ));
+    assert_eq!(
+        endpoint.summarizing_requests(),
+        1,
+        "the bound has to have landed inside the pass, not before it"
+    );
+    assert_eq!(
+        endpoint.turn_requests(),
+        1,
+        "and the second turn never got as far as its own model request"
+    );
+}
+
+#[tokio::test]
+async fn a_cancel_during_an_automatic_pass_ends_the_run_as_a_cancellation() {
+    // The other bound, and the one 0.23 swallowed: a cancel inside
+    // auto-compaction was degraded past as though the summarizer had merely
+    // been unavailable, and the turn carried on. It now ends the run, and
+    // basis reports it exactly as it reports any other cancelled turn —
+    // `RunFailure::Cancelled` and deliberately *no* `Bound`, because a stop
+    // somebody asked for is not an allowance the run outgrew (see `Bound`).
+    let (options, token) = TurnOptions::cancellable();
+    let endpoint = ScriptedEndpoint::start_cancelling_on_compaction(token);
+    let dir = tempfile::tempdir().expect("tempdir");
+    let store_dir = tempfile::tempdir().expect("tempdir");
+
+    let workspace = offline(dir.path())
+        .with_compaction(eager_compaction())
+        .with_runtime(endpoint.runtime(store_dir.path()))
+        .open()
+        .await
+        .expect("opens");
+
+    let mut run = workspace.prepare("go").expect("mints");
+    run.execute(CollectingSink::default())
+        .await
+        .expect("the first turn has nothing older to summarize and is answered");
+
+    let report = tokio::time::timeout(
+        PROMPTLY,
+        run.send_with_options("again", CollectingSink::default(), basis::AllowAll, options),
+    )
+    .await
+    .expect("a cancelled pass must not run to completion")
+    .expect("cancelling ends the run, it does not break it");
+
+    assert!(matches!(
+        report.failure.as_ref(),
+        Some(RunFailure::Cancelled)
+    ));
+    assert_eq!(report.stopped_by, None);
+    assert!(!report.succeeded());
+    assert_eq!(endpoint.summarizing_requests(), 1);
+    assert_eq!(
+        endpoint.turn_requests(),
+        1,
+        "the cancelled pass ends the run rather than being degraded past, so \
+         the second turn's own model request never goes out"
+    );
+}
+
+#[tokio::test]
 async fn a_conversation_with_nothing_to_compact_says_so_and_emits_nothing() {
     // The answer a caller gets either way. A `/compact` on a session that has
     // not spoken yet must not report a compaction that did not happen, and
@@ -278,6 +610,41 @@ async fn forgetting_a_conversation_that_was_never_there_is_not_an_error() {
 // Harness
 // ---------------------------------------------------------------------------
 
+/// A workspace whose every turn compacts first.
+///
+/// One token is below any real estimate, so `auto_compact_if_needed` fires
+/// before every model request rather than after a transcript this endpoint
+/// would have to script its way to. The *first* turn still summarizes nothing
+/// — mentra protects the trailing turn, and a bare user message is the whole
+/// transcript at that point, so its engine returns without asking the provider
+/// anything — which is what makes the second turn's pass the only summarizing
+/// request the endpoint ever sees.
+fn eager_compaction() -> Compaction {
+    Compaction::default()
+        .with_auto_threshold_tokens(Some(1))
+        // Off, so the trigger is the absolute number above and not a share of
+        // a window this endpoint's wire never reports anyway.
+        .with_auto_threshold_percent(None)
+}
+
+/// A bounded pass must end promptly. Exceeding this means the bound was never
+/// read and the run is waiting on a summarizer that will never answer.
+const PROMPTLY: Duration = Duration::from_secs(10);
+
+/// The deadline a turn is given when the claim is that its bound was read
+/// *inside* the summarizing pass.
+///
+/// The interval has to be long enough that everything between
+/// `send_with_options` and the request landing on the endpoint — projecting
+/// the history, estimating its tokens, persisting the transcript, opening a
+/// TCP connection — is comfortably inside it, because a deadline that expires
+/// first trips at `bounds.check()` *before* the provider call and the pass
+/// never happens: the same `Bound::Deadline` for the wrong reason, and a
+/// summarizing-request count of zero. Two seconds is roughly an order of
+/// magnitude of headroom over that work, and still far inside both `STALL`
+/// and `PROMPTLY`, so the stalled pass is provably where the bound landed.
+const DEADLINE_INSIDE_THE_STALL: Duration = Duration::from_secs(2);
+
 /// A builder that discovers nothing it was not shown.
 fn offline(workspace: &Path) -> WorkspaceBuilder {
     Workspace::builder(workspace)
@@ -338,7 +705,7 @@ struct ScriptedEndpoint {
 
 impl ScriptedEndpoint {
     fn start() -> Self {
-        Self::start_with(Refuse::Nothing)
+        Self::start_with(WhenSummarizing::default())
     }
 
     /// Answers ordinary turns and refuses the summarizing call.
@@ -348,19 +715,44 @@ impl ScriptedEndpoint {
     /// this endpoint, and a count that guessed wrong would refuse the wrong
     /// one and still look like a passing test.
     fn start_refusing_compaction() -> Self {
-        Self::start_with(Refuse::Compaction)
+        Self::start_with(WhenSummarizing {
+            refuse: true,
+            ..WhenSummarizing::default()
+        })
     }
 
-    fn start_with(refuse: Refuse) -> Self {
+    /// Never answers the summarizing call, so a pass is provably still in
+    /// flight when whatever is supposed to stop it does.
+    fn start_stalling_compaction() -> Self {
+        Self::start_with(WhenSummarizing {
+            stall: true,
+            ..WhenSummarizing::default()
+        })
+    }
+
+    /// Trips `token` the instant a summarizing request arrives, and then
+    /// stalls — a person pressing stop with the pass underway, without the
+    /// test having to guess when that is.
+    fn start_cancelling_on_compaction(token: CancellationToken) -> Self {
+        Self::start_with(WhenSummarizing {
+            stall: true,
+            cancels: Some(token),
+            ..WhenSummarizing::default()
+        })
+    }
+
+    fn start_with(when_summarizing: WhenSummarizing) -> Self {
         let listener = TcpListener::bind("127.0.0.1:0").expect("bind test endpoint");
         let address = listener.local_addr().expect("read endpoint address");
         let requests = Arc::new(Mutex::new(Vec::new()));
 
         let recorded = Arc::clone(&requests);
+        let behaviour = Arc::new(when_summarizing);
         thread::spawn(move || {
             while let Ok((stream, _)) = listener.accept() {
                 let recorded = Arc::clone(&recorded);
-                thread::spawn(move || answer(stream, &recorded, refuse));
+                let behaviour = Arc::clone(&behaviour);
+                thread::spawn(move || answer(stream, &recorded, &behaviour));
             }
         });
 
@@ -368,6 +760,25 @@ impl ScriptedEndpoint {
             base_url: format!("http://{address}/"),
             requests,
         }
+    }
+
+    /// How many summarizing calls this endpoint has been asked for.
+    fn summarizing_requests(&self) -> usize {
+        self.requests()
+            .iter()
+            .filter(|request| request.contains(COMPACTION_SYSTEM_PROMPT))
+            .count()
+    }
+
+    /// How many *turns* this endpoint has answered — completions that are not
+    /// summaries, so the model listing a runtime opens with does not count.
+    fn turn_requests(&self) -> usize {
+        self.requests()
+            .iter()
+            .filter(|request| {
+                request.starts_with("POST") && !request.contains(COMPACTION_SYSTEM_PROMPT)
+            })
+            .count()
     }
 
     fn runtime(&self, store_dir: &Path) -> Arc<Runtime> {
@@ -382,25 +793,48 @@ impl ScriptedEndpoint {
     }
 }
 
-/// Which request, if any, this endpoint refuses.
-#[derive(Clone, Copy)]
-enum Refuse {
-    Nothing,
-    Compaction,
+/// What this endpoint does when it is asked for a summary, as opposed to for
+/// an ordinary turn. Every field is off by default, which is a plain endpoint.
+#[derive(Default)]
+struct WhenSummarizing {
+    /// Answer with a 400 instead of a summary.
+    refuse: bool,
+    /// Never answer at all: the connection is held open until the test is over.
+    stall: bool,
+    /// Trip this the moment the request lands, before stalling on it.
+    cancels: Option<CancellationToken>,
 }
+
+/// How long a stalled summarizing request is held before the thread lets go.
+///
+/// Long enough that nothing under test can outwait it, and finite so a
+/// listener thread is not parked forever if a test process lingers.
+const STALL: Duration = Duration::from_secs(30);
 
 /// The opening of the system prompt mentra sends its summarizer, which is what
 /// makes a summarizing request recognizable from the wire.
 const COMPACTION_SYSTEM_PROMPT: &str = "You are a coding-session compaction engine";
 
-fn answer(mut stream: TcpStream, recorded: &Mutex<Vec<String>>, refuse: Refuse) {
+fn answer(mut stream: TcpStream, recorded: &Mutex<Vec<String>>, when: &WhenSummarizing) {
     let request = read_http_request(&mut stream);
-    let refused =
-        matches!(refuse, Refuse::Compaction) && request.contains(COMPACTION_SYSTEM_PROMPT);
+    let summarizing = request.contains(COMPACTION_SYSTEM_PROMPT);
+    let refused = summarizing && when.refuse;
     recorded
         .lock()
         .unwrap_or_else(|poisoned| poisoned.into_inner())
         .push(request);
+
+    if summarizing {
+        // Recorded first: a test asserting the pass was underway reads the
+        // request log, and the token below is what ends the pass.
+        if let Some(token) = &when.cancels {
+            token.cancel();
+        }
+        if when.stall {
+            thread::sleep(STALL);
+            return;
+        }
+    }
 
     let response = if refused {
         let body = r#"{"error":{"message":"summarizing is not available","type":"invalid_request_error"}}"#;

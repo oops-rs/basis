@@ -44,11 +44,31 @@
 //! It is basis's own verb accounting for its own outcome, exactly as the
 //! success path does, and the guard means an upstream event would take
 //! precedence rather than double up.
+//!
+//! # And why a bounded pass is announced the same way
+//!
+//! [`PreparedRun::compact_with_options`] can end a pass on a cancellation
+//! token or a deadline, and mentra reports both as what they are —
+//! `RuntimeError::Cancelled`, `RuntimeError::DeadlineExceeded` — rather than
+//! as a summarizer that refused. The caller therefore has the bound in the
+//! type it matches on, which is the half that matters for control flow.
+//!
+//! The stream gets the same single [`Event::Error`] a failure gets, and that
+//! is deliberate rather than an omission. The alternative is silence, and
+//! silence is what the failure path already rejected: a client that asked for
+//! a conversation to shrink and watched nothing happen is owed a line either
+//! way. What a client needs is to tell the two apart, and it can — the
+//! message is mentra's own (`operation cancelled`, `deadline exceeded`, and
+//! not the summarizer's complaint), and `recoverable` is false for both
+//! because mentra classifies a bound as terminal, so nothing here invites a
+//! retry into a stop somebody asked for. basis has no `Bound` to report on
+//! this verb the way [`RunReport`](crate::RunReport) does for a turn, because
+//! there is no report: a pass returns a value, not a run.
 
-use mentra::runtime::is_transient_runtime_error;
+use mentra::{compaction::CompactionBounds, runtime::is_transient_runtime_error};
 use tokio::sync::broadcast::error::TryRecvError;
 
-use super::{Event, EventSink, PreparedRun, RunError};
+use super::{Event, EventSink, PreparedRun, RunError, TurnOptions, bounded};
 
 /// What a summarizing pass did.
 ///
@@ -91,7 +111,7 @@ impl PreparedRun {
     ///
     /// Billed by the provider, but *not* accounted by basis. mentra reports no
     /// usage for a summarizing call — the engine reads the response's content
-    /// and drops its `usage` (mentra 0.23.4 `src/compaction.rs`
+    /// and drops its `usage` (mentra 0.24.0 `src/compaction.rs`
     /// `summarize_locally`; the provider-native remote path has no usage on
     /// its response type at all) — so no `UsageReport` is emitted, and what
     /// basis tallies is what mentra reports. A pass therefore adds nothing to
@@ -118,15 +138,90 @@ impl PreparedRun {
     /// The sink is borrowed rather than taken. Every other verb on a run hands
     /// its sink back inside a report, and there is no report here: two events
     /// and a value are the whole of what happened.
+    ///
+    /// Bounded by whatever the run itself was configured with
+    /// ([`bounds`](Self::bounds)) and by nothing else. For a pass a caller
+    /// can take back — a stop button, a deadline of its own — see
+    /// [`compact_with_options`](Self::compact_with_options), which this is.
     pub async fn compact<S: EventSink>(
         &mut self,
         instructions: Option<&str>,
         sink: &mut S,
     ) -> Result<Option<Compacted>, RunError> {
+        self.compact_with_options(instructions, sink, TurnOptions::default())
+            .await
+    }
+
+    /// Compacts this conversation now, under bounds the caller can trip.
+    ///
+    /// [`compact`](Self::compact) with a way to stop it. A summarizing pass is
+    /// a full provider round trip over the longest transcript this
+    /// conversation has ever had — which is exactly the moment a person
+    /// reaches for stop — and until mentra 0.24 it ran to completion whatever
+    /// the caller did afterwards. `options`' cancellation token and deadline
+    /// are the two that apply, so a host driving `/compact` from a UI gets the
+    /// same cancel it already has over a turn.
+    ///
+    /// Only those two, deliberately, and the choice is mentra's own
+    /// (`CompactionBounds::from_run_options`): a graceful
+    /// [`stop`](crate::TurnOptions::stop) ends a *turn* at its next round
+    /// boundary with everything committed, and abandoning a summary half-way
+    /// is not that. The tool and token budgets do not apply either — mentra
+    /// reports no usage for a summarizing call, so there is nothing for them
+    /// to measure (see [`compact`](Self::compact)) — and a spent
+    /// [`BudgetPool`](crate::BudgetPool) does not refuse a pass for the same
+    /// reason.
+    ///
+    /// A bound left unset falls back to the run's own, exactly as it does for
+    /// [`send_with_options`](Self::send_with_options): attaching a token says
+    /// something about stopping, not about limits.
+    ///
+    /// Reaching a bound leaves the transcript exactly as it was — mentra
+    /// checks before it issues the request and again while it is in flight,
+    /// and applies nothing it did not finish — and reports as the bound rather
+    /// than as a refused summarizer: the caller gets
+    /// [`RunError::Runtime`](crate::RunError::Runtime) carrying
+    /// `RuntimeError::Cancelled` or `RuntimeError::DeadlineExceeded`, and the
+    /// stream gets one [`Event::Error`](crate::Event) reading `operation
+    /// cancelled` or `deadline exceeded` with `recoverable` false. That is the
+    /// same announcement a failed pass gets and it is the right one: a client
+    /// that expected the conversation to shrink is owed a line saying it did
+    /// not, and the two cases are told apart by what the line *says* — mentra
+    /// classifies both bounds as terminal, so `recoverable` never invites a
+    /// retry into a stop somebody asked for.
+    ///
+    /// With one exception, and a caller relying on the bound has to know it:
+    /// a pass with nothing to summarize answers `Ok(None)` *before* the bounds
+    /// are consulted at all. mentra returns on the empty prefix first and
+    /// checks the bounds only once there is work worth an artifact (mentra
+    /// 0.24.0 `src/compaction.rs`, `StandardCompactionEngine::compact`), which
+    /// is the right order for the check's own purpose — a run already past its
+    /// allowance should leave no snapshot behind — but it means an
+    /// already-cancelled pass on a conversation whose whole transcript is the
+    /// protected tail succeeds emptily. So `Ok(None)` says "there was nothing
+    /// to compact", never "your cancel did not arrive": a host that must not
+    /// carry on after the stop it asked for reads its own token, not this
+    /// return value. basis does not check the bounds itself ahead of the call
+    /// to close the gap — that would be a second opinion about a check the
+    /// runtime owns (ADR-0005), and it would turn a truthful `Ok(None)` into
+    /// an error on the one path where nothing was going to happen anyway.
+    pub async fn compact_with_options<S: EventSink>(
+        &mut self,
+        instructions: Option<&str>,
+        sink: &mut S,
+        options: TurnOptions,
+    ) -> Result<Option<Compacted>, RunError> {
+        // Resolved through the turn's own merge and its own conversion, so the
+        // deadline a compaction honors is the one a turn would have honored:
+        // an absolute instant wins over a relative one, and there is no second
+        // opinion here about which.
+        let bounds =
+            CompactionBounds::from_run_options(&self.run_options(bounded(options, &self.bounds)));
+
         // Subscribed before the pass rather than after, because a broadcast
         // receiver only sees what is sent once it exists.
         let mut events = self.session.subscribe();
-        let result = self.session.compact(instructions).await;
+        let result = self.session.compact_with_bounds(instructions, bounds).await;
         let announced = drain(&mut events, sink)?;
 
         let details = match result {

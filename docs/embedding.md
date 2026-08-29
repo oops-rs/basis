@@ -656,6 +656,10 @@ turn even though nothing was discarded, because mentra still owes a final assist
 and the last committed one was a tool result. The work is kept either way; the report is
 what disagrees.
 
+A turn is not the only thing a stop button has to reach. A summarizing pass is a provider
+round trip too, and `run.compact_with_options(..)` takes the same `TurnOptions` for the
+same reason — see [Compaction](#compaction) for which of the bounds apply to it.
+
 In-process concurrent work is the host's own tokio: fan out on a
 `tokio::task::JoinSet`, wire the stop button through the `CancellationToken` a
 `TurnOptions` hands back, and let the bounds — deadline, tool budget, token budget — keep
@@ -850,7 +854,7 @@ let workspace = basis::Workspace::builder("/repo")
     .with_compaction(
         basis::Compaction::default()
             .with_keep_recent_tool_results(Some(5))       // elide older ones; default None keeps all
-            .with_auto_threshold_tokens(Some(400_000))    // default Some(50_000); None turns both triggers off
+            .with_auto_threshold_tokens(Some(400_000))    // default Some(50_000); None leaves the share alone in charge
             .with_auto_threshold_percent(Some(80))        // default Some(75); wins when the window is known
             .with_preserve_recent_user_tokens(20_000),
     )
@@ -868,11 +872,20 @@ model itself how big it is, and it wins whenever the window *is* known — 50,00
 most of a small model's window and a rounding error in a 1M-token one, so no single constant
 was ever going to be right for both.
 
-The two are one setting, though, not two independent triggers. mentra resolves them
-together and treats a cleared `auto_threshold_tokens` as *off* before it looks at the
-percentage at all, so clearing the absolute number disables the window-relative trigger
-with it. A host that wants the percentage to be what decides leaves a large absolute
-number in place rather than clearing it.
+The two are one setting, though, not two independent triggers: mentra resolves them
+together, and the pair also says *which* posture you mean.
+
+| `auto_threshold_tokens` | `auto_threshold_percent` | what fires |
+| --- | --- | --- |
+| set | either | the percentage of a known window, else the absolute number |
+| cleared | set | the percentage of a known window, and nothing when the window is unknown |
+| cleared | cleared | nothing, at any window |
+
+The middle row is the one to reach for when you do not want to name a token count you
+cannot justify: an absolute fallback goes live on exactly the models whose window nobody
+reports, which is where a wrong guess costs the most. Before mentra 0.24 it had no
+spelling — a cleared `auto_threshold_tokens` was the off switch for the whole feature, so
+wanting the window share meant leaving a large absolute number in place. It no longer does.
 
 A run reads the same two figures a host would need to decide this for itself:
 
@@ -894,7 +907,7 @@ the *effective* prompt, which nothing outside mentra can read.
 
 Third, independent of both thresholds: a provider that refuses a request as too long
 (`ProviderError::ContextLengthExceeded`) gets exactly one compaction and one retry, even with
-`auto_threshold_tokens` cleared — a second overflow after that is not retried again. So
+both thresholds cleared — a second overflow after that is not retried again. So
 turning the first trigger off means basis never compacts *ahead of* running out of room, not
 that an oversized conversation is guaranteed to fail outright.
 
@@ -911,6 +924,35 @@ A pass that *fails* puts an `Event::Error` on the sink before returning the erro
 client watching the stream is told why a conversation it expected to shrink did not. The
 transcript is untouched and the next turn goes out on the unshortened history.
 
+A pass is also the longest provider round trip the conversation will make — the whole
+transcript, at its longest — which is exactly the moment somebody reaches for stop.
+`compact_with_options` is `compact` with a way to take it back:
+
+```rust
+let (options, stop) = basis::TurnOptions::cancellable();
+tokio::spawn(async move { on_stop_pressed().await; stop.cancel(); });
+
+match run.compact_with_options(instructions, &mut sink, options).await {
+    Err(basis::RunError::Runtime(mentra::error::RuntimeError::Cancelled)) => { /* they stopped it */ }
+    other => { other?; }
+}
+```
+
+Two bounds apply and only two: the cancellation token and the deadline. A graceful
+`stop()` does not, because it means "end at the next round boundary with everything
+committed" and abandoning a summary half-way is not that; the tool and token budgets do
+not, because there is no reported usage for them to measure. `compact` is this call with
+`TurnOptions::default()`, so it inherits whatever `with_bounds` configured on the run — a
+run given a deadline now has one on its manual passes too, where before it ran to
+completion whatever the run was allowed.
+
+Reaching a bound leaves the transcript exactly as it was and reports as the bound rather
+than as a refused summarizer: `RunError::Runtime` carrying `RuntimeError::Cancelled` or
+`RuntimeError::DeadlineExceeded`, and one `Event::Error` on the sink reading mentra's own
+`operation cancelled` / `deadline exceeded` with `recoverable: false`. The line is there
+for the same reason a failure's is — a client that asked for a conversation to shrink is
+owed a reason it did not — and the two are told apart by what the line says.
+
 Two limits worth knowing, both upstream's and neither worked around here. A summarizing
 call is billed by the provider but does not appear in `RunReport::usage` and is not
 charged against a token budget or a `BudgetPool`: mentra reports no usage for it, and
@@ -923,7 +965,11 @@ substituted for them, so asking for one extra thing cannot cost the file paths a
 outcomes every summary needs; `None` asks for the standing ones alone. `Ok(None)` means
 there was nothing to compact — the last turn is always preserved whole, exactly as it is
 for the model's own `compact` intrinsic, so a conversation with only that has no older
-prefix to summarize — and nothing is emitted in that case either.
+prefix to summarize — and nothing is emitted in that case either. That answer comes back
+*before* the bounds above are read, because mentra returns on the empty prefix first, so
+`Ok(None)` always means "there was nothing to compact" and never "your cancel did not
+arrive": a host that must not carry on after the stop it asked for checks its own token
+rather than reading `Ok(None)` as consent.
 
 It is a model call: the summary is written by the same provider the conversation runs on,
 and it is billed and can fail like any other request. It is not a *turn*, though: no prompt
