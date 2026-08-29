@@ -64,7 +64,16 @@ pub(super) fn discover(
 
 /// Rejects a workspace that is missing or is not a directory, and resolves it
 /// so the parent walk and the duplicate check agree on identity.
-fn validate_workspace(workspace: &Path) -> Result<PathBuf, ContextError> {
+///
+/// `pub(crate)` because [`WorkspaceBuilder::open`] resolves the root through
+/// this same function before anything else reads it: the parent walk, the
+/// dispatcher key, the runtime's policy roots and the agent's base directory
+/// must all name one directory, and they do that by resolving *once* rather
+/// than each canonicalizing its own copy. Calling it again here is free —
+/// canonicalizing a canonical path returns it unchanged — and keeps
+/// [`WorkspaceContext::discover_with`](super::WorkspaceContext::discover_with)
+/// correct for the hosts that call it directly.
+pub(crate) fn validate_workspace(workspace: &Path) -> Result<PathBuf, ContextError> {
     let metadata = std::fs::metadata(workspace).map_err(|source| match source.kind() {
         std::io::ErrorKind::NotFound => ContextError::WorkspaceMissing {
             path: workspace.to_path_buf(),

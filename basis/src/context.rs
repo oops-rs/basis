@@ -17,6 +17,12 @@
 mod discovery;
 mod render;
 
+/// The workspace root, absolute and canonical, or the error that says why the
+/// path is not one. [`WorkspaceBuilder::open`](crate::WorkspaceBuilder::open)
+/// is the caller: one resolution, at the open, for every part of a workspace
+/// that names its directory.
+pub(crate) use discovery::validate_workspace as resolve_workspace;
+
 use std::path::{Path, PathBuf};
 
 use thiserror::Error;

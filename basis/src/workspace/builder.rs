@@ -486,6 +486,19 @@ impl WorkspaceBuilder {
     /// fixed for the life of the returned [`Workspace`]; a run minted from that
     /// workspace does no I/O of its own.
     ///
+    /// # Where the workspace is
+    ///
+    /// The path is made absolute and canonical here, once, and that resolved
+    /// directory is [`Workspace::root`] — a workspace opened as `.`, through a
+    /// symlink, or with a `..` in it reports the directory those spellings
+    /// name, not the spelling. Everything downstream takes that one value: the
+    /// agent's base directory, the runtime's policy roots, the hook
+    /// dispatcher's key, the store identifier, and the run header's
+    /// `workspace`. Nothing resolves it again, so a process that changes its
+    /// working directory afterwards changes nothing about a workspace already
+    /// open. A path that does not exist, or is not a directory, fails the open
+    /// here rather than at the first tool call.
+    ///
     /// # What this workspace's conversations are tagged with
     ///
     /// Every agent persisted from here should carry
@@ -533,12 +546,31 @@ impl WorkspaceBuilder {
             }
         }
 
+        // **The one resolution.** Everything below this line names the
+        // workspace through `path` and nothing re-derives it: the dispatcher
+        // key, the private runtime's policy roots, the agent's base directory,
+        // the hook runner's directory, the store identifier and the run
+        // header all take this value. A relative spelling would otherwise
+        // survive into all of them and be resolved again — against whatever
+        // the process's working directory happened to be at the time, which is
+        // not a thing a workspace should depend on: mentra normalizes a policy
+        // root at every check, not at construction
+        // (`RuntimePolicy::normalize_policy_root`), so a relative root means
+        // *the same* run answers differently after a `chdir`. Canonical, not
+        // merely absolute, for the reason
+        // [`store::runtime_identifier`](crate::store::runtime_identifier)
+        // gives: a symlinked spelling and its target are one workspace.
+        //
+        // Placed after the reusable-posture checks so a misconfigured builder
+        // is still refused before any filesystem question is asked of it.
+        let path = crate::context::resolve_workspace(&self.path)?;
+
         let context = if self.discovery_enabled {
-            WorkspaceContext::discover_with(&self.path, &self.context)?
+            WorkspaceContext::discover_with(&path, &self.context)?
         } else {
             // `none` skips every file candidate but deliberately retains
             // canonical workspace-path validation.
-            WorkspaceContext::discover_with(&self.path, &ContextConfig::none())?
+            WorkspaceContext::discover_with(&path, &ContextConfig::none())?
         };
 
         // A shared runtime can acquire a skill loader after any one-time
@@ -563,7 +595,7 @@ impl WorkspaceBuilder {
         let config = match self.config {
             Some(config) => config,
             None if self.discovery_enabled => {
-                config::Config::discover(&self.path, self.context.global_dir.as_deref())?
+                config::Config::discover(&path, self.context.global_dir.as_deref())?
             }
             None => Config::default(),
         };
@@ -572,7 +604,7 @@ impl WorkspaceBuilder {
         // parse fails the open loudly, rather than at the first tool call —
         // or worse, never.
         let loaded_hooks = if self.discovery_enabled {
-            hooks::load(&self.path, &self.hooks)?
+            hooks::load(&path, &self.hooks)?
         } else {
             Vec::new()
         };
@@ -582,7 +614,7 @@ impl WorkspaceBuilder {
         // find. Registering it needs the runtime, so that waits until there is
         // one.
         let declared_sources = if self.discovery_enabled {
-            declared::discover(&self.path, &self.tools)?
+            declared::discover(&path, &self.tools)?
         } else {
             Vec::new()
         };
@@ -656,18 +688,14 @@ impl WorkspaceBuilder {
             RuntimeSource::Shared(runtime) => (runtime, None),
             RuntimeSource::Private(recipe) => (
                 Arc::new(recipe.with_config(&config).build_for(
-                    &self.path,
+                    &path,
                     self.shell,
                     &memory_roots,
                 )?),
                 None,
             ),
             RuntimeSource::Reusable(recipe) => {
-                let runtime = Arc::new(
-                    recipe
-                        .build_for(&self.path, self.shell, &memory_roots)
-                        .await?,
-                );
+                let runtime = Arc::new(recipe.build_for(&path, self.shell, &memory_roots).await?);
                 (runtime, Some(recipe))
             }
         };
@@ -695,8 +723,7 @@ impl WorkspaceBuilder {
         // Skills must be registered on the runtime before any session spawns,
         // so every agent's tool roster includes `load_skill`.
         let (skills_dirs, skills) = if self.discovery_enabled {
-            let dirs =
-                register_skills(runtime.mentra_runtime_internal(), &self.path, &self.skills)?;
+            let dirs = register_skills(runtime.mentra_runtime_internal(), &path, &self.skills)?;
             let loaded = runtime
                 .mentra_runtime_internal()
                 .skills()
@@ -718,17 +745,20 @@ impl WorkspaceBuilder {
         // without it. The names are claimed first, so a manifest naming a tool
         // this runtime already answers to — `spawn`, a mentra builtin, another
         // workspace's declaration — refuses the open instead of replacing it.
-        let declared_tools = DeclaredTools::register(
-            Arc::clone(&runtime),
-            &dispatch::canonical(&self.path),
-            &declared_sources,
-        )?;
+        // No `dispatch::canonical` around the root here or on the guard entry
+        // below: `path` already is what that helper would return, and calling
+        // it again would be the second resolution this open exists to do
+        // without. Registration and lookup still meet on one key, because the
+        // lookup side canonicalizes the *call's* directory, which is the side
+        // that has not been resolved yet.
+        let declared_tools =
+            DeclaredTools::register(Arc::clone(&runtime), &path, &declared_sources)?;
         let declared_tool_names = declared_tools.names().to_vec();
 
         // Templates need no runtime registration — they are basis-side convention
         // data, rendered into a prompt by whatever surface offers them.
         let (templates_dirs, templates) = if self.discovery_enabled {
-            load_templates(&self.path, &self.templates)?
+            load_templates(&path, &self.templates)?
         } else {
             (Vec::new(), Vec::new())
         };
@@ -738,7 +768,7 @@ impl WorkspaceBuilder {
         // hooks predates the runtime split and survives it — only the
         // registration point moved, onto the runtime's dispatcher.
         let runner = runtime.interceptors().iter().cloned().fold(
-            HookRunner::new(&self.path, loaded_hooks),
+            HookRunner::new(&path, loaded_hooks),
             |runner, interceptor| runner.with_interceptor(interceptor),
         );
         // Written by every mint, read by `spawn` when a child policy narrows a
@@ -749,7 +779,7 @@ impl WorkspaceBuilder {
         let hook_registration = runtime.register_workspace(dispatch::WorkspaceGuardEntry {
             runner: Arc::new(runner),
             shell: self.shell,
-            root: dispatch::canonical(&self.path),
+            root: path.clone(),
             // On a private runtime the shell posture and the `.git` carve-out
             // are already in policy; enforcing them in the dispatcher too
             // would change whose words a denial arrives in.
@@ -764,15 +794,15 @@ impl WorkspaceBuilder {
         #[cfg(feature = "mcp")]
         let (mcp_connections, mcp_files, mcp_servers) = {
             if self.discovery_enabled {
-                let (files, servers) = discovered_mcp(&self.path, &self.mcp)?;
+                let (files, servers) = discovered_mcp(&path, &self.mcp)?;
                 let connections =
-                    McpConnections::connect(Arc::clone(&runtime), &self.path, servers).await;
+                    McpConnections::connect(Arc::clone(&runtime), &path, servers).await;
                 let names = connections.names().to_vec();
 
                 (connections, files, names)
             } else {
                 (
-                    McpConnections::empty(Arc::clone(&runtime), &self.path),
+                    McpConnections::empty(Arc::clone(&runtime), &path),
                     Vec::new(),
                     Vec::new(),
                 )
@@ -784,13 +814,12 @@ impl WorkspaceBuilder {
         let reuse = reusable_recipe.map(|recipe| WorkspaceReuse::new(recipe, self.shell));
 
         Ok(Workspace {
-            root: resolved_workspace(&self.path, &context),
             // Compaction is two statements from two owners, joined here: the
             // numbers are this workspace's, the directory the snapshots land in
             // is the runtime's, because it is the one that knows where this
             // workspace's history lives (ADR-0018).
             agent: agent_config(
-                &self.path,
+                &path,
                 &context,
                 self.system_prompt.as_ref(),
                 memory::index_block(&memories).as_deref(),
@@ -798,8 +827,11 @@ impl WorkspaceBuilder {
                 self.compaction,
                 runtime.transcripts_dir().to_path_buf(),
             ),
-            identifier: store::runtime_identifier(&self.path),
-            path: self.path,
+            identifier: store::runtime_identifier(&path),
+            // Not `resolved_workspace` a second time: `path` *is* what
+            // discovery resolved, and asking again would reintroduce the second
+            // answer this open exists to do without.
+            root: path,
             provider: runtime.provider().to_string(),
             runtime,
             reuse,
@@ -911,9 +943,12 @@ pub(crate) fn load_templates(
 /// than the caller typed. Reporting the resolved root keeps the header
 /// internally consistent — `workspace` and `context_files` name one place.
 ///
-/// Shared with [`prepare_with_session`](crate::run::prepare_with_session) for
-/// the same reason [`load_templates`] is: the one path that does not open a
-/// workspace must still report one the same way.
+/// [`prepare_with_session`](crate::run::prepare_with_session) is the only
+/// caller left, for the same reason it is one of [`load_templates`]'s: it is
+/// the one path that does not open a workspace and must still report one the
+/// same way. [`open`](WorkspaceBuilder::open) does not use it — it resolves
+/// the root itself, before discovery, and hands that same value to discovery
+/// and to everything else.
 pub(crate) fn resolved_workspace(requested: &Path, context: &WorkspaceContext) -> PathBuf {
     context
         .root()

@@ -99,12 +99,16 @@ use crate::{
 /// sessions from `&self`, so concurrent minting from one workspace needs no
 /// lock of basis's own.
 pub struct Workspace {
-    /// The path the caller asked for. What the agent is scoped to, and what
-    /// policy roots are built from.
-    path: PathBuf,
-    /// The same directory as discovery resolved it, symlinks followed. What
-    /// the run header reports, so `workspace` and `context_files` name one
-    /// place.
+    /// The directory this workspace is scoped to: absolute and canonical,
+    /// resolved exactly once by [`WorkspaceBuilder::open`] and never derived
+    /// again.
+    ///
+    /// One field rather than two — the requested spelling and the resolved
+    /// one — because everything downstream has to agree: the agent's base
+    /// directory, the runtime's policy roots, the dispatcher's key, the store
+    /// identifier and the run header's `workspace` all take this value, and a
+    /// second spelling kept beside it is only an opportunity for two of them
+    /// to name different directories.
     root: PathBuf,
     runtime: Arc<Runtime>,
     /// Present only for a generation opened from a reusable runtime recipe.
@@ -122,9 +126,9 @@ pub struct Workspace {
     config: Config,
     provider: String,
     /// [`store::runtime_identifier`](crate::store::runtime_identifier) for
-    /// `path`, computed once: what this workspace's conversations are (or, on
-    /// a shared runtime, should be — see [`WorkspaceBuilder::open`]) tagged
-    /// with.
+    /// [`root`](Self::root), computed once: what this workspace's
+    /// conversations are (or, on a shared runtime, should be — see
+    /// [`WorkspaceBuilder::open`]) tagged with.
     identifier: String,
     context: WorkspaceContext,
     /// The memories discovered at open, frontmatter only, name-ordered after
@@ -339,14 +343,21 @@ impl Workspace {
         fingerprint::snapshot(&self.root)
     }
 
-    /// The path this workspace was opened with, which is what its runs are
-    /// scoped to.
+    /// The directory this workspace's runs are scoped to.
+    ///
+    /// The same value as [`root`](Self::root), and deliberately so: a caller
+    /// that opened a relative or symlinked spelling gets back the directory
+    /// that spelling named, not the spelling. Both names are kept because
+    /// hosts use both.
     pub fn path(&self) -> &Path {
-        &self.path
+        &self.root
     }
 
-    /// The same directory as discovery resolved it, symlinks followed. What the
-    /// run header reports, and what [`fingerprint`](Self::fingerprint) reads.
+    /// The workspace root: absolute, symlinks followed, resolved once at
+    /// [`open`](Self::open). What the run header reports, what the agent is
+    /// based in, what the runtime's policy roots are built from, and what
+    /// [`fingerprint`](Self::fingerprint) reads — one directory under one
+    /// spelling, so `workspace` and `context_files` can never disagree.
     pub fn root(&self) -> &Path {
         &self.root
     }
@@ -506,13 +517,13 @@ impl Workspace {
             lifecycle: _,
         } = reuse;
 
-        let runtime = Arc::new(recipe.build_for(&self.path, shell, &[]).await?);
+        let runtime = Arc::new(recipe.build_for(&self.root, shell, &[]).await?);
         validate_model_provider(&self.model, runtime.provider())?;
 
         let declared_registration = DeclaredTools::register(Arc::clone(&runtime), &self.root, &[])?;
         let foreign_tools = Arc::new(RwLock::new(BTreeSet::new()));
         let runner = runtime.interceptors().iter().cloned().fold(
-            HookRunner::new(&self.path, Vec::new()),
+            HookRunner::new(&self.root, Vec::new()),
             |runner, interceptor| runner.with_interceptor(interceptor),
         );
         let hook_registration = runtime.register_workspace(dispatch::WorkspaceGuardEntry {
@@ -532,7 +543,6 @@ impl Workspace {
         let reuse = Some(WorkspaceReuse::new(recipe, shell));
 
         Ok(Self {
-            path: self.path,
             root: self.root,
             runtime,
             reuse,

@@ -350,6 +350,13 @@ async fn opening_a_workspace_registers_what_its_manifest_declared() {
 
     let workspace = offline(fixture.path()).open().await.expect("opens");
 
+    // The open resolves the root once — symlinks followed, and on macOS the
+    // temp dir is one — so every discovered path hangs off the resolved
+    // spelling, the same rule `tests/run_stream.rs` pins for `context_files`.
+    let manifest = manifest
+        .canonicalize()
+        .expect("the manifest the fixture wrote");
+
     assert_eq!(workspace.declared_tools(), ["jenkins_job"]);
     assert_eq!(
         workspace

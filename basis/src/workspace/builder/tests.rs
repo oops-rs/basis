@@ -758,3 +758,81 @@ async fn every_tool_result_the_model_read_is_still_in_front_of_it() {
         );
     }
 }
+
+/// A workspace that opens without contacting anything: an explicit model id
+/// short-circuits resolution, discovery is off so nothing on the machine
+/// running this can move an assertion, and the base URL is a closed port.
+fn offline(path: &Path) -> WorkspaceBuilder {
+    Workspace::builder(path)
+        .with_runtime_builder(
+            RuntimeBuilder::default()
+                .with_base_url("http://127.0.0.1:1/v1")
+                .with_api_key("test-key")
+                .with_ephemeral_history(),
+        )
+        .with_model(ModelSelector::Id("test-model".to_string()))
+        .without_discovery()
+}
+
+/// Every name one opened workspace answers to for the directory it is scoped
+/// to. They must be one path, or two of them disagree about where the run is.
+fn spellings(workspace: &Workspace) -> Vec<&Path> {
+    vec![
+        workspace.root(),
+        workspace.path(),
+        workspace.agent.workspace.base_dir.as_path(),
+        workspace.declared_registration.root(),
+    ]
+}
+
+#[tokio::test]
+async fn a_relative_path_is_made_absolute_at_open() {
+    let workspace = offline(Path::new(".")).open().await.expect("opens");
+    let here = std::env::current_dir()
+        .expect("a working directory")
+        .canonicalize()
+        .expect("canonical working directory");
+
+    for spelling in spellings(&workspace) {
+        assert_eq!(
+            spelling, here,
+            "a relative spelling must not survive the open"
+        );
+    }
+}
+
+#[tokio::test]
+async fn a_symlinked_spelling_opens_the_directory_it_names() {
+    let base = tempfile::tempdir().expect("tempdir");
+    let real = base.path().join("real");
+    std::fs::create_dir(&real).expect("create the real directory");
+    let link = base.path().join("link");
+    std::os::unix::fs::symlink(&real, &link).expect("symlink");
+
+    let workspace = offline(&link).open().await.expect("opens");
+    let canonical = real.canonicalize().expect("canonical target");
+
+    for spelling in spellings(&workspace) {
+        assert_eq!(
+            spelling, canonical,
+            "a symlinked spelling must resolve once, at the open"
+        );
+    }
+}
+
+#[tokio::test]
+async fn a_dotted_spelling_is_folded_at_open() {
+    let base = tempfile::tempdir().expect("tempdir");
+    let nested = base.path().join("nested");
+    std::fs::create_dir(&nested).expect("create the nested directory");
+
+    let workspace = offline(&nested.join("..").join("nested"))
+        .open()
+        .await
+        .expect("opens");
+    let canonical = nested.canonicalize().expect("canonical directory");
+
+    for spelling in spellings(&workspace) {
+        assert_eq!(spelling, canonical, "`..` must not survive the open");
+    }
+}
