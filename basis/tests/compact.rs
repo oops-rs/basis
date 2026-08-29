@@ -325,6 +325,72 @@ async fn an_unbounded_pass_is_what_compact_still_asks_for() {
 }
 
 #[tokio::test]
+async fn the_older_verb_inherits_the_deadline_the_run_was_configured_with() {
+    // The other half of "additive", and the half that is a behaviour change:
+    // `compact` is `compact_with_options` with nothing attached, and nothing
+    // attached is filled in from `with_bounds` — so a run configured with a
+    // deadline now has one on its manual passes too, where before 0.24 they
+    // ran to completion whatever the run was allowed. Asserted through the old
+    // verb on purpose: a refactor that stopped merging `self.bounds` would
+    // leave every `compact_with_options` test above passing.
+    let endpoint = ScriptedEndpoint::start();
+    let dir = tempfile::tempdir().expect("tempdir");
+    let store_dir = tempfile::tempdir().expect("tempdir");
+
+    let workspace = offline(dir.path())
+        .with_runtime(endpoint.runtime(store_dir.path()))
+        .open()
+        .await
+        .expect("opens");
+
+    // Configured *after* the turn, because a deadline already in the past
+    // would have refused the turn that gives the pass something to summarize.
+    let mut run = workspace.prepare("go").expect("mints");
+    run.execute(CollectingSink::default())
+        .await
+        .expect("the scripted turn runs");
+    let mut run = run.with_bounds(
+        TurnOptions::default().with_absolute_deadline(SystemTime::now() - Duration::from_secs(1)),
+    );
+
+    let transcript_before = run.history().len();
+    let asked_before = endpoint.requests().len();
+
+    let mut sink = CollectingSink::default();
+    let failure = run
+        .compact(Some("keep the migration plan"), &mut sink)
+        .await
+        .expect_err("a run already past its deadline does not get a summarizing pass");
+
+    assert!(
+        matches!(
+            failure,
+            RunError::Runtime(mentra::error::RuntimeError::DeadlineExceeded)
+        ),
+        "{failure:?}"
+    );
+    assert_eq!(run.history().len(), transcript_before);
+    assert_eq!(
+        endpoint.requests().len(),
+        asked_before,
+        "a pass refused by a bound is a pass the provider never hears about"
+    );
+
+    match &sink.into_events()[..] {
+        [
+            Event::Error {
+                recoverable,
+                message,
+            },
+        ] => {
+            assert!(!recoverable);
+            assert_eq!(message, "deadline exceeded");
+        }
+        other => panic!("expected one deadline on the stream, got {other:?}"),
+    }
+}
+
+#[tokio::test]
 async fn a_deadline_reached_inside_an_automatic_pass_is_the_runs_own_bound() {
     // The half of 0.24 basis does not call: auto-compaction happens *inside* a
     // turn and now inherits that turn's bounds, so a run can end on a bound it
@@ -355,7 +421,7 @@ async fn a_deadline_reached_inside_an_automatic_pass_is_the_runs_own_bound() {
             "again",
             CollectingSink::default(),
             basis::AllowAll,
-            TurnOptions::default().with_deadline(Duration::from_millis(250)),
+            TurnOptions::default().with_deadline(DEADLINE_INSIDE_THE_STALL),
         ),
     )
     .await
@@ -564,6 +630,20 @@ fn eager_compaction() -> Compaction {
 /// A bounded pass must end promptly. Exceeding this means the bound was never
 /// read and the run is waiting on a summarizer that will never answer.
 const PROMPTLY: Duration = Duration::from_secs(10);
+
+/// The deadline a turn is given when the claim is that its bound was read
+/// *inside* the summarizing pass.
+///
+/// The interval has to be long enough that everything between
+/// `send_with_options` and the request landing on the endpoint — projecting
+/// the history, estimating its tokens, persisting the transcript, opening a
+/// TCP connection — is comfortably inside it, because a deadline that expires
+/// first trips at `bounds.check()` *before* the provider call and the pass
+/// never happens: the same `Bound::Deadline` for the wrong reason, and a
+/// summarizing-request count of zero. Two seconds is roughly an order of
+/// magnitude of headroom over that work, and still far inside both `STALL`
+/// and `PROMPTLY`, so the stalled pass is provably where the bound landed.
+const DEADLINE_INSIDE_THE_STALL: Duration = Duration::from_secs(2);
 
 /// A builder that discovers nothing it was not shown.
 fn offline(workspace: &Path) -> WorkspaceBuilder {
