@@ -373,6 +373,27 @@ flowchart LR
   (Seatbelt on macOS, bubblewrap+seccomp on Linux, codex's `workspace-write` design) stays
   parked in [`proposals/0002`](proposals/0002-native-sandbox.md) as an *optional* later
   layer, not a return to denying commands by default.
+- **What a repository is trusted with**: opening a workspace runs what the repository
+  declares. `AGENTS.md`, `.basis/config.json`, `.basis/hooks.json`, `.basis/tools.json`,
+  `.mcp.json` and the skills roots are configuration carrying the workspace's authority,
+  not inert data. `.mcp.json`'s servers are connected by `Workspace::open` itself, before
+  a model has said anything; a `.basis/hooks.json` entry that omits `tools` is asked on
+  every tool call, reads included. Both spawn programs the file names, and neither clears
+  the environment it inherits, so each holds the same authority the account running basis
+  holds — the paragraph above, restated where a repository is the party naming the
+  program. ADR-0013 is the reason basis states this rather than narrowing it: a
+  repository's declarations are bounded by whatever confines the process, and in-process
+  that is nothing.
+- **The one deliberate exception** is `base_url` in a *workspace* `.basis/config.json`,
+  which fails the open by name (§8, *Effort, providers, and custom endpoints*). A
+  redirected endpoint carries the credential basis just read out of the environment to a
+  host the file chose, and a leaked secret is bounded by nothing. It is a narrow rule and
+  not a general posture: `.mcp.json`'s `${VAR}` expansion does hand the named variables to
+  a program the repository declared, which is what that key is for. An operator opening a
+  repository they have not read has two honest moves. Build the workspace with
+  `WorkspaceBuilder::without_discovery()` — which probes none of these files, and is an
+  embedding host's knob; the CLI carries no flag for it — or run the whole process under
+  one of the OS patterns in [`containerization.md`](containerization.md).
 
 ## 5. Research notes (2026-08-08)
 
