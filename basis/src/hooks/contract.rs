@@ -37,7 +37,14 @@ use super::wire::HOOK_SCHEMA_VERSION;
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum HookEvent {
-    /// After authorization, before the tool runs.
+    /// Before the tool runs — and, since mentra 0.24, before the schema check
+    /// and the [`ToolAuthorizer`](mentra::tool::ToolAuthorizer) too.
+    ///
+    /// So a hook is asked about *every* registered call, including ones the
+    /// approver goes on to refuse: being consulted is not being approved, and
+    /// a participant with side effects of its own must not read it that way.
+    /// What it may take from the ordering is that a rewrite it returns is what
+    /// the approver is then asked about.
     #[default]
     PreToolUse,
     /// After the tool ran, before the model is shown what it returned.

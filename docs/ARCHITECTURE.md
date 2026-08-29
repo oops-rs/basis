@@ -215,6 +215,15 @@ participant is from the workspace's own data, the earlier it speaks**: a host's 
 guard can then refuse before a program that arrived with a five-minute-old clone is spawned
 at all. Anything that cannot answer denies.
 
+Since mentra 0.24 the chain runs *before* authorization, on both execution lanes: hooks,
+then the tool's `input_schema` against what they left, then the `ToolAuthorizer`. Two things
+follow. A hook is consulted about **every** registered call, including ones the approver
+goes on to refuse — so being asked is not being approved, and a participant with side
+effects of its own should deny what it will not stand behind. And a participant that
+*rewrites* is judged by the approver on what it produced, not on what the model asked for;
+basis's own guards on the shared path do the same, re-reading a `HookDecision::Modify`
+before it becomes the call (`basis/src/runtime/dispatch.rs`).
+
 `Approver` is a *sibling* seam, not a parent and not a child. It answers *may this happen*
 and its answer feeds the permission machinery a person drives; an interceptor answers *may
 this happen, in this form*. mentra keeps the two apart for the same reason, and merging
@@ -383,10 +392,13 @@ flowchart LR
   `.mcp.json` and the skills roots are configuration carrying the workspace's authority,
   not inert data. `.mcp.json`'s servers are connected by `Workspace::open` itself, before
   a model has said anything; a `.basis/hooks.json` entry that omits `tools` is asked on
-  every tool call, reads included. Both spawn programs the file names, and neither clears
-  the environment it inherits, so each holds the same authority the account running basis
-  holds — the paragraph above, restated where a repository is the party naming the
-  program. ADR-0013 is the reason basis states this rather than narrowing it: a
+  every tool call, reads included — and since mentra 0.24 that is *every registered* call,
+  including ones the approver goes on to refuse, because hooks now run ahead of
+  authorization. A hook that rewrites is judged on what it produced: the approver sees the
+  rewritten input, and so do basis's own guards. Both spawn programs the file names, and
+  neither clears the environment it inherits, so each holds the same authority the account
+  running basis holds — the paragraph above, restated where a repository is the party
+  naming the program. ADR-0013 is the reason basis states this rather than narrowing it: a
   repository's declarations are bounded by whatever confines the process, and in-process
   that is nothing.
 - **The one deliberate exception** is `base_url` in a *workspace* `.basis/config.json`,

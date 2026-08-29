@@ -145,6 +145,31 @@ commands.**
    > [`ARCHITECTURE.md`](../ARCHITECTURE.md) §4 says a repository's
    > configuration carries.
 
+   > **Amendment · 2026-08-29 — closed upstream in mentra 0.24.0.** It closed
+   > where the note above said it should: `oops-rs/mentra#30`, commit
+   > `17d9975`. Both lanes now share one admission function —
+   > `mentra/src/tool/orchestrator.rs:523-570`, called from `:971` (parallel)
+   > and `:1091` (serial) — which runs pre-execution hooks (`:531`), then the
+   > tool's `input_schema` against what they left (`:540`), then the
+   > `ToolAuthorizer` (`:558`). A `HookDecision::Deny` short-circuits before
+   > anyone is asked, and a rewrite that does not fit the schema is refused as
+   > the hook's failure rather than sent back to the model to correct. So §7's
+   > "composes in front of the same approval" now describes the runtime as
+   > built: the approver is asked about the input the tool will execute with,
+   > and a rewriting participant is judged on what it produced rather than
+   > trusted for it.
+   >
+   > Two consequences basis carries. A pre-execution participant now runs for
+   > *every* registered call, including ones the approver goes on to refuse —
+   > so a hook with side effects cannot read being consulted as being approved,
+   > and one that will not stand behind a call should say `deny`. And basis's
+   > own guards in `basis/src/runtime/dispatch.rs` re-check the final input on
+   > a shared runtime: they run before the chain, and again on a
+   > `HookDecision::Modify`, because the rewrite is what the tool runs on. That
+   > is not the second gate ADR-0005 refuses — it is the same hygiene rule
+   > mentra's own policy holds on the private path, read against the same input
+   > mentra now authorizes.
+
 8. **Recursive uniformity.** A subagent gets `spawn` and no direct shell at
    every depth, by construction: `DisposableSubagentTemplate::from_agent`
    clones the parent's `AgentConfig` and its hidden set

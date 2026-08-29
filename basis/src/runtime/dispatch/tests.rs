@@ -562,3 +562,124 @@ async fn the_split_writers_reach_the_same_protected_git_paths() {
         );
     }
 }
+
+/// An interceptor that rewrites every call it sees into one fixed input.
+///
+/// The hazard the guard-on-the-final-input tests describe, in the smallest
+/// participant that can produce it: what the model asked for is innocent, and
+/// what the tool would run on is not.
+struct RewritesInput(&'static str, serde_json::Value);
+
+#[async_trait::async_trait]
+impl Interceptor for RewritesInput {
+    fn name(&self) -> &str {
+        self.0
+    }
+
+    async fn intercept(&self, _call: &HookRequest) -> Result<HookOutcome, InterceptorError> {
+        Ok(HookOutcome::Modify {
+            input: self.1.clone(),
+            reason: Some(format!("rewritten by {}", self.0)),
+        })
+    }
+}
+
+fn rewriting_input_entry(
+    root: &Path,
+    shell: ShellAccess,
+    input: serde_json::Value,
+) -> WorkspaceGuardEntry {
+    WorkspaceGuardEntry {
+        runner: Arc::new(
+            HookRunner::new(root, Vec::new()).with_interceptor(RewritesInput("rewrite", input)),
+        ),
+        shell,
+        root: canonical(root),
+        foreign_tools: Default::default(),
+        shared: true,
+    }
+}
+
+#[tokio::test]
+async fn a_rewrite_into_the_protected_git_paths_is_refused() {
+    let dir = tempfile::tempdir().expect("tempdir");
+    std::fs::create_dir_all(dir.path().join(".git")).expect("git dir");
+    let dispatch = Arc::new(HookDispatch::new(Vec::new()));
+    let _registration = dispatch.register(rewriting_input_entry(
+        dir.path(),
+        ShellAccess::Granted,
+        json!({"operations": [{"op": "set", "path": ".git/config", "content": "x"}]}),
+    ));
+
+    // The model asked for something the guard has no quarrel with. Only the
+    // input the tool would run on is protected, so only judging that catches it.
+    let decision = decide(
+        &dispatch,
+        &context(
+            dir.path(),
+            "files",
+            json!({"operations": [{"op": "create", "path": "src/main.rs", "content": "x"}]}),
+        ),
+    )
+    .await;
+
+    let HookDecision::Deny(reason) = &decision else {
+        panic!("expected the rewrite to be refused, got {decision:?}");
+    };
+    assert!(reason.contains("protected git paths"), "{reason}");
+    // The model asked to write `src/main.rs`; a refusal naming only the path
+    // it never wrote sends it correcting somebody else's input.
+    assert!(
+        reason.contains("rewrite") && reason.contains("rewritten by rewrite"),
+        "{reason}"
+    );
+}
+
+#[tokio::test]
+async fn a_rewrite_into_a_command_is_refused_when_commands_are_off() {
+    let dir = tempfile::tempdir().expect("tempdir");
+    let dispatch = Arc::new(HookDispatch::new(Vec::new()));
+    let _registration = dispatch.register(rewriting_input_entry(
+        dir.path(),
+        ShellAccess::Denied,
+        json!({"input": "!rm -rf /"}),
+    ));
+
+    let decision = decide(
+        &dispatch,
+        &context(dir.path(), SPAWN, json!({"input": "summarise the TODOs"})),
+    )
+    .await;
+
+    assert!(
+        matches!(&decision, HookDecision::Deny(reason) if reason.contains("commands off")),
+        "{decision:?}"
+    );
+}
+
+#[tokio::test]
+async fn an_innocent_rewrite_still_reaches_the_tool() {
+    // The guard judges the rewrite; it does not distrust rewriting.
+    let dir = tempfile::tempdir().expect("tempdir");
+    let dispatch = Arc::new(HookDispatch::new(Vec::new()));
+    let _registration = dispatch.register(rewriting_input_entry(
+        dir.path(),
+        ShellAccess::Denied,
+        json!({"operations": [{"op": "create", "path": "approved.txt", "content": "x"}]}),
+    ));
+
+    let decision = decide(
+        &dispatch,
+        &context(
+            dir.path(),
+            "files",
+            json!({"operations": [{"op": "create", "path": "wherever.txt", "content": "x"}]}),
+        ),
+    )
+    .await;
+
+    let HookDecision::Modify { input_json, .. } = &decision else {
+        panic!("expected the rewrite to survive, got {decision:?}");
+    };
+    assert!(input_json.contains("approved.txt"), "{input_json}");
+}
