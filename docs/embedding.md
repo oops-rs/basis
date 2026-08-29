@@ -656,6 +656,10 @@ turn even though nothing was discarded, because mentra still owes a final assist
 and the last committed one was a tool result. The work is kept either way; the report is
 what disagrees.
 
+A turn is not the only thing a stop button has to reach. A summarizing pass is a provider
+round trip too, and `run.compact_with_options(..)` takes the same `TurnOptions` for the
+same reason — see [Compaction](#compaction) for which of the bounds apply to it.
+
 In-process concurrent work is the host's own tokio: fan out on a
 `tokio::task::JoinSet`, wire the stop button through the `CancellationToken` a
 `TurnOptions` hands back, and let the bounds — deadline, tool budget, token budget — keep
@@ -920,6 +924,35 @@ A pass that *fails* puts an `Event::Error` on the sink before returning the erro
 client watching the stream is told why a conversation it expected to shrink did not. The
 transcript is untouched and the next turn goes out on the unshortened history.
 
+A pass is also the longest provider round trip the conversation will make — the whole
+transcript, at its longest — which is exactly the moment somebody reaches for stop.
+`compact_with_options` is `compact` with a way to take it back:
+
+```rust
+let (options, stop) = basis::TurnOptions::cancellable();
+tokio::spawn(async move { on_stop_pressed().await; stop.cancel(); });
+
+match run.compact_with_options(instructions, &mut sink, options).await {
+    Err(basis::RunError::Runtime(mentra::error::RuntimeError::Cancelled)) => { /* they stopped it */ }
+    other => { other?; }
+}
+```
+
+Two bounds apply and only two: the cancellation token and the deadline. A graceful
+`stop()` does not, because it means "end at the next round boundary with everything
+committed" and abandoning a summary half-way is not that; the tool and token budgets do
+not, because there is no reported usage for them to measure. `compact` is this call with
+`TurnOptions::default()`, so it inherits whatever `with_bounds` configured on the run — a
+run given a deadline now has one on its manual passes too, where before it ran to
+completion whatever the run was allowed.
+
+Reaching a bound leaves the transcript exactly as it was and reports as the bound rather
+than as a refused summarizer: `RunError::Runtime` carrying `RuntimeError::Cancelled` or
+`RuntimeError::DeadlineExceeded`, and one `Event::Error` on the sink reading mentra's own
+`operation cancelled` / `deadline exceeded` with `recoverable: false`. The line is there
+for the same reason a failure's is — a client that asked for a conversation to shrink is
+owed a reason it did not — and the two are told apart by what the line says.
+
 Two limits worth knowing, both upstream's and neither worked around here. A summarizing
 call is billed by the provider but does not appear in `RunReport::usage` and is not
 charged against a token budget or a `BudgetPool`: mentra reports no usage for it, and
@@ -932,7 +965,11 @@ substituted for them, so asking for one extra thing cannot cost the file paths a
 outcomes every summary needs; `None` asks for the standing ones alone. `Ok(None)` means
 there was nothing to compact — the last turn is always preserved whole, exactly as it is
 for the model's own `compact` intrinsic, so a conversation with only that has no older
-prefix to summarize — and nothing is emitted in that case either.
+prefix to summarize — and nothing is emitted in that case either. That answer comes back
+*before* the bounds above are read, because mentra returns on the empty prefix first, so
+`Ok(None)` always means "there was nothing to compact" and never "your cancel did not
+arrive": a host that must not carry on after the stop it asked for checks its own token
+rather than reading `Ok(None)` as consent.
 
 It is a model call: the summary is written by the same provider the conversation runs on,
 and it is billed and can fail like any other request. It is not a *turn*, though: no prompt
