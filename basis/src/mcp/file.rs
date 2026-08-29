@@ -578,7 +578,7 @@ mod tests {
             .expect_err("mentra's tool-name split would parse this as server `evil`");
 
         assert!(matches!(error, McpError::Invalid { .. }), "{error}");
-        assert!(error.to_string().contains("__"), "{error}");
+        assert!(error.to_string().contains("tool-name encoding"), "{error}");
     }
 
     #[test]
