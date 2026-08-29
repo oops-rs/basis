@@ -111,6 +111,22 @@ pub(crate) struct HookRegistration {
     id: u64,
 }
 
+impl HookRegistration {
+    /// The path this workspace is registered and dispatched under.
+    ///
+    /// Exposed so the open's own tests can assert it against
+    /// [`Workspace::root`](crate::Workspace::root): the dispatcher key is one
+    /// of the five names an open promises to settle on one directory, and
+    /// without a reader nothing failed if an edit reintroduced a second
+    /// spelling of it. `#[cfg(test)]` because that assertion is the only
+    /// caller — `register` already holds the value, and `deregister` reads the
+    /// field directly.
+    #[cfg(test)]
+    pub(crate) fn key(&self) -> &Path {
+        &self.key
+    }
+}
+
 impl Drop for HookRegistration {
     fn drop(&mut self) {
         self.dispatch.deregister(&self.key, self.id);
