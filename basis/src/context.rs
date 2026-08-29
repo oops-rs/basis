@@ -184,7 +184,14 @@ fn default_global_dir() -> Option<PathBuf> {
 }
 
 /// Anything that can go wrong while discovering context.
+///
+/// `#[non_exhaustive]` for the reason [`RunError`](crate::RunError) is, and
+/// added in the same release as the variant that made the point: this enum was
+/// the last public error type here a caller could match exhaustively, so every
+/// new way discovery can fail broke that match. `ContextFileNameNotBare` is
+/// the last variant addition that costs a downstream crate a compile.
 #[derive(Debug, Error)]
+#[non_exhaustive]
 pub enum ContextError {
     #[error(
         "context file name '{name}' is not a file name; \
