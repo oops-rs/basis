@@ -439,10 +439,15 @@ periodic check — so no single use case bends the API toward itself.
   + protocol is weeks, not days, to polish. The phase order front-loads the embeddable core.
 - **Extension expressiveness.** Narrower than it was: an embedding Rust host now writes an
   `Interceptor` in its own process with its own types, which is the case subprocess hooks
-  were worst at. What remains untested is the other audience — a *repository* whose guard
-  has to be a program, in any language, with JSON on stdin. If that proves coarser than
-  pi's in-process TS extensions, the escalation path (wasm/rhai) is named but deferred
-  until friction is shown.
+  were worst at. The other audience — a *repository* whose guard has to be a program, in
+  any language, with JSON on stdin — is no longer untested: `basis/tests/hooks/` drives a
+  real `.basis/hooks.json`, real scripts on disk and real processes, two of its cases
+  through a real runtime so that a rewritten input is shown reaching the tool, and
+  `basis/tests/declared_tools.rs` does the same for `.basis/tools.json`. Both are
+  `#![cfg(unix)]`, because a shell script is the cheapest real program to exercise. What
+  those suites cannot answer is the question this risk is actually about — whether the
+  shape is *expressive* enough beside pi's in-process TS extensions. If it proves coarser,
+  the escalation path (wasm/rhai) is named but deferred until friction is shown.
 - **ACP crate maturity.** Official but young; budget for permission-flow gaps; acp-ui's traffic
   monitor is the debugger.
 - **Mentra co-evolution.** Same author on both sides: gaps basis hits become mentra changes, not
