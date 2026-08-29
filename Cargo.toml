@@ -23,11 +23,25 @@ basis-acp = { version = "0.9", path = "basis-acp" }
 # that is now merely their first client.
 basis-tasks = { version = "0.9", path = "basis-tasks" }
 
-# Mentra 0.23.4 is the runtime contract basis targets, and the floor is hard:
-# it reserves generated terminal output before execution and validates a
+# Mentra 0.24.0 is the runtime contract basis targets, and the floor is hard.
+# `CompactionBounds` and `Session::compact_with_bounds` are what let basis's
+# on-demand pass be taken back, and `AutoCompactTrigger` is what lets its two
+# threshold knobs say "a share of a known window and nothing else" — a posture
+# that had no spelling while a cleared token count was also the off switch.
+# Beside those: `BoundedCommand`, the spawn discipline basis's subprocess hooks
+# and declared tools need as a primitive rather than as a hand-rolled copy that
+# loses `env_clear` or the group kill one field at a time;
+# `unregister_skills_dir`, without which a workspace that closes leaves its
+# skills reachable on a runtime other workspaces are still running on; the
+# fixed gate order that runs every pre-execution hook *before* the tool
+# authorizer, so what a person approves is the narrowed command a hook left and
+# not the one the model wrote; and `validate_mcp_server_name`, which refuses a
+# server name that would collide in a bridged tool name before it is connected
+# rather than after. The 0.23.4 floor's reasons still hold beneath it: it
+# reserves generated terminal output before execution and validates a
 # candidate before that tool may terminate, which is the contract behind
 # Basis's report-preserving validated multipart output. The 0.23.3 floor's
-# reasons still hold beneath it:
+# reasons still hold beneath that:
 # its Session exposes the serialized, quiescent synchronous agent-event tap Basis forwards,
 # mentra-provider can mint fresh Responses session scopes for safe rebuilds,
 # and dropping a minted runtime releases its background observer state. The
