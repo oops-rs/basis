@@ -12,13 +12,12 @@ keywords = ["agent", "llm", "harness", "mentra", "durable"]
 categories = ["development-tools"]
 
 [dependencies]
+# basis alone (ADR-0022 decision 4). Resume recovery reads a resumed session's
+# own committed messages — the last assistant text, for the crashed process's
+# unrecorded result — through `PreparedRun::last_assistant_text`, the fact
+# basis exposes beside `answered_turns` so this crate never has to match on
+# `mentra::Role`, and so never has to name mentra to do it.
 basis.workspace = true
-# Resume recovery reads a resumed session's own committed messages: the last
-# assistant text, for the crashed process's unrecorded result. `history()`
-# returning `&[mentra::Message]` is basis's own public surface, not a reach
-# past it (contrast `PreparedRun::answered_turns`, the fact basis exposes
-# instead of a caller matching `mentra::Role` for it).
-mentra.workspace = true
 
 # The attach lock: one writer, ever, per task (ADR-0019). Already in the tree
 # via basis-cli, which is where this crate's implementation lived before
@@ -34,5 +33,4 @@ tokio.workspace = true
 uuid = { workspace = true, features = ["v4", "serde"] }
 
 [dev-dependencies]
-mentra = { workspace = true, features = ["test-utils"] }
 tokio = { workspace = true, features = ["time"] }

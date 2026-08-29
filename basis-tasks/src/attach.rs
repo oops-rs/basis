@@ -511,13 +511,8 @@ async fn run_model(
     let mut last_stopped_by: Option<Bound> = None;
     if reattached {
         initial_done = run.answered_turns() > meta.answered_before;
-        if let Some(message) = run
-            .history()
-            .iter()
-            .rev()
-            .find(|message| matches!(message.role, mentra::Role::Assistant))
-        {
-            last_result = message.text();
+        if let Some(text) = run.last_assistant_text() {
+            last_result = text;
         }
     }
 

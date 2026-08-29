@@ -298,7 +298,6 @@ version = "0.8.2"
 dependencies = [
  "basis",
  "fs2",
- "mentra",
  "serde",
  "serde_json",
  "tempfile",

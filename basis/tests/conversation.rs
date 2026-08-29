@@ -250,6 +250,54 @@ async fn answered_turns_counts_the_assistant_messages_only() {
     );
 }
 
+/// The text half of the same crash-recovery question `answered_turns` counts:
+/// once the watermark says the recorded prompt was already answered, the
+/// standing answer is what the crashed process never got to record. Reading it
+/// off `history()` means matching `mentra::Role` in the caller, which is the
+/// dependency `basis-tasks` carried a whole `mentra` entry for.
+#[tokio::test]
+async fn last_assistant_text_is_the_newest_committed_answer() {
+    let workspace = workspace();
+    let mock = mock(&["one", "two"]);
+    let session = mock
+        .runtime()
+        .create_session("test", mock.model())
+        .expect("session");
+
+    let mut prepared = prepare_with_session(
+        session,
+        workspace.path(),
+        "first",
+        &context(),
+        "openai",
+        "mock-model",
+    )
+    .expect("prepared");
+
+    assert_eq!(
+        prepared.last_assistant_text(),
+        None,
+        "nothing is committed before a turn runs"
+    );
+
+    prepared
+        .execute(CollectingSink::new())
+        .await
+        .expect("first turn");
+    assert_eq!(prepared.last_assistant_text().as_deref(), Some("one"));
+
+    prepared
+        .send("second", CollectingSink::new(), AllowAll)
+        .await
+        .expect("second turn");
+    assert_eq!(
+        prepared.last_assistant_text().as_deref(),
+        Some("two"),
+        "the newest answer, not the first — a user message committed after it \
+         must not become the answer"
+    );
+}
+
 #[tokio::test]
 async fn an_empty_follow_up_prompt_is_refused() {
     let workspace = workspace();
