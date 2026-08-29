@@ -23,17 +23,43 @@ basis-acp = { version = "0.10", path = "basis-acp" }
 # that is now merely their first client.
 basis-tasks = { version = "0.10", path = "basis-tasks" }
 
-# Mentra 0.24.0 is the runtime contract basis targets, and the floor is hard.
-# Three of its surfaces basis depends on today. `CompactionBounds` and
-# `Session::compact_with_bounds` are what let basis's on-demand pass be taken
-# back; `AutoCompactTrigger` is what lets its two threshold knobs say "a share
-# of a known window and nothing else" — a posture that had no spelling while a
-# cleared token count was also the off switch; and the fixed gate order that
-# runs every pre-execution hook *before* the tool authorizer is what makes the
-# thing a person approves the narrowed command a hook left rather than the one
-# the model wrote. basis writes no line of code for that last one, which is
-# exactly why the floor has to carry it: on an older runtime it would be lost
-# with nothing here to notice.
+# The 0.25 floor's reasons are two host-observable runtime contracts basis
+# depends on. First, the primary provider stream observes the run's cancellation
+# token and deadline while the provider request is opening *and* while the
+# runtime waits for the first model event. A provider that accepts the request
+# and then stalls cannot leave a host waiting forever: the run returns the
+# existing `RuntimeError::Cancelled` or `RuntimeError::DeadlineExceeded`.
+# Retry backoff observes those same hard bounds; after the first event, the
+# streaming path and its per-event `check_limits` behavior remain unchanged.
+# The runtime abandons its own wait when a bound wins, while whether a provider
+# transport aborts its underlying request remains provider-specific. This is a
+# runtime contract rather than a basis-side timeout, so an older floor would
+# silently restore the unbounded startup wait.
+#
+# Second, `McpStdioClient::connect` starts a server with `env_clear`, restores
+# Mentra's documented runnable baseline, and then layers the explicitly named
+# `McpServerConfig::env` entries. On Unix that baseline is `PATH`, `HOME`,
+# `TMPDIR`, `TMP`, `TEMP`, `LANG`, and `LC_ALL`; on Windows it is `PATH`,
+# `PATHEXT`, `SystemRoot`, `COMSPEC`, `TEMP`, and `TMP`. A `.mcp.json` author
+# must name every variable outside that baseline, including provider
+# credentials and proxy settings. The stdio process has a host process
+# group/tree lifecycle: disconnect or drop terminates it with its descendants,
+# while protocol frames and retained stderr remain bounded and stderr is
+# continuously drained. This is host-owned process and environment hygiene,
+# not a sandbox or confinement boundary; the server retains the host account's
+# filesystem and network authority. Basis depends on these observable
+# semantics rather than copying a second MCP launcher, so the floor is hard.
+#
+# The 0.24 floor's reasons still hold beneath it. Three of its surfaces basis
+# depends on today. `CompactionBounds` and `Session::compact_with_bounds` are
+# what let basis's on-demand pass be taken back; `AutoCompactTrigger` is what
+# lets its two threshold knobs say "a share of a known window and nothing else"
+# — a posture that had no spelling while a cleared token count was also the off
+# switch; and the fixed gate order that runs every pre-execution hook *before*
+# the tool authorizer is what makes the thing a person approves the narrowed
+# command a hook left rather than the one the model wrote. basis writes no line
+# of code for that last one, which is exactly why the floor has to carry it: on
+# an older runtime it would be lost with nothing here to notice.
 #
 # And three basis has not taken up yet but moved the floor for, because each
 # is a primitive it would otherwise have to hand-roll: `BoundedCommand`, the
@@ -80,7 +106,7 @@ basis-tasks = { version = "0.10", path = "basis-tasks" }
 # persistent store is the file-backed one, which is exactly ADR-0023's
 # posture — basis persists to files and links no database — so nothing
 # re-offers it.
-mentra = { version = "0.24.0", default-features = false }
+mentra = { version = "0.25.0", default-features = false }
 
 async-trait = "0.1"
 # ACP carries an image in a prompt as base64; basis's `PromptPart` carries the
