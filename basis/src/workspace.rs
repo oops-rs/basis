@@ -315,7 +315,7 @@ impl Workspace {
             apply_effort(&mut session, legacy_effort)?;
         }
 
-        // Mentra 0.22 exposes no resumed AgentConfig reader. The persisted
+        // Mentra 0.23 exposes no resumed AgentConfig reader. The persisted
         // agent may carry a per-run system override that differs from this
         // workspace's current default, so substituting `self.agent.system`
         // would turn an unknown estimate into a confidently wrong one.

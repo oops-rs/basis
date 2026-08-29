@@ -141,7 +141,7 @@ impl PreparedRun {
     ///
     /// [`Workspace::minted`](crate::workspace::Workspace) is the only caller.
     /// A fresh prepare records the final per-run prompt Basis handed Mentra;
-    /// resume records `None`, because Mentra 0.22 exposes no reader for the
+    /// resume records `None`, because Mentra 0.23 exposes no reader for the
     /// persisted agent config and its prompt may differ from the workspace's
     /// current default. [`prepare_with_session`](super::prepare_with_session),
     /// the path with no workspace, also leaves this unknown.
@@ -385,7 +385,7 @@ impl PreparedRun {
     /// **A floor, not the real number.** On a freshly prepared workspace run,
     /// Mentra may add a task-reminder banner and a skill-description block on
     /// top of the system prompt Basis configured. On a resumed run the floor
-    /// excludes the entire system prompt: Mentra 0.22 exposes no persisted
+    /// excludes the entire system prompt: Mentra 0.23 exposes no persisted
     /// `AgentConfig` reader, and substituting the current workspace default
     /// would be wrong when the original run carried a profile override. The
     /// effective prompt is private, so nothing outside Mentra can close either

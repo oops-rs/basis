@@ -121,7 +121,7 @@ pub enum RunError {
     /// and reasoning changes, because the profile or an effective legacy
     /// effort also changes reasoning.
     ///
-    /// Mentra 0.22 exposes one setter for each but no atomic combined update.
+    /// Mentra 0.23 exposes one setter for each but no atomic combined update.
     /// Refused before session lookup so a failed second write can never leave
     /// half of the host's profile in force.
     #[error(
