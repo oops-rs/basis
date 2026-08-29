@@ -135,6 +135,10 @@ alone, so it answers from what earlier turns gathered. Ask it to read *and* answ
 well-formed answer from a model that opened nothing, reported as a success. Either read on an
 ordinary turn and shape on the next, or hand the turn its tools back with `with_tools()`.
 
+A typed turn that produces no value returns an `OutputFailure`: the same `RunError` as ever in
+`failure.error`, beside `failure.report` — the usage, the bound that stopped it, and the sink —
+because those are facts about the run, not about whether a value came out of it.
+
 ### One allowance across many runs
 
 Dividing a limit across a fan-out starves the runs with something to say; granting it per run

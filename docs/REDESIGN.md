@@ -143,7 +143,7 @@ boundary it proves.
 | MCP behind a feature | 0011/0012 | **Built** (`a4c259c`) — `mcp`, default-on; `default-features = false` compiles a `basis` with no MCP concept at all [2] |
 | Approval enum → trait impls | 0010 | **Built** (`a4c259c`, `6192230`) — `ApprovalPolicy` is gone: `ApprovalGate` authorizes, `AllowAll` / `DenyAll` decide, the terminal approver is the binary's, and `basis_acp::ApprovalMode` holds the protocol's mode list. `--approve` is unchanged [3] [4] [5] |
 | `Workspace` / run split | 0010 | **Built** (`8b52ebf`) — `Workspace::open` settles context, credential, model, skills, templates, hooks, MCP connections and the approval gate once; `prepare(RunSpec)` mints a run *synchronously*, which is the honest signal that nothing is left to await. `Workspace::fingerprint()` lands on the type its row above promised it to. The free functions stay, as wrappers over `RunConfig::split` [6] [7] [14] |
-| `.output::<T>()` structured output | 0010 | **Built** (`07cf4d1`, over mentra `fce664a`; docs corrected in `dae4765`; the second mode in `b782e75` over mentra `be65c00`) — `PreparedRun::output::<T>()` and `output_with_options`, with `OutputSpec` / `OutputReport` basis's own and the schema the caller's to write. basis asks mentra for the raw `Value` and deserializes itself, which buys `RunError::OutputMismatch`. `OutputSpec::with_tools()` keeps the ordinary toolset on the turn, so read-then-shape is a choice rather than a ceremony [9] [12] |
+| `.output::<T>()` structured output | 0010 | **Built** (`07cf4d1`, over mentra `fce664a`; docs corrected in `dae4765`; the second mode in `b782e75` over mentra `be65c00`) — `PreparedRun::output::<T>()` and `output_with_options`, with `OutputSpec` / `OutputReport` basis's own and the schema the caller's to write. basis asks mentra for the raw `Value` and deserializes itself, which buys `RunError::OutputMismatch`. `OutputSpec::with_tools()` keeps the ordinary toolset on the turn, so read-then-shape is a choice rather than a ceremony. A turn that produces no value now returns `OutputFailure` — that same `RunError` beside the `RunReport` the turn earned — rather than dropping the usage, the bound, and the sink on the failing branch [9] [12] |
 | `BudgetPool` | 0010 | **Built** (`e21d632`) — the pool *is* mentra's shared `token_usage` counter, so `spent()` is the number the turns are stopped against rather than a tally reconciled later. `RunSpec::with_budget` / `TurnOptions::with_budget` attach one; an exhausted pool refuses the turn with `RunError::BudgetExhausted` before the prompt is sent [10] [11] |
 | Tagged sinks / event fan-in | 0010 | **Built** (`07cf4d1`) — `EventFanIn` mints one `TaggedSink` per run and merges them into `MergedEvents`; the tag rides outside `Event`, so the versioned wire schema is untouched [13] |
 | Cancellation on the public API | 0010 | **Built** (`07cf4d1`) — `TurnOptions::cancellable()` / `stoppable()` / `with_cancel` / `with_stop`, `execute_with_options` and its neighbours on every entry point, and `CancellationToken` re-exported under the rule the commit writes down: every mentra type basis's surface makes a caller *name*, basis re-exports [8] |
@@ -426,13 +426,15 @@ the wins is not a ledger:
     `RunError::BudgetExhausted` buys is narrower than it was, and still real:
     refusing before the prompt is committed beats committing it and reporting
     why afterwards.
-    **On a bound-ended typed turn the stream is the sole carrier.** A typed
-    turn with no value returns `Err`, and the report that would otherwise carry
-    `stopped_by` is not handed back — there is nothing to hand it back with. So
-    the only place the bound is named is `Event::RunFinished`, pinned by
-    `basis/tests/output.rs::a_working_turn_out_of_budget_says_so_on_the_stream`.
-    A host that drives typed turns and reads only reports will see a
-    `RunError::Runtime` with no bound in it.
+    **On a bound-ended typed turn the report is handed back too.** A typed turn
+    with no value returns `Err`, and that `Err` is now an `OutputFailure`: the
+    same `RunError` in `error`, and in `report` the `RunReport` the turn earned
+    — `stopped_by`, `usage`, and the sink. The stream still names the bound in
+    `Event::RunFinished` and the two must agree, pinned by
+    `basis/tests/output.rs::a_working_turn_out_of_budget_hands_back_the_bound_it_stopped_on`.
+    It read the other way round until then: the report was dropped on the
+    failing branch, and a host that drove typed turns and read only reports saw
+    a `RunError::Runtime` with no bound in it.
     **A run that answers *and* is bounded exits `3` printing nothing on
     stderr.** `basis/src/run.rs` announces on stderr only from the
     `RunOutcome::Error` arm, so an `Ok` result that carries a bound exits `3`

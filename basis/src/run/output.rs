@@ -33,7 +33,7 @@
 use mentra::{TerminalOutputReservation as MentraOutputReservation, TerminalOutputSpec};
 use serde_json::Value;
 
-use super::RunReport;
+use super::{RunError, RunReport};
 
 /// The shape a turn must answer in.
 ///
@@ -184,6 +184,82 @@ pub struct OutputReport<T, S> {
     pub report: RunReport<S>,
 }
 
+/// A typed turn that produced no value — and everything it reported anyway.
+///
+/// The turn still happened. It spent tokens, it may have been ended by a bound
+/// rather than by the work, and it wrote a whole stream into the sink the
+/// caller lent it. A typed turn used to build that [`RunReport`] and then drop
+/// it on the floor, returning a bare [`RunError`]; a caller charging runs
+/// against a shared allowance, or deciding between re-asking with a clearer
+/// schema and backing off, was left to reconstruct from the event log what the
+/// run had already written down. Library first (ADR-0003) is judged by the
+/// in-process Rust consumer, and this is the shape that consumer needs: the
+/// error *and* the account.
+///
+/// The error is deliberately the same [`RunError`] the turn returned before,
+/// not a second vocabulary for the same failure — two names for one thing is
+/// how a host ends up matching on the wrong one. [`From`] hands it straight
+/// back, so a caller that wants nothing but the error writes
+/// `.await.map_err(RunError::from)?` and receives exactly what it always did:
+/// [`RunError::OutputMismatch`] for an answer `T` refused,
+/// [`RunError::Runtime`] for a turn that failed or never called the terminal
+/// tool.
+///
+/// Distinct from [`RunFailure`](crate::RunFailure), which is mentra's own error
+/// as retained *inside* a report.
+#[derive(Debug)]
+pub struct OutputFailure<S> {
+    /// Why there is no value, in the same terms as before this type existed.
+    ///
+    /// On a runtime failure this is where mentra's original error lives, rather
+    /// than in [`RunReport::failure`]: a `RuntimeError` is not `Clone` and
+    /// cannot be in two places, and the error is where a caller reaching for
+    /// `?` looks. The validated path
+    /// ([`output_parts_validated_with_options`](super::PreparedRun::output_parts_validated_with_options))
+    /// returns `Ok`, so there the report is the only home and keeps it
+    /// (ADR-0024 §4).
+    pub error: RunError,
+    /// Everything the turn reported before it came up empty, sink included.
+    ///
+    /// `None` only when there was no turn to report on — an empty prompt, an
+    /// option set that cannot be drawn, a sink that refused a write, a
+    /// forwarding task that did not come back. Every failure *of the turn
+    /// itself* carries its report.
+    pub report: Option<RunReport<S>>,
+}
+
+impl<S> From<RunError> for OutputFailure<S> {
+    /// A failure with no turn behind it. See [`report`](OutputFailure::report).
+    fn from(error: RunError) -> Self {
+        Self {
+            error,
+            report: None,
+        }
+    }
+}
+
+impl<S> From<OutputFailure<S>> for RunError {
+    /// The error alone, worded exactly as the typed turn worded it before it
+    /// carried a report. The report — and with it the sink — is dropped here,
+    /// which is the whole cost of `?` and the reason the richer type is what
+    /// the turn returns.
+    fn from(failure: OutputFailure<S>) -> Self {
+        failure.error
+    }
+}
+
+impl<S> std::fmt::Display for OutputFailure<S> {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        self.error.fmt(f)
+    }
+}
+
+impl<S: std::fmt::Debug> std::error::Error for OutputFailure<S> {
+    fn source(&self) -> Option<&(dyn std::error::Error + 'static)> {
+        Some(&self.error)
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -257,5 +333,53 @@ mod tests {
 
         assert_eq!(template.clone(), template);
         assert_ne!(template, spec(), "and it is not the shaping spec");
+    }
+
+    fn a_mismatch() -> serde_json::Error {
+        serde_json::from_str::<u32>("\"not a number\"").expect_err("a mismatch")
+    }
+
+    #[test]
+    fn the_error_a_caller_reaches_through_question_mark_is_the_one_it_always_got() {
+        // The whole migration story: a host that only wants the error writes
+        // `?` and must receive the same variant it matched on before the
+        // report came along. A conversion that re-labelled here would break
+        // every such match silently, which is the failure mode this shape was
+        // chosen to avoid.
+        let failure: OutputFailure<()> = OutputFailure {
+            error: RunError::OutputMismatch(a_mismatch()),
+            report: None,
+        };
+
+        assert!(matches!(
+            RunError::from(failure),
+            RunError::OutputMismatch(_)
+        ));
+    }
+
+    #[test]
+    fn a_failure_with_no_turn_behind_it_carries_no_report() {
+        // Setup refusals — an empty prompt, an undrawable option set — happen
+        // before there is a turn to account for, and must say so rather than
+        // inventing an empty report for a run that never started.
+        let failure: OutputFailure<()> = RunError::EmptyPrompt.into();
+
+        assert!(failure.report.is_none());
+        assert!(matches!(failure.error, RunError::EmptyPrompt));
+    }
+
+    #[test]
+    fn a_failure_reads_as_the_error_it_carries() {
+        // `Display` is the error's, not a wrapper's: a host logging the failure
+        // should not have to learn a second wording for a failure it already
+        // knows how to print.
+        let error = RunError::OutputMismatch(a_mismatch());
+        let message = error.to_string();
+        let failure: OutputFailure<()> = OutputFailure {
+            error,
+            report: None,
+        };
+
+        assert_eq!(failure.to_string(), message);
     }
 }

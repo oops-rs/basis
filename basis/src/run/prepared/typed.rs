@@ -12,9 +12,9 @@ use serde::de::DeserializeOwned;
 use serde_json::Value;
 
 use super::{
-    Approver, Ended, EventSink, OutputAttempt, OutputAttemptReport, OutputDecision, OutputReport,
-    OutputReservation, OutputSpec, PreparedRun, PromptPart, RunError, TurnOptions, bounded,
-    drawable, prompt,
+    Approver, Ended, EventSink, OutputAttempt, OutputAttemptReport, OutputDecision, OutputFailure,
+    OutputReport, OutputReservation, OutputSpec, PreparedRun, PromptPart, RunError, TurnOptions,
+    bounded, drawable, prompt,
 };
 
 impl PreparedRun {
@@ -118,8 +118,12 @@ impl PreparedRun {
     /// arrives as [`Event::AssistantMessage`](crate::Event::AssistantMessage).
     ///
     /// Where a plain turn reports its failure on the stream and still returns
-    /// `Ok`, this returns `Err`: a typed turn without a value has nothing to
-    /// hand back.
+    /// `Ok`, this returns `Err`: a typed turn without a value has no
+    /// [`OutputReport`] to hand back. It hands back an [`OutputFailure`]
+    /// instead, which is the same error it always returned —
+    /// [`OutputFailure::error`] — beside the [`RunReport`](crate::RunReport)
+    /// the turn earned anyway. A caller that wants only the error writes
+    /// `.await.map_err(RunError::from)?` and is where it was before.
     ///
     /// - [`RunError::OutputMismatch`] — an answer arrived that `T` did not
     ///   accept. mentra commits the exchange before basis reads it, so the
@@ -131,16 +135,18 @@ impl PreparedRun {
     ///   them apart. A working turn ([`OutputSpec::with_tools`]) reaches the
     ///   second of those the most ways, since nothing forces its ending: it can
     ///   answer in prose, or be refused another round by a bound while it is
-    ///   still gathering. Which bound that was is on the stream, as
-    ///   [`Event::RunFinished`](crate::Event::RunFinished)'s `stopped_by` —
-    ///   [`Bound::TokenBudget`](crate::Bound::TokenBudget) for an
-    ///   allowance spent mid-gather — and only there, because the report that
-    ///   would otherwise carry it is not handed back when there is no value to
-    ///   hand back with it.
+    ///   still gathering. Which bound that was is on the report, as
+    ///   [`RunReport::stopped_by`](crate::RunReport::stopped_by) —
+    ///   [`Bound::TokenBudget`](crate::Bound::TokenBudget) for an allowance
+    ///   spent mid-gather — and on the stream, as
+    ///   [`Event::RunFinished`](crate::Event::RunFinished)'s `stopped_by`. The
+    ///   two say the same thing, which is why the report is worth returning:
+    ///   a caller should not have to re-read its own event log to learn that a
+    ///   budget, and not a broken provider, is what it just paid for.
     ///
-    /// The stream is complete and closed in every one of those cases, so a sink
-    /// with somewhere to put events — a file, a channel — has the whole run.
-    /// Only the sink *value* is lost, because it comes back inside the report.
+    /// The stream is complete and closed in every one of those cases, and the
+    /// sink comes back inside the report either way — so a `CollectingSink` on
+    /// a turn that produced nothing is still readable.
     ///
     /// ```no_run
     /// use serde::Deserialize;
@@ -187,7 +193,7 @@ impl PreparedRun {
         spec: OutputSpec,
         sink: S,
         approver: A,
-    ) -> Result<OutputReport<T, S>, RunError> {
+    ) -> Result<OutputReport<T, S>, OutputFailure<S>> {
         self.typed_turn(prompt.into(), spec, sink, approver, TurnOptions::default())
             .await
     }
@@ -206,7 +212,7 @@ impl PreparedRun {
         sink: S,
         approver: A,
         options: TurnOptions,
-    ) -> Result<OutputReport<T, S>, RunError> {
+    ) -> Result<OutputReport<T, S>, OutputFailure<S>> {
         self.typed_turn(prompt.into(), spec, sink, approver, options)
             .await
     }
@@ -228,7 +234,7 @@ impl PreparedRun {
         sink: S,
         approver: A,
         options: TurnOptions,
-    ) -> Result<OutputReport<T, S>, RunError> {
+    ) -> Result<OutputReport<T, S>, OutputFailure<S>> {
         let options = bounded(options, &self.bounds);
         drawable(&options)?;
         let parts = vec![PromptPart::Text(prompt)];
@@ -263,10 +269,21 @@ impl PreparedRun {
 
         let report = self.finish(turn, ended, &observed, usage).await?;
 
+        // The report is built either way and handed back either way. What the
+        // turn spent, which bound ended it, and the sink it wrote are facts
+        // about the run, not about whether a value came out of it — dropping
+        // them on the failing branch made the failing branch the one a caller
+        // could say least about (ADR-0003).
         match typed {
             Ok(Ok(value)) => Ok(OutputReport { value, report }),
-            Ok(Err(mismatch)) => Err(RunError::OutputMismatch(mismatch)),
-            Err(error) => Err(RunError::Runtime(error)),
+            Ok(Err(mismatch)) => Err(OutputFailure {
+                error: RunError::OutputMismatch(mismatch),
+                report: Some(report),
+            }),
+            Err(error) => Err(OutputFailure {
+                error: RunError::Runtime(error),
+                report: Some(report),
+            }),
         }
     }
 }

@@ -553,6 +553,28 @@ is no value and `output` returns `Err`. Put the stopping condition in the descri
 "call this once you have read every changed file" — which is exactly the wording the
 default mode warns you against.
 
+That `Err` is an `OutputFailure`, not a bare error, because the turn still happened. Its
+`error` field is the same `RunError` as ever — `OutputMismatch` for an answer the type
+refused, `Runtime` for a turn that failed or never answered — and its `report` is the
+`RunReport` the turn earned: what it spent, which bound stopped it, and the sink it wrote
+to, all of which a fan-out charging one allowance needs whether or not a value came out.
+`.map_err(RunError::from)` if you only want the error:
+
+```rust
+match run.output::<Findings, _, _>(prompt, findings_spec().with_tools(), sink, basis::AllowAll).await {
+    Ok(output) => …,
+    Err(failure) => {
+        // A budget, not a broken provider — and what it cost to find out.
+        let report = failure.report.expect("the turn ran");
+        eprintln!("{}: stopped by {:?} after {} tokens",
+            failure.error, report.stopped_by, report.usage.total_tokens());
+    }
+}
+```
+
+`report` is `None` only when there was no turn to report on: an empty prompt, an option set
+that cannot be drawn, or a sink that refused a write.
+
 ## One allowance, many runs
 
 Dividing a limit across a fan-out starves the runs with something to say; granting it per

@@ -44,7 +44,8 @@ use crate::{
 
 pub use bounds::Bounds;
 pub use output::{
-    OutputAttempt, OutputAttemptReport, OutputDecision, OutputReport, OutputReservation, OutputSpec,
+    OutputAttempt, OutputAttemptReport, OutputDecision, OutputFailure, OutputReport,
+    OutputReservation, OutputSpec,
 };
 pub use prepared::{
     AgentEventTapGuard, Compacted, LoadedSkill, PreparedRun, PromptPart, RunContext,
@@ -234,6 +235,13 @@ pub struct RunReport<S> {
     pub outcome: RunOutcome,
     /// Original typed runtime failure, before [`RunOutcome`] display/wire
     /// projection. `None` on success and on Basis-owned output-shape mismatch.
+    ///
+    /// Also `None` on a failed typed turn ([`PreparedRun::output`]), where the
+    /// same error is the [`OutputFailure::error`] the report arrives beside: a
+    /// `RunFailure` is not `Clone` and cannot be in both places, and the error
+    /// is the half a caller reaching for `?` gets. The validated path
+    /// ([`PreparedRun::output_parts_validated_with_options`]) returns `Ok`, so
+    /// there this field is the only home and keeps it (ADR-0024 §4).
     pub failure: Option<RunFailure>,
     /// Which bound ended the run, when one did rather than the work.
     ///
