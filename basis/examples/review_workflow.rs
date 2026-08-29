@@ -231,9 +231,15 @@ async fn review(
     // Turn two: shape it. The sink comes back inside the report and goes
     // straight into the next turn — and the report is not held past this line,
     // because a held report is a branch of the merged stream held open.
+    // `map_err(RunError::from)` because this reviewer has nothing to do with
+    // the rest of an `OutputFailure`: a shaping turn that produced no findings
+    // is one reviewer's silence, and the fan-in below already prices the run
+    // from the shared pool. A caller that wanted the usage, the bound, or the
+    // sink back would keep the failure whole instead.
     let OutputReport { value, .. } = run
         .output::<Findings, _, _>(SUBMIT, findings_spec(), report.sink, AllowAll)
-        .await?;
+        .await
+        .map_err(RunError::from)?;
 
     Ok(value)
 }
@@ -335,6 +341,7 @@ async fn verify(
     match judge
         .output::<Verdict, _, _>(prompt, verdict_spec(), NullSink, AllowAll)
         .await
+        .map_err(RunError::from)
     {
         Ok(OutputReport { value, .. }) => println!(
             "\nverdict: {} — {}",

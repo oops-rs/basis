@@ -24,8 +24,8 @@ use self::{
 };
 use super::{
     Bound, Effort, EventSink, ModelInfo, OutputAttempt, OutputAttemptReport, OutputDecision,
-    OutputReport, OutputReservation, OutputSpec, ReasoningOptions, RunError, RunReport, RunUsage,
-    TurnOptions,
+    OutputFailure, OutputReport, OutputReservation, OutputSpec, ReasoningOptions, RunError,
+    RunReport, RunUsage, TurnOptions,
     turn::{bounded, drawable},
 };
 use crate::{
@@ -846,7 +846,13 @@ impl PreparedRun {
                 RunOutcome::Error {
                     message: format!("output did not match the requested type: {mismatch}"),
                 },
-                None,
+                // The same question gets the same answer as on `Answered`,
+                // from the same place: this turn *completed*, so whether an
+                // allowance ended it is the run's own record to give
+                // ([`ended_on`]) and not a `None` this arm invents. A hardcoded
+                // answer here would be the second opinion these three arms
+                // exist to prevent.
+                ended_on(observed, None),
             ),
         };
 

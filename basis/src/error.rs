@@ -281,7 +281,9 @@ pub enum RunError {
     /// deserializes it here, so a value that does not fit `T` is a schema or
     /// prompt problem — retry with a clearer schema — while a provider failure
     /// is not. The exchange stays in the session's transcript either way; see
-    /// [`PreparedRun::output`](crate::PreparedRun::output).
+    /// [`PreparedRun::output`](crate::PreparedRun::output), which delivers this
+    /// inside an [`OutputFailure`](crate::OutputFailure) so the report the turn
+    /// earned comes with it.
     #[error("the run's output did not match the requested type: {0}")]
     OutputMismatch(#[source] serde_json::Error),
 

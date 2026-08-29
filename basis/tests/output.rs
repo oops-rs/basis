@@ -28,8 +28,8 @@ use std::{
 
 use async_trait::async_trait;
 use basis::{
-    AllowAll, Bound, CollectingSink, Event, FnSink, OutputAttempt, OutputDecision, OutputSpec,
-    PromptPart, RunError, RunOutcome, TurnOptions, run::prepare_with_session,
+    AllowAll, Bound, CollectingSink, Event, OutputAttempt, OutputDecision, OutputSpec, PromptPart,
+    RunError, RunOutcome, TurnOptions, run::prepare_with_session,
 };
 use mentra::{
     BuiltinProvider, ContentBlock, ModelInfo, Role, Runtime, RuntimePolicy, Session, TokenUsage,
@@ -576,7 +576,7 @@ async fn an_answer_in_the_wrong_shape_is_told_apart_from_a_failed_run() {
         ForcedToolProvider::answering(json!({ "verdict": "hold", "findings": "lots" })),
     );
 
-    let error = run
+    let failure = run
         .output::<Review, _, _>(
             "review this diff",
             review_spec(),
@@ -590,9 +590,68 @@ async fn an_answer_in_the_wrong_shape_is_told_apart_from_a_failed_run() {
     // with a clearer schema, a provider failure is worth backing off — so the
     // distinction has to be in the type rather than in the message text.
     assert!(
-        matches!(error, RunError::OutputMismatch(_)),
-        "expected a mismatch, got {error:?}"
+        matches!(failure.error, RunError::OutputMismatch(_)),
+        "expected a mismatch, got {:?}",
+        failure.error
     );
+
+    // And the label survives the way a host that only wants the error gets it:
+    // `?` through `From`, which must not re-word what it was handed.
+    let error = RunError::from(failure);
+    assert!(
+        matches!(error, RunError::OutputMismatch(_)),
+        "the conversion re-labelled the failure: {error:?}"
+    );
+}
+
+#[tokio::test]
+async fn a_typed_mismatch_hands_back_the_report_the_turn_earned() {
+    // The turn ran, spent tokens, wrote a whole stream, and then answered in a
+    // shape `T` refused. All of that is what the run *did*, and a caller
+    // charging a shared budget or deciding whether to re-ask needs it as much
+    // here as on the turn that succeeded (ADR-0003).
+    let dir = workspace();
+    let (_runtime, mut run) = prepared(
+        &dir,
+        ForcedToolProvider::answering(json!({ "verdict": "hold", "findings": "lots" }))
+            .reporting_usage(12, 3),
+    );
+
+    let failure = run
+        .output::<Review, _, _>(
+            "review this diff",
+            review_spec(),
+            CollectingSink::new(),
+            AllowAll,
+        )
+        .await
+        .expect_err("the value does not fit the type");
+
+    let report = failure.report.expect("a turn that ran has a report");
+    assert_eq!(
+        report.usage.total_tokens(),
+        15,
+        "what the failed turn spent"
+    );
+    assert_eq!(
+        report.stopped_by, None,
+        "nothing bounded this one, and the report says so rather than staying silent"
+    );
+    assert!(matches!(report.outcome, RunOutcome::Error { .. }));
+    assert!(
+        report.failure.is_none(),
+        "a mismatch is basis's own verdict, not a retained mentra failure"
+    );
+
+    // The sink comes back too, so a `CollectingSink` on a failed typed turn is
+    // not a stream the caller watched being written and can never read.
+    assert!(matches!(
+        report.sink.into_events().last(),
+        Some(Event::RunFinished {
+            outcome: RunOutcome::Error { .. },
+            ..
+        })
+    ));
 }
 
 #[tokio::test]
@@ -615,8 +674,9 @@ async fn a_run_that_never_calls_the_terminal_tool_produces_no_value() {
     // read error prose to separate them — so both land here. Narrowing this
     // needs an upstream variant, not a string match (ADR-0005).
     assert!(
-        matches!(error, RunError::Runtime(_)),
-        "expected a runtime failure, got {error:?}"
+        matches!(error.error, RunError::Runtime(_)),
+        "expected a runtime failure, got {:?}",
+        error.error
     );
 }
 
@@ -896,8 +956,9 @@ async fn a_working_turn_that_settles_for_prose_produces_no_value() {
         .expect_err("prose is not an answer to a typed ask");
 
     assert!(
-        matches!(error, RunError::Runtime(_)),
-        "expected a runtime failure, got {error:?}"
+        matches!(error.error, RunError::Runtime(_)),
+        "expected a runtime failure, got {:?}",
+        error.error
     );
     // And it is this mode's failure, not the old one: the turn had the whole
     // toolset in front of it for both rounds and still ended on talk.
@@ -912,12 +973,13 @@ async fn a_working_turn_that_settles_for_prose_produces_no_value() {
 }
 
 #[tokio::test]
-async fn a_working_turn_out_of_budget_says_so_on_the_stream() {
+async fn a_working_turn_out_of_budget_hands_back_the_bound_it_stopped_on() {
     // A working turn can be refused another round while it is still gathering,
     // which is the one way it fails that reads exactly like a broken provider.
-    // The report that would name the bound is not returned — there is no value
-    // to return it with — so the stream is where a caller has to be able to
-    // find it.
+    // Telling the two apart is the report's job — `stopped_by` names the
+    // allowance — so the report has to survive the failure and not only the
+    // stream. It used to be the other way round, and a caller that wanted the
+    // bound had to sift its own event log for it.
     let dir = workspace();
     let provider = ScriptedModel::new(vec![
         Say::Read,
@@ -928,33 +990,38 @@ async fn a_working_turn_out_of_budget_says_so_on_the_stream() {
     let model = provider.model.clone();
     let (_runtime, mut run) = prepared_with(&dir, provider, model);
 
-    // The sink is a closure over shared state rather than a `CollectingSink`,
-    // because a failed typed turn keeps the report the sink comes back inside.
-    let events = Arc::new(Mutex::new(Vec::new()));
-    let recorded = Arc::clone(&events);
-
-    // `let else` rather than `expect_err`, which would want the success type to
-    // be `Debug` and so want it of the sink.
-    let Err(error) = run
+    // An ordinary `CollectingSink`: the sink now comes back inside the report
+    // the failure carries, so a test no longer needs a closure over shared
+    // state to read the stream of a turn that produced nothing.
+    let failure = run
         .output_with_options::<Review, _, _>(
             "read AGENTS.md, then review this diff",
             review_spec().with_tools(),
-            FnSink::new(move |event| {
-                recorded.lock().expect("not poisoned").push(event);
-                Ok(())
-            }),
+            CollectingSink::new(),
             AllowAll,
             TurnOptions::default().with_token_budget(100),
         )
         .await
-    else {
-        panic!("a turn stopped before the terminal call has no value");
-    };
+        .expect_err("a turn stopped before the terminal call has no value");
 
     assert!(
-        matches!(error, RunError::Runtime(_)),
-        "expected a runtime failure, got {error:?}"
+        matches!(failure.error, RunError::Runtime(_)),
+        "expected a runtime failure, got {:?}",
+        failure.error
     );
+
+    let report = failure.report.expect("a turn that ran has a report");
+    assert_eq!(
+        report.stopped_by,
+        Some(Bound::TokenBudget),
+        "the allowance, not the provider, is what ended it"
+    );
+    assert_eq!(
+        report.usage.total_tokens(),
+        100,
+        "and what it spent getting there"
+    );
+
     let offers = handle.offers();
     assert_eq!(
         offers.len(),
@@ -966,16 +1033,16 @@ async fn a_working_turn_out_of_budget_says_so_on_the_stream() {
         "and it was a working turn that got cut off: {offers:?}"
     );
 
-    let events = events.lock().expect("not poisoned").clone();
+    // The stream still says the same thing, because a client reading JSONL has
+    // no report to read it off — the two accounts must not disagree.
     assert!(
         matches!(
-            events.last(),
+            report.sink.into_events().last(),
             Some(Event::RunFinished {
                 stopped_by: Some(Bound::TokenBudget),
                 ..
             })
         ),
-        "the allowance, not the provider, is what ended it: {:?}",
-        events.last()
+        "the stream and the report tell one story"
     );
 }
