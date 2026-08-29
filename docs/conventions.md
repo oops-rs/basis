@@ -231,11 +231,13 @@ file written before the third transport existed keeps its meaning. Unknown
 keys are tolerated — the file is shared with other agents. `${VAR}` expands. A file
 that exists but names no `mcpServers` is an error, because a typo would
 otherwise disable every server silently. An ACP client's `session/new` servers
-outrank both files. A server name may not contain `__`: mentra namespaces a
-bridged tool as `mcp__{server}__{tool}` and recovers the split on the first
-`__` it finds, so a name like `evil__foo` would be parsed back as server
-`evil` — the rule applies wherever a server name comes from, not just this
-file.
+outrank both files. A server name may not contain `__` or end in `_`: mentra
+namespaces a bridged tool as `mcp__{server}__{tool}` and recovers the split
+on the first `__` it finds, so a name like `evil__foo` would be parsed back
+as server `evil`, and a name like `evil_` joins its trailing `_` to a tool's
+leading `_` the same way — `evil_` with tool `_thing` encodes identically to
+`evil` with tool `__thing`. The rule applies wherever a server name comes
+from, not just this file.
 
 ### Memory files
 
