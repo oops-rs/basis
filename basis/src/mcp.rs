@@ -204,6 +204,48 @@ impl McpServer {
             Self::Stdio(_) | Self::Sse(_) => None,
         }
     }
+
+    /// Rejects a name mentra's own tool-namespacing cannot round-trip.
+    ///
+    /// mentra encodes every bridged tool as `mcp__{server}__{tool}` and
+    /// recovers the split with `str::split_once("__")`, taking the *first*
+    /// `__` as the boundary (mentra's `parse_mcp_tool_name`,
+    /// `mcp/bridge.rs`). A server named e.g. `evil__foo` would put a second
+    /// `__` ahead of that boundary: the encoded name
+    /// `mcp__evil__foo__real_tool` parses back as server `evil`, tool
+    /// `foo__real_tool` — indistinguishable from a server actually named
+    /// `evil`. This crate's own foreign-tool check in `workspace.rs` trusts
+    /// that same split, so a shared runtime would then attribute
+    /// `evil__foo`'s tools to `evil`, and any two servers whose names differ
+    /// only by where a `__` falls would collide in the roster.
+    ///
+    /// A name ending in a single `_` is the same hole in disguise: mentra
+    /// joins it to the literal `__` in the format string, so server `evil_`
+    /// with tool `_thing` encodes to `mcp__evil____thing` — byte-identical
+    /// to server `evil` with tool `__thing`. Barring `__` inside the name
+    /// and a trailing `_` together guarantee the first `__` in the encoded
+    /// name is genuinely the separator mentra intended, which is what makes
+    /// this the whole rule rather than half of it.
+    ///
+    /// This is the boundary check basis owns for names it hands to mentra,
+    /// not a permanent stand-in for mentra validating its own encoding —
+    /// see [oops-rs/mentra#29](https://github.com/oops-rs/mentra/issues/29).
+    pub fn validate_name(name: &str) -> Result<(), &'static str> {
+        if name.contains("__") {
+            Err(
+                "has a name containing `__`, which mentra's `mcp__{server}__{tool}` \
+                 tool-name encoding uses as the separator between server and tool",
+            )
+        } else if name.ends_with('_') {
+            Err(
+                "has a name ending in `_`, which would join mentra's `__` separator \
+                 into an earlier boundary — server `evil_` with tool `_thing` encodes \
+                 to the same `mcp__evil____thing` as server `evil` with tool `__thing`",
+            )
+        } else {
+            Ok(())
+        }
+    }
 }
 
 /// Which MCP servers a run gets: where to look for configured ones, and any
@@ -380,6 +422,20 @@ pub(crate) fn configured(
     config: &McpConfig,
 ) -> Result<Vec<ConfiguredServer>, McpError> {
     let discovered = discovered(workspace, config)?;
+
+    // `.mcp.json` and an ACP client's `mcpServers` already check their own
+    // entries at the door — see [`McpServer::validate_name`]. A Rust host's
+    // own list, set through [`crate::workspace::WorkspaceBuilder::with_mcp`],
+    // has no door of its own to check at: nothing stops it building an
+    // [`McpServer`] directly. This is the one place every source has already
+    // converged, so it is where that last gap gets closed.
+    for server in &config.supplied {
+        McpServer::validate_name(server.name()).map_err(|reason| McpError::Invalid {
+            origin: "the supplied MCP server list".to_string(),
+            name: server.name().to_string(),
+            reason: reason.to_string(),
+        })?;
+    }
 
     Ok(layer(
         config
@@ -566,6 +622,58 @@ mod tests {
             "from-the-client",
             "the client is answering for this session in particular"
         );
+    }
+
+    #[test]
+    fn a_supplied_server_with_a_double_underscore_name_is_rejected() {
+        // Nothing stops a Rust host building an `McpServer` directly and
+        // handing it to `WorkspaceBuilder::with_mcp` — this is the one
+        // producer `.mcp.json` and an ACP client's `mcpServers` cannot check
+        // at their own door, so `configured` is where the check lands for
+        // this source instead. See [`McpServer::validate_name`].
+        let tmp = tempfile::tempdir().expect("tempdir");
+
+        let config = McpConfig {
+            supplied: vec![McpServer::Stdio(McpServerConfig {
+                name: "evil__foo".to_string(),
+                command: "from-the-host".to_string(),
+                args: Vec::new(),
+                env: Default::default(),
+                cwd: None,
+            })],
+            ..config(None)
+        };
+
+        let error =
+            servers(tmp.path(), &config).expect_err("mentra's split would misparse this name");
+
+        assert!(matches!(error, McpError::Invalid { .. }), "{error}");
+        assert!(error.to_string().contains("tool-name encoding"), "{error}");
+    }
+
+    #[test]
+    fn a_supplied_server_with_a_trailing_underscore_name_is_rejected() {
+        // `evil_` doesn't contain `__` itself, but a tool named `_thing`
+        // joins onto it: `mcp__evil____thing` is byte-identical to server
+        // `evil` with tool `__thing`. See [`McpServer::validate_name`].
+        let tmp = tempfile::tempdir().expect("tempdir");
+
+        let config = McpConfig {
+            supplied: vec![McpServer::Stdio(McpServerConfig {
+                name: "evil_".to_string(),
+                command: "from-the-host".to_string(),
+                args: Vec::new(),
+                env: Default::default(),
+                cwd: None,
+            })],
+            ..config(None)
+        };
+
+        let error = servers(tmp.path(), &config)
+            .expect_err("a trailing `_` can join a tool's leading `_` into a fake separator");
+
+        assert!(matches!(error, McpError::Invalid { .. }), "{error}");
+        assert!(error.to_string().contains("ending in `_`"), "{error}");
     }
 
     #[test]
