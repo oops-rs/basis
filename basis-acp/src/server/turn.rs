@@ -11,7 +11,8 @@
 //! ACP has no separate method for invoking a command — a client sends what the
 //! person typed — so the only place a built-in can be recognized is where a
 //! prompt arrives, and it is the same place because it needs the same turn
-//! lock.
+//! lock. A workspace template's name is recognized here for the same reason,
+//! and rendered into the prompt it stands for on the way to the model.
 //!
 //! [`NotificationSink`] is here rather than beside [`session_update`] because
 //! it is that mapping bound to one connection and one session, which is a
@@ -20,8 +21,8 @@
 use agent_client_protocol::{
     Client, ConnectionTo,
     schema::v1::{
-        ContentBlock, Error, ImageContent, PromptRequest, PromptResponse, SessionId, SessionUpdate,
-        StopReason, UsageUpdate,
+        BlobResourceContents, ContentBlock, EmbeddedResourceResource, Error, PromptRequest,
+        PromptResponse, SessionId, SessionUpdate, StopReason, UsageUpdate,
     },
 };
 use base64::Engine;
@@ -61,12 +62,6 @@ pub(super) async fn prompt(
         return run_builtin(&session, connection, &request.session_id, builtin).await;
     }
 
-    // The session's mode decides which of these requests the client actually
-    // sees; the runtime surfaces every consequential call so that it can.
-    let approver = ModedApprover::new(
-        session.modes().clone(),
-        AcpApprover::new(request.session_id.clone(), connection.clone()),
-    );
     let sink = NotificationSink::new(request.session_id.clone(), connection.clone());
 
     // Held across the turn: one conversation runs one turn at a time, which is
@@ -75,6 +70,26 @@ pub(super) async fn prompt(
     let mut run = session.lock_turn().await;
     let options = session.begin_turn();
     let cancelled = options.cancel.clone();
+
+    // Under the lock, because the templates live on the run: a `/review`
+    // the client offered from `AvailableCommandsUpdate` comes back as the
+    // text `/review the diff`, and the model must read what the template
+    // says, not the slash line.
+    let parts = commands::expand(parts, &run.context().templates);
+
+    // Built after the turn is armed, because the approver needs the turn's
+    // interrupt: a cancel has to reach a request the client is still looking
+    // at, or the turn waits for an answer nobody is going to give. The
+    // session's mode decides which of these requests the client actually
+    // sees; the runtime surfaces every consequential call so that it can.
+    let asking = AcpApprover::new(request.session_id.clone(), connection.clone());
+    let asking = match session.interrupt() {
+        Some(interrupt) => asking.interrupted_by(interrupt),
+        // Cancelled between arming and here: the token is already tripped
+        // and mentra refuses the turn before anything is asked.
+        None => asking,
+    };
+    let approver = ModedApprover::new(session.modes().clone(), asking);
 
     let report = run.send_parts(parts, sink, approver, options).await;
     session.end_turn();
@@ -95,31 +110,57 @@ pub(super) async fn prompt(
         );
     }
 
-    // A cancelled turn fails inside mentra, so the token — not the error — is
-    // what distinguishes "the client stopped it" from "it broke". ACP requires
-    // `Cancelled` in that case.
-    if cancelled.is_some_and(|token| token.is_cancelled()) {
-        return Ok(PromptResponse::new(StopReason::Cancelled));
-    }
-
-    match report {
+    let ended = match report {
         // The bound is read before the outcome, because a bound that ended a
         // turn is the answer whichever way the turn came back. `TokenBudget`
         // is graceful and can arrive on a run that answered (see
         // `Bound::TokenBudget`), and reporting that as `EndTurn` would drop
         // the one fact the client needs to know: there would have been more.
         Ok(report) => match report.stopped_by {
-            Some(bound) => Ok(PromptResponse::new(stop_reason(bound))),
-            None if report.succeeded() => Ok(PromptResponse::new(StopReason::EndTurn)),
-            None => Err(Error::internal_error().data(match report.outcome {
+            Some(bound) => Ended::Bounded(bound),
+            None if report.succeeded() => Ended::Answered,
+            None => Ended::Failed(match report.outcome {
                 basis::RunOutcome::Error { message } => message,
                 // `Ok` without a final message — or an outcome this build
                 // does not know — either way the turn failed without words
                 // of its own.
                 _ => "the turn failed".to_string(),
-            })),
+            }),
         },
-        Err(error) => Err(Error::internal_error().data(error.to_string())),
+        Err(error) => Ended::Failed(error.to_string()),
+    };
+
+    stop_reason_for(ended, cancelled.is_some_and(|token| token.is_cancelled()))
+}
+
+/// How a turn came back, reduced to what the stop reason depends on.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(super) enum Ended {
+    /// A bound ended it; committed work is kept.
+    Bounded(basis::Bound),
+    /// The model answered.
+    Answered,
+    /// It failed, with these words.
+    Failed(String),
+}
+
+/// The `session/prompt` response for a turn that ended as `ended`, given
+/// whether its cancellation token was tripped.
+///
+/// A cancelled turn fails inside mentra, so the token — not the error — is
+/// what distinguishes "the client stopped it" from "it broke", and ACP
+/// requires `Cancelled` for the first. But the token is read *after* the turn
+/// and mentra reads it only at round boundaries, so a stop pressed after the
+/// last boundary finds a turn that already answered. That turn is reported as
+/// what it was: the answer streamed and was kept, and calling it `Cancelled`
+/// would tell the client it was thrown away. The token decides only when the
+/// turn did not come back on its own.
+pub(super) fn stop_reason_for(ended: Ended, cancelled: bool) -> Result<PromptResponse, Error> {
+    match ended {
+        Ended::Bounded(bound) => Ok(PromptResponse::new(stop_reason(bound))),
+        Ended::Answered => Ok(PromptResponse::new(StopReason::EndTurn)),
+        Ended::Failed(_) if cancelled => Ok(PromptResponse::new(StopReason::Cancelled)),
+        Ended::Failed(message) => Err(Error::internal_error().data(message)),
     }
 }
 
@@ -242,8 +283,25 @@ pub(super) fn prompt_parts(blocks: &[ContentBlock]) -> Result<Vec<PromptPart>, E
         match block {
             ContentBlock::Image(image) => {
                 flush(&mut text, &mut parts);
-                parts.push(image_part(image)?);
+                parts.push(image_part(&image.data, &image.mime_type)?);
             }
+            // An image that arrived as an embedded resource — a client
+            // attaching a screenshot from a file sends the same bytes in this
+            // envelope — is the same image, and goes the same way.
+            ContentBlock::Resource(resource) => match image_blob(&resource.resource) {
+                Some(blob) => {
+                    flush(&mut text, &mut parts);
+                    parts.push(image_part(
+                        &blob.blob,
+                        blob.mime_type.as_deref().unwrap_or_default(),
+                    )?);
+                }
+                None => {
+                    if let Some(line) = block_text(block) {
+                        text.push(line);
+                    }
+                }
+            },
             other => {
                 if let Some(line) = block_text(other) {
                     text.push(line);
@@ -263,6 +321,24 @@ fn flush(text: &mut Vec<String>, parts: &mut Vec<PromptPart>) {
     }
 }
 
+/// An embedded resource's binary contents, when they are an image.
+///
+/// Decided by the declared media type, because that is the only thing that
+/// says what the bytes are; a blob without one is not guessed at.
+fn image_blob(resource: &EmbeddedResourceResource) -> Option<&BlobResourceContents> {
+    match resource {
+        EmbeddedResourceResource::BlobResourceContents(blob)
+            if blob
+                .mime_type
+                .as_deref()
+                .is_some_and(|mime| mime.starts_with("image/")) =>
+        {
+            Some(blob)
+        }
+        _ => None,
+    }
+}
+
 /// One ACP image, as bytes.
 ///
 /// ACP carries the payload base64-encoded and mentra takes the bytes, so this
@@ -271,29 +347,36 @@ fn flush(text: &mut Vec<String>, parts: &mut Vec<PromptPart>) {
 /// says why it could not be sent, and `uri` — which ACP allows alongside the
 /// data — is not a fallback basis can use, because Gemini rejects a URL image
 /// outright.
-fn image_part(image: &ImageContent) -> Result<PromptPart, Error> {
+fn image_part(data: &str, mime_type: &str) -> Result<PromptPart, Error> {
     let data = base64::engine::general_purpose::STANDARD
-        .decode(&image.data)
+        .decode(data)
         .map_err(|error| {
             Error::invalid_params().data(format!("image data is not valid base64: {error}"))
         })?;
 
-    Ok(PromptPart::image(image.mime_type.clone(), data))
+    Ok(PromptPart::image(mime_type.to_string(), data))
 }
 
 /// The text of one block, for the blocks that have some.
 ///
-/// Resource links and embedded resources are named rather than inlined: basis
-/// does not fetch on the client's behalf, and dropping them silently would
-/// lose what the user attached.
+/// Resource links, and embedded resources basis cannot carry, are named rather
+/// than inlined: basis does not fetch on the client's behalf, mentra has no
+/// block for a PDF, and dropping either silently would lose what the user
+/// attached — the model would answer as though nothing had been.
 fn block_text(block: &ContentBlock) -> Option<String> {
     match block {
         ContentBlock::Text(text) => Some(text.text.clone()),
         ContentBlock::ResourceLink(link) => Some(format!("[{}]({})", link.name, link.uri)),
         ContentBlock::Resource(resource) => match &resource.resource {
-            agent_client_protocol::schema::v1::EmbeddedResourceResource::TextResourceContents(
-                contents,
-            ) => Some(contents.text.clone()),
+            EmbeddedResourceResource::TextResourceContents(contents) => Some(contents.text.clone()),
+            // Image blobs were taken by `prompt_parts` before this is asked;
+            // what is left is something basis cannot send as itself.
+            EmbeddedResourceResource::BlobResourceContents(blob) => {
+                Some(format!("[{}]({})", blob.uri, blob.uri))
+            }
+            // The enum is `#[non_exhaustive]`: a kind this build does not
+            // know is one basis cannot carry, and it says nothing it cannot
+            // read.
             _ => None,
         },
         _ => None,

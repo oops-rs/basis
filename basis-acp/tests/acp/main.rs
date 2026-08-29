@@ -25,6 +25,7 @@
 mod client;
 mod source;
 
+mod attach;
 mod bounds;
 mod commands;
 mod discovery;

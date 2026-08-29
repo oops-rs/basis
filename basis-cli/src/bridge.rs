@@ -20,6 +20,13 @@
 //! reaches its conversation the way any client does, through `session/load`,
 //! because mentra persists the agent behind it.
 //!
+//! Two tabs are not two views of one conversation, though. Every connection
+//! is served from the one [`ServeConfig`] and so from the one runtime, and
+//! mentra leases an agent to the session holding it: a tab that loads a
+//! conversation another tab is holding is refused, in words that say so,
+//! until the first closes it or goes away. That is ADR-0019's attach
+//! discipline, and the bridge adds nothing beside it.
+//!
 //! # What this socket is worth to an attacker
 //!
 //! Everything the agent can do. It writes to the workspace, and where shell is

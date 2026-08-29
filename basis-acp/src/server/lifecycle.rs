@@ -390,13 +390,32 @@ pub(super) async fn delete_session(
 
 /// Turns a setup failure into the error a client can act on.
 ///
+/// Two failures have a remedy the client can carry out; the rest are basis's.
+///
 /// A missing credential is the one failure with a remedy the protocol has a
 /// name for. basis advertises no auth method to fix it with — there is no login,
 /// only an environment variable — so the message carries the variable's name,
 /// which is the actionable part.
+///
+/// A conversation that is already open is the other. mentra leases an agent to
+/// the session holding it, for as long as that session lives, so a
+/// `session/load` of a conversation another connection to this process — or
+/// another process — is holding is refused by the runtime itself. That is the
+/// attach discipline of ADR-0019 at the protocol edge, and basis keeps no set
+/// of its own beside it. What basis owes the client is the reading: reported
+/// as `-32603` it looked like basis breaking, when the fix is to close the
+/// conversation where it is open.
 pub(super) fn setup_failed(error: basis::RunError) -> Error {
     if is_missing_credential(&error) {
         return Error::auth_required().data(error.to_string());
+    }
+
+    if is_open_elsewhere(&error) {
+        return Error::invalid_params().data(format!(
+            "this conversation is already open — on another connection to this process, or in \
+             another process — and one connection drives it at a time; close it there first \
+             ({error})"
+        ));
     }
 
     Error::internal_error().data(error.to_string())
@@ -406,5 +425,12 @@ fn is_missing_credential(error: &basis::RunError) -> bool {
     matches!(
         error,
         RunError::Provider(ProviderError::NoCredential | ProviderError::MissingCredential { .. })
+    )
+}
+
+fn is_open_elsewhere(error: &basis::RunError) -> bool {
+    matches!(
+        error,
+        RunError::Runtime(mentra::error::RuntimeError::LeaseUnavailable(_))
     )
 }

@@ -15,7 +15,7 @@ use std::{
 };
 
 use agent_client_protocol::{
-    Agent, Channel, Client, ConnectionTo, Responder,
+    Agent, Channel, Client, ConnectionTo, Error, Responder,
     schema::{
         ProtocolVersion,
         v1::{
@@ -39,6 +39,38 @@ const NOT_STUCK: Duration = Duration::from_secs(10);
 pub(crate) struct Observed {
     pub(crate) updates: Vec<SessionUpdate>,
     pub(crate) permission_requests: Vec<RequestPermissionRequest>,
+    /// Permission requests a handler chose to leave unanswered, held here so
+    /// the responder stays alive: a person who has not decided yet is a
+    /// responder nobody has used, not one that was dropped.
+    pub(crate) unanswered: Vec<Responder<RequestPermissionResponse>>,
+}
+
+/// What the client does when the agent asks permission. It is handed the
+/// request, the responder and the connection, and may answer at once, hold
+/// the answer, or do something else to the session first.
+pub(crate) type OnPermission = Arc<
+    dyn Fn(
+            RequestPermissionRequest,
+            Responder<RequestPermissionResponse>,
+            ConnectionTo<Agent>,
+            &Arc<Mutex<Observed>>,
+        ) -> Result<(), Error>
+        + Send
+        + Sync,
+>;
+
+/// A client that answers every permission request with `answer`, or, given
+/// `None`, with `Cancelled` — a client not prepared to be asked.
+pub(crate) fn answering(answer: Option<&'static str>) -> OnPermission {
+    Arc::new(move |_request, responder, _connection, _observed| {
+        let outcome = match answer {
+            Some(option) => RequestPermissionOutcome::Selected(SelectedPermissionOutcome::new(
+                option.to_string(),
+            )),
+            None => RequestPermissionOutcome::Cancelled,
+        };
+        responder.respond(RequestPermissionResponse::new(outcome))
+    })
 }
 
 impl Observed {
@@ -169,13 +201,27 @@ where
     Fut: Future<Output = Result<T, agent_client_protocol::Error>> + Send,
     T: Send + 'static,
 {
+    connected_with(ServeConfig::with_source(source), answering(answer), body).await
+}
+
+/// [`connected`], for a test that needs to say more: which [`ServeConfig`]
+/// the server runs on — two servers sharing one is how a second connection
+/// to the same process is stood up — and what the client does when asked
+/// permission.
+pub(crate) async fn connected_with<F, Fut, T>(
+    config: ServeConfig,
+    on_permission: OnPermission,
+    body: F,
+) -> (T, Arc<Mutex<Observed>>)
+where
+    F: FnOnce(ConnectionTo<Agent>) -> Fut + Send + 'static,
+    Fut: Future<Output = Result<T, agent_client_protocol::Error>> + Send,
+    T: Send + 'static,
+{
     let (client_side, agent_side) = Channel::duplex();
     let observed = Arc::new(Mutex::new(Observed::default()));
 
-    let server = tokio::spawn(basis_acp::serve(
-        ServeConfig::with_source(source),
-        agent_side,
-    ));
+    let server = tokio::spawn(basis_acp::serve(config, agent_side));
 
     let seen = Arc::clone(&observed);
     let recorded = Arc::clone(&observed);
@@ -198,8 +244,9 @@ where
         .on_receive_request(
             move |request: RequestPermissionRequest,
                   responder: Responder<RequestPermissionResponse>,
-                  _connection| {
+                  connection: ConnectionTo<Agent>| {
                 let recorded = Arc::clone(&recorded);
+                let on_permission = Arc::clone(&on_permission);
                 async move {
                     recorded
                         .lock()
@@ -207,13 +254,7 @@ where
                         .permission_requests
                         .push(request.clone());
 
-                    let outcome = match answer {
-                        Some(option) => RequestPermissionOutcome::Selected(
-                            SelectedPermissionOutcome::new(option.to_string()),
-                        ),
-                        None => RequestPermissionOutcome::Cancelled,
-                    };
-                    responder.respond(RequestPermissionResponse::new(outcome))
+                    on_permission(request, responder, connection, &recorded)
                 }
             },
             agent_client_protocol::on_receive_request!(),
@@ -236,7 +277,15 @@ where
         .expect("the conversation must not hang")
         .expect("the client drives cleanly");
 
-    server.abort();
+    // The client is gone, so the server must end — and it must have, before
+    // the next thing a test does, because what it does on the way out (letting
+    // go of the conversations this connection held) is what a second
+    // connection depends on. Aborting it here would skip exactly that.
+    tokio::time::timeout(NOT_STUCK, server)
+        .await
+        .expect("a server whose client went away must end")
+        .expect("the server task does not panic")
+        .expect("a client going away is the normal end of a connection, not an error");
 
     (result, observed)
 }

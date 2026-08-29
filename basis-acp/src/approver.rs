@@ -15,6 +15,18 @@
 //! module's request reaches the client, the loop can still read the answer.
 //! Driving a turn inline from the loop instead would deadlock permanently —
 //! the client answers, and nothing is listening.
+//!
+//! # Why the wait can be interrupted
+//!
+//! A person looking at a permission dialog can press stop instead of
+//! answering, close the session, or delete it. All three cancel the turn, and
+//! the turn is parked here, on an answer that is now never coming — mentra
+//! reads its cancellation flag at round boundaries, and a question mid-tool
+//! is not one (see [`session`](crate::session)). So the round trip is raced
+//! against the session's [`Interrupt`]: a cancel wins the race, the request
+//! to the client is withdrawn — dropping it sends `$/cancel_request`, which is
+//! how ACP says "never mind" — and the answer is a denial that names the
+//! reason, which carries the turn to the boundary where the flag ends it.
 
 use std::time::Duration;
 
@@ -26,6 +38,7 @@ use agent_client_protocol::{
     },
 };
 
+use crate::session::Interrupt;
 use basis::approval::{ApprovalAnswer, ApprovalDecision, ApprovalRequest, Approver};
 
 /// Option ids on the wire. Chosen by basis, echoed back by the client, and
@@ -47,6 +60,10 @@ const ANSWER_TIMEOUT: Duration = Duration::from_secs(30 * 60);
 pub struct AcpApprover {
     session_id: SessionId,
     connection: ConnectionTo<Client>,
+    /// What cuts a wait short. `None` waits for the client or the timeout,
+    /// whichever is first — a host driving this approver outside a session
+    /// has nothing to interrupt it with.
+    interrupt: Option<Interrupt>,
 }
 
 impl AcpApprover {
@@ -54,6 +71,16 @@ impl AcpApprover {
         Self {
             session_id,
             connection,
+            interrupt: None,
+        }
+    }
+
+    /// Gives up on a pending request when `interrupt` fires — the turn's
+    /// cancellation, see the module docs — rather than waiting out the client.
+    pub fn interrupted_by(self, interrupt: Interrupt) -> Self {
+        Self {
+            interrupt: Some(interrupt),
+            ..self
         }
     }
 }
@@ -72,11 +99,24 @@ impl Approver for AcpApprover {
             options(),
         );
 
-        match round_trip(&self.connection, outbound).await {
+        let asked = round_trip(&self.connection, outbound);
+        let outcome = match &mut self.interrupt {
+            Some(interrupt) => tokio::select! {
+                // Biased: an answer that has already arrived is a decision the
+                // person made, and it is read before a cancel that raced it.
+                biased;
+                outcome = asked => outcome,
+                () = interrupt.wait() => Err("the turn was cancelled".to_string()),
+            },
+            None => asked.await,
+        };
+
+        match outcome {
             Ok(outcome) => answer(&outcome, &request.tool_name),
-            // A failed round trip, a closed connection, or a client that never
-            // answered. Deny rather than assume consent, and say which it was
-            // — the model reads this, and "denied" alone invites a retry.
+            // A failed round trip, a closed connection, a client that never
+            // answered, or a turn cancelled while it was deciding. Deny rather
+            // than assume consent, and say which it was — the model reads
+            // this, and "denied" alone invites a retry.
             Err(why) => refused(&request.tool_name, &why),
         }
     }

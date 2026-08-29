@@ -14,15 +14,16 @@ use std::{
 use agent_client_protocol::schema::{
     ProtocolVersion,
     v1::{
-        ContentBlock, DeleteSessionRequest, ErrorCode, ImageContent, InitializeRequest,
-        ListSessionsRequest, ResourceLink, SessionCapabilities, StopReason, TextContent,
+        BlobResourceContents, ContentBlock, DeleteSessionRequest, EmbeddedResource,
+        EmbeddedResourceResource, ErrorCode, ImageContent, InitializeRequest, ListSessionsRequest,
+        ResourceLink, SessionCapabilities, StopReason, TextContent,
     },
 };
 
 use super::config::{Discovery, ServeConfig, SessionSource, SessionTemplate};
 use super::initialize;
 use super::lifecycle::{delete_session, list_sessions, session_info, setup_failed};
-use super::turn::{prompt_parts, prompt_text, stop_reason, usage_update};
+use super::turn::{Ended, prompt_parts, prompt_text, stop_reason, stop_reason_for, usage_update};
 use super::workspaces::{ConfiguredSource, WorkspaceKey};
 use crate::mode::ApprovalMode;
 use basis::{
@@ -300,6 +301,43 @@ fn an_image_that_cannot_be_decoded_is_refused_rather_than_dropped() {
 }
 
 #[test]
+fn an_embedded_image_blob_arrives_as_the_image_it_is() {
+    // `initialize` claims `embeddedContext`, and a client that attaches a
+    // screenshot from a file may send it as an embedded resource rather than
+    // an image block — same bytes, different envelope. Dropping the envelope
+    // basis did not recognize dropped the screenshot.
+    let blob = BlobResourceContents::new("AQID", "file:///shot.png").mime_type("image/png");
+    let parts = prompt_parts(&[
+        ContentBlock::Text(TextContent::new("what is this".to_string())),
+        ContentBlock::Resource(EmbeddedResource::new(
+            EmbeddedResourceResource::BlobResourceContents(blob),
+        )),
+    ])
+    .expect("valid base64 decodes");
+
+    assert_eq!(
+        parts,
+        vec![
+            PromptPart::text("what is this"),
+            PromptPart::image("image/png", vec![1, 2, 3]),
+        ]
+    );
+}
+
+#[test]
+fn an_embedded_blob_basis_cannot_carry_is_named_rather_than_dropped() {
+    // mentra has no block for a PDF. The same rule as a resource link: say
+    // what was attached, so the model knows there was something it did not
+    // get, rather than answering as though nothing was.
+    let blob = BlobResourceContents::new("AQID", "file:///report.pdf").mime_type("application/pdf");
+    let text = prompt_text(&[ContentBlock::Resource(EmbeddedResource::new(
+        EmbeddedResourceResource::BlobResourceContents(blob),
+    ))]);
+
+    assert!(text.contains("file:///report.pdf"), "{text}");
+}
+
+#[test]
 fn initialize_claims_images_and_not_audio() {
     // Every provider mentra serves carries inline image bytes. None of them
     // has a block for audio, so claiming it would be offering a client
@@ -348,6 +386,34 @@ fn every_bound_names_a_stop_reason_a_client_can_act_on() {
             "{bound:?} ended the turn early, and `EndTurn` says it ended successfully"
         );
     }
+}
+
+#[test]
+fn a_cancel_that_lands_after_the_turn_answered_is_not_a_cancellation() {
+    // mentra reads the token at round boundaries; a stop pressed after the
+    // last one finds a turn that has already answered. Reporting that as
+    // `Cancelled` would tell the client the answer it just streamed was
+    // thrown away, which it was not.
+    let answered = stop_reason_for(Ended::Answered, true).expect("an answer is an answer");
+    assert_eq!(answered.stop_reason, StopReason::EndTurn);
+
+    // A bound that ended the turn is likewise what actually happened.
+    let bounded =
+        stop_reason_for(Ended::Bounded(basis::Bound::TokenBudget), true).expect("a bound");
+    assert_eq!(bounded.stop_reason, StopReason::MaxTokens);
+}
+
+#[test]
+fn a_turn_that_failed_under_a_tripped_token_was_cancelled() {
+    // The token, not the error, is what distinguishes "the client stopped it"
+    // from "it broke": a cancelled turn fails inside mentra like any other.
+    let cancelled = stop_reason_for(Ended::Failed("cancelled".to_string()), true)
+        .expect("ACP requires `Cancelled`, not an error");
+    assert_eq!(cancelled.stop_reason, StopReason::Cancelled);
+
+    let broke = stop_reason_for(Ended::Failed("it broke".to_string()), false)
+        .expect_err("a failure nobody asked for is an error");
+    assert_eq!(broke.code, ErrorCode::InternalError);
 }
 
 #[test]
@@ -418,6 +484,34 @@ fn a_missing_credential_is_an_authentication_failure_not_an_internal_one() {
             .is_some_and(|data| data.contains("ANTHROPIC_API_KEY")),
         "the actionable part is which variable to set: {:?}",
         error.data
+    );
+}
+
+#[test]
+fn a_conversation_open_elsewhere_is_a_conflict_the_client_can_act_on() {
+    // mentra leases an agent to the session holding it, so a second
+    // `session/load` — from another connection to this process, or from
+    // another process — is refused there. Reported as `-32603` that read as
+    // basis breaking; the client can actually act on "close it there first".
+    let error = setup_failed(RunError::Runtime(
+        mentra::error::RuntimeError::LeaseUnavailable(
+            "Agent 'agent-1' is already leased by another runtime".to_string(),
+        ),
+    ));
+
+    assert_eq!(error.code, ErrorCode::InvalidParams);
+    let data = error
+        .data
+        .as_ref()
+        .and_then(serde_json::Value::as_str)
+        .unwrap_or_default();
+    assert!(
+        data.contains("another connection"),
+        "the conflict must be named: {data}"
+    );
+    assert!(
+        data.contains("agent-1"),
+        "and mentra's own words kept, for the person reading a log: {data}"
     );
 }
 
