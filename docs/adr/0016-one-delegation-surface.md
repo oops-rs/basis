@@ -1,6 +1,9 @@
 # 0016 — One delegation surface: `spawn` is the only door
 
-> Status: Accepted · 2026-08-11 · **decided, not built**
+> Status: Accepted · 2026-08-11 · **built** — `spawn` shipped in `74ef59f`;
+> [`REDESIGN.md`](../REDESIGN.md) §2's *One delegation surface (`spawn`)* row
+> records the surface, and the *Delegated spend is tallied and the delegation
+> recorded* row the accounting §3 asked for. Amended below, 2026-08-29.
 > Amends [`0013-the-host-owns-the-boundary.md`](0013-the-host-owns-the-boundary.md)
 > — the *route* to a command changes, the availability does not;
 > extends [`0012-one-contract-many-bindings.md`](0012-one-contract-many-bindings.md)
@@ -116,6 +119,31 @@ commands.**
    ADR-0012's sibling-seam rule, and mentra keeps `ToolAuthorizer` and its
    pre-execution hook apart for the same reason. A boundary of this decision,
    not work left over from it.
+
+   > **Amendment · 2026-08-29 — mentra: re-authorize after a pre-execution
+   > Modify.** "Composes in front of the same approval" is not the order the
+   > runtime runs, and this ADR should not be read as claiming it. mentra
+   > 0.23.5 authorizes *first* and applies pre-execution hooks *after*, on both
+   > paths: parallel at `mentra/src/tool/orchestrator.rs:859` (authorize) and
+   > `:873` (hooks), serial at `:1023` and `:1051`. `apply_pre_hooks` (`:463`)
+   > writes a `HookDecision::Modify`'s JSON straight into `call.input` and
+   > returns *proceed*, so the rewritten input executes without being put to
+   > the `ToolAuthorizer` again — and without a schema check either, which runs
+   > once and only before authorization (`:842`, `:1006`). A hook or
+   > interceptor that rewrote `spawn("!rg TODO")` into another command would
+   > therefore run a command the approver never saw and no rule ever matched.
+   >
+   > **The correction is upstream** (ADR-0005): mentra should re-authorize, and
+   > re-check the schema, on an input a pre-execution hook changed. Nothing in
+   > basis is the place to compensate — a basis-side re-ask would be a
+   > second gate in front of a runtime that already decided, which is the
+   > workaround ADR-0005 refuses. The decision in this section stands as
+   > written — rewriting is the `Interceptor`'s question, allow/deny is the
+   > `Approver`'s, and they are different seams. What was wrong is the sentence
+   > about where the two meet. Until it closes, a rewriting participant is
+   > trusted at the level of whoever declared it, which is what
+   > [`ARCHITECTURE.md`](../ARCHITECTURE.md) §4 says a repository's
+   > configuration carries.
 
 8. **Recursive uniformity.** A subagent gets `spawn` and no direct shell at
    every depth, by construction: `DisposableSubagentTemplate::from_agent`
