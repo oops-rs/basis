@@ -121,9 +121,11 @@
 //! triggers above and how much recent user text a summarizing pass must leave
 //! alone — and *derives* a fifth, `auto_compact_trigger`, from two of them
 //! rather than offering it, because the numbers already say which posture a
-//! host means and a switch beside them could disagree with them (see
-//! [`Compaction::trigger`]). The mutually exclusive projected-byte budget is pinned off: exposing
-//! it needs a Basis-owned policy shape rather than two knobs that can disagree.
+//! host means and a switch beside them could disagree with them (the private
+//! `Compaction::trigger` is where the three rows above are read off — it stays
+//! private for that reason, so there is nothing to link to). The mutually
+//! exclusive projected-byte budget is pinned off: exposing it needs a
+//! Basis-owned policy shape rather than two knobs that can disagree.
 //! The summary's input and output caps, local versus remote summarization, and
 //! how many snapshots are kept remain defaults nobody has had a reason to move.
 //! A knob basis offers is a knob basis has to keep meaning; they arrive when a
