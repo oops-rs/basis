@@ -242,9 +242,9 @@ impl McpServer {
     ///
     /// mentra's rule has a third shape this one does not, the empty name. The
     /// `.mcp.json` loader (`mcp/file.rs`) rejects that separately, so an entry
-    /// in a file keeps
-    /// its file-naming refusal; a *host-supplied* server (`with_mcp`) with an
-    /// empty name is the one case now caught at connect rather than at load.
+    /// in a file keeps its file-naming refusal; a *host-supplied* server
+    /// (`with_mcp`) with an empty name is the one case now caught at connect
+    /// rather than at load.
     pub fn validate_name(name: &str) -> Result<(), &'static str> {
         if name.contains("__") {
             Err(
