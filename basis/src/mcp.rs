@@ -230,6 +230,21 @@ impl McpServer {
     /// This is the boundary check basis owns for names it hands to mentra,
     /// not a permanent stand-in for mentra validating its own encoding —
     /// see [oops-rs/mentra#29](https://github.com/oops-rs/mentra/issues/29).
+    ///
+    /// That issue closed in mentra 0.24: `McpManager::connect`, `connect_sse`
+    /// and `connect_streamable_http` refuse the same shapes before opening a
+    /// connection, as `McpServerNameError` surfaced through each transport's
+    /// error (`mentra/src/mcp/bridge.rs:128, 161`). So this is no longer the
+    /// only line — it is the *config-side early* one, and the reason to keep
+    /// it is what it can say: a name read out of `.mcp.json` is refused with
+    /// the file that named it and the entry that did, before any server is
+    /// dialed, rather than as one connection's failure.
+    ///
+    /// mentra's rule has a third shape this one does not, the empty name. The
+    /// `.mcp.json` loader (`mcp/file.rs`) rejects that separately, so an entry
+    /// in a file keeps
+    /// its file-naming refusal; a *host-supplied* server (`with_mcp`) with an
+    /// empty name is the one case now caught at connect rather than at load.
     pub fn validate_name(name: &str) -> Result<(), &'static str> {
         if name.contains("__") {
             Err(
