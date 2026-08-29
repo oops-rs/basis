@@ -43,7 +43,9 @@ use crate::{
 };
 
 pub use bounds::Bounds;
-pub use output::{OutputReport, OutputSpec};
+pub use output::{
+    OutputAttempt, OutputAttemptReport, OutputDecision, OutputReport, OutputReservation, OutputSpec,
+};
 pub use prepared::{
     AgentEventTapGuard, Compacted, LoadedSkill, PreparedRun, PromptPart, RunContext,
 };

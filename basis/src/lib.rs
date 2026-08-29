@@ -134,10 +134,11 @@ pub use memory::{MemoryConfig, WorkspaceMemoryRoot};
 pub use run::{
     AgentEvent, AgentEventTapGuard, Bound, Bounds, CancellationToken, CollectingSink, Compacted,
     ContentBlock, Effort, EventFanIn, EventSink, FnSink, MergedEvents, ModelInfo, NullSink,
-    OutputReport, OutputSpec, PreparedRun, PromptPart, ReasoningChange, ReasoningOptions,
-    ReasoningSummary, RoundAdjustment, RoundBoundary, RoundContext, RoundDecision, RoundStrategy,
-    RoundToolResult, RunContext, RunFailure, RunFailureCategory, RunReport, RunUsage, TaggedEvent,
-    TaggedSink, TurnOptions, run, run_with_approver,
+    OutputAttempt, OutputAttemptReport, OutputDecision, OutputReport, OutputReservation,
+    OutputSpec, PreparedRun, PromptPart, ReasoningChange, ReasoningOptions, ReasoningSummary,
+    RoundAdjustment, RoundBoundary, RoundContext, RoundDecision, RoundStrategy, RoundToolResult,
+    RunContext, RunFailure, RunFailureCategory, RunReport, RunUsage, TaggedEvent, TaggedSink,
+    TurnOptions, run, run_with_approver,
 };
 pub use runtime::{Runtime, RuntimeBuilder, RuntimeRecipe, ToolResultPolicy};
 pub use shell::ShellAccess;

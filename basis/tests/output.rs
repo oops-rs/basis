@@ -28,8 +28,8 @@ use std::{
 
 use async_trait::async_trait;
 use basis::{
-    AllowAll, Bound, CollectingSink, Event, FnSink, OutputSpec, RunError, RunOutcome, TurnOptions,
-    run::prepare_with_session,
+    AllowAll, Bound, CollectingSink, Event, FnSink, OutputAttempt, OutputDecision, OutputSpec,
+    PromptPart, RunError, RunOutcome, TurnOptions, run::prepare_with_session,
 };
 use mentra::{
     BuiltinProvider, ContentBlock, ModelInfo, Role, Runtime, RuntimePolicy, Session, TokenUsage,
@@ -371,6 +371,123 @@ fn review_spec() -> OutputSpec {
             "required": ["verdict", "findings"]
         }),
     )
+}
+
+#[tokio::test]
+async fn a_validated_multipart_output_rejects_then_accepts_a_transformed_value() {
+    let dir = workspace();
+    let provider = ScriptedModel::new(vec![
+        Say::Answer(json!({ "verdict": "draft", "findings": [] })),
+        Say::Answer(json!({ "verdict": "hold", "findings": [] })),
+    ])
+    .spending(10, 2);
+    let handle = provider.clone();
+    let model = provider.model.clone();
+    let (_runtime, mut run) = prepared_with(&dir, provider, model);
+    let reservation = review_spec().with_tools().reserve();
+    let terminal_name = reservation.tool_name().to_string();
+    let attempts = Arc::new(AtomicUsize::new(0));
+    let attempts_for_validator = Arc::clone(&attempts);
+
+    let attempted = run
+        .output_parts_validated_with_options::<Review, _, _, _>(
+            vec![
+                PromptPart::text("review this diff"),
+                PromptPart::text("preserve this second prompt part"),
+            ],
+            reservation,
+            move |candidate| {
+                if attempts_for_validator.fetch_add(1, Ordering::SeqCst) == 0 {
+                    assert_eq!(candidate["verdict"], "draft");
+                    OutputDecision::Reject("draft is not final".to_string())
+                } else {
+                    assert_eq!(candidate["verdict"], "hold");
+                    OutputDecision::Accept(json!({ "verdict": "ship", "findings": ["normalized"] }))
+                }
+            },
+            CollectingSink::new(),
+            AllowAll,
+            TurnOptions::default(),
+        )
+        .await
+        .expect("the validated turn is reportable");
+
+    let OutputAttempt::Accepted(review) = attempted.output else {
+        panic!("the corrected output should be accepted");
+    };
+    assert_eq!(review.verdict, "ship");
+    assert_eq!(review.findings, vec!["normalized"]);
+    assert_eq!(attempts.load(Ordering::SeqCst), 2);
+    assert_eq!(attempted.report.usage.model_responses, 2);
+    assert!(attempted.report.succeeded());
+    assert!(
+        handle
+            .offers()
+            .iter()
+            .all(|offer| offer.terminal.as_deref() == Some(terminal_name.as_str()))
+    );
+}
+
+#[tokio::test]
+async fn a_validated_output_mismatch_keeps_its_report_and_sink() {
+    let dir = workspace();
+    let (_runtime, mut run) = prepared(
+        &dir,
+        ForcedToolProvider::answering(json!({ "verdict": "hold", "findings": "many" }))
+            .reporting_usage(12, 3),
+    );
+
+    let attempted = run
+        .output_parts_validated_with_options::<Review, _, _, _>(
+            vec![PromptPart::text("review this diff")],
+            review_spec().reserve(),
+            |candidate| OutputDecision::Accept(candidate.clone()),
+            CollectingSink::new(),
+            AllowAll,
+            TurnOptions::default(),
+        )
+        .await
+        .expect("a mismatch still returns its report");
+
+    assert!(matches!(attempted.output, OutputAttempt::Mismatch(_)));
+    assert!(matches!(attempted.report.outcome, RunOutcome::Error { .. }));
+    assert_eq!(attempted.report.usage.total_tokens(), 15);
+    assert!(matches!(
+        attempted.report.sink.into_events().last(),
+        Some(Event::RunFinished {
+            outcome: RunOutcome::Error { .. },
+            ..
+        })
+    ));
+}
+
+#[tokio::test]
+async fn a_bounded_validated_output_keeps_missing_usage_and_bound_in_its_report() {
+    let dir = workspace();
+    let provider = ScriptedModel::new(vec![
+        Say::Read,
+        Say::Answer(json!({ "verdict": "ship", "findings": [] })),
+    ])
+    .spending(60, 40);
+    let model = provider.model.clone();
+    let (_runtime, mut run) = prepared_with(&dir, provider, model);
+
+    let attempted = run
+        .output_parts_validated_with_options::<Review, _, _, _>(
+            vec![PromptPart::text("read, then review")],
+            review_spec().with_tools().reserve(),
+            |candidate| OutputDecision::Accept(candidate.clone()),
+            CollectingSink::new(),
+            AllowAll,
+            TurnOptions::default().with_token_budget(100),
+        )
+        .await
+        .expect("the bounded turn still returns its report");
+
+    assert!(matches!(attempted.output, OutputAttempt::Missing));
+    assert_eq!(attempted.report.stopped_by, Some(Bound::TokenBudget));
+    assert_eq!(attempted.report.usage.total_tokens(), 100);
+    assert!(attempted.report.failure.is_some());
 }
 
 #[tokio::test]

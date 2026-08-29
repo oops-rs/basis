@@ -23,8 +23,9 @@ use self::{
     outcome::{Ended, chain_message, ended_on},
 };
 use super::{
-    Bound, Effort, EventSink, ModelInfo, OutputReport, OutputSpec, ReasoningOptions, RunError,
-    RunReport, RunUsage, TurnOptions,
+    Bound, Effort, EventSink, ModelInfo, OutputAttempt, OutputAttemptReport, OutputDecision,
+    OutputReport, OutputReservation, OutputSpec, ReasoningOptions, RunError, RunReport, RunUsage,
+    TurnOptions,
     turn::{bounded, drawable},
 };
 use crate::{
