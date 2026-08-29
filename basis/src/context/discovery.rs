@@ -118,6 +118,22 @@ fn validate_file_name(name: &str) -> Result<(), ContextError> {
 /// canonicalizing a canonical path returns it unchanged — and keeps
 /// [`WorkspaceContext::discover_with`](super::WorkspaceContext::discover_with)
 /// correct for the hosts that call it directly.
+///
+/// # Why the Windows verbatim prefix comes back off
+///
+/// Because this one value leaves basis: it becomes mentra's policy root and
+/// the agent's base directory, and mentra decides whether a path the model
+/// named is allowed by `starts_with` against that root
+/// (`RuntimePolicy::path_is_allowed`). Its normalizer copies a
+/// `Component::Prefix` through untouched, so the verbatim form
+/// `std::fs::canonicalize` returns on Windows — `\\?\C:\repo` — would never
+/// prefix the plain `C:\repo\file.txt` a model writes, and every absolute path
+/// the model named would be refused. Simplified here rather than at each
+/// consumer, because one spelling for one directory is the whole point of
+/// resolving once. `dunce` leaves the verbatim form in place in the cases
+/// where a plain one would name something else or nothing at all — a reserved
+/// DOS name, a segment ending in a dot or a space, a path past `MAX_PATH` —
+/// and is a no-op on the other two platforms.
 pub(crate) fn validate_workspace(workspace: &Path) -> Result<PathBuf, ContextError> {
     let metadata = std::fs::metadata(workspace).map_err(|source| match source.kind() {
         std::io::ErrorKind::NotFound => ContextError::WorkspaceMissing {
@@ -135,10 +151,13 @@ pub(crate) fn validate_workspace(workspace: &Path) -> Result<PathBuf, ContextErr
         });
     }
 
-    std::fs::canonicalize(workspace).map_err(|source| ContextError::WorkspaceUnresolvable {
-        path: workspace.to_path_buf(),
-        source,
-    })
+    let canonical =
+        std::fs::canonicalize(workspace).map_err(|source| ContextError::WorkspaceUnresolvable {
+            path: workspace.to_path_buf(),
+            source,
+        })?;
+
+    Ok(dunce::simplified(&canonical).to_path_buf())
 }
 
 /// The workspace's ancestors, ordered outermost first so that walking them in

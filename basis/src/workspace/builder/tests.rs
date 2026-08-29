@@ -774,6 +774,15 @@ fn offline(path: &Path) -> WorkspaceBuilder {
         .without_discovery()
 }
 
+/// What an open is expected to have made of a spelling: canonical, and in the
+/// form every program on the platform accepts. `Path::canonicalize` alone is
+/// the wrong expectation on Windows, where it yields the verbatim `\\?\C:\…`
+/// that the open deliberately simplifies away — see `validate_workspace`.
+fn resolved(path: &Path) -> PathBuf {
+    let canonical = path.canonicalize().expect("canonical path");
+    dunce::simplified(&canonical).to_path_buf()
+}
+
 /// Every name one opened workspace answers to for the directory it is scoped
 /// to. They must be one path, or two of them disagree about where the run is.
 fn spellings(workspace: &Workspace) -> Vec<&Path> {
@@ -788,10 +797,7 @@ fn spellings(workspace: &Workspace) -> Vec<&Path> {
 #[tokio::test]
 async fn a_relative_path_is_made_absolute_at_open() {
     let workspace = offline(Path::new(".")).open().await.expect("opens");
-    let here = std::env::current_dir()
-        .expect("a working directory")
-        .canonicalize()
-        .expect("canonical working directory");
+    let here = resolved(&std::env::current_dir().expect("a working directory"));
 
     for spelling in spellings(&workspace) {
         assert_eq!(
@@ -815,7 +821,7 @@ async fn a_symlinked_spelling_opens_the_directory_it_names() {
     std::os::unix::fs::symlink(&real, &link).expect("symlink");
 
     let workspace = offline(&link).open().await.expect("opens");
-    let canonical = real.canonicalize().expect("canonical target");
+    let canonical = resolved(&real);
 
     for spelling in spellings(&workspace) {
         assert_eq!(
@@ -835,9 +841,39 @@ async fn a_dotted_spelling_is_folded_at_open() {
         .open()
         .await
         .expect("opens");
-    let canonical = nested.canonicalize().expect("canonical directory");
+    let canonical = resolved(&nested);
 
     for spelling in spellings(&workspace) {
         assert_eq!(spelling, canonical, "`..` must not survive the open");
+    }
+}
+
+/// The resolved root is the spelling the rest of the world uses.
+///
+/// `std::fs::canonicalize` answers `\\?\C:\repo` on Windows, and this one
+/// value becomes mentra's policy root and the agent's base directory. mentra
+/// asks whether a path the model named is allowed with `starts_with` against
+/// that root over components whose `Prefix` it copies through untouched, so a
+/// verbatim root does not prefix the plain `C:\repo\file.txt` a model writes:
+/// every absolute path it named would be refused. Nothing off Windows can
+/// notice, which is why this is pinned here rather than left to the shared
+/// assertions above.
+#[cfg(windows)]
+#[tokio::test]
+async fn the_resolved_root_is_not_a_verbatim_windows_path() {
+    let base = tempfile::tempdir().expect("tempdir");
+    let workspace = offline(base.path()).open().await.expect("opens");
+
+    for spelling in spellings(&workspace) {
+        assert!(
+            !spelling.as_os_str().to_string_lossy().starts_with(r"\\?\"),
+            "a verbatim root denies every absolute path the model names: {}",
+            spelling.display()
+        );
+        assert!(
+            spelling.is_absolute(),
+            "simplifying must not cost the root its prefix: {}",
+            spelling.display()
+        );
     }
 }

@@ -397,8 +397,18 @@ fn batched_targets(operation: &serde_json::Value) -> Vec<&str> {
 /// same ruling as [`store::runtime_identifier`](crate::store::runtime_identifier),
 /// and for the same reason: keying the map is not the place to validate a
 /// workspace.
+///
+/// Simplified the way `context::discovery::validate_workspace` simplifies the
+/// root it hands out, so a workspace registered under its own
+/// resolved root keys the map under the path it calls itself rather than under
+/// a Windows verbatim spelling of it. Lookup and registration would agree
+/// either way — both come through here — but a key that is not the root is a
+/// second spelling of the same directory, which is the thing resolving once
+/// exists to prevent.
 pub(crate) fn canonical(path: &Path) -> PathBuf {
-    std::fs::canonicalize(path).unwrap_or_else(|_| path.to_path_buf())
+    std::fs::canonicalize(path)
+        .map(|resolved| dunce::simplified(&resolved).to_path_buf())
+        .unwrap_or_else(|_| path.to_path_buf())
 }
 
 /// A candidate path as the guard measures it: absolute against the workspace
