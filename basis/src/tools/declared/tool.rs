@@ -26,13 +26,13 @@ use super::manifest::DeclaredToolSpec;
 
 /// How much later than the tool's own deadline mentra's is set.
 ///
-/// basis's deadline is the one that matters, because it is the one that kills
-/// the process: mentra enforces `execution_timeout` by dropping the future, and
-/// a `spawn_blocking` future dropped mid-wait abandons the thread rather than
-/// stopping the program it is waiting on. So the descriptor still carries a
-/// deadline — a turn must not hang on a saturated blocking pool — and it is set
-/// deliberately later, so the message the model reads is the one that names the
-/// tool and says it was stopped, not the generic one from outside.
+/// basis's deadline is the one that should fire: mentra enforces
+/// `execution_timeout` by dropping the future, which since 0.24 does kill the
+/// program (`kill_on_drop`), but says so in a generic message from outside.
+/// The descriptor still carries a deadline — a turn must never hang on a
+/// program basis lost track of — and it is set deliberately later, so the
+/// message the model reads is the one that names the tool and says it was
+/// stopped.
 const TIMEOUT_BACKSTOP: Duration = Duration::from_secs(5);
 
 /// One tool a workspace declared, wrapped as the thing mentra can run.
@@ -235,30 +235,25 @@ async fn run(
         )
     })?;
 
-    let running = Arc::clone(&spec);
-    let environment = environment(runtime_environment, &spec.env);
-
-    // Spawning a process and waiting for it is genuinely blocking work, so it
-    // goes to a thread meant for it rather than onto a runtime worker — which
-    // holds on every runtime flavor, including the `current_thread` an embedder
-    // inside an editor is likely to have.
-    let completion = tokio::task::spawn_blocking(move || {
-        subprocess::execute(
-            &running.command,
-            &running.working_directory(&workspace),
-            &environment,
-            &payload,
-            running.timeout(),
-        )
-    })
-    .await
-    .map_err(|error| format!("{} could not be run: {error}", spec.name))?;
+    // Awaited in place: since mentra 0.24 spawning and waiting for a program is
+    // an async primitive, so nothing here blocks a runtime worker, on any
+    // flavor — and a call cancelled mid-run drops the future and kills the
+    // program with it, where the `spawn_blocking` this replaced abandoned a
+    // thread to it.
+    let completion = subprocess::execute(
+        &spec.command,
+        &spec.working_directory(&workspace),
+        environment(runtime_environment, &spec.env),
+        &payload,
+        spec.timeout(),
+    )
+    .await;
 
     answer(&spec, completion)
 }
 
-/// What one declared program is spawned with, over the environment it
-/// inherits.
+/// What one declared program is spawned with, over
+/// [`crate::subprocess`]'s baseline.
 ///
 /// **The manifest wins.** The runtime's pairs are the host's statement about
 /// every process this runtime spawns; the manifest's are this one tool's own,
@@ -267,9 +262,10 @@ async fn run(
 /// one. A host that wants the opposite is asking for a value a repository
 /// cannot override, which is a different feature and not this one.
 ///
-/// Neither set clears the inherited environment, and that is deliberate:
-/// `PATH`, `HOME` and the rest come from there, and a program that lost them
-/// would be a manifest that used to work and now does not.
+/// Neither set is the whole environment. The program gets these over the
+/// baseline that makes it runnable — `PATH`, `HOME` and the rest — and nothing
+/// else this process holds: a credential reaches a declared tool by being
+/// named here, not by being in the air.
 fn environment(
     runtime: &[(String, String)],
     manifest: &[(String, String)],
@@ -296,8 +292,10 @@ fn answer(spec: &DeclaredToolSpec, completion: std::io::Result<Completion>) -> T
         format!("{} could not be started: {error}", spec.name)
     })?;
 
+    // A timed-out program carries whatever it printed before the kill, and it
+    // is not quoted: a partial result would read to the model as a whole one.
     let (code, stdout, stderr) = match completion {
-        Completion::TimedOut => {
+        Completion::TimedOut { .. } => {
             return Err(format!(
                 "{} did not finish within {} seconds and was stopped",
                 spec.name,
@@ -308,7 +306,11 @@ fn answer(spec: &DeclaredToolSpec, completion: std::io::Result<Completion>) -> T
             code,
             stdout,
             stderr,
-        } => (code, stdout, stderr),
+        } => (
+            code,
+            subprocess::stdout_text(&stdout),
+            subprocess::stderr_text(&stderr),
+        ),
     };
 
     match code {

@@ -355,18 +355,36 @@ mod subprocess_cases {
     }
 
     #[tokio::test]
-    async fn the_inherited_environment_survives_both_of_them() {
-        // Neither set clears what the process already had: `PATH` is how the
-        // shell in every one of these cases is found at all, and a manifest
-        // that used to work must not stop working.
+    async fn path_arrives_from_the_baseline_and_a_parent_variable_does_not() {
+        // The child's environment is what basis passed and nothing else: the
+        // baseline (`PATH` is how the shell in every one of these cases is
+        // found at all), the runtime's pairs, and the manifest's. Whatever
+        // this process happens to be holding — a token, a proxy setting —
+        // stops at the spawn. `/usr/bin/env` adds nothing of its own, so every
+        // name it prints was either passed or leaked.
         let answer = call_with_runtime_environment(
-            spec(sh("test -n \"$PATH\" && printf inherited")),
-            &pairs(&[("X", "1")]),
+            spec(vec!["/usr/bin/env"]),
+            &pairs(&[("BASIS_TEST_RUNTIME", "1")]),
         )
         .await
         .expect("the program succeeded");
 
-        assert_eq!(answer, "inherited");
+        let listed: Vec<&str> = answer
+            .lines()
+            .filter_map(|line| line.split_once('='))
+            .map(|(name, _)| name)
+            .collect();
+        assert!(
+            listed.contains(&"PATH"),
+            "the baseline carries PATH: {answer}"
+        );
+        assert!(listed.contains(&"BASIS_TEST_RUNTIME"), "{answer}");
+        for name in listed {
+            assert!(
+                name == "BASIS_TEST_RUNTIME" || subprocess::is_baseline(name),
+                "`{name}` leaked from this process into the program: {answer}"
+            );
+        }
     }
 
     #[tokio::test]

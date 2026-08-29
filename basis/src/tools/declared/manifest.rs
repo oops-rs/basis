@@ -102,7 +102,7 @@ pub struct DeclaredToolSpec {
     /// Where the program runs, relative to the workspace root. Absent means the
     /// root itself.
     pub cwd: Option<PathBuf>,
-    /// Added to the environment the program inherits, on top of the runtime's
+    /// Added to the baseline the program is handed, on top of the runtime's
     /// fixed command environment and overriding it for any name they share —
     /// this is the tool's own statement, and the more specific one holds (see
     /// the module docs' three layers). Sorted, so a spec is comparable; never

@@ -317,6 +317,37 @@ fn an_observer_can_choose_to_fail_open() {
 }
 
 #[test]
+fn a_hook_is_handed_the_baseline_and_nothing_from_the_parent() {
+    // A hook is asked a question, not handed a credential: the only variables
+    // it sees are the baseline that makes a program runnable at all. The hook
+    // reports every name it was given as its reason, so the assertion reads
+    // the child's environment through the wire contract.
+    let (outcome, _) = decide(vec![sh(
+        "env",
+        r#"printf '{"decision":"deny","reason":"%s"}' "$(env | cut -d= -f1 | tr '\n' ' ')""#,
+    )]);
+
+    let reason = denied(outcome);
+    let listed: Vec<&str> = reason
+        .trim_start_matches("denied by hook 'env': ")
+        .split_whitespace()
+        .collect();
+    assert!(
+        listed.contains(&"PATH"),
+        "the baseline carries PATH: {reason}"
+    );
+    for name in listed {
+        // `PWD`, `SHLVL`, `_` and `OLDPWD` are the shell's own, set by
+        // `/bin/sh` after the spawn rather than inherited through it.
+        let shells_own = matches!(name, "PWD" | "OLDPWD" | "SHLVL" | "_");
+        assert!(
+            shells_own || crate::subprocess::is_baseline(name),
+            "`{name}` leaked from this process into the hook: {reason}"
+        );
+    }
+}
+
+#[test]
 fn a_command_is_never_handed_to_a_shell() {
     // `;` is shell syntax; as argv it is just an argument. If basis ever
     // started interpreting the command, `touch` would run.

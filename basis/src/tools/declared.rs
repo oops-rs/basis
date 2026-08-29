@@ -75,10 +75,14 @@
 //! Three layers, outermost first, each overriding the one before it for a name
 //! they share:
 //!
-//! 1. **What the process inherits.** Nothing is cleared — `PATH`, `HOME` and
-//!    the rest are how a program is found and how most of them work at all.
-//!    (This is where a declared tool parts company with a `spawn` command,
-//!    which mentra's executor runs with the ambient environment cleared.)
+//! 1. **basis's baseline.** The program is spawned through mentra's
+//!    `BoundedCommand`, which clears the environment before setting what it
+//!    was given — the same discipline a `spawn` command runs under — and basis
+//!    passes back only what makes a program runnable: `PATH`, `HOME`, the
+//!    temp and locale variables, each listed with its reason in
+//!    `crate::subprocess`. Nothing else this process holds arrives: a
+//!    credential reaches a program by being named in the two layers below,
+//!    never by being in the air.
 //! 2. **The runtime's fixed command environment**, from
 //!    [`RuntimeBuilder::with_command_environment`](crate::RuntimeBuilder::with_command_environment).
 //!    A host saying where its service lives is saying it about *every* process

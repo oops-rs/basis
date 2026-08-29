@@ -24,8 +24,15 @@ The repository is inside that authority, not outside it. `AGENTS.md`,
 the skills roots are configuration, and configuration here names programs:
 opening a workspace connects the MCP servers `.mcp.json` declares before a model
 has said anything, and a `.basis/hooks.json` entry that lists no `tools` is asked
-on every tool call, reads included. Both spawn with the environment this process
-inherited and the authority above. Cloning a repository and opening it is
+on every tool call, reads included. Both spawn with the authority above. What
+each is *handed* is narrower: a hook and a declared tool run under mentra's
+`BoundedCommand`, which clears the environment, so a hook sees only basis's
+baseline (`PATH`, `HOME`, temp and locale) and a declared tool that plus the
+variables its manifest names — the provider key this process read, and
+anything the host exported, reach neither. An `.mcp.json` server is spawned by
+mentra's MCP client and still inherits everything. That is hygiene and not a
+boundary: a hook can still `cat ~/.netrc`; what stops is the ambient
+credential nobody decided to pass. Cloning a repository and opening it is
 therefore the same act as running what it ships
 ([ADR-0013](adr/0013-the-host-owns-the-boundary.md)).
 

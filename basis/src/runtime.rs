@@ -378,7 +378,7 @@ impl Runtime {
     /// The fixed command environment, as the pairs a spawned program is given.
     ///
     /// A `Vec` rather than the map it is stored as, because that is the shape
-    /// [`crate::subprocess::execute`] takes and what a declared tool merges its
+    /// `crate::subprocess::execute` takes and what a declared tool merges its
     /// own `env` over. Sorted, because the map is.
     pub(crate) fn command_environment(&self) -> Vec<(String, String)> {
         self.command_environment
