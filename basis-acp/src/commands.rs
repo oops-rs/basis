@@ -9,7 +9,9 @@
 //!
 //! Nothing here decides *when* to send the update — the ACP server owns the
 //! session lifecycle — and nothing here runs anything;
-//! [`turn`](crate::server::turn) is where a recognized built-in is acted on.
+//! [`turn`](crate::server::turn) is where a recognized built-in is acted on,
+//! and where a template's name is [expanded](expand) into the prompt it
+//! stands for before the model sees it.
 //!
 //! # Built-ins, and what happens when a workspace picks the same name
 //!
@@ -29,7 +31,7 @@ use agent_client_protocol::schema::v1::{
     AvailableCommand, AvailableCommandInput, UnstructuredCommandInput,
 };
 
-use basis::{Template, templates::invocation};
+use basis::{PromptPart, Template, templates::invocation};
 
 /// The name of the one command basis answers itself.
 pub(crate) const COMPACT: &str = "compact";
@@ -48,16 +50,49 @@ pub(crate) enum Builtin<'a> {
 /// [`basis::templates::invocation`], which is the same parser the shell uses,
 /// so a name typed in an editor and a name typed at a terminal are one rule.
 ///
-/// A `/name` that is not a built-in returns `None` and the prompt goes to the
-/// model as typed — including a template's. Expanding a template on this side
-/// would be a second implementation of a rewrite the shell already does; that
-/// gap is real and is not this function's to close.
+/// A `/name` that is not a built-in returns `None`. A template's name is
+/// answered next door, by [`expand`], once the turn lock — which is where the
+/// templates live — is held.
 pub(crate) fn builtin(prompt: &str) -> Option<Builtin<'_>> {
     match invocation(prompt)? {
         (COMPACT, arguments) => Some(Builtin::Compact {
             instructions: (!arguments.is_empty()).then_some(arguments),
         }),
         _ => None,
+    }
+}
+
+/// The prompt a `/name …` line stands for, when `name` is one of `templates`.
+///
+/// The other half of [`available_commands`]: a client that offers `/review`
+/// sends back `/review the diff` as text, and the model must read the body
+/// the author wrote with the argument substituted — the same rewrite the shell
+/// performs on `basis spawn /review …`, through the same
+/// [`Template::render`], so the two surfaces cannot disagree about what a
+/// template says.
+///
+/// Only the prompt's opening text is read, and only when it is text: a
+/// `/review` typed after a screenshot is prose about reviewing. A name that
+/// matches nothing goes to the model as typed, where the shell refuses it. The
+/// shell has stdin as the escape for a prompt that begins with a literal `/`;
+/// an editor has nothing but this request, and the names were the client's to
+/// offer in the first place.
+pub(crate) fn expand(parts: Vec<PromptPart>, templates: &[Template]) -> Vec<PromptPart> {
+    let rendered = match parts.first() {
+        Some(PromptPart::Text(text)) => invocation(text).and_then(|(name, arguments)| {
+            templates
+                .iter()
+                .find(|template| template.name == name)
+                .map(|template| template.render(arguments))
+        }),
+        _ => None,
+    };
+
+    match rendered {
+        Some(prompt) => std::iter::once(PromptPart::text(prompt))
+            .chain(parts.into_iter().skip(1))
+            .collect(),
+        None => parts,
     }
 }
 
@@ -184,6 +219,56 @@ mod tests {
     }
 
     #[test]
+    fn a_template_invocation_is_rendered_with_its_arguments() {
+        let templates = [Template {
+            body: "Review $ARGUMENTS carefully.".to_string(),
+            ..template("review", None)
+        }];
+
+        assert_eq!(
+            expand(vec![PromptPart::text("/review the diff")], &templates),
+            vec![PromptPart::text("Review the diff carefully.")],
+            "the same rewrite the shell performs, through the same render"
+        );
+    }
+
+    #[test]
+    fn only_the_opening_text_is_read_and_the_rest_is_kept() {
+        let templates = [Template {
+            body: "Review $ARGUMENTS.".to_string(),
+            ..template("review", None)
+        }];
+        let image = PromptPart::image("image/png", vec![1, 2, 3]);
+
+        // A screenshot first: the `/review` after it is prose about reviewing.
+        assert_eq!(
+            expand(
+                vec![image.clone(), PromptPart::text("/review this")],
+                &templates
+            ),
+            vec![image.clone(), PromptPart::text("/review this")]
+        );
+        // Text first: rendered, and what followed it still follows.
+        assert_eq!(
+            expand(
+                vec![PromptPart::text("/review this"), image.clone()],
+                &templates
+            ),
+            vec![PromptPart::text("Review this."), image]
+        );
+    }
+
+    #[test]
+    fn a_name_that_matches_no_template_goes_to_the_model_as_typed() {
+        // The shell refuses here and offers stdin as the escape; an editor has
+        // no stdin, and the client offered the names to begin with.
+        assert_eq!(
+            expand(vec![PromptPart::text("/etc/hosts is what I mean")], &[]),
+            vec![PromptPart::text("/etc/hosts is what I mean")]
+        );
+    }
+
+    #[test]
     fn a_namespaced_name_reaches_the_wire_intact() {
         let commands = from_templates(&[template("git:commit", None)]);
 
@@ -226,8 +311,8 @@ mod tests {
 
     #[test]
     fn anything_else_is_a_prompt_for_the_model() {
-        // Including a template's own name: expanding one on this side would be
-        // a second implementation of the rewrite the shell already does.
+        // Including a template's own name: that is `expand`'s to answer, once
+        // the templates are in hand.
         assert_eq!(builtin("/review the diff"), None);
         assert_eq!(builtin("compact the log output"), None);
         assert_eq!(

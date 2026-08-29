@@ -11,7 +11,8 @@
 //! ACP has no separate method for invoking a command — a client sends what the
 //! person typed — so the only place a built-in can be recognized is where a
 //! prompt arrives, and it is the same place because it needs the same turn
-//! lock.
+//! lock. A workspace template's name is recognized here for the same reason,
+//! and rendered into the prompt it stands for on the way to the model.
 //!
 //! [`NotificationSink`] is here rather than beside [`session_update`] because
 //! it is that mapping bound to one connection and one session, which is a
@@ -69,6 +70,12 @@ pub(super) async fn prompt(
     let mut run = session.lock_turn().await;
     let options = session.begin_turn();
     let cancelled = options.cancel.clone();
+
+    // Under the lock, because the templates live on the run: a `/review`
+    // the client offered from `AvailableCommandsUpdate` comes back as the
+    // text `/review the diff`, and the model must read what the template
+    // says, not the slash line.
+    let parts = commands::expand(parts, &run.context().templates);
 
     // Built after the turn is armed, because the approver needs the turn's
     // interrupt: a cancel has to reach a request the client is still looking

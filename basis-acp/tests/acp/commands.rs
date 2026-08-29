@@ -145,3 +145,79 @@ async fn a_command_on_a_conversation_with_history_compacts_it() {
         observed.thought_text()
     );
 }
+
+#[tokio::test]
+async fn a_workspace_template_offered_as_a_command_is_rendered_when_invoked() {
+    // The other half of advertising a template as an `AvailableCommand`: a
+    // client that offers `/review` sends back `/review the diff` as text, and
+    // what the model must receive is the template's body with the argument
+    // substituted — the same rewrite the shell performs — not the literal
+    // slash line, which reads as a typo the model politely works around.
+    let workspace = workspace();
+    let templates = workspace.path().join(".basis/templates");
+    std::fs::create_dir_all(&templates).expect("templates dir");
+    std::fs::write(
+        templates.join("review.md"),
+        "---\ndescription: review something\n---\nReview $ARGUMENTS carefully.",
+    )
+    .expect("write template");
+    let mock = Arc::new(text_mock(&["reviewed"]));
+
+    let (stop_reasons, observed) = drive(
+        MockSource::new(&mock, &workspace),
+        vec!["/review the diff"],
+        None,
+    )
+    .await;
+
+    assert_eq!(stop_reasons, vec![StopReason::EndTurn]);
+    assert!(
+        observed
+            .lock()
+            .expect("not poisoned")
+            .command_names()
+            .contains(&"review".to_string()),
+        "the template was offered as a command in the first place"
+    );
+
+    let requests = mock.recorded_requests().await;
+    let sent = requests
+        .first()
+        .expect("the turn reached the provider")
+        .messages
+        .last()
+        .expect("a user message was appended")
+        .text();
+    assert_eq!(
+        sent, "Review the diff carefully.",
+        "the model must read the rendered template, not the slash line"
+    );
+}
+
+#[tokio::test]
+async fn a_slash_name_that_is_no_command_goes_to_the_model_as_typed() {
+    // Over ACP the client offered the names, so an unknown one is either a
+    // command basis never advertised or a prompt that happens to start with
+    // a slash. Refusing it — as the shell does, where the escape is stdin —
+    // would leave an editor with no way to send that prompt at all.
+    let workspace = workspace();
+    let mock = Arc::new(text_mock(&["answered"]));
+
+    let (stop_reasons, _observed) = drive(
+        MockSource::new(&mock, &workspace),
+        vec!["/etc/hosts is what I mean"],
+        None,
+    )
+    .await;
+
+    assert_eq!(stop_reasons, vec![StopReason::EndTurn]);
+    let requests = mock.recorded_requests().await;
+    let sent = requests
+        .first()
+        .expect("the turn reached the provider")
+        .messages
+        .last()
+        .expect("a user message was appended")
+        .text();
+    assert_eq!(sent, "/etc/hosts is what I mean");
+}
