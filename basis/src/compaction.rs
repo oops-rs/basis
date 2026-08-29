@@ -42,6 +42,15 @@
 //!   [`estimated_context_tokens`](crate::PreparedRun::estimated_context_tokens)
 //!   are how a host reads the same two figures for itself, ahead of whichever
 //!   trigger fires first.
+//!
+//!   The two are one setting resolved together, not two triggers that fire
+//!   independently: mentra reads a cleared `auto_threshold_tokens` as *off*
+//!   before it consults the percentage at all
+//!   (`CompactionConfig::auto_compact_threshold`), so the absolute number is
+//!   the switch for both and the percentage only ever chooses *where* an
+//!   already-armed trigger sits. basis said the opposite here until the
+//!   behaviour was checked against upstream; the pair of tests named for it
+//!   in this module's `tests` now pins each half.
 //! - Or the provider refuses a request as too long
 //!   (`ProviderError::ContextLengthExceeded`), regardless of either threshold —
 //!   including with `auto_threshold_tokens` cleared. mentra compacts once and
@@ -84,13 +93,15 @@ pub struct Compaction {
     /// to the provider. `None` — basis's default — keeps every one of them.
     keep_recent_tool_results: Option<usize>,
     /// The estimated request size that triggers a summarizing pass, for a
-    /// model whose context window is unknown. `None` never triggers one this
-    /// way — see [`auto_threshold_percent`](Self::auto_threshold_percent) for
-    /// the trigger that still can.
+    /// model whose context window is unknown, and the switch for the
+    /// window-relative trigger too: `None` turns automatic summarizing off
+    /// outright, including through
+    /// [`auto_threshold_percent`](Self::auto_threshold_percent).
     auto_threshold_tokens: Option<usize>,
     /// The percentage of a *known* context window that triggers a summarizing
     /// pass, winning over `auto_threshold_tokens` when both apply. `None`
     /// pins the trigger to the absolute number even when the window is known.
+    /// Only consulted while `auto_threshold_tokens` is set.
     auto_threshold_percent: Option<u8>,
     /// How much recent user text a summarizing pass must leave verbatim.
     preserve_recent_user_tokens: usize,
@@ -142,8 +153,8 @@ impl Compaction {
     }
 
     /// Triggers a summarizing pass once an estimated request reaches `tokens`,
-    /// for a model whose context window basis does not know — or never this
-    /// way, with `None`.
+    /// for a model whose context window basis does not know — or turns
+    /// automatic summarizing off entirely, with `None`.
     ///
     /// The estimate is mentra's, over the serialized messages plus the system
     /// prompt, and it is not the provider's accounting.
@@ -151,6 +162,15 @@ impl Compaction {
     /// over this whenever the window *is* known, so this is the fallback a
     /// host sets for a model it cannot ask, or the only number that matters
     /// once the percentage is cleared.
+    ///
+    /// `None` is the off switch for *both* triggers, not just for this one.
+    /// mentra resolves the pair together and returns "no threshold" as soon as
+    /// this is cleared, without ever reading the percentage
+    /// (`CompactionConfig::auto_compact_threshold`), so a host that wants the
+    /// window-relative trigger and no absolute one has to leave a number here
+    /// — a large one, if it wants the percentage to be what decides. There is
+    /// no basis-side repair for that and there should not be one: the
+    /// threshold is the runtime's to resolve (ADR-0005).
     ///
     /// `None` is a real posture, not a way of saying *later*: nothing here
     /// shortens the history ahead of time, and a conversation that outgrows
@@ -177,6 +197,11 @@ impl Compaction {
     /// returns `Some` — today, a workspace whose provider is Gemini; Anthropic
     /// and the Responses transport do not report one, so this has no effect for
     /// them until they do. Values above 100 are treated as 100.
+    ///
+    /// It has no effect either while
+    /// [`with_auto_threshold_tokens`](Self::with_auto_threshold_tokens) is
+    /// `None`, which is that knob's off switch for the whole mechanism — see
+    /// there.
     ///
     /// basis reads mentra's own default (75) here rather than choosing one:
     /// unlike the absolute number, a percentage is not a guess about any

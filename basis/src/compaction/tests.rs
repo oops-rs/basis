@@ -97,17 +97,43 @@ fn every_knob_reaches_the_config_mentra_reads() {
 }
 
 #[test]
-fn an_unset_absolute_threshold_still_leaves_the_percent_trigger_live() {
-    // Distinct from a very large one: mentra reads `None` as "do not check
-    // this way", not "never summarize" — a known context window still
-    // triggers through the percentage, and an unknown one still gets the
-    // provider's own compact-and-retry if it overflows regardless.
+fn clearing_the_absolute_threshold_turns_the_percent_trigger_off_with_it() {
+    // The two fields are not two independent triggers, and this test used to
+    // say they were. mentra resolves them together
+    // (`CompactionConfig::auto_compact_threshold`) and reads a cleared
+    // absolute number as "off" before it ever looks at the percentage, so a
+    // known context window does not switch it back on. Asserted against the
+    // resolved threshold rather than the two fields: the fields arriving
+    // intact is all the previous version proved, while the behaviour its name
+    // claimed was upstream's opposite.
     let config = Compaction::default()
         .with_auto_threshold_tokens(None)
         .into_mentra(transcripts());
 
     assert_eq!(config.auto_compact_threshold_tokens, None);
     assert_eq!(config.auto_compact_threshold_percent, Some(75));
+    assert_eq!(
+        config.auto_compact_threshold(Some(200_000)),
+        None,
+        "a known window must not revive a cleared trigger"
+    );
+    assert_eq!(config.auto_compact_threshold(None), None);
+}
+
+#[test]
+fn a_known_window_is_what_the_percent_trigger_reads_when_both_are_set() {
+    // The other half of the pair, so the correction above cannot be read as
+    // "the percentage never does anything": with the absolute number left in
+    // place it is the percentage that decides, and 75% of the window is what
+    // mentra resolves to.
+    let config = Compaction::default().into_mentra(transcripts());
+
+    assert_eq!(config.auto_compact_threshold(Some(200_000)), Some(150_000));
+    assert_eq!(
+        config.auto_compact_threshold(None),
+        Some(50_000),
+        "and an unknown window falls back to the absolute number"
+    );
 }
 
 #[test]

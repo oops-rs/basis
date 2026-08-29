@@ -828,7 +828,7 @@ let workspace = basis::Workspace::builder("/repo")
     .with_compaction(
         basis::Compaction::default()
             .with_keep_recent_tool_results(Some(5))       // elide older ones; default None keeps all
-            .with_auto_threshold_tokens(Some(400_000))    // default Some(50_000); None never triggers this way
+            .with_auto_threshold_tokens(Some(400_000))    // default Some(50_000); None turns both triggers off
             .with_auto_threshold_percent(Some(80))        // default Some(75); wins when the window is known
             .with_preserve_recent_user_tokens(20_000),
     )
@@ -844,8 +844,15 @@ carries it.
 know. `auto_threshold_percent` is the one that did not exist until mentra could ask the
 model itself how big it is, and it wins whenever the window *is* known — 50,000 tokens is
 most of a small model's window and a rounding error in a 1M-token one, so no single constant
-was ever going to be right for both. A run reads the same two figures a host would need to
-decide this for itself:
+was ever going to be right for both.
+
+The two are one setting, though, not two independent triggers. mentra resolves them
+together and treats a cleared `auto_threshold_tokens` as *off* before it looks at the
+percentage at all, so clearing the absolute number disables the window-relative trigger
+with it. A host that wants the percentage to be what decides leaves a large absolute
+number in place rather than clearing it.
+
+A run reads the same two figures a host would need to decide this for itself:
 
 ```rust
 if let Some(window) = run.context_window() {
