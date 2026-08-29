@@ -37,6 +37,29 @@
 //! would still be running commands. So [`ModedApprover`] answers mentra with a
 //! plain allow or deny and keeps the "…for this session" answer here, where
 //! changing the mode clears it.
+//!
+//! # A request already put to the client stays put
+//!
+//! `session/set_mode` may arrive while a permission dialog is open. The mode
+//! that was in force when the request was *put* decides that request; the new
+//! mode governs the next one. [`ModedApprover`] reads the mode once, before
+//! asking, and never again for the same call, and that is deliberate rather
+//! than incidental:
+//!
+//! - The dialog is on screen, and ACP gives an agent no way to take it down.
+//!   Answering the call from the new mode would leave a person looking at a
+//!   question whose answer no longer matters, and whatever they then click
+//!   would be discarded — which is a worse surprise than the one it avoids.
+//! - The person at the client holds both controls. Someone who switches to
+//!   read-only with a dialog open can refuse in the dialog; someone who
+//!   switches to always-allow can allow in it. Nothing is lost by letting the
+//!   dialog have the last word on the call it is about.
+//! - A "…for this session" answer that lands after the switch is remembered
+//!   like any other, and cannot outlive the switch either: it is only ever
+//!   read under `Prompt`, and moving back to `Prompt` is itself a switch,
+//!   which clears it.
+//!
+//! `tests/acp/permission.rs` pins both directions.
 
 use std::{
     collections::HashMap,

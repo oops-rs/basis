@@ -16,8 +16,9 @@ use std::sync::Arc;
 use agent_client_protocol::{
     Agent, ConnectionTo, Error,
     schema::v1::{
-        CancelNotification, CloseSessionRequest, DeleteSessionRequest, SessionId,
-        SetSessionModeRequest, StopReason,
+        CancelNotification, CloseSessionRequest, DeleteSessionRequest, RequestPermissionOutcome,
+        RequestPermissionResponse, SelectedPermissionOutcome, SessionId, SetSessionModeRequest,
+        StopReason,
     },
 };
 use basis_acp::ServeConfig;
@@ -258,4 +259,59 @@ async fn deleting_the_session_while_the_client_is_deciding_ends_the_turn() {
 
     assert_eq!(stop_reason, StopReason::Cancelled);
     assert!(!workspace.path().join("made.txt").exists());
+}
+
+/// A client that, asked permission, first switches the session to `mode` and
+/// then answers `answer`. Returns whether the write happened.
+async fn switched_while_deciding(mode: &'static str, answer: &'static str) -> bool {
+    let workspace = workspace();
+    let mock = Arc::new(writing_mock(&workspace));
+
+    let on_permission: OnPermission = Arc::new(move |request, responder, connection, _observed| {
+        // Sent before the answer, so the server reads the switch first: the
+        // dispatch loop handles messages in the order they were written.
+        connection
+            .send_request(SetSessionModeRequest::new(request.session_id.clone(), mode))
+            .detach();
+        responder.respond(RequestPermissionResponse::new(
+            RequestPermissionOutcome::Selected(SelectedPermissionOutcome::new(answer)),
+        ))
+    });
+
+    let (stop_reason, observed) = connected_with(
+        ServeConfig::with_source(MockSource::new(&mock, &workspace)),
+        on_permission,
+        |connection| async move {
+            let session = open(&connection).await?;
+            say(&connection, &session, "make a file").await
+        },
+    )
+    .await;
+
+    assert_eq!(stop_reason, StopReason::EndTurn);
+    let observed = observed.lock().expect("not poisoned");
+    assert_eq!(observed.permission_requests.len(), 1);
+    assert_eq!(
+        observed.mode_changes(),
+        vec![mode.to_string()],
+        "the switch itself must have landed"
+    );
+
+    workspace.path().join("made.txt").exists()
+}
+
+#[tokio::test]
+async fn a_request_already_put_to_the_client_is_answered_by_the_client() {
+    // The rule `mode` documents: a dialog on screen is the authority for the
+    // call it is about, and a mode switched while it is open governs the
+    // *next* call. Both directions, because either could be the one that
+    // quietly got the other treatment.
+    assert!(
+        switched_while_deciding("never", "allow-once").await,
+        "the person allowed it, in a dialog basis put up under `prompt`"
+    );
+    assert!(
+        !switched_while_deciding("always", "reject-once").await,
+        "and the person refused it, in the same dialog"
+    );
 }
