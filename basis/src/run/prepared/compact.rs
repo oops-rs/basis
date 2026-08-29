@@ -189,6 +189,22 @@ impl PreparedRun {
     /// not, and the two cases are told apart by what the line *says* — mentra
     /// classifies both bounds as terminal, so `recoverable` never invites a
     /// retry into a stop somebody asked for.
+    ///
+    /// With one exception, and a caller relying on the bound has to know it:
+    /// a pass with nothing to summarize answers `Ok(None)` *before* the bounds
+    /// are consulted at all. mentra returns on the empty prefix first and
+    /// checks the bounds only once there is work worth an artifact (mentra
+    /// 0.24.0 `src/compaction.rs`, `StandardCompactionEngine::compact`), which
+    /// is the right order for the check's own purpose — a run already past its
+    /// allowance should leave no snapshot behind — but it means an
+    /// already-cancelled pass on a conversation whose whole transcript is the
+    /// protected tail succeeds emptily. So `Ok(None)` says "there was nothing
+    /// to compact", never "your cancel did not arrive": a host that must not
+    /// carry on after the stop it asked for reads its own token, not this
+    /// return value. basis does not check the bounds itself ahead of the call
+    /// to close the gap — that would be a second opinion about a check the
+    /// runtime owns (ADR-0005), and it would turn a truthful `Ok(None)` into
+    /// an error on the one path where nothing was going to happen anyway.
     pub async fn compact_with_options<S: EventSink>(
         &mut self,
         instructions: Option<&str>,
