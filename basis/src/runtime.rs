@@ -230,6 +230,21 @@ pub struct Runtime {
     /// Which workspace owns each declared tool name on the same single
     /// registry. See [`Runtime::claim_declared_tool`] for why this exists.
     declared_claims: Mutex<HashMap<String, DeclaredClaim>>,
+    /// How many open workspaces hold each skills root on this runtime's single
+    /// skill registry. See [`Runtime::register_skill_roots`].
+    skill_root_holders: Mutex<HashMap<PathBuf, usize>>,
+}
+
+/// The identity a skills root is counted under.
+///
+/// mentra matches a root by its canonical path where the filesystem can
+/// resolve one and by the exact path it was registered with otherwise
+/// (`runtime/skill/registry.rs`'s `root_key`), so the holder count has to be
+/// keyed the same way: two workspaces reaching the user's global root through
+/// different spellings are one root upstream and must be one entry here, or
+/// the first of them to drop would free what the second is still serving.
+fn skill_root_key(path: &Path) -> PathBuf {
+    std::fs::canonicalize(path).unwrap_or_else(|_| path.to_path_buf())
 }
 
 /// A declared tool name registered on this runtime by a workspace still open.
@@ -507,6 +522,69 @@ impl Runtime {
             // Under the claim lock, so no other claimant can see the name free
             // while the tool is still registered.
             self.mentra.unregister_tool(name);
+        }
+    }
+
+    /// Registers a workspace's skills roots and counts it as a holder of each.
+    ///
+    /// mentra 0.24 made registration all-or-nothing and gave a host
+    /// `unregister_skills_dirs` to take a root back, which is what lets a
+    /// workspace stop leaving its skills on a runtime that outlives it. What
+    /// mentra cannot know is *how many* workspaces asked for a root: a root is
+    /// one entry upstream however often it is registered, and on a shared
+    /// runtime (ADR-0018) every workspace registers the same two user-scoped
+    /// roots. Unregistering on the first drop would take the user's own skills
+    /// away from every repository still open, so the count lives here — the
+    /// same ledger, and for the same reason, as
+    /// [`claim_declared_tool`](Self::claim_declared_tool).
+    ///
+    /// The registration happens under the holder lock, so nothing can observe
+    /// a root counted but absent, or free one between the register and the
+    /// count. An `Err` leaves both sides untouched: mentra commits nothing,
+    /// and no holder is recorded.
+    pub(crate) fn register_skill_roots(
+        &self,
+        roots: &[PathBuf],
+    ) -> Result<(), mentra::SkillLoadError> {
+        let mut holders = self
+            .skill_root_holders
+            .lock()
+            .expect("skill root holder map poisoned");
+
+        self.mentra.register_skills_dirs(roots)?;
+        for root in roots {
+            *holders.entry(skill_root_key(root)).or_insert(0) += 1;
+        }
+        Ok(())
+    }
+
+    /// Releases the holds [`register_skill_roots`](Self::register_skill_roots)
+    /// recorded, taking a root off the runtime when its last holder goes.
+    ///
+    /// A root nobody else holds leaves mentra's registry entirely: the skills
+    /// it contributed stop being listed to the model, `load_skill` refuses
+    /// them, and a name this root had shadowed resolves to the weaker root
+    /// again. Dropping the last root of all also withdraws `load_skill`, which
+    /// the next workspace to open restores.
+    ///
+    /// Under the holder lock, like the declared-tool release above, so no
+    /// other opener can see a root free while its skills are still registered.
+    pub(crate) fn release_skill_roots(&self, roots: &[PathBuf]) {
+        let mut holders = self
+            .skill_root_holders
+            .lock()
+            .expect("skill root holder map poisoned");
+
+        for root in roots {
+            let key = skill_root_key(root);
+            let Some(count) = holders.get_mut(&key) else {
+                continue;
+            };
+            *count = count.saturating_sub(1);
+            if *count == 0 {
+                holders.remove(&key);
+                self.mentra.unregister_skills_dir(&key);
+            }
         }
     }
 

@@ -743,6 +743,7 @@ impl RuntimeBuilder {
             #[cfg(feature = "mcp")]
             mcp_claims: Mutex::new(HashMap::new()),
             declared_claims: Mutex::new(HashMap::new()),
+            skill_root_holders: Mutex::new(HashMap::new()),
         })
     }
 }

@@ -253,7 +253,9 @@ config — never through code in `basis`:
   workspace, then `skills/` in the global config directory and `~/.agents/skills/`. The `.agents`
   pair is the directory other harnesses read, so a skill written once is found here too. Loaded by
   name on demand, so only descriptions cost context, and a nearer root shadows a name rather than a
-  whole directory.
+  whole directory. A root goes on the runtime at open and comes off when the workspace drops, so a
+  host holding one shared `Runtime` across many repositories does not accumulate the skills of every
+  repository it ever opened.
 - **Prompt templates** — `.basis/templates/*.md` with `$ARGUMENTS` and `$1`, `$2`…; a nested path is a
   namespace (`git/commit.md` → `git:commit`). ACP clients get them as commands.
 - **The model choice** — `.basis/config.json`: `provider`, `model`, `effort`, schema-versioned, with

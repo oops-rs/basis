@@ -62,7 +62,7 @@ hot-reloadable extensions. Two pi decisions independently validate ours:
 | Strict private-runtime reuse | Repeatable registered-provider recipe, discovery-off/fresh-only/resolved-model/exact-roster workspace, explicit per-generation host-tool bind, consuming async rebuild ✅ | built |
 | Builtin tools (files, shell, background exec, tasks) | Mentra builtins, with the roster basis's: `read`, `ls`, `grep`, `glob`, `write`, `edit` (mentra's split file tools, `RuntimeBuilder::with_file_tools`), `compact`, `load_skill`, and `spawn` for commands and delegation. `shell`, `background_run`, `check_background`, `task`, `task_*`, `team_*`, `idle` and — since D2 switched mentra's memory engine off — `memory_pin`/`memory_forget`/`memory_search` are registered but not offered ✅ | mentra + built |
 | Context files (AGENTS.md) | Loader: workspace + global, parent-dir walk; `CLAUDE.md` per directory where there is no `AGENTS.md` | build |
-| Skills (on-demand) | SKILL.md discovery, description-first loading, four roots — `.basis/skills` and `.agents/skills` in the workspace, `skills/` in the global config dir and `~/.agents/skills` | build |
+| Skills (on-demand) | SKILL.md discovery, description-first loading, four roots — `.basis/skills` and `.agents/skills` in the workspace, `skills/` in the global config dir and `~/.agents/skills`; each root registered at open and handed back when the workspace drops, so a shared runtime holds only the skills of the repositories still open ✅ | build |
 | Prompt templates (/commands) | Markdown templates with args, exposed over ACP as commands ✅ | built |
 | Extensions (custom tools, event interception) | MCP servers + declared subprocess tools + interception with two bindings — in-process `Interceptor`, subprocess hooks — before a call (allow/deny/modify) and after it (keep/replace) (§3) ✅ | built |
 | Packages (shareable bundles) | Directory convention over skills/templates/hooks/MCP — defer | later |
@@ -304,9 +304,14 @@ flowchart LR
   meets the noun. What stays per workspace is what a repository says: hooks, `ShellAccess`,
   the `.git` carve-out — enforced on a shared runtime by the single dispatch hook basis
   registers, since mentra fixes hooks at build time and workspaces arrive later — its
-  declared tools, and its MCP connections. The last two are minted from its own config and
-  die with it while the tool registry underneath is the runtime's, so each is claimed by name
-  at open, released at drop, and hidden from every other workspace's roster.
+  declared tools, its skills roots, and its MCP connections. The last three are minted from
+  its own config and die with it while the registries underneath are the runtime's, so each is
+  claimed at open and released at drop. Declared tools and bridged MCP tools are claimed by
+  name and hidden from every other workspace's roster; skills roots are counted rather than
+  owned, because two repositories legitimately register the same user-scoped root and the
+  first to close must not take it from the second. Skills are the one thing that *does* travel
+  between workspaces on a shared runtime — a run can `load_skill` a sibling's skill while the
+  sibling is open, and cannot once it is not.
 - **A reusable private runtime is consumed, never reset in place** (ADR-0024). Basis 0.8 uses
   Mentra 0.23.3 for the underlying observer and fresh provider-session primitives.
   `RuntimeBuilder::with_reusable_registered_provider(provider_id, make, warm)` records the host's

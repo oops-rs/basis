@@ -39,7 +39,7 @@ use crate::{
     run::LoadedSkill,
     runtime::{Runtime, RuntimeBuilder, RuntimeRecipe, dispatch},
     shell::ShellAccess,
-    skills::{self, SkillsConfig},
+    skills::{self, SkillRoots, SkillsConfig},
     store,
     templates::{self, Template, TemplatesConfig},
     tools::declared::{self, DeclaredTools, ToolsConfig},
@@ -518,11 +518,16 @@ impl WorkspaceBuilder {
     /// # What sharing a runtime shares
     ///
     /// Skills are registered on the runtime's single registry, so a skill one
-    /// workspace registers is loadable by another's runs — an accepted
-    /// consequence of sharing; [`Workspace::skills`] reports only what this
-    /// workspace registered. MCP tools live on the same single registry but do
-    /// **not** travel: every roster minted here hides the `mcp__*` tools of
-    /// servers this workspace does not own.
+    /// workspace registers is loadable by another's runs for as long as both
+    /// are open — an accepted consequence of sharing, and what
+    /// [`Workspace::skills`] therefore reports. It ends with the workspace: the
+    /// roots this open registered come off the runtime when the [`Workspace`]
+    /// drops, so a sibling that outlives it stops being able to reach its
+    /// skills, and a root two workspaces both registered — the user's global
+    /// ones, on any host that opens more than one repository — stays until the
+    /// last of them goes. MCP tools live on the same single registry but do
+    /// **not** travel even while both are open: every roster minted here hides
+    /// the `mcp__*` tools of servers this workspace does not own.
     pub async fn open(self) -> Result<Workspace, RunError> {
         if let RuntimeSource::Reusable(recipe) = &self.runtime {
             if self.discovery_enabled {
@@ -721,9 +726,12 @@ impl WorkspaceBuilder {
         };
 
         // Skills must be registered on the runtime before any session spawns,
-        // so every agent's tool roster includes `load_skill`.
-        let (skills_dirs, skills) = if self.discovery_enabled {
-            let dirs = register_skills(runtime.mentra_runtime_internal(), &path, &self.skills)?;
+        // so every agent's tool roster includes `load_skill`. The hold is a
+        // stack value until the `Workspace` below takes it: every `?` between
+        // here and there drops it, so an open refused after this point leaves
+        // a shared runtime holding no skills of a workspace that never opened.
+        let (skills_registration, skills) = if self.discovery_enabled {
+            let registration = register_skills(Arc::clone(&runtime), &path, &self.skills)?;
             let loaded = runtime
                 .mentra_runtime_internal()
                 .skills()
@@ -733,11 +741,12 @@ impl WorkspaceBuilder {
                     description: skill.description,
                     model_invocable: skill.model_invocable,
                     path: skill.path,
+                    root: skill.root,
                 })
                 .collect();
-            (dirs, loaded)
+            (registration, loaded)
         } else {
-            (Vec::new(), Vec::new())
+            (SkillRoots::none(Arc::clone(&runtime)), Vec::new())
         };
 
         // Beside the skills and for the same reason: a tool has to be on the
@@ -844,7 +853,7 @@ impl WorkspaceBuilder {
             config,
             context,
             memories,
-            skills_dirs,
+            skills_registration,
             skills,
             templates_dirs,
             templates,
@@ -898,22 +907,23 @@ fn discovered_mcp(
     Ok((files, mcp::configured(workspace, config)?))
 }
 
-/// Registers every skills directory that exists, most specific first.
+/// Registers every skills directory that exists, most specific first, and
+/// returns the hold that gives them back.
 ///
 /// Roots layer rather than replace, so a workspace skill shadows a personal one
 /// of the same name and everything else from the weaker roots still loads. Which
-/// four roots those are, and why they are in that order, is [`crate::skills`].
+/// four roots those are, and why they are in that order, is [`crate::skills`];
+/// what the returned value is for, and why the runtime counts holders rather
+/// than owners, is [`SkillRoots`].
 fn register_skills(
-    runtime: &mentra::Runtime,
+    runtime: Arc<Runtime>,
     workspace: &Path,
     config: &SkillsConfig,
-) -> Result<Vec<PathBuf>, RunError> {
+) -> Result<SkillRoots, RunError> {
     let sources = skills::discover(workspace, config);
     let paths: Vec<PathBuf> = sources.iter().map(|source| source.path.clone()).collect();
 
-    runtime.register_skills_dirs(&paths)?;
-
-    Ok(paths)
+    SkillRoots::register(runtime, paths)
 }
 
 /// Loads every template the workspace defines, with the roots they came from.
