@@ -56,6 +56,17 @@ pub struct LoadedSkill {
     /// entries apart that look alike and behave differently.
     pub model_invocable: bool,
     pub path: PathBuf,
+    /// The registered root this skill came from, exactly as basis handed it to
+    /// mentra — one of [`skills::discover`](crate::skills::discover)'s four.
+    ///
+    /// Carried for the reason `model_invocable` is: only a host can act on it,
+    /// and it cannot be recovered from anything else here. With four roots
+    /// layered, [`path`](Self::path) says which file won and this says which
+    /// *scope* did — a repository's skill or the user's — which is what a host
+    /// listing a workspace's skills needs to attribute one. On a shared
+    /// runtime (ADR-0018) it also tells a sibling workspace's skill from this
+    /// one's, since the registry is the runtime's and additive.
+    pub root: PathBuf,
 }
 
 /// Builds the opening line. Kept separate so [`PreparedRun::header`] and the

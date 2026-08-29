@@ -30,6 +30,16 @@
 //! name wins), so a repository shadows a personal skill by name and inherits
 //! everything it did not shadow.
 //!
+//! # A root is held, not given away
+//!
+//! Registration is on the *runtime*, which on a shared one (ADR-0018) outlives
+//! every workspace opened on it. So a workspace holds its roots rather than
+//! handing them over: an internal hold releases them when the `Workspace` drops,
+//! and the runtime takes a root off mentra's registry once its last holder
+//! goes. What that buys is a host — an editor server, an ACP session — that
+//! can close a repository without its skills outliving it, and without taking
+//! the user's own `~/.agents/skills` away from the repositories still open.
+//!
 //! # `disable-model-invocation`
 //!
 //! A `SKILL.md` may set `disable-model-invocation: true` in its frontmatter
@@ -49,9 +59,13 @@
 //! `SKILL.md` does not define — which is [`crate::templates`] a second time,
 //! under a second set of rules.
 
+mod registration;
+
 use std::path::{Path, PathBuf};
 
 use crate::context::ContextScope;
+
+pub(crate) use registration::SkillRoots;
 
 /// Where basis looks inside a workspace, relative to its root.
 pub const DEFAULT_WORKSPACE_SKILLS_DIR: &str = ".basis/skills";

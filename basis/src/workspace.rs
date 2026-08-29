@@ -82,6 +82,7 @@ use crate::{
         dispatch::{self, HookRegistration},
     },
     shell::ShellAccess,
+    skills::SkillRoots,
     templates::Template,
     tools::declared::DeclaredTools,
 };
@@ -136,7 +137,10 @@ pub struct Workspace {
     memories: Vec<Memory>,
     /// Built once from the context, cloned per run: none of its inputs vary.
     agent: AgentConfig,
-    skills_dirs: Vec<PathBuf>,
+    /// The skills roots this open put on the runtime, held for as long as this
+    /// workspace is: their paths are what a run reports, and the hold is what
+    /// takes them back off a shared runtime on drop.
+    skills_registration: SkillRoots,
     skills: Vec<LoadedSkill>,
     templates_dirs: Vec<PathBuf>,
     templates: Vec<Template>,
@@ -387,12 +391,22 @@ impl Workspace {
         &self.memories
     }
 
-    /// The skills this workspace registered on the runtime, after layering.
+    /// Every skill a run from this workspace could reach at open, after
+    /// layering, name-ordered.
     ///
-    /// Only what *this* workspace registered. The registry itself is the
-    /// runtime's and additive, so on a shared runtime a run may also be able
-    /// to `load_skill` what a sibling workspace registered — an accepted
-    /// consequence of sharing (see [`WorkspaceBuilder::open`]).
+    /// On a private runtime that is exactly this workspace's four roots. On a
+    /// shared one (ADR-0018) the registry is the runtime's and additive, so it
+    /// is this workspace's roots *and* whatever a sibling workspace open at the
+    /// time had registered — which is what a run can actually `load_skill`, and
+    /// therefore the honest answer to what this reports.
+    /// [`LoadedSkill::root`](crate::run::LoadedSkill::root) is how to tell the
+    /// two apart: a root under [`root`](Self::root) is this repository's.
+    ///
+    /// A snapshot, taken once at open like everything else here. A sibling that
+    /// opens afterwards adds skills this list does not name, and one that drops
+    /// takes its own away — since mentra 0.24 a workspace hands its roots back
+    /// when it goes, so a shared runtime no longer accumulates the skills of
+    /// every repository a host has ever opened on it.
     pub fn skills(&self) -> &[LoadedSkill] {
         &self.skills
     }
@@ -501,6 +515,11 @@ impl Workspace {
         drop(self.mcp_connections);
         drop(self.declared_registration);
         drop(self.hook_registration);
+        // Beside the other two, and load-bearing for the `try_unwrap` below:
+        // the hold owns an `Arc` on the runtime it registered against, so a
+        // rebuild that did not drop it would find the old runtime shared and
+        // refuse itself.
+        drop(self.skills_registration);
 
         let old_runtime = match Arc::try_unwrap(self.runtime) {
             Ok(runtime) => runtime,
@@ -541,6 +560,11 @@ impl Workspace {
         agent.compaction.transcript_dir = runtime.transcripts_dir().to_path_buf();
         let provider = runtime.provider().to_string();
         let reuse = Some(WorkspaceReuse::new(recipe, shell));
+        // A reusable generation runs with discovery off, so it registered no
+        // root and the replacement holds none either — stated against the new
+        // runtime rather than carried over, since the old hold belonged to a
+        // runtime that no longer exists.
+        let skills_registration = SkillRoots::none(Arc::clone(&runtime));
 
         Ok(Self {
             root: self.root,
@@ -555,7 +579,7 @@ impl Workspace {
             context: self.context,
             memories: self.memories,
             agent,
-            skills_dirs: self.skills_dirs,
+            skills_registration,
             skills: self.skills,
             templates_dirs: self.templates_dirs,
             templates: self.templates,
@@ -669,7 +693,7 @@ impl Workspace {
                 provider: self.provider.clone(),
                 model,
                 context: self.context.clone(),
-                skills_dirs: self.skills_dirs.clone(),
+                skills_dirs: self.skills_registration.dirs().to_vec(),
                 skills: self.skills.clone(),
                 templates_dirs: self.templates_dirs.clone(),
                 templates: self.templates.clone(),
