@@ -188,10 +188,16 @@ async fn a_rewrite_into_a_protected_git_path_is_refused() {
     )
     .await;
 
+    // `ToolCompleted` carries mentra's 200-byte head of the result, so what
+    // this can see is the front of the refusal — which is the half that has to
+    // be right: a refusal opening on the guard's complaint about a path the
+    // model never wrote sends it correcting somebody else's input.
     let result = tool_result(&events, "write");
     assert!(
-        result.contains("protected git paths"),
-        "the guard must judge the input the tool would run on: {result}"
+        result.contains("a hook rewrote this call")
+            && result.contains("redirect")
+            && result.contains("config belongs in git"),
+        "the refusal must name the hand that wrote the path: {result}"
     );
     assert!(
         !workspace.path().join(".git/config").exists(),

@@ -280,11 +280,28 @@ impl PreExecutionHook for HookDispatch {
         // tool runs on: mentra 0.24 re-checks the tool's schema and asks the
         // authorizer about exactly this input, so a guard still holding the
         // model's original would be judging a call that never happens.
+        //
+        // The rewrite's own reason survives into the refusal. Without it the
+        // model reads a denial of an input it never wrote and is sent to
+        // correct someone else's path — the mistake mentra avoids on the same
+        // seam when a rewrite fails the schema check (its `schema_violation`
+        // branch blames the hook, not the model) and the "every hand that
+        // touched the call is named" property `hooks::chain` states.
         if shared
-            && let HookDecision::Modify { input_json, .. } = &decision
+            && let HookDecision::Modify {
+                input_json,
+                reason: rewrite,
+            } = &decision
             && let Some(reason) = guard(&context.tool_name, input_json, shell, &root)
         {
-            return Ok(HookDecision::Deny(reason));
+            return Ok(HookDecision::Deny(match rewrite {
+                Some(rewrite) => {
+                    format!(
+                        "a hook rewrote this call ({rewrite}), and the rewrite is denied: {reason}"
+                    )
+                }
+                None => format!("a hook rewrote this call, and the rewrite is denied: {reason}"),
+            }));
         }
 
         Ok(decision)

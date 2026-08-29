@@ -623,9 +623,15 @@ async fn a_rewrite_into_the_protected_git_paths_is_refused() {
     )
     .await;
 
+    let HookDecision::Deny(reason) = &decision else {
+        panic!("expected the rewrite to be refused, got {decision:?}");
+    };
+    assert!(reason.contains("protected git paths"), "{reason}");
+    // The model asked to write `src/main.rs`; a refusal naming only the path
+    // it never wrote sends it correcting somebody else's input.
     assert!(
-        matches!(&decision, HookDecision::Deny(reason) if reason.contains("protected git paths")),
-        "{decision:?}"
+        reason.contains("rewrite") && reason.contains("rewritten by rewrite"),
+        "{reason}"
     );
 }
 
