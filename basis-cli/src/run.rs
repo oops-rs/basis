@@ -18,13 +18,13 @@ use std::{
     process::ExitCode,
 };
 
-use basis::{JsonlWriter, RunSpec, Runtime, ShellAccess, Workspace, provider};
+use basis::{JsonlWriter, RunProfile, RunSpec, Runtime, ShellAccess, Workspace, provider};
 use mentra::ModelSelector;
 
 use crate::{cli::RunArgs, exit::exit_code};
 
 pub(crate) async fn execute_run(args: RunArgs) -> Result<ExitCode, String> {
-    let prompt = prompt_from(args.prompt)?;
+    let prompt = prompt_from(args.prompt.clone())?;
     // Refused before anything else happens: `Workspace::open` resolves a
     // provider and spawns every server `.mcp.json` names, and a refusal that
     // has already spawned processes is not a refusal. The free functions make
@@ -32,6 +32,11 @@ pub(crate) async fn execute_run(args: RunArgs) -> Result<ExitCode, String> {
     if prompt.trim().is_empty() {
         return Err("prompt is empty".to_string());
     }
+
+    // Built early, before the fields below are moved out of `args` one by
+    // one: this borrows the whole struct, and Rust refuses that once any
+    // field has been partially moved.
+    let spec = run_spec(&args, prompt);
 
     let workspace = match args.workspace {
         Some(path) => path,
@@ -69,24 +74,6 @@ pub(crate) async fn execute_run(args: RunArgs) -> Result<ExitCode, String> {
         builder = builder.with_model(ModelSelector::Id(model));
     }
 
-    let mut spec = RunSpec::new(prompt);
-    if let Some(effort) = args.effort {
-        spec = spec.with_effort(effort.into());
-    }
-
-    // A bound that trips ends the run gracefully — the stream closes the way
-    // it always does and committed work is kept — so setting one costs a
-    // healthy run nothing.
-    if let Some(deadline) = args.deadline {
-        spec = spec.with_deadline(deadline.duration());
-    }
-    if let Some(tool_budget) = args.tool_budget {
-        spec = spec.with_tool_budget(tool_budget);
-    }
-    if let Some(token_budget) = args.token_budget {
-        spec = spec.with_token_budget(token_budget);
-    }
-
     // Every consequential call is put to this one, and nothing else decides:
     // `always` allows, `never` refuses, `prompt` asks the person.
     let approver = args.approve.approver();
@@ -105,6 +92,42 @@ pub(crate) async fn execute_run(args: RunArgs) -> Result<ExitCode, String> {
         .await
         .map_err(|error| error.to_string())?;
     Ok(ExitCode::from(exit_code(&report)))
+}
+
+/// The [`RunSpec`] one attended `spawn` invocation asks for: the CLI flags
+/// that shape a run, turned into the typed builder — the same mapping
+/// `local::verbs::run_spec` does for the other two routes, so the two system-
+/// prompt flags mean the same thing regardless of which route reaches them.
+fn run_spec(args: &RunArgs, prompt: String) -> RunSpec {
+    let mut spec = RunSpec::new(prompt);
+    if let Some(effort) = args.effort {
+        spec = spec.with_effort(effort.into());
+    }
+
+    // A bound that trips ends the run gracefully — the stream closes the way
+    // it always does and committed work is kept — so setting one costs a
+    // healthy run nothing.
+    if let Some(deadline) = args.deadline {
+        spec = spec.with_deadline(deadline.duration());
+    }
+    if let Some(tool_budget) = args.tool_budget {
+        spec = spec.with_tool_budget(tool_budget);
+    }
+    if let Some(token_budget) = args.token_budget {
+        spec = spec.with_token_budget(token_budget);
+    }
+    // `basis::RunSpec` carries host overrides through its `RunProfile`
+    // rather than a `with_system_prompt` of its own — unlike
+    // `basis_tasks::RunSpec` (see `local::verbs::run_spec`), which is a
+    // durable task's spawn request and owns the field directly. Both routes
+    // apply the same two-flag mapping from [`cli::system_prompt`].
+    if let Some(system_prompt) = crate::cli::system_prompt(
+        args.system_prompt.clone(),
+        args.append_system_prompt.clone(),
+    ) {
+        spec = spec.with_profile(RunProfile::new().with_system_prompt(system_prompt));
+    }
+    spec
 }
 
 /// The prompt as `spawn` (or its `run` alias) was given it, reading stdin when
@@ -171,6 +194,63 @@ mod tests {
         assert_eq!(
             prompt_from("fix the failing test".to_string()).expect("a literal prompt"),
             "fix the failing test"
+        );
+    }
+
+    fn run_args(flags: &[&str]) -> RunArgs {
+        use clap::Parser;
+
+        use crate::cli::{Cli, Command};
+
+        let mut argv = vec!["basis", "spawn", "prompt"];
+        argv.extend_from_slice(flags);
+        let Some(Command::Spawn(parsed)) = Cli::try_parse_from(argv).expect("parses").command
+        else {
+            panic!("spawn parses");
+        };
+        parsed
+    }
+
+    /// Pins the gap this module existed to close: `--system-prompt` and
+    /// `--append-system-prompt` are declared on [`RunArgs`], but until this
+    /// spec builder applied them nothing on the attended route ever read the
+    /// two fields — `basis spawn --json --system-prompt ...` silently ran the
+    /// workspace's own prompt instead of the caller's.
+    #[test]
+    fn the_replace_flag_reaches_the_minted_spec() {
+        let args = run_args(&["--system-prompt", "you are Acme's reviewer"]);
+
+        let spec = run_spec(&args, "prompt".to_string());
+
+        let expected = RunSpec::new("prompt").with_profile(RunProfile::new().with_system_prompt(
+            basis::SystemPrompt::Replace("you are Acme's reviewer".to_string()),
+        ));
+        assert_eq!(spec, expected);
+    }
+
+    #[test]
+    fn the_append_flag_reaches_the_minted_spec() {
+        let args = run_args(&["--append-system-prompt", "answer in Latin"]);
+
+        let spec = run_spec(&args, "prompt".to_string());
+
+        let expected = RunSpec::new("prompt").with_profile(
+            RunProfile::new()
+                .with_system_prompt(basis::SystemPrompt::Append("answer in Latin".to_string())),
+        );
+        assert_eq!(spec, expected);
+    }
+
+    #[test]
+    fn neither_flag_leaves_the_spec_at_the_workspace_default() {
+        let args = run_args(&[]);
+
+        let spec = run_spec(&args, "prompt".to_string());
+
+        assert_eq!(
+            spec,
+            RunSpec::new("prompt"),
+            "unsaid must leave the profile empty, not force a system prompt"
         );
     }
 
