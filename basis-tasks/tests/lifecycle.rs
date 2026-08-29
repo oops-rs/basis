@@ -14,10 +14,10 @@ use std::{
     net::{TcpListener, TcpStream},
     sync::{
         Arc,
-        atomic::{AtomicUsize, Ordering},
+        atomic::{AtomicBool, AtomicUsize, Ordering},
     },
     thread,
-    time::Duration,
+    time::{Duration, Instant},
 };
 
 use basis_tasks::{RunSpec, Tasks, WaitOutcome};
@@ -110,38 +110,179 @@ async fn spawn_ask_wait_and_list_from_rust_with_no_binary_involved() {
     );
 }
 
+/// A wait's deadline is honored at the turn boundary, not by cutting a turn
+/// short (ADR-0019: cancellation and deadlines are boundary-granular). The
+/// turn in flight when the wait's own deadline passes runs to its end under
+/// the *task's* deadline; the next one does not start. The task is left
+/// exactly as a crash between turns would leave it — no terminal record, the
+/// attach lock free — and a later wait picks it up where the first stopped.
+#[tokio::test]
+async fn a_wait_past_its_deadline_stops_between_turns_and_leaves_the_task_resumable() {
+    stub_api_key();
+    // The endpoint holds every turn until told otherwise, so the test — not
+    // the clock — decides that the wait's deadline passes while its first
+    // turn is in flight: the check under test is the one at the boundary
+    // after it.
+    let endpoint = ScriptedEndpoint::start_held();
+    let data_dir = tempfile::tempdir().expect("tempdir");
+    let workspace = tempfile::tempdir().expect("tempdir");
+    let tasks = Tasks::open_at(data_dir.path(), workspace.path()).expect("opens");
+
+    let spec = RunSpec::new("hello")
+        .with_base_url(&endpoint.base_url)
+        .with_model("test-model")
+        .with_deadline(Duration::from_secs(60))
+        .with_approve(basis_tasks::Approve::Always);
+    let handle = tasks.spawn(spec).expect("spawn mints a handle immediately");
+    // Two more turns queued behind the prompt: three in all, and a wait that
+    // ignored its own deadline would run every one of them.
+    tasks.send(&handle, "one").expect("enqueue");
+    tasks.send(&handle, "two").expect("enqueue");
+
+    // Long enough for the attach to open the workspace and start its first
+    // turn (no turn starts once the wait is already over — the rule under
+    // test cuts both ways), short enough that the test holds that turn past
+    // it without waiting long.
+    let timeout = Duration::from_secs(2);
+    let started = Instant::now();
+    let waiter = {
+        let tasks = tasks.clone();
+        let handle = handle.clone();
+        tokio::spawn(async move { tasks.wait(&handle, None, timeout, None).await })
+    };
+    // The first turn is in flight (its request has reached the endpoint) and
+    // the wait's own deadline is behind it before the turn is allowed to end.
+    while endpoint.arrived() == 0 {
+        assert!(
+            started.elapsed() < timeout,
+            "the first turn never reached the endpoint inside the wait's timeout"
+        );
+        tokio::time::sleep(Duration::from_millis(10)).await;
+    }
+    tokio::time::sleep(timeout.saturating_sub(started.elapsed()) + Duration::from_millis(100))
+        .await;
+    endpoint.release();
+
+    let outcome = waiter
+        .await
+        .expect("waiter task ends")
+        .expect("wait completes");
+    let elapsed = started.elapsed();
+    assert_eq!(
+        outcome,
+        WaitOutcome::TimedOut { attached: false },
+        "the wait ends at its own deadline, and releases the lock before saying so"
+    );
+    assert!(
+        elapsed < Duration::from_secs(10),
+        "the wait returned at the first boundary after its deadline, not the task's \
+         (took {elapsed:?})"
+    );
+    assert_eq!(
+        endpoint.served(),
+        1,
+        "the in-flight turn finished; no other started"
+    );
+    assert!(
+        tasks.terminal(&handle).expect("reads").is_none(),
+        "a wait that timed out settles nothing: the task stays resumable"
+    );
+    assert!(
+        !tasks.is_attached(&handle).expect("probes"),
+        "the attach lock is released with the wait"
+    );
+
+    // The second wait resumes from the committed turn and finishes the job.
+    let outcome = tasks
+        .wait(&handle, None, Duration::from_secs(30), None)
+        .await
+        .expect("wait completes");
+    let WaitOutcome::Terminal(terminal) = outcome else {
+        panic!("a resumed task runs to its terminal inside a generous timeout");
+    };
+    assert_eq!(terminal["state"], "succeeded", "{terminal}");
+    assert_eq!(terminal["result"], "reply-3", "{terminal}");
+    assert_eq!(
+        endpoint.served(),
+        3,
+        "the two queued messages ran on the second attach, and nothing was rerun"
+    );
+}
+
 /// An endpoint scripted to answer every connection with a fixed assistant
 /// message on the `chat/completions` wire — the smallest shape a finished
 /// turn needs. The listener is dropped, and its accept loop ends, with the
 /// endpoint.
 struct ScriptedEndpoint {
     base_url: String,
+    /// Turn requests that have reached the endpoint, held or not.
+    arrived: Arc<AtomicUsize>,
+    /// Turns answered.
     served: Arc<AtomicUsize>,
+    /// While set, every turn waits at the endpoint for [`release`](Self::release).
+    held: Arc<AtomicBool>,
 }
 
 impl ScriptedEndpoint {
     fn start() -> Self {
+        Self::start_with(false)
+    }
+
+    /// As [`start`](Self::start), but every turn is held at the endpoint
+    /// until [`release`](Self::release) — a turn that takes exactly as long
+    /// as the test wants, for one that needs a wait to run out while a turn
+    /// is in flight.
+    fn start_held() -> Self {
+        Self::start_with(true)
+    }
+
+    fn start_with(held: bool) -> Self {
         let listener = TcpListener::bind("127.0.0.1:0").expect("bind test endpoint");
         let address = listener.local_addr().expect("read endpoint address");
+        let arrived = Arc::new(AtomicUsize::new(0));
         let served = Arc::new(AtomicUsize::new(0));
+        let held = Arc::new(AtomicBool::new(held));
 
-        let counted = Arc::clone(&served);
+        let turns = Turns {
+            arrived: Arc::clone(&arrived),
+            served: Arc::clone(&served),
+            held: Arc::clone(&held),
+        };
         thread::spawn(move || {
             while let Ok((stream, _)) = listener.accept() {
-                let counted = Arc::clone(&counted);
-                thread::spawn(move || answer(stream, &counted));
+                let turns = turns.clone();
+                thread::spawn(move || answer(stream, &turns));
             }
         });
 
         Self {
             base_url: format!("http://{address}/"),
+            arrived,
             served,
+            held,
         }
+    }
+
+    fn arrived(&self) -> usize {
+        self.arrived.load(Ordering::SeqCst)
     }
 
     fn served(&self) -> usize {
         self.served.load(Ordering::SeqCst)
     }
+
+    /// Lets every held turn — and every turn after — answer.
+    fn release(&self) {
+        self.held.store(false, Ordering::SeqCst);
+    }
+}
+
+/// The endpoint's turn accounting, shared with each connection's thread.
+#[derive(Clone)]
+struct Turns {
+    arrived: Arc<AtomicUsize>,
+    served: Arc<AtomicUsize>,
+    held: Arc<AtomicBool>,
 }
 
 /// A pinned model is looked up in the provider's listing before the first
@@ -160,13 +301,17 @@ fn model_listing(request: &str) -> Option<String> {
     })
 }
 
-fn answer(mut stream: TcpStream, turns: &AtomicUsize) {
+fn answer(mut stream: TcpStream, turns: &Turns) {
     let request = read_http_request(&mut stream);
     if let Some(listing) = model_listing(&request) {
         let _ = stream.write_all(listing.as_bytes());
         return;
     }
-    let index = turns.fetch_add(1, Ordering::SeqCst) + 1;
+    turns.arrived.fetch_add(1, Ordering::SeqCst);
+    while turns.held.load(Ordering::SeqCst) {
+        thread::sleep(Duration::from_millis(10));
+    }
+    let index = turns.served.fetch_add(1, Ordering::SeqCst) + 1;
     let id = format!("chatcmpl_{index}");
     let events = [
         json!({

@@ -114,6 +114,14 @@ pub enum WaitOutcome {
 /// forever rather than refused, which is what asking for one that large
 /// means.
 ///
+/// The deadline binds the wait, not the task. Between polls it is checked
+/// here; while this process is the executor it travels into [`drive`] on
+/// `ctx` and is honored at every turn boundary, so a `wait` that attaches
+/// to a long task gives the lock back — with no terminal record, the task
+/// still resumable — once its own time is up. The one turn in flight at
+/// that moment is bounded by the task's deadline, not the wait's: that is
+/// ADR-0019's granularity, not a gap.
+///
 /// **Threading (G7, `ca9ddcb`, applied at this crate's own boundary):** this
 /// function itself never touches a lock or a file — [`poll_once`] and
 /// [`is_attached`] do that, each on its own `spawn_blocking` thread, so the
@@ -126,6 +134,7 @@ pub(crate) async fn wait_for_terminal(
     ctx: &DriveContext,
 ) -> Result<WaitOutcome, String> {
     let deadline = Instant::now().checked_add(timeout);
+    let ctx = ctx.clone().until(deadline.map(Instant::into_std));
     loop {
         if let Some(terminal) = poll_once(data.clone(), task.to_string(), ctx.clone()).await? {
             return Ok(WaitOutcome::Terminal(terminal));
@@ -150,8 +159,10 @@ pub(crate) async fn wait_for_terminal(
 /// `settle_children`'s recursive `drive` calls included) ever runs on one.
 ///
 /// `None` means the iteration made no progress (nothing to attach to yet, or
-/// [`drive`] itself backed off) — indistinguishable to the caller from "still
-/// running", which is exactly right: both just mean try again next poll.
+/// [`drive`] itself backed off — its conversation claimed elsewhere, or the
+/// waiter's own deadline reached at a turn boundary) — indistinguishable to
+/// the caller from "still running", which is exactly right: both just mean
+/// check the deadline, then try again next poll.
 async fn poll_once(
     data: DataDir,
     task: String,
@@ -200,7 +211,10 @@ async fn is_attached(data: &DataDir, task: &str) -> Result<bool, String> {
 ///
 /// `timeout` is saturated into a deadline, as [`wait_for_terminal`]'s is: a
 /// duration too large to represent as a deadline waits forever rather than
-/// panicking or refusing.
+/// panicking or refusing — and, as there, it bounds the wait rather than
+/// the task: past it no further turn starts under this process, the one in
+/// flight finishes under the task's own deadline, and the lock is released
+/// with the message still pending for whoever attaches next.
 ///
 /// **Threading:** as [`wait_for_terminal`] — [`poll_message_once`] carries
 /// every lock and fs touch this makes onto a blocking thread; this `async fn`
@@ -213,7 +227,7 @@ pub(crate) async fn wait_for_message(
     prompt_host: Option<Arc<dyn crate::approve::PromptHost>>,
 ) -> Result<WaitOutcome, String> {
     let deadline = Instant::now().checked_add(timeout);
-    let ctx = DriveContext::new(None, prompt_host);
+    let ctx = DriveContext::new(None, prompt_host).until(deadline.map(Instant::into_std));
     loop {
         match poll_message_once(
             data.clone(),
@@ -277,8 +291,15 @@ async fn poll_message_once(
         if terminal.is_none()
             && let Some(guard) = try_attach(&paths)?
         {
-            let _ = handle.block_on(drive(&data, &task, guard, &ctx))?;
-            return Ok(MessagePoll::Drove);
+            // `None` is a drive that made no progress — its conversation
+            // claimed elsewhere, or the waiter's deadline reached at a turn
+            // boundary — and reporting it as `Drove` would send the caller
+            // straight back here to attach and yield again, never reaching
+            // its own deadline check. It is `Idle`: nothing changed.
+            return Ok(match handle.block_on(drive(&data, &task, guard, &ctx))? {
+                Some(_) => MessagePoll::Drove,
+                None => MessagePoll::Idle,
+            });
         }
         Ok(MessagePoll::Idle)
     })
@@ -352,14 +373,18 @@ fn children_of(data: &DataDir, task: &str) -> Result<Vec<String>, String> {
 }
 
 /// Executes the agent to its terminal record while holding the attach lock,
-/// and returns the raw terminal payload — or `None` when this attempt made
-/// no progress because the conversation it would resume is already claimed by
-/// another task's executor (see [`try_conversation`]). `None` means exactly
-/// what a contended [`try_attach`] already means to its own caller: nobody
-/// drove anything this attempt, the lock this call did hold (this task's own
-/// attach lock, dropped with `guard` on any return) is released, and the
-/// caller's poll loop retries — the same observe-don't-race contract, one
-/// layer down, for T2(b)'s double-continuation race.
+/// and returns the raw terminal payload — or `None` when this attempt did
+/// not settle the task: the conversation it would resume is already claimed
+/// by another task's executor (see [`try_conversation`]), or the waiter
+/// `ctx` drives for ran out of time at a turn boundary (see
+/// [`DriveContext::until`]). Either way the lock this call did hold (this
+/// task's own attach lock, dropped with `guard` on any return) is released
+/// with no terminal record written, so the task is exactly as resumable as
+/// before, and the caller's poll loop checks its own deadline and retries —
+/// the same observe-don't-race contract a contended [`try_attach`] already
+/// means to its own caller, one layer down. For the claimed-conversation
+/// case that is T2(b)'s double-continuation race; for the timed-out waiter
+/// it is README's "waiting is not owning".
 pub(crate) async fn drive(
     data: &DataDir,
     task: &str,
@@ -374,21 +399,34 @@ pub(crate) async fn drive(
     guard.write_fingerprint();
     let mut meta = load_meta(&paths)?;
     if meta.pending_terminal.is_none() {
-        match existing_conversation(&meta) {
+        let turns = match existing_conversation(&meta) {
             Some(agent_id) => {
                 let (key, _) = valid_task_handle(task)
                     .ok_or_else(|| format!("malformed task handle {task}"))?;
                 match try_conversation(data, key, &agent_id)? {
-                    Some(_conversation) => {
-                        run_model(data, task, &paths, &mut meta, ctx).await?;
-                    }
+                    Some(_conversation) => run_model(data, task, &paths, &mut meta, ctx).await?,
                     None => return Ok(None),
                 }
             }
             None => run_model(data, task, &paths, &mut meta, ctx).await?,
+        };
+        if matches!(turns, Turns::Yielded) {
+            return Ok(None);
         }
     }
     Ok(Some(settle(data, &paths, &mut meta, ctx).await?))
+}
+
+/// How [`run_model`]'s turn loop ended.
+#[derive(Debug, PartialEq, Eq)]
+enum Turns {
+    /// A completion is recorded in `meta.pending_terminal`; the settle pass
+    /// turns it into the terminal record.
+    Recorded,
+    /// The waiter's own deadline passed at a turn boundary with work still
+    /// queued. Nothing is recorded, nothing is settled: the next attach picks
+    /// the task up at exactly this boundary.
+    Yielded,
 }
 
 /// The conversation this task's next turn resumes, if it resumes one at all
@@ -424,16 +462,18 @@ fn try_conversation(
     lock::try_exclusive(&path).map_err(|error| format!("acquire conversation lock: {error}"))
 }
 
-/// Runs the recorded work to a pending completion. Model, configuration, and
-/// workspace failures become `Failed` completions; only metadata-persistence
-/// failures propagate as errors, leaving the agent resumable.
+/// Runs the recorded work to a pending completion — or to the turn boundary
+/// at which the waiter `ctx` drives for gave up ([`Turns::Yielded`]). Model,
+/// configuration, and workspace failures become `Failed` completions; only
+/// metadata-persistence failures propagate as errors, leaving the agent
+/// resumable.
 async fn run_model(
     data: &DataDir,
     task: &str,
     paths: &AgentPaths,
     meta: &mut TaskMeta,
     ctx: &DriveContext,
-) -> Result<(), String> {
+) -> Result<Turns, String> {
     if meta.deadline_passed() {
         return record_pending(
             paths,
@@ -518,7 +558,10 @@ async fn run_model(
 
     let cancellation = CancellationToken::default();
     loop {
-        // The turn boundary: cancel markers and deadlines are honored here.
+        // The turn boundary: cancel markers and deadlines — the task's and
+        // the waiter's — are honored here, and only here. A turn already
+        // running is never cut short by any of them except the task's own
+        // deadline (below, around the execution itself).
         if cancel_requested(paths) {
             return record_pending(paths, meta, PendingTerminal::Cancelled, None);
         }
@@ -532,6 +575,19 @@ async fn run_model(
                 },
                 Some(Bound::Deadline),
             );
+        }
+        // The waiter's deadline stops the *next turn*, not the task: with
+        // one still to run (the prompt, or a pending message) this attach
+        // ends here, meta saved, nothing recorded, so the next attach
+        // resumes at this same boundary. With nothing left to run there is
+        // no turn to withhold, and the completion below is recorded as
+        // usual — a finished task is not kept unsettled by an impatient
+        // observer. Checked before `start_next`, which would otherwise mark
+        // a message in flight that this process is not going to drive.
+        if ctx.waiter_expired() && (!initial_done || inbox::has_pending(paths)?) {
+            meta.updated_ms = now_ms();
+            save_meta(paths, meta)?;
+            return Ok(Turns::Yielded);
         }
         let message = if initial_done {
             inbox::start_next(paths)?
@@ -641,12 +697,15 @@ async fn run_model(
     }
 }
 
+/// Records a completion on `meta`, durably. Always [`Turns::Recorded`] on
+/// success, so a turn loop can `return record_pending(..)` as its own
+/// verdict.
 fn record_pending(
     paths: &AgentPaths,
     meta: &mut TaskMeta,
     completion: PendingTerminal,
     stopped_by: Option<Bound>,
-) -> Result<(), String> {
+) -> Result<Turns, String> {
     if matches!(completion, PendingTerminal::Cancelled) {
         meta.result_truncated = false;
         meta.stopped_by = None;
@@ -655,7 +714,8 @@ fn record_pending(
     }
     meta.pending_terminal = Some(completion);
     meta.updated_ms = now_ms();
-    save_meta(paths, meta)
+    save_meta(paths, meta)?;
+    Ok(Turns::Recorded)
 }
 
 fn record_failure(
@@ -663,7 +723,7 @@ fn record_failure(
     meta: &mut TaskMeta,
     message: String,
     stopped_by: Option<Bound>,
-) -> Result<(), String> {
+) -> Result<Turns, String> {
     let (error, _) = bounded_text(message, MAX_RESULT_BYTES);
     meta.result_truncated = false;
     record_pending(paths, meta, PendingTerminal::Failed { error }, stopped_by)
