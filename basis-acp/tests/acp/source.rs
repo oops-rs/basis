@@ -6,7 +6,13 @@
 //! built on one. `client` is the other end and takes one of these; nothing
 //! here knows anything about it.
 
-use std::{path::PathBuf, sync::Arc};
+use std::{
+    path::PathBuf,
+    sync::{
+        Arc, Mutex,
+        atomic::{AtomicBool, AtomicUsize, Ordering},
+    },
+};
 
 use basis::{
     PreparedRun, RunError, TurnOptions, approval::ApprovalGate, run::prepare_with_session,
@@ -16,6 +22,7 @@ use mentra::{
     RuntimePolicy,
     test::{MockRuntime, MockToolCall},
 };
+use tokio::sync::Notify;
 
 /// The runtime identifier every mock here files its agents under. Each mock
 /// still gets its own store root, so sharing the name costs nothing and means
@@ -168,6 +175,185 @@ pub(crate) fn text_mock(chunks: &[&str]) -> MockRuntime {
         .stream_text(chunks.to_vec())
         .build()
         .expect("mock runtime builds")
+}
+
+/// Synchronization and wire capture for the in-flight `/compact` regression.
+///
+/// The provider blocks only after accepting the compaction request. The test
+/// can therefore issue `session/cancel` while a real provider future is still
+/// in flight, then release the old implementation to prove that it ignored
+/// the notification rather than merely timing out.
+#[derive(Clone)]
+pub(crate) struct CompactBlocker {
+    started: Arc<AtomicBool>,
+    entered: Arc<Notify>,
+    calls: Arc<AtomicUsize>,
+    requests: Arc<Mutex<Vec<mentra::Request<'static>>>>,
+}
+
+impl CompactBlocker {
+    pub(crate) async fn wait_until_compaction_started(&self) {
+        if !self.started.load(Ordering::Acquire) {
+            self.entered.notified().await;
+        }
+    }
+
+    pub(crate) fn requests(&self) -> Vec<mentra::Request<'static>> {
+        self.requests
+            .lock()
+            .expect("compact request log poisoned")
+            .clone()
+    }
+}
+
+struct BlockingCompactProvider {
+    model: mentra::ModelInfo,
+    blocker: CompactBlocker,
+}
+
+#[async_trait::async_trait]
+impl mentra::Provider for BlockingCompactProvider {
+    fn descriptor(&self) -> mentra::ProviderDescriptor {
+        mentra::ProviderDescriptor::new(self.model.provider.clone())
+    }
+
+    fn capabilities(&self) -> mentra::ProviderCapabilities {
+        mentra::ProviderCapabilities {
+            supports_model_listing: true,
+            supports_streaming: true,
+            supports_tool_calls: true,
+            ..Default::default()
+        }
+    }
+
+    async fn list_models(&self) -> Result<Vec<mentra::ModelInfo>, mentra::ProviderError> {
+        Ok(vec![self.model.clone()])
+    }
+
+    async fn stream(
+        &self,
+        request: mentra::Request<'_>,
+    ) -> Result<mentra::ProviderEventStream, mentra::ProviderError> {
+        let call = self.blocker.calls.fetch_add(1, Ordering::AcqRel);
+        self.blocker
+            .requests
+            .lock()
+            .expect("compact request log poisoned")
+            .push(request.into_owned());
+
+        if call == 2 {
+            self.blocker.started.store(true, Ordering::Release);
+            self.blocker.entered.notify_one();
+            std::future::pending::<()>().await;
+        }
+
+        let text = match call {
+            0 => "seed answer",
+            1 => "second answer",
+            2 => r#"{"goal":"compacted","progress":"seed"}"#,
+            _ => "after cancel answer",
+        };
+
+        Ok(mentra::provider_event_stream_from_response(
+            mentra::provider::Response {
+                id: format!("compact-test-{call}"),
+                model: self.model.id.clone(),
+                role: mentra::Role::Assistant,
+                content: vec![mentra::ContentBlock::text(text)],
+                stop_reason: None,
+                usage: None,
+            },
+        ))
+    }
+}
+
+/// A source backed by a provider whose compaction request can be held open.
+/// This stays in the test harness: production sources continue to use the
+/// ordinary `MockRuntime` and no public API is widened for a test seam.
+pub(crate) struct BlockingCompactSource {
+    runtime: Arc<mentra::Runtime>,
+    model: mentra::ModelInfo,
+    workspace: PathBuf,
+}
+
+pub(crate) fn blocking_compact_source(
+    workspace: &tempfile::TempDir,
+) -> (BlockingCompactSource, CompactBlocker) {
+    let blocker = CompactBlocker {
+        started: Arc::new(AtomicBool::new(false)),
+        entered: Arc::new(Notify::new()),
+        calls: Arc::new(AtomicUsize::new(0)),
+        requests: Arc::new(Mutex::new(Vec::new())),
+    };
+    let model = mentra::ModelInfo::new("mock-model", "openai");
+    let runtime = mentra::Runtime::empty_builder()
+        .with_provider_instance(BlockingCompactProvider {
+            model: model.clone(),
+            blocker: blocker.clone(),
+        })
+        .with_store(mentra::runtime::VolatileRuntimeStore::new())
+        .build()
+        .expect("blocking runtime builds");
+
+    (
+        BlockingCompactSource {
+            runtime: Arc::new(runtime),
+            model,
+            workspace: workspace.path().to_path_buf(),
+        },
+        blocker,
+    )
+}
+
+#[async_trait::async_trait]
+impl SessionSource for BlockingCompactSource {
+    async fn create(
+        &self,
+        _cwd: PathBuf,
+        _mcp: Vec<basis::McpServer>,
+    ) -> Result<PreparedRun, RunError> {
+        let session = self
+            .runtime
+            .create_session_with_config(
+                "test",
+                self.model.clone(),
+                mentra::agent::AgentConfig {
+                    workspace: mentra::agent::WorkspaceConfig {
+                        base_dir: self.workspace.clone(),
+                        ..Default::default()
+                    },
+                    compaction: mentra::agent::CompactionConfig {
+                        transcript_dir: self.workspace.join(".transcripts"),
+                        ..Default::default()
+                    },
+                    ..Default::default()
+                },
+            )
+            .expect("session");
+
+        Ok(prepare_with_session(
+            session,
+            &self.workspace,
+            "",
+            &self.context(),
+            "openai",
+            "mock-model",
+        )?)
+    }
+
+    fn lists_sessions(&self) -> bool {
+        false
+    }
+}
+
+impl BlockingCompactSource {
+    fn context(&self) -> basis::ContextConfig {
+        basis::ContextConfig {
+            file_name: "AGENTS.md".to_string(),
+            global_dir: None,
+            walk_parents: false,
+        }
+    }
 }
 
 /// A runtime that wants to write one file, and an authorizer that surfaces the
