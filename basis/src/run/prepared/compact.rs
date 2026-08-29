@@ -28,7 +28,24 @@
 //! holds 512. A turn needs the concurrent forwarder for a different reason:
 //! it has to answer permission requests while the turn is blocked on them,
 //! and a summarizing pass asks for nothing.
+//!
+//! # Why a failed pass is announced too
+//!
+//! The same argument, read the other way. A pass that fails is a model call
+//! that happened and cost something, and the conversation a client is
+//! watching does not shrink — so a stream that says nothing leaves that
+//! client with a `/compact` that produced no observable effect and no reason.
+//! mentra does not fill that in: `Session::compact` hands the error back and,
+//! unlike `finish_turn`, puts no `SessionEvent::Error` on the stream for it.
+//!
+//! So basis emits one [`Event::Error`], from the error it is already holding,
+//! and only when the drain forwarded none. This is not a workaround for a
+//! runtime hole (ADR-0005) — there is nothing hidden upstream to recover here.
+//! It is basis's own verb accounting for its own outcome, exactly as the
+//! success path does, and the guard means an upstream event would take
+//! precedence rather than double up.
 
+use mentra::runtime::is_transient_runtime_error;
 use tokio::sync::broadcast::error::TryRecvError;
 
 use super::{Event, EventSink, PreparedRun, RunError};
@@ -72,6 +89,25 @@ impl PreparedRun {
     /// request. It is not a turn, though — no prompt is committed, the
     /// transcript gains no exchange, and nothing is sent afterwards.
     ///
+    /// Billed by the provider, but *not* accounted by basis. mentra reports no
+    /// usage for a summarizing call — the engine reads the response's content
+    /// and drops its `usage` (mentra 0.23.4 `src/compaction.rs`
+    /// `summarize_locally`; the provider-native remote path has no usage on
+    /// its response type at all) — so no `UsageReport` is emitted, and what
+    /// basis tallies is what mentra reports. A pass therefore adds nothing to
+    /// any [`RunReport::usage`](crate::RunReport) and is not charged against
+    /// [`Bounds::token_budget`](crate::Bounds) or a
+    /// [`BudgetPool`](crate::BudgetPool). Basis does not estimate the
+    /// difference: a made-up number in a field documented as *reported*
+    /// (see [`RunUsage`](crate::RunUsage)) would be worse than a known gap,
+    /// and the gap is upstream's to close (ADR-0005).
+    ///
+    /// A failure reaches the sink as one [`Event::Error`](crate::Event) before
+    /// it reaches the caller as an `Err`, so a client watching the stream is
+    /// told why a conversation it expected to shrink did not. The transcript
+    /// is untouched in that case and the next turn goes out on the history
+    /// this pass did not shorten.
+    ///
     /// `Ok(None)` means there was nothing to compact, which is the honest
     /// answer for a conversation that has not spoken yet: the last turn is
     /// always preserved whole, exactly as it is for the model's own `compact`
@@ -90,8 +126,28 @@ impl PreparedRun {
         // Subscribed before the pass rather than after, because a broadcast
         // receiver only sees what is sent once it exists.
         let mut events = self.session.subscribe();
-        let details = self.session.compact(instructions).await?;
-        drain(&mut events, sink)?;
+        let result = self.session.compact(instructions).await;
+        let announced = drain(&mut events, sink)?;
+
+        let details = match result {
+            Ok(details) => details,
+            Err(error) => {
+                if !announced {
+                    sink.emit(Event::Error {
+                        // The predicate mentra's own `finish_turn` applies to
+                        // a failed turn, so the field means one thing across
+                        // the stream: whether waiting and trying again is what
+                        // the failure calls for, not whether the conversation
+                        // survived. It did — a refused pass leaves the
+                        // transcript exactly as it was, and the next turn goes
+                        // out on the history this one did not shorten.
+                        recoverable: is_transient_runtime_error(&error),
+                        message: error.to_string(),
+                    })?;
+                }
+                return Err(error.into());
+            }
+        };
 
         let Some(details) = details else {
             return Ok(None);
@@ -109,7 +165,16 @@ impl PreparedRun {
     }
 }
 
-/// Empties whatever the pass put on the session's stream into the sink.
+/// Empties whatever the pass put on the session's stream into the sink, and
+/// reports whether any of it already announced a failure.
+///
+/// The answer is what keeps [`PreparedRun::compact`]'s own error event from
+/// becoming a duplicate. mentra says nothing on the stream when a summarizing
+/// pass fails — `Session::compact` returns the error and, unlike
+/// `finish_turn`, emits no `SessionEvent::Error` for it — so today this is
+/// always `false` on the failing path and basis speaks. If mentra grows that
+/// event, its line is the one the client gets and basis stays quiet, which is
+/// the right precedence: the runtime's own account of its own failure.
 ///
 /// A lag is impossible in practice — a compaction emits two events into a
 /// channel that holds 512 — so a receiver that reports one has been overtaken
@@ -118,7 +183,8 @@ impl PreparedRun {
 fn drain<S: EventSink>(
     events: &mut mentra::SessionEventReceiver,
     sink: &mut S,
-) -> Result<(), RunError> {
+) -> Result<bool, RunError> {
+    let mut announced_failure = false;
     loop {
         match events.try_recv() {
             // `from_session_event` is the same mapping a turn's forwarder
@@ -126,11 +192,12 @@ fn drain<S: EventSink>(
             // on its own are the same two lines.
             Ok(event) => {
                 if let Some(mapped) = Event::from_session_event(&event) {
+                    announced_failure |= matches!(mapped, Event::Error { .. });
                     sink.emit(mapped)?;
                 }
             }
             Err(TryRecvError::Empty | TryRecvError::Closed | TryRecvError::Lagged(_)) => {
-                return Ok(());
+                return Ok(announced_failure);
             }
         }
     }

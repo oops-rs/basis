@@ -14,11 +14,25 @@ use serde::{Deserialize, Serialize};
 /// a sum of them, and so is this. A turn that took four rounds reports four
 /// times and lands here as one figure.
 ///
-/// Three things to know before treating this as a bill.
+/// Four things to know before treating this as a bill.
 ///
 /// It is *reported*, not measured. A provider that says nothing leaves this at
 /// zero. Basis records the reports through the run's synchronous observer, so
 /// a lagging presentation stream cannot make the in-process tally undercount.
+///
+/// It counts the rounds of a *turn*, and a summarizing pass is not one. The
+/// model call a compaction makes — automatic, the model's own `compact`
+/// intrinsic, or [`PreparedRun::compact`](crate::PreparedRun::compact) — is
+/// billed by the provider and absent here, because mentra reports no usage
+/// for it: its compaction engine reads the response's content and drops its
+/// `usage` (mentra 0.23.4 `src/compaction.rs`, `summarize_locally`), and the
+/// provider-native remote path returns a response type with no usage on it at
+/// all. No `UsageReport` is emitted, so nothing reaches this tally, mentra's
+/// own `token_budget` counter, or a [`BudgetPool`](crate::BudgetPool). A
+/// long-running conversation therefore under-reports by roughly one
+/// summarizing request per compaction. Basis does not estimate the shortfall:
+/// this field's whole contract is that it is what the provider said, and the
+/// missing report is upstream's to add (ADR-0005).
 ///
 /// It counts the rounds of the run's own agent *and* of the work that agent
 /// delegates. A delegating tool — basis's [`spawn`](crate::tools::spawn), or

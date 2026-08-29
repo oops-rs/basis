@@ -885,6 +885,17 @@ if let Some(compacted) = run.compact(Some("keep the migration plan"), &mut sink)
 }
 ```
 
+A pass that *fails* puts an `Event::Error` on the sink before returning the error, so a
+client watching the stream is told why a conversation it expected to shrink did not. The
+transcript is untouched and the next turn goes out on the unshortened history.
+
+Two limits worth knowing, both upstream's and neither worked around here. A summarizing
+call is billed by the provider but does not appear in `RunReport::usage` and is not
+charged against a token budget or a `BudgetPool`: mentra reports no usage for it, and
+basis tallies only what is reported. And an *automatic* pass that fails is retried and
+then dropped silently — the run carries on with an unshortened history, but nothing on
+the stream says so. The pass a host asks for itself is the one whose failure is visible.
+
 The instructions are **added** to mentra's standing continuity requirements rather than
 substituted for them, so asking for one extra thing cannot cost the file paths and command
 outcomes every summary needs; `None` asks for the standing ones alone. `Ok(None)` means

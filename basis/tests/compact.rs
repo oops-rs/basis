@@ -126,6 +126,46 @@ async fn the_instruction_is_added_to_what_the_summarizer_is_already_told() {
 }
 
 #[tokio::test]
+async fn a_compaction_that_fails_says_so_on_the_stream() {
+    // The dual of the test above, and the case that was silent. A summarizing
+    // pass is a model call, so it can be refused; the caller learns that from
+    // the `Err`, and a client watching the stream learned nothing at all —
+    // neither mentra's `Session::compact` nor basis said a word, so a person
+    // who pressed "compact" saw a conversation that did not shrink and no
+    // reason why.
+    let endpoint = ScriptedEndpoint::start_refusing_compaction();
+    let dir = tempfile::tempdir().expect("tempdir");
+    let store_dir = tempfile::tempdir().expect("tempdir");
+
+    let workspace = offline(dir.path())
+        .with_runtime(endpoint.runtime(store_dir.path()))
+        .open()
+        .await
+        .expect("opens");
+
+    let mut run = workspace.prepare("go").expect("mints");
+    run.execute(CollectingSink::default())
+        .await
+        .expect("the ordinary turn is still answered");
+
+    let mut sink = CollectingSink::default();
+    let failure = run
+        .compact(None, &mut sink)
+        .await
+        .expect_err("the summarizing call is refused");
+
+    let events = sink.into_events();
+    match &events[..] {
+        [Event::Error { message, .. }] => assert!(
+            failure.to_string().contains(message.as_str()),
+            "the stream must carry the failure the caller was handed: \
+             {message:?} against {failure}"
+        ),
+        other => panic!("expected one error on the stream, got {other:?}"),
+    }
+}
+
+#[tokio::test]
 async fn a_conversation_with_nothing_to_compact_says_so_and_emits_nothing() {
     // The answer a caller gets either way. A `/compact` on a session that has
     // not spoken yet must not report a compaction that did not happen, and
@@ -298,6 +338,20 @@ struct ScriptedEndpoint {
 
 impl ScriptedEndpoint {
     fn start() -> Self {
+        Self::start_with(Refuse::Nothing)
+    }
+
+    /// Answers ordinary turns and refuses the summarizing call.
+    ///
+    /// Picked out by what mentra tells the summarizer it is rather than by
+    /// counting requests: a turn is not guaranteed to be exactly one call to
+    /// this endpoint, and a count that guessed wrong would refuse the wrong
+    /// one and still look like a passing test.
+    fn start_refusing_compaction() -> Self {
+        Self::start_with(Refuse::Compaction)
+    }
+
+    fn start_with(refuse: Refuse) -> Self {
         let listener = TcpListener::bind("127.0.0.1:0").expect("bind test endpoint");
         let address = listener.local_addr().expect("read endpoint address");
         let requests = Arc::new(Mutex::new(Vec::new()));
@@ -306,7 +360,7 @@ impl ScriptedEndpoint {
         thread::spawn(move || {
             while let Ok((stream, _)) = listener.accept() {
                 let recorded = Arc::clone(&recorded);
-                thread::spawn(move || answer(stream, &recorded));
+                thread::spawn(move || answer(stream, &recorded, refuse));
             }
         });
 
@@ -328,18 +382,39 @@ impl ScriptedEndpoint {
     }
 }
 
-fn answer(mut stream: TcpStream, recorded: &Mutex<Vec<String>>) {
+/// Which request, if any, this endpoint refuses.
+#[derive(Clone, Copy)]
+enum Refuse {
+    Nothing,
+    Compaction,
+}
+
+/// The opening of the system prompt mentra sends its summarizer, which is what
+/// makes a summarizing request recognizable from the wire.
+const COMPACTION_SYSTEM_PROMPT: &str = "You are a coding-session compaction engine";
+
+fn answer(mut stream: TcpStream, recorded: &Mutex<Vec<String>>, refuse: Refuse) {
     let request = read_http_request(&mut stream);
+    let refused =
+        matches!(refuse, Refuse::Compaction) && request.contains(COMPACTION_SYSTEM_PROMPT);
     recorded
         .lock()
         .unwrap_or_else(|poisoned| poisoned.into_inner())
         .push(request);
 
-    let body = sse_body();
-    let response = format!(
-        "HTTP/1.1 200 OK\r\nconnection: close\r\ncontent-type: text/event-stream\r\ncontent-length: {}\r\n\r\n{body}",
-        body.len()
-    );
+    let response = if refused {
+        let body = r#"{"error":{"message":"summarizing is not available","type":"invalid_request_error"}}"#;
+        format!(
+            "HTTP/1.1 400 Bad Request\r\nconnection: close\r\ncontent-type: application/json\r\ncontent-length: {}\r\n\r\n{body}",
+            body.len()
+        )
+    } else {
+        let body = sse_body();
+        format!(
+            "HTTP/1.1 200 OK\r\nconnection: close\r\ncontent-type: text/event-stream\r\ncontent-length: {}\r\n\r\n{body}",
+            body.len()
+        )
+    };
     let _ = stream.write_all(response.as_bytes());
 }
 

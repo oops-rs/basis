@@ -60,6 +60,30 @@
 //!   does is guaranteed to fail — the provider's own refusal gets the one
 //!   attempt basis's own trigger would have spent earlier.
 //!
+//! # What a failed automatic pass looks like
+//!
+//! Like nothing. Both events above are built from a *success*: mentra
+//! synthesizes `CompactionStarted` and `CompactionCompleted` together from the
+//! one `ContextCompacted` a finished pass emits, so there is no "started" line
+//! to leave dangling — and no line of any kind when the pass does not finish.
+//! An automatic pass that fails is retried up to three times and then dropped
+//! (`Agent::auto_compact_if_needed`, mentra 0.23.4 `src/agent/compact.rs`),
+//! which is a reasonable posture — the run continues on an unshortened
+//! history rather than dying over a summary — but it is taken silently: no
+//! event, no hook, nothing a sink can see. The retries in between surface as
+//! [`Event::Retry`](crate::Event::Retry), indistinguishable from a model
+//! request's own.
+//!
+//! basis does not paper over that. Inferring a failure from an estimate that
+//! crossed a threshold with no compaction after it would be a guess dressed as
+//! an event, and the fix belongs where the failure is (ADR-0005). What a host
+//! *can* rely on is the pass it asks for itself:
+//! [`PreparedRun::compact`](crate::PreparedRun::compact) reports its failure on
+//! the stream as well as to the caller.
+//!
+//! Neither kind of pass is counted in [`RunUsage`](crate::RunUsage) — see
+//! there for why.
+//!
 //! # What is not here
 //!
 //! mentra's `CompactionConfig` has eleven fields. This exposes four: the three
