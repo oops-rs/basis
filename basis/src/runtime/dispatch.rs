@@ -31,6 +31,23 @@
 //! workspace's hooks, so the chain order host interceptors → global hooks →
 //! workspace hooks survives the move unchanged.
 //!
+//! Then the guards again, if the chain came back with a rewrite. A
+//! [`HookDecision::Modify`] is what the tool runs on — mentra 0.24 re-checks
+//! the tool's schema against it and asks the `ToolAuthorizer` about it rather
+//! than about the model's original — so a guard that only ever saw the
+//! original would be answering about a call that never happens, and a
+//! workspace hook could turn an allowed `write` into one under `.git/config`
+//! or a delegation into a command on a workspace opened with commands off.
+//! The pre-chain check stays: a plainly bad original is refused without
+//! spawning anything a repository chose. Both readings go through one
+//! [`guard`], so the two cannot come to disagree.
+//!
+//! One check covers both bindings, because there is one chain: a host's
+//! [`Interceptor`](crate::hooks::Interceptor) and a workspace's subprocess
+//! hook are folded into the same [`HookRunner`] and answer with the same
+//! [`HookDecision`], so whichever of them produced the rewrite, this is where
+//! the rewrite is judged.
+//!
 //! On a miss — an agent whose working directory no live workspace claims — the
 //! host interceptors still run, alone. Workspace hooks cannot: they belong to a
 //! workspace, and there is none. A key mismatch therefore fails open for
@@ -252,11 +269,25 @@ impl PreExecutionHook for HookDispatch {
             return runner.pre_tool_execution(context).await;
         };
 
-        if shared && let Some(reason) = guard(context, shell, &root) {
+        if shared && let Some(reason) = guard(&context.tool_name, &context.input_json, shell, &root)
+        {
             return Ok(HookDecision::Deny(reason));
         }
 
-        runner.pre_tool_execution(context).await
+        let decision = runner.pre_tool_execution(context).await?;
+
+        // The chain may have rewritten the call, and a rewrite is what the
+        // tool runs on: mentra 0.24 re-checks the tool's schema and asks the
+        // authorizer about exactly this input, so a guard still holding the
+        // model's original would be judging a call that never happens.
+        if shared
+            && let HookDecision::Modify { input_json, .. } = &decision
+            && let Some(reason) = guard(&context.tool_name, input_json, shell, &root)
+        {
+            return Ok(HookDecision::Deny(reason));
+        }
+
+        Ok(decision)
     }
 }
 
@@ -316,19 +347,24 @@ impl PostExecutionHook for DispatchHook {
     }
 }
 
-/// basis's own guards, ahead of every configured participant.
+/// basis's own guards, over one reading of one call.
 ///
 /// These carry rules that lived in the private runtime's `RuntimePolicy` —
 /// which a shared runtime cannot hold per-workspace — into the one seam that
 /// knows which workspace a call belongs to. Hygiene, not a boundary, exactly
 /// as the policy versions were: a shell redirect still reaches any path,
 /// because nothing here parses shell (ADR-0004, ADR-0013).
-fn guard(context: &PreExecutionContext, shell: ShellAccess, root: &Path) -> Option<String> {
-    if context.tool_name == SPAWN && !shell.is_granted() {
+///
+/// Takes the tool name and the input as text rather than the whole
+/// [`PreExecutionContext`], because it is asked twice about one call — once
+/// about what the model produced, once about what the hook chain left — and
+/// the second reading has no context of its own to be given.
+fn guard(tool_name: &str, input_json: &str, shell: ShellAccess, root: &Path) -> Option<String> {
+    if tool_name == SPAWN && !shell.is_granted() {
         // The `!` prefix is read by the same parser `spawn` itself uses, so
         // this guard and the tool can never disagree about which calls are
         // commands (the "one reader" rule on `tools::spawn::parse`).
-        let input: serde_json::Value = serde_json::from_str(&context.input_json).ok()?;
+        let input: serde_json::Value = serde_json::from_str(input_json).ok()?;
         if parse_spawn(&input).is_ok_and(|spawn| spawn.mode() == SpawnMode::Command) {
             return Some(
                 "command execution is denied: this workspace was opened with commands off"
@@ -345,8 +381,8 @@ fn guard(context: &PreExecutionContext, shell: ShellAccess, root: &Path) -> Opti
     // `WorkspaceEditor::authorize_write`, which the batched ops and the split
     // `write`/`edit` both call — so a guard that knew one profile's names
     // would be narrower on a shared runtime than the policy it mirrors.
-    let input: serde_json::Value = serde_json::from_str(&context.input_json).ok()?;
-    let targets = write_targets(&context.tool_name, &input);
+    let input: serde_json::Value = serde_json::from_str(input_json).ok()?;
+    let targets = write_targets(tool_name, &input);
     if targets.is_empty() {
         return None;
     }

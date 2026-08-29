@@ -14,11 +14,13 @@
 //! above them proves basis's half of the contract and none of it proves that the
 //! runtime ever consults a hook — or that a rewritten input reaches the tool.
 //!
-//! One test crate rather than two, which is what a directory with a `main.rs`
+//! One test crate rather than three, which is what a directory with a `main.rs`
 //! buys: [`results`] is the same fixtures asked about a call that has already
-//! run, and a second `tests/*.rs` would compile and link its own copy of the
-//! workspace-with-scripts harness below.
+//! run, [`guarded`] is the same fixtures put to basis's own guards on a shared
+//! runtime, and a second and third `tests/*.rs` would each compile and link
+//! their own copy of the workspace-with-scripts harness below.
 
+mod guarded;
 mod results;
 
 use std::{
