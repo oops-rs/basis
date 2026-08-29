@@ -28,6 +28,7 @@ mod source;
 mod attach;
 mod bounds;
 mod commands;
+mod compact_cancel;
 mod discovery;
 mod permission;
 mod sessions;

@@ -19,7 +19,7 @@ use agent_client_protocol::{
     schema::{
         ProtocolVersion,
         v1::{
-            ContentBlock, InitializeRequest, NewSessionRequest, PromptRequest,
+            ContentBlock, InitializeRequest, NewSessionRequest, PromptRequest, PromptResponse,
             RequestPermissionOutcome, RequestPermissionRequest, RequestPermissionResponse,
             SelectedPermissionOutcome, SessionConfigKind, SessionConfigOption, SessionId,
             SessionNotification, SessionUpdate, StopReason, TextContent,
@@ -331,13 +331,21 @@ pub(crate) async fn say(
     session: &SessionId,
     prompt: &str,
 ) -> Result<StopReason, agent_client_protocol::Error> {
-    let response = connection
-        .send_request(PromptRequest::new(
-            session.clone(),
-            vec![ContentBlock::Text(TextContent::new(prompt))],
-        ))
-        .block_task()
-        .await?;
+    let response = start_say(connection, session, prompt).block_task().await?;
 
     Ok(response.stop_reason)
+}
+
+/// Starts a prompt without waiting for its response. Keeping this handle is
+/// what lets a duplex test send a notification while the request is still in
+/// flight on the agent side.
+pub(crate) fn start_say(
+    connection: &ConnectionTo<Agent>,
+    session: &SessionId,
+    prompt: &str,
+) -> agent_client_protocol::SentRequest<PromptResponse> {
+    connection.send_request(PromptRequest::new(
+        session.clone(),
+        vec![ContentBlock::Text(TextContent::new(prompt))],
+    ))
 }

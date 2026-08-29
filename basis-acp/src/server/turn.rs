@@ -164,20 +164,30 @@ pub(super) fn stop_reason_for(ended: Ended, cancelled: bool) -> Result<PromptRes
     }
 }
 
+/// Clears a session's cancellation slot even if the operation unwinds while
+/// resolving an error. The guard is scoped to the compaction future, so a
+/// completed command cannot leave a token armed for a later turn.
+struct CompactCancellation<'a> {
+    session: &'a crate::session::AcpSession,
+}
+
+impl Drop for CompactCancellation<'_> {
+    fn drop(&mut self) {
+        self.session.end_turn();
+    }
+}
+
 /// Answers a `session/prompt` that was a command rather than a prompt.
 ///
 /// Takes the turn lock, because a built-in acts on the conversation and one
 /// conversation does one thing at a time: compacting while a turn is mid-flight
 /// would rewrite the transcript out from under it.
 ///
-/// It does **not** arm a cancellation token — and the reason it did not is no
-/// longer the reason it does not. There used to be no boundary inside a
-/// summarizing pass for a token to be read at, so arming one would have told a
-/// client its stop button applied where nothing would read it. mentra 0.24
-/// polls the token inside the pass itself and basis carries it there
-/// (`PreparedRun::compact_with_options`), so a `/compact` here *could* now be
-/// stopped; wiring `session/cancel` to it is work this crate has not done, and
-/// a client's stop is still ignored until it is.
+/// Arms the same cancellation slot as a normal prompt. mentra polls the token
+/// while the summarizing provider request is in flight, and
+/// [`PreparedRun::compact_with_options`] carries it into that boundary. The
+/// slot is cleared after the pass so a late `session/cancel` cannot affect a
+/// later turn.
 async fn run_builtin(
     session: &crate::session::AcpSession,
     connection: &ConnectionTo<Client>,
@@ -188,7 +198,13 @@ async fn run_builtin(
 
     let mut sink = NotificationSink::new(session_id.clone(), connection.clone());
     let mut run = session.lock_turn().await;
-    let compacted = run.compact(instructions, &mut sink).await;
+    let options = session.begin_turn();
+    let cancelled = options.cancel.clone();
+    let compacted = {
+        let _armed = CompactCancellation { session };
+        run.compact_with_options(instructions, &mut sink, options)
+            .await
+    };
     drop(run);
 
     match compacted {
@@ -208,7 +224,10 @@ async fn run_builtin(
             );
             Ok(PromptResponse::new(StopReason::EndTurn))
         }
-        Err(error) => Err(Error::internal_error().data(error.to_string())),
+        Err(error) => stop_reason_for(
+            Ended::Failed(error.to_string()),
+            cancelled.is_some_and(|token| token.is_cancelled()),
+        ),
     }
 }
 
