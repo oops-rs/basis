@@ -83,7 +83,7 @@ use crate::{
 pub const DEFAULT_WORKSPACE_CONFIG_FILE: &str = ".basis/config.json";
 
 /// Where basis looks inside the global config directory. Not the dotted name,
-/// for [`crate::mcp`]'s reason: a hidden file inside a directory that exists to
+/// for `crate::mcp`'s reason: a hidden file inside a directory that exists to
 /// hold configuration would be hiding it from the person who put it there.
 pub const DEFAULT_GLOBAL_CONFIG_FILE: &str = "config.json";
 
@@ -103,7 +103,7 @@ pub struct Setting<T> {
     /// The file this came from.
     pub path: PathBuf,
     /// [`ContextScope::Workspace`] or [`ContextScope::Global`]; there is no
-    /// parent walk, for [`crate::mcp`]'s reason.
+    /// parent walk, for `crate::mcp`'s reason.
     pub scope: ContextScope,
 }
 
@@ -213,7 +213,9 @@ impl Config {
 /// Why a config file could not be used.
 ///
 /// These messages travel — into `basis spawn --json`, into an ACP client's
-/// error pane — and they follow [`McpError`](crate::mcp::McpError)'s rule
+/// error pane — and they follow
+#[cfg_attr(feature = "mcp", doc = "[`McpError`](crate::mcp::McpError)'s rule")]
+#[cfg_attr(not(feature = "mcp"), doc = "`McpError`'s rule")]
 /// even though nothing here is meant to hold a credential: `${VAR}` expansion
 /// resolves real values before validation, so an error names the file, the
 /// key, and an environment variable, and nothing else it read. That is also
