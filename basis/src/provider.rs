@@ -18,7 +18,7 @@
 //! Resolution consults the environment in three places — the base URL, the
 //! compatible-endpoint key, and auto-detection — which is enough to make every
 //! test of it a test of the shell that started it. So the lookup is passed in,
-//! exactly as [`crate::mcp`] passes one to `${VAR}` expansion, and the rules
+//! exactly as `crate::mcp` passes one to `${VAR}` expansion, and the rules
 //! below can be pinned without mutating the process's own environment.
 
 use mentra::BuiltinProvider;
