@@ -122,6 +122,15 @@ pub(crate) fn enqueue(paths: &AgentPaths, task: &str, body: String) -> Result<St
 
 /// Marks the next pending message in-flight and returns it, for the executor's
 /// turn boundary.
+/// Whether a message is waiting to be driven — [`start_next`] without the
+/// claim, for an executor deciding whether there *is* a next turn before
+/// committing to run it.
+pub(crate) fn has_pending(paths: &AgentPaths) -> Result<bool, String> {
+    Ok(load(paths)?
+        .iter()
+        .any(|message| message.state == MessageState::Pending))
+}
+
 pub(crate) fn start_next(paths: &AgentPaths) -> Result<Option<(String, String)>, String> {
     update(paths, |messages| {
         let Some(message) = messages
