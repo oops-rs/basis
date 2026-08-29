@@ -75,22 +75,26 @@
 > §2 carries one row per item, each with what it cost and what it newly
 > exposes; every public-API removal ships in 0.6.0.
 > **Rev 15 raises the mentra floor to 0.24.0 and adopts what it added.** The
-> wave is adoption, not invention (ADR-0001): `mentra::process::BoundedCommand`
-> replaces `hooks/runner/subprocess.rs`, so a hook and a declared tool are
-> spawned by the primitive the shell executor uses — which clears the child's
-> environment to what the caller passed, meaning neither inherits basis's own
-> any more; `Runtime::unregister_skills_dir` lets a workspace take its skill
-> roots back at drop instead of leaving them on a shared runtime for the life
-> of the process; a compaction carries the run's cancellation token and
-> deadline, and `AutoCompactTrigger` gives the window-share-only policy and the
-> off switch each a spelling of its own rather than leaving "clear the token
-> count" to mean both; and, because pre-execution hooks now run *before* the
-> schema check and the authorizer on both lanes, the dispatcher's own guards
-> re-read the final input — the rewrite a hook produced is what the tool runs
-> on and what the approver is asked about, so it is what the `.git` carve-out
-> and the shell posture must judge too. ADR-0016's §7 amendment — which said
-> the fix belonged upstream and refused a basis-side one — gets its closing
-> note in the same wave.
+> wave is adoption, not invention (ADR-0001). Most of it is what the wave takes
+> on rather than what the tree already holds: `mentra::process::BoundedCommand`
+> in place of `hooks/runner/subprocess.rs`, so that a hook and a declared tool
+> are spawned by the primitive the shell executor uses — which clears the
+> child's environment to what the caller passed, so that neither will inherit
+> basis's own; `Runtime::unregister_skills_dir`, so that a workspace takes its
+> skill roots back at drop instead of leaving them on a shared runtime for the
+> life of the process; a compaction carrying the run's cancellation token and
+> deadline, with `AutoCompactTrigger` giving the window-share-only policy and
+> the off switch each a spelling of its own rather than leaving "clear the
+> token count" to mean both. Until each lands, the paragraphs describing the
+> shipped state — `hooks/runner/subprocess.rs`, and ARCHITECTURE on the
+> environment a hook inherits — are still the true ones. One item is in the
+> tree already: because pre-execution hooks now run *before* the schema check
+> and the authorizer on both lanes, the dispatcher's own guards re-read the
+> final input — the rewrite a hook produced is what the tool runs on and what
+> the approver is asked about, so it is what the `.git` carve-out and the shell
+> posture judge too. ADR-0016's §7 amendment — which said the fix belonged
+> upstream and refused a basis-side one — gets its closing note in the same
+> wave.
 
 ## 1. The target in one paragraph
 
