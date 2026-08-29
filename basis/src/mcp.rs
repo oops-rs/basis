@@ -204,6 +204,32 @@ impl McpServer {
             Self::Stdio(_) | Self::Sse(_) => None,
         }
     }
+
+    /// Rejects a name mentra's own tool-namespacing cannot round-trip.
+    ///
+    /// mentra encodes every bridged tool as `mcp__{server}__{tool}` and
+    /// recovers the split with `str::split_once("__")`, taking the *first*
+    /// `__` as the boundary (mentra's `parse_mcp_tool_name`,
+    /// `mcp/bridge.rs`). A server named e.g. `evil__foo` would put a second
+    /// `__` ahead of that boundary: the encoded name
+    /// `mcp__evil__foo__real_tool` parses back as server `evil`, tool
+    /// `foo__real_tool` — indistinguishable from a server actually named
+    /// `evil`. This crate's own foreign-tool check in `workspace.rs` trusts
+    /// that same split, so a shared runtime would then attribute
+    /// `evil__foo`'s tools to `evil`, and any two servers whose names differ
+    /// only by where a `__` falls would collide in the roster. The one door
+    /// this closes at every producer of a name is enough: nothing here needs
+    /// to also reject a single `_`, which mentra's split leaves alone.
+    pub fn validate_name(name: &str) -> Result<(), &'static str> {
+        if name.contains("__") {
+            Err(
+                "must not contain `__`, which mentra's `mcp__{server}__{tool}` \
+                 tool-name encoding uses as the separator between server and tool",
+            )
+        } else {
+            Ok(())
+        }
+    }
 }
 
 /// Which MCP servers a run gets: where to look for configured ones, and any
@@ -380,6 +406,20 @@ pub(crate) fn configured(
     config: &McpConfig,
 ) -> Result<Vec<ConfiguredServer>, McpError> {
     let discovered = discovered(workspace, config)?;
+
+    // `.mcp.json` and an ACP client's `mcpServers` already check their own
+    // entries at the door — see [`McpServer::validate_name`]. A Rust host's
+    // own list, set through [`crate::workspace::WorkspaceBuilder::with_mcp`],
+    // has no door of its own to check at: nothing stops it building an
+    // [`McpServer`] directly. This is the one place every source has already
+    // converged, so it is where that last gap gets closed.
+    for server in &config.supplied {
+        McpServer::validate_name(server.name()).map_err(|reason| McpError::Invalid {
+            origin: "the supplied MCP server list".to_string(),
+            name: server.name().to_string(),
+            reason: reason.to_string(),
+        })?;
+    }
 
     Ok(layer(
         config
@@ -566,6 +606,33 @@ mod tests {
             "from-the-client",
             "the client is answering for this session in particular"
         );
+    }
+
+    #[test]
+    fn a_supplied_server_with_a_double_underscore_name_is_rejected() {
+        // Nothing stops a Rust host building an `McpServer` directly and
+        // handing it to `WorkspaceBuilder::with_mcp` — this is the one
+        // producer `.mcp.json` and an ACP client's `mcpServers` cannot check
+        // at their own door, so `configured` is where the check lands for
+        // this source instead. See [`McpServer::validate_name`].
+        let tmp = tempfile::tempdir().expect("tempdir");
+
+        let config = McpConfig {
+            supplied: vec![McpServer::Stdio(McpServerConfig {
+                name: "evil__foo".to_string(),
+                command: "from-the-host".to_string(),
+                args: Vec::new(),
+                env: Default::default(),
+                cwd: None,
+            })],
+            ..config(None)
+        };
+
+        let error =
+            servers(tmp.path(), &config).expect_err("mentra's split would misparse this name");
+
+        assert!(matches!(error, McpError::Invalid { .. }), "{error}");
+        assert!(error.to_string().contains("__"), "{error}");
     }
 
     #[test]

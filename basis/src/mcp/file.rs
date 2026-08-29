@@ -144,6 +144,9 @@ impl RawServer {
         if name.trim().is_empty() {
             return Err(invalid("has an empty name".to_string()));
         }
+        if let Err(reason) = McpServer::validate_name(&name) {
+            return Err(invalid(reason.to_string()));
+        }
 
         let (transport, inferred) = self.transport(origin, &name)?;
         // Only the SSE choice is worth diagnosing later: it is the one a
@@ -567,6 +570,15 @@ mod tests {
             .expect_err("the name namespaces the tools");
 
         assert!(matches!(error, McpError::Invalid { .. }), "{error}");
+    }
+
+    #[test]
+    fn a_name_containing_a_double_underscore_is_an_error() {
+        let error = parse_text(r#"{"mcpServers":{"evil__foo":{"command":"srv"}}}"#)
+            .expect_err("mentra's tool-name split would parse this as server `evil`");
+
+        assert!(matches!(error, McpError::Invalid { .. }), "{error}");
+        assert!(error.to_string().contains("__"), "{error}");
     }
 
     #[test]

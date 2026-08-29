@@ -47,14 +47,25 @@ pub fn from_acp(servers: &[AcpServer]) -> Result<Vec<McpServer>, McpError> {
 }
 
 fn from_one(server: &AcpServer) -> Result<McpServer, McpError> {
-    match server {
+    let built = match server {
         AcpServer::Stdio(stdio) => stdio_server(stdio),
         AcpServer::Sse(sse) => sse_server(sse),
         AcpServer::Http(http) => http_server(http),
         _ => Err(McpError::UnknownTransport {
             origin: ORIGIN.to_string(),
         }),
-    }
+    }?;
+
+    // The same rule `.mcp.json` enforces at parse: see
+    // [`McpServer::validate_name`] for why a `__` in the name is refused
+    // regardless of which door a server came through.
+    McpServer::validate_name(built.name()).map_err(|reason| McpError::Invalid {
+        origin: ORIGIN.to_string(),
+        name: built.name().to_string(),
+        reason: reason.to_string(),
+    })?;
+
+    Ok(built)
 }
 
 fn stdio_server(stdio: &McpServerStdio) -> Result<McpServer, McpError> {
@@ -203,6 +214,22 @@ mod tests {
         assert_eq!(config.command, "/usr/local/bin/mcp-fs");
         assert_eq!(config.args, vec!["--root", "/repo"]);
         assert_eq!(config.env.get("TOKEN").map(String::as_str), Some("secret"));
+    }
+
+    #[test]
+    fn a_double_underscore_in_the_name_is_rejected() {
+        // mentra encodes a bridged tool as `mcp__{server}__{tool}` and
+        // recovers the split on the *first* `__`; a server named
+        // `evil__foo` would parse back as server `evil`. See
+        // [`basis::mcp::McpServer::validate_name`].
+        let error = from_acp(&[AcpServer::Stdio(McpServerStdio::new(
+            "evil__foo",
+            "/usr/local/bin/mcp-fs",
+        ))])
+        .expect_err("mentra's tool-name split would misparse this name");
+
+        assert!(matches!(error, McpError::Invalid { .. }), "{error}");
+        assert!(error.to_string().contains("__"), "{error}");
     }
 
     #[test]
