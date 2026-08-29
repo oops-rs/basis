@@ -66,3 +66,35 @@ jobs:
       # need no network and no credentials — nothing here reaches a provider.
       - name: Run tests
         run: cargo test --workspace --all-features --locked
+
+  no-mcp:
+    name: basis with --no-default-features
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: dtolnay/rust-toolchain@stable
+
+      - uses: Swatinem/rust-cache@v2
+
+      # mcp is default-on (ADR-0012), so the crate's docs and its own test
+      # suite both need to hold up with it off — a doc link or a cfg'd item
+      # that only exists behind mcp is a break no default-feature build sees.
+      - name: Check docs build without the mcp feature
+        env:
+          RUSTDOCFLAGS: -D warnings
+        run: cargo doc -p basis --no-default-features --no-deps
+
+      - name: Check the crate without the mcp feature
+        run: cargo check -p basis --no-default-features --all-targets --locked
+
+      - name: Run tests without the mcp feature
+        run: cargo test -p basis --no-default-features --locked
+
+  deny:
+    name: cargo-deny (advisories, bans, licenses, sources)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: EmbarkStudios/cargo-deny-action@v2

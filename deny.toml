@@ -1,0 +1,43 @@
+# cargo-deny configuration. Run `cargo deny check` before every commit that
+# touches dependencies; CI runs the same check on every PR.
+
+[graph]
+all-features = true
+
+[advisories]
+db-path = "~/.cargo/advisory-db"
+db-urls = ["https://github.com/rustsec/advisory-db"]
+# A known vulnerability blocks CI outright; an unmaintained crate is a
+# heads-up worth seeing but not a reason to fail a build on its own.
+version = 2
+yanked = "deny"
+ignore = []
+
+[licenses]
+version = 2
+allow = [
+    "MIT",
+    "Apache-2.0",
+    "BSD-2-Clause",
+    "BSD-3-Clause",
+    "ISC",
+    "Unicode-3.0",
+    "Zlib",
+    # option-ext (via mentra -> directories -> dirs-sys), macOS/Linux config
+    # dir lookup only, not linked into anything basis ships modified.
+    "MPL-2.0",
+    # webpki-roots (via mentra -> reqwest -> hyper-rustls), a data file of
+    # Mozilla's CA root list, not code.
+    "CDLA-Permissive-2.0",
+]
+confidence-threshold = 0.8
+
+[bans]
+multiple-versions = "warn"
+wildcards = "deny"
+deny = []
+
+[sources]
+unknown-registry = "deny"
+unknown-git = "deny"
+allow-registry = ["https://github.com/rust-lang/crates.io-index"]
