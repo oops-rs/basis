@@ -50,13 +50,19 @@
 //!
 //! # The seams underneath
 //!
-//! mentra's [`PreExecutionHook`](mentra::runtime::PreExecutionHook) fires after
-//! authorization and before the tool runs;
-//! [`PostExecutionHook`](mentra::runtime::PostExecutionHook) fires after it and
-//! before the result reaches the model — before mentra's own pager, so a
-//! participant sees the whole output rather than its first window, and without
-//! touching `AgentEvent::ToolExecutionFinished`, so the audit trail keeps what
-//! actually happened whatever the model is shown.
+//! mentra's [`PreExecutionHook`](mentra::runtime::PreExecutionHook) fires
+//! before the tool runs, and since mentra 0.24 before the rest of admission
+//! too: hooks, then the tool's `input_schema` against what they left, then the
+//! [`ToolAuthorizer`](mentra::tool::ToolAuthorizer). A participant is
+//! therefore asked about every registered call, including ones the approver
+//! goes on to refuse — being consulted is not being approved — and a rewrite
+//! it returns is what the approver is then asked about.
+//!
+//! [`PostExecutionHook`](mentra::runtime::PostExecutionHook) fires after the
+//! call and before the result reaches the model — before mentra's own pager,
+//! so a participant sees the whole output rather than its first window, and
+//! without touching `AgentEvent::ToolExecutionFinished`, so the audit trail
+//! keeps what actually happened whatever the model is shown.
 //!
 //! basis registers exactly one implementation on each, [`HookRunner`], which
 //! fans out to every interceptor and every configured command — not because it
