@@ -89,6 +89,16 @@ pub(super) fn discover(
 ///
 /// Empty is [`ContextConfig::none`] and is not a name at all — nothing is ever
 /// looked for, so there is nothing to check.
+///
+/// One component, and `./AGENTS.md` is therefore refused along with the rest.
+/// That spelling names the same file the bare name does and reaches nowhere
+/// else, so refusing it buys no hygiene — what it buys is a rule with one
+/// spelling. "A bare name" is a rule a host can hold and this function can
+/// state in a line; "a path that happens to resolve to a bare name" is neither,
+/// and it is the version that has to answer for `./../x` and
+/// `a/../AGENTS.md`. The cost is one clear error at the open, from a message
+/// that names the field and says what it wants. Pinned by test, so it is a
+/// decision rather than a side effect of how `Components` treats a leading dot.
 fn validate_file_name(name: &str) -> Result<(), ContextError> {
     if name.is_empty() {
         return Ok(());

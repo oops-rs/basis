@@ -748,7 +748,20 @@ mod tests {
         let workspace = tmp.path().join("repo");
         write(&workspace, DEFAULT_CONTEXT_FILE, "workspace rules");
 
-        for name in ["../AGENTS.md", "/etc/agents.md", "nested/AGENTS.md", ".."] {
+        // `./AGENTS.md` is in the list deliberately. It names the same file
+        // the bare name does and reaches nowhere else, so refusing it buys no
+        // hygiene — what it buys is one rule with one spelling. "A bare name"
+        // is a rule a host can hold; "a path that happens to resolve to a bare
+        // name" is not, and it is the rule that has to answer for `./../x` and
+        // `a/../AGENTS.md`. The refusal names the field and says what it wants,
+        // so the cost of the strictness is one clear error at the open.
+        for name in [
+            "../AGENTS.md",
+            "/etc/agents.md",
+            "nested/AGENTS.md",
+            "./AGENTS.md",
+            "..",
+        ] {
             let config = ContextConfig {
                 file_name: name.to_string(),
                 global_dir: None,
