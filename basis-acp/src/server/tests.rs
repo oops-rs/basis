@@ -22,7 +22,7 @@ use agent_client_protocol::schema::{
 use super::config::{Discovery, ServeConfig, SessionSource, SessionTemplate};
 use super::initialize;
 use super::lifecycle::{delete_session, list_sessions, session_info, setup_failed};
-use super::turn::{prompt_parts, prompt_text, stop_reason, usage_update};
+use super::turn::{Ended, prompt_parts, prompt_text, stop_reason, stop_reason_for, usage_update};
 use super::workspaces::{ConfiguredSource, WorkspaceKey};
 use crate::mode::ApprovalMode;
 use basis::{
@@ -348,6 +348,34 @@ fn every_bound_names_a_stop_reason_a_client_can_act_on() {
             "{bound:?} ended the turn early, and `EndTurn` says it ended successfully"
         );
     }
+}
+
+#[test]
+fn a_cancel_that_lands_after_the_turn_answered_is_not_a_cancellation() {
+    // mentra reads the token at round boundaries; a stop pressed after the
+    // last one finds a turn that has already answered. Reporting that as
+    // `Cancelled` would tell the client the answer it just streamed was
+    // thrown away, which it was not.
+    let answered = stop_reason_for(Ended::Answered, true).expect("an answer is an answer");
+    assert_eq!(answered.stop_reason, StopReason::EndTurn);
+
+    // A bound that ended the turn is likewise what actually happened.
+    let bounded =
+        stop_reason_for(Ended::Bounded(basis::Bound::TokenBudget), true).expect("a bound");
+    assert_eq!(bounded.stop_reason, StopReason::MaxTokens);
+}
+
+#[test]
+fn a_turn_that_failed_under_a_tripped_token_was_cancelled() {
+    // The token, not the error, is what distinguishes "the client stopped it"
+    // from "it broke": a cancelled turn fails inside mentra like any other.
+    let cancelled = stop_reason_for(Ended::Failed("cancelled".to_string()), true)
+        .expect("ACP requires `Cancelled`, not an error");
+    assert_eq!(cancelled.stop_reason, StopReason::Cancelled);
+
+    let broke = stop_reason_for(Ended::Failed("it broke".to_string()), false)
+        .expect_err("a failure nobody asked for is an error");
+    assert_eq!(broke.code, ErrorCode::InternalError);
 }
 
 #[test]

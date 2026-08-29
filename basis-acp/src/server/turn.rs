@@ -103,31 +103,57 @@ pub(super) async fn prompt(
         );
     }
 
-    // A cancelled turn fails inside mentra, so the token — not the error — is
-    // what distinguishes "the client stopped it" from "it broke". ACP requires
-    // `Cancelled` in that case.
-    if cancelled.is_some_and(|token| token.is_cancelled()) {
-        return Ok(PromptResponse::new(StopReason::Cancelled));
-    }
-
-    match report {
+    let ended = match report {
         // The bound is read before the outcome, because a bound that ended a
         // turn is the answer whichever way the turn came back. `TokenBudget`
         // is graceful and can arrive on a run that answered (see
         // `Bound::TokenBudget`), and reporting that as `EndTurn` would drop
         // the one fact the client needs to know: there would have been more.
         Ok(report) => match report.stopped_by {
-            Some(bound) => Ok(PromptResponse::new(stop_reason(bound))),
-            None if report.succeeded() => Ok(PromptResponse::new(StopReason::EndTurn)),
-            None => Err(Error::internal_error().data(match report.outcome {
+            Some(bound) => Ended::Bounded(bound),
+            None if report.succeeded() => Ended::Answered,
+            None => Ended::Failed(match report.outcome {
                 basis::RunOutcome::Error { message } => message,
                 // `Ok` without a final message — or an outcome this build
                 // does not know — either way the turn failed without words
                 // of its own.
                 _ => "the turn failed".to_string(),
-            })),
+            }),
         },
-        Err(error) => Err(Error::internal_error().data(error.to_string())),
+        Err(error) => Ended::Failed(error.to_string()),
+    };
+
+    stop_reason_for(ended, cancelled.is_some_and(|token| token.is_cancelled()))
+}
+
+/// How a turn came back, reduced to what the stop reason depends on.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(super) enum Ended {
+    /// A bound ended it; committed work is kept.
+    Bounded(basis::Bound),
+    /// The model answered.
+    Answered,
+    /// It failed, with these words.
+    Failed(String),
+}
+
+/// The `session/prompt` response for a turn that ended as `ended`, given
+/// whether its cancellation token was tripped.
+///
+/// A cancelled turn fails inside mentra, so the token — not the error — is
+/// what distinguishes "the client stopped it" from "it broke", and ACP
+/// requires `Cancelled` for the first. But the token is read *after* the turn
+/// and mentra reads it only at round boundaries, so a stop pressed after the
+/// last boundary finds a turn that already answered. That turn is reported as
+/// what it was: the answer streamed and was kept, and calling it `Cancelled`
+/// would tell the client it was thrown away. The token decides only when the
+/// turn did not come back on its own.
+pub(super) fn stop_reason_for(ended: Ended, cancelled: bool) -> Result<PromptResponse, Error> {
+    match ended {
+        Ended::Bounded(bound) => Ok(PromptResponse::new(stop_reason(bound))),
+        Ended::Answered => Ok(PromptResponse::new(StopReason::EndTurn)),
+        Ended::Failed(_) if cancelled => Ok(PromptResponse::new(StopReason::Cancelled)),
+        Ended::Failed(message) => Err(Error::internal_error().data(message)),
     }
 }
 
