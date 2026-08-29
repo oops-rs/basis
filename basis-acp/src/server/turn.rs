@@ -20,8 +20,8 @@
 use agent_client_protocol::{
     Client, ConnectionTo,
     schema::v1::{
-        ContentBlock, Error, ImageContent, PromptRequest, PromptResponse, SessionId, SessionUpdate,
-        StopReason, UsageUpdate,
+        BlobResourceContents, ContentBlock, EmbeddedResourceResource, Error, PromptRequest,
+        PromptResponse, SessionId, SessionUpdate, StopReason, UsageUpdate,
     },
 };
 use base64::Engine;
@@ -276,8 +276,25 @@ pub(super) fn prompt_parts(blocks: &[ContentBlock]) -> Result<Vec<PromptPart>, E
         match block {
             ContentBlock::Image(image) => {
                 flush(&mut text, &mut parts);
-                parts.push(image_part(image)?);
+                parts.push(image_part(&image.data, &image.mime_type)?);
             }
+            // An image that arrived as an embedded resource — a client
+            // attaching a screenshot from a file sends the same bytes in this
+            // envelope — is the same image, and goes the same way.
+            ContentBlock::Resource(resource) => match image_blob(&resource.resource) {
+                Some(blob) => {
+                    flush(&mut text, &mut parts);
+                    parts.push(image_part(
+                        &blob.blob,
+                        blob.mime_type.as_deref().unwrap_or_default(),
+                    )?);
+                }
+                None => {
+                    if let Some(line) = block_text(block) {
+                        text.push(line);
+                    }
+                }
+            },
             other => {
                 if let Some(line) = block_text(other) {
                     text.push(line);
@@ -297,6 +314,24 @@ fn flush(text: &mut Vec<String>, parts: &mut Vec<PromptPart>) {
     }
 }
 
+/// An embedded resource's binary contents, when they are an image.
+///
+/// Decided by the declared media type, because that is the only thing that
+/// says what the bytes are; a blob without one is not guessed at.
+fn image_blob(resource: &EmbeddedResourceResource) -> Option<&BlobResourceContents> {
+    match resource {
+        EmbeddedResourceResource::BlobResourceContents(blob)
+            if blob
+                .mime_type
+                .as_deref()
+                .is_some_and(|mime| mime.starts_with("image/")) =>
+        {
+            Some(blob)
+        }
+        _ => None,
+    }
+}
+
 /// One ACP image, as bytes.
 ///
 /// ACP carries the payload base64-encoded and mentra takes the bytes, so this
@@ -305,29 +340,36 @@ fn flush(text: &mut Vec<String>, parts: &mut Vec<PromptPart>) {
 /// says why it could not be sent, and `uri` — which ACP allows alongside the
 /// data — is not a fallback basis can use, because Gemini rejects a URL image
 /// outright.
-fn image_part(image: &ImageContent) -> Result<PromptPart, Error> {
+fn image_part(data: &str, mime_type: &str) -> Result<PromptPart, Error> {
     let data = base64::engine::general_purpose::STANDARD
-        .decode(&image.data)
+        .decode(data)
         .map_err(|error| {
             Error::invalid_params().data(format!("image data is not valid base64: {error}"))
         })?;
 
-    Ok(PromptPart::image(image.mime_type.clone(), data))
+    Ok(PromptPart::image(mime_type.to_string(), data))
 }
 
 /// The text of one block, for the blocks that have some.
 ///
-/// Resource links and embedded resources are named rather than inlined: basis
-/// does not fetch on the client's behalf, and dropping them silently would
-/// lose what the user attached.
+/// Resource links, and embedded resources basis cannot carry, are named rather
+/// than inlined: basis does not fetch on the client's behalf, mentra has no
+/// block for a PDF, and dropping either silently would lose what the user
+/// attached — the model would answer as though nothing had been.
 fn block_text(block: &ContentBlock) -> Option<String> {
     match block {
         ContentBlock::Text(text) => Some(text.text.clone()),
         ContentBlock::ResourceLink(link) => Some(format!("[{}]({})", link.name, link.uri)),
         ContentBlock::Resource(resource) => match &resource.resource {
-            agent_client_protocol::schema::v1::EmbeddedResourceResource::TextResourceContents(
-                contents,
-            ) => Some(contents.text.clone()),
+            EmbeddedResourceResource::TextResourceContents(contents) => Some(contents.text.clone()),
+            // Image blobs were taken by `prompt_parts` before this is asked;
+            // what is left is something basis cannot send as itself.
+            EmbeddedResourceResource::BlobResourceContents(blob) => {
+                Some(format!("[{}]({})", blob.uri, blob.uri))
+            }
+            // The enum is `#[non_exhaustive]`: a kind this build does not
+            // know is one basis cannot carry, and it says nothing it cannot
+            // read.
             _ => None,
         },
         _ => None,

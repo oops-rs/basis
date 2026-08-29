@@ -14,8 +14,9 @@ use std::{
 use agent_client_protocol::schema::{
     ProtocolVersion,
     v1::{
-        ContentBlock, DeleteSessionRequest, ErrorCode, ImageContent, InitializeRequest,
-        ListSessionsRequest, ResourceLink, SessionCapabilities, StopReason, TextContent,
+        BlobResourceContents, ContentBlock, DeleteSessionRequest, EmbeddedResource,
+        EmbeddedResourceResource, ErrorCode, ImageContent, InitializeRequest, ListSessionsRequest,
+        ResourceLink, SessionCapabilities, StopReason, TextContent,
     },
 };
 
@@ -297,6 +298,43 @@ fn an_image_that_cannot_be_decoded_is_refused_rather_than_dropped() {
     .expect_err("undecodable data is not a prompt");
 
     assert_eq!(error.code, ErrorCode::InvalidParams);
+}
+
+#[test]
+fn an_embedded_image_blob_arrives_as_the_image_it_is() {
+    // `initialize` claims `embeddedContext`, and a client that attaches a
+    // screenshot from a file may send it as an embedded resource rather than
+    // an image block — same bytes, different envelope. Dropping the envelope
+    // basis did not recognize dropped the screenshot.
+    let blob = BlobResourceContents::new("AQID", "file:///shot.png").mime_type("image/png");
+    let parts = prompt_parts(&[
+        ContentBlock::Text(TextContent::new("what is this".to_string())),
+        ContentBlock::Resource(EmbeddedResource::new(
+            EmbeddedResourceResource::BlobResourceContents(blob),
+        )),
+    ])
+    .expect("valid base64 decodes");
+
+    assert_eq!(
+        parts,
+        vec![
+            PromptPart::text("what is this"),
+            PromptPart::image("image/png", vec![1, 2, 3]),
+        ]
+    );
+}
+
+#[test]
+fn an_embedded_blob_basis_cannot_carry_is_named_rather_than_dropped() {
+    // mentra has no block for a PDF. The same rule as a resource link: say
+    // what was attached, so the model knows there was something it did not
+    // get, rather than answering as though nothing was.
+    let blob = BlobResourceContents::new("AQID", "file:///report.pdf").mime_type("application/pdf");
+    let text = prompt_text(&[ContentBlock::Resource(EmbeddedResource::new(
+        EmbeddedResourceResource::BlobResourceContents(blob),
+    ))]);
+
+    assert!(text.contains("file:///report.pdf"), "{text}");
 }
 
 #[test]
