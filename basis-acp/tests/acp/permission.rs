@@ -13,9 +13,16 @@
 
 use std::sync::Arc;
 
-use agent_client_protocol::schema::v1::{SetSessionModeRequest, StopReason};
+use agent_client_protocol::{
+    Agent, ConnectionTo, Error,
+    schema::v1::{
+        CancelNotification, CloseSessionRequest, DeleteSessionRequest, SessionId,
+        SetSessionModeRequest, StopReason,
+    },
+};
+use basis_acp::ServeConfig;
 
-use crate::client::{connected, drive, open, say};
+use crate::client::{OnPermission, connected, connected_with, drive, open, say};
 use crate::source::{MockSource, workspace, writing_mock};
 
 #[tokio::test]
@@ -156,4 +163,99 @@ async fn switching_to_read_only_refuses_without_asking() {
         !workspace.path().join("made.txt").exists(),
         "a mode that refuses must actually refuse"
     );
+}
+
+/// A client that, asked permission, never answers and instead does `interrupt`
+/// to the session — presses stop, closes it, deletes it. What is pinned is that
+/// the turn ends anyway: the request to the client is abandoned, the write does
+/// not happen, and the prompt comes back `Cancelled`.
+async fn interrupted_while_deciding(
+    interrupt: fn(&ConnectionTo<Agent>, &SessionId) -> Result<(), Error>,
+) -> (StopReason, tempfile::TempDir) {
+    let workspace = workspace();
+    let mock = Arc::new(writing_mock(&workspace));
+
+    let on_permission: OnPermission = Arc::new(move |request, responder, connection, observed| {
+        interrupt(&connection, &request.session_id)?;
+        // Held, not answered: the person is still looking at the dialog.
+        observed
+            .lock()
+            .expect("not poisoned")
+            .unanswered
+            .push(responder);
+        Ok(())
+    });
+
+    let (stop_reason, observed) = connected_with(
+        ServeConfig::with_source(MockSource::new(&mock, &workspace)),
+        on_permission,
+        |connection| async move {
+            let session = open(&connection).await?;
+            say(&connection, &session, "make a file").await
+        },
+    )
+    .await;
+
+    let observed = observed.lock().expect("not poisoned");
+    assert_eq!(
+        observed.permission_requests.len(),
+        1,
+        "the write was put to the client before anything interrupted it"
+    );
+    assert_eq!(
+        observed.unanswered.len(),
+        1,
+        "and the client never answered"
+    );
+
+    (stop_reason, workspace)
+}
+
+#[tokio::test]
+async fn a_cancel_while_the_client_is_deciding_ends_the_turn() {
+    let (stop_reason, workspace) = interrupted_while_deciding(|connection, session| {
+        connection.send_notification(CancelNotification::new(session.clone()))
+    })
+    .await;
+
+    assert_eq!(
+        stop_reason,
+        StopReason::Cancelled,
+        "the client pressed stop, and ACP says the turn must say so"
+    );
+    assert!(
+        !workspace.path().join("made.txt").exists(),
+        "a call nobody approved must not happen"
+    );
+}
+
+#[tokio::test]
+async fn closing_the_session_while_the_client_is_deciding_ends_the_turn() {
+    let (stop_reason, workspace) = interrupted_while_deciding(|connection, session| {
+        connection
+            .send_request(CloseSessionRequest::new(session.clone()))
+            .detach();
+        Ok(())
+    })
+    .await;
+
+    assert_eq!(stop_reason, StopReason::Cancelled);
+    assert!(!workspace.path().join("made.txt").exists());
+}
+
+#[tokio::test]
+async fn deleting_the_session_while_the_client_is_deciding_ends_the_turn() {
+    // Delete waits out the turn by taking its lock, and the turn is waiting on
+    // the client: without the interrupt this is the deadlock ADR-0007 names,
+    // one hop longer.
+    let (stop_reason, workspace) = interrupted_while_deciding(|connection, session| {
+        connection
+            .send_request(DeleteSessionRequest::new(session.clone()))
+            .detach();
+        Ok(())
+    })
+    .await;
+
+    assert_eq!(stop_reason, StopReason::Cancelled);
+    assert!(!workspace.path().join("made.txt").exists());
 }

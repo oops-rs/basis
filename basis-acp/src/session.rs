@@ -15,6 +15,18 @@
 //! The session's mode lives outside the turn lock for the same reason, and is
 //! its own type — see [`mode`](crate::mode).
 //!
+//! # Why cancelling is two signals
+//!
+//! mentra's token is a flag the runner reads at round boundaries, and a turn
+//! waiting on `session/request_permission` is not at one: it is parked inside
+//! a tool call until the approver answers, and the approver is waiting on the
+//! client. A stop pressed then would trip a flag nothing reads until an answer
+//! arrives that the person who pressed stop is no longer going to give. So
+//! the token travels with an [`Interrupt`] — an awaitable the approver selects
+//! against — and [`cancel`](AcpSession::cancel) trips both. The flag is what
+//! ends the turn; the interrupt is what gets the turn to the boundary where
+//! the flag is read.
+//!
 //! # Which id is the session id
 //!
 //! basis uses mentra's **agent id**, not its session id. mentra persists agents;
@@ -30,9 +42,47 @@ use std::{
 
 use agent_client_protocol::schema::v1::SessionId;
 
+use tokio::sync::watch;
+
 use crate::mode::{ApprovalMode, SessionModes};
 use basis::{PreparedRun, run::TurnOptions};
 use mentra::runtime::CancellationToken;
+
+/// The half of a cancellation an approver can wait on.
+///
+/// Cloneable, so a turn's approver and anything else parked on the client can
+/// each hold one; [`wait`](Self::wait) resolves once for all of them when the
+/// turn is cancelled, and resolves at once if it already was — a stop pressed
+/// before the question was asked is still a stop.
+#[derive(Clone, Debug)]
+pub struct Interrupt {
+    cancelled: watch::Receiver<bool>,
+}
+
+impl Interrupt {
+    /// Resolves when the turn this belongs to is cancelled.
+    ///
+    /// Also resolves if the turn has already ended and disarmed its token —
+    /// there is nothing left for a waiter to wait for, and an approver still
+    /// asking after the turn is gone has no turn to answer.
+    pub async fn wait(&mut self) {
+        let _ = self.cancelled.wait_for(|cancelled| *cancelled).await;
+    }
+}
+
+/// What [`AcpSession::begin_turn`] arms: mentra's flag and the interrupt that
+/// wakes an approver to go and read it.
+struct Armed {
+    token: CancellationToken,
+    interrupt: watch::Sender<bool>,
+}
+
+impl Armed {
+    fn cancel(&self) {
+        self.token.cancel();
+        self.interrupt.send_replace(true);
+    }
+}
 
 /// One open conversation.
 #[derive(Clone)]
@@ -41,7 +91,7 @@ pub struct AcpSession {
     run: Arc<tokio::sync::Mutex<PreparedRun>>,
     /// Set while a turn is in flight. Reachable without the turn lock, which
     /// is the entire point — see the module docs.
-    cancel: Arc<Mutex<Option<CancellationToken>>>,
+    cancel: Arc<Mutex<Option<Armed>>>,
     /// Also reachable without the turn lock: ACP says `session/set_mode` may
     /// arrive while the agent is generating.
     modes: SessionModes,
@@ -78,8 +128,17 @@ impl AcpSession {
     /// Arms a fresh cancellation token for a turn about to start.
     pub fn begin_turn(&self) -> TurnOptions {
         let (options, token) = TurnOptions::cancellable();
-        *self.cancel_slot() = Some(token);
+        let (interrupt, _) = watch::channel(false);
+        *self.cancel_slot() = Some(Armed { token, interrupt });
         options
+    }
+
+    /// The interrupt armed for the turn in flight, for whatever is about to
+    /// wait on the client on that turn's behalf. `None` between turns.
+    pub fn interrupt(&self) -> Option<Interrupt> {
+        self.cancel_slot().as_ref().map(|armed| Interrupt {
+            cancelled: armed.interrupt.subscribe(),
+        })
     }
 
     /// Disarms after a turn ends, so a late `session/cancel` cannot cancel the
@@ -88,18 +147,19 @@ impl AcpSession {
         *self.cancel_slot() = None;
     }
 
-    /// Trips the in-flight turn's token. `false` when no turn is running.
+    /// Trips the in-flight turn's token and wakes anything waiting on the
+    /// client for it. `false` when no turn is running.
     pub fn cancel(&self) -> bool {
         match self.cancel_slot().take() {
-            Some(token) => {
-                token.cancel();
+            Some(armed) => {
+                armed.cancel();
                 true
             }
             None => false,
         }
     }
 
-    fn cancel_slot(&self) -> std::sync::MutexGuard<'_, Option<CancellationToken>> {
+    fn cancel_slot(&self) -> std::sync::MutexGuard<'_, Option<Armed>> {
         self.cancel
             .lock()
             .unwrap_or_else(|poisoned| poisoned.into_inner())
@@ -164,6 +224,74 @@ mod tests {
         assert!(registry.is_empty());
         assert!(registry.get(&SessionId::new("nobody")).is_none());
         assert!(registry.remove(&SessionId::new("nobody")).is_none());
+    }
+
+    /// A session over a scripted runtime, for tests that arm turns without
+    /// running one.
+    async fn session() -> AcpSession {
+        let mock = mentra::test::MockRuntime::builder()
+            .model("mock-model", "openai")
+            .with_policy(mentra::RuntimePolicy::permissive())
+            .text("unused")
+            .build()
+            .expect("mock runtime builds");
+        let workspace = tempfile::tempdir().expect("tempdir");
+        let mentra_session = mock
+            .runtime()
+            .create_session("test", mock.model())
+            .expect("session");
+        let run = basis::run::prepare_with_session(
+            mentra_session,
+            workspace.path(),
+            "",
+            &basis::ContextConfig {
+                file_name: "AGENTS.md".to_string(),
+                global_dir: None,
+                walk_parents: false,
+            },
+            "openai",
+            "mock-model",
+        )
+        .expect("prepared");
+        AcpSession::new(run, ApprovalMode::Prompt)
+    }
+
+    #[tokio::test]
+    async fn there_is_nothing_to_interrupt_between_turns() {
+        let session = session().await;
+
+        assert!(session.interrupt().is_none());
+        assert!(!session.cancel(), "and nothing to cancel");
+    }
+
+    #[tokio::test]
+    async fn cancelling_wakes_whoever_is_waiting_on_the_turn() {
+        let session = session().await;
+        let options = session.begin_turn();
+        let mut interrupt = session.interrupt().expect("a turn is armed");
+
+        assert!(session.cancel());
+
+        // Both halves tripped: the flag mentra reads, and the wake-up that
+        // gets the turn to where it reads it.
+        assert!(options.cancel.expect("armed").is_cancelled());
+        tokio::time::timeout(std::time::Duration::from_secs(1), interrupt.wait())
+            .await
+            .expect("the interrupt must fire");
+    }
+
+    #[tokio::test]
+    async fn a_turn_that_ended_leaves_no_one_waiting() {
+        let session = session().await;
+        let _options = session.begin_turn();
+        let mut interrupt = session.interrupt().expect("a turn is armed");
+
+        session.end_turn();
+
+        tokio::time::timeout(std::time::Duration::from_secs(1), interrupt.wait())
+            .await
+            .expect("a waiter on a finished turn must not wait forever");
+        assert!(session.interrupt().is_none());
     }
 
     #[test]

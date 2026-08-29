@@ -61,12 +61,6 @@ pub(super) async fn prompt(
         return run_builtin(&session, connection, &request.session_id, builtin).await;
     }
 
-    // The session's mode decides which of these requests the client actually
-    // sees; the runtime surfaces every consequential call so that it can.
-    let approver = ModedApprover::new(
-        session.modes().clone(),
-        AcpApprover::new(request.session_id.clone(), connection.clone()),
-    );
     let sink = NotificationSink::new(request.session_id.clone(), connection.clone());
 
     // Held across the turn: one conversation runs one turn at a time, which is
@@ -75,6 +69,20 @@ pub(super) async fn prompt(
     let mut run = session.lock_turn().await;
     let options = session.begin_turn();
     let cancelled = options.cancel.clone();
+
+    // Built after the turn is armed, because the approver needs the turn's
+    // interrupt: a cancel has to reach a request the client is still looking
+    // at, or the turn waits for an answer nobody is going to give. The
+    // session's mode decides which of these requests the client actually
+    // sees; the runtime surfaces every consequential call so that it can.
+    let asking = AcpApprover::new(request.session_id.clone(), connection.clone());
+    let asking = match session.interrupt() {
+        Some(interrupt) => asking.interrupted_by(interrupt),
+        // Cancelled between arming and here: the token is already tripped
+        // and mentra refuses the turn before anything is asked.
+        None => asking,
+    };
+    let approver = ModedApprover::new(session.modes().clone(), asking);
 
     let report = run.send_parts(parts, sink, approver, options).await;
     session.end_turn();
