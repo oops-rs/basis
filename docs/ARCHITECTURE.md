@@ -324,8 +324,9 @@ flowchart LR
   first to close must not take it from the second. Skills are the one thing that *does* travel
   between workspaces on a shared runtime — a run can `load_skill` a sibling's skill while the
   sibling is open, and cannot once it is not.
-- **A reusable private runtime is consumed, never reset in place** (ADR-0024). Basis 0.8 uses
-  Mentra 0.23.3 for the underlying observer and fresh provider-session primitives.
+- **A reusable private runtime is consumed, never reset in place** (ADR-0024). Basis 0.11 uses
+  Mentra 0.25.0 for the underlying observer, fresh provider-session, and bounded process
+  primitives.
   `RuntimeBuilder::with_reusable_registered_provider(provider_id, make, warm)` records the host's
   provider factory and the async warm step for its ordinary clone;
   `into_reusable_recipe` accepts it only with explicit ephemeral history and without one-shot
