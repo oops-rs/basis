@@ -85,12 +85,25 @@
 //! one `ContextCompacted` a finished pass emits, so there is no "started" line
 //! to leave dangling — and no line of any kind when the pass does not finish.
 //! An automatic pass that fails is retried up to three times and then dropped
-//! (`Agent::auto_compact_if_needed`, mentra 0.23.4 `src/agent/compact.rs`),
+//! (`Agent::auto_compact_if_needed`, mentra 0.24.0 `src/agent/compact.rs`),
 //! which is a reasonable posture — the run continues on an unshortened
 //! history rather than dying over a summary — but it is taken silently: no
 //! event, no hook, nothing a sink can see. The retries in between surface as
 //! [`Event::Retry`](crate::Event::Retry), indistinguishable from a model
 //! request's own.
+//!
+//! With one exception, and it is the one that matters for control: since
+//! mentra 0.24 an automatic pass inherits the bounds of the turn it happens
+//! inside, and a cancellation or a deadline reached *during* it ends the run
+//! instead of being degraded past. Silently continuing after a caller asked
+//! the run to stop would have made the stop button a suggestion. basis names
+//! that ending exactly as it names the same bound reached anywhere else in the
+//! turn — [`Bound::Deadline`](crate::Bound::Deadline) for the deadline, and
+//! for a cancel the run's own
+//! [`RunFailure::Cancelled`](crate::RunFailure::Cancelled) with no `Bound`,
+//! because a stop somebody asked for is not an allowance the run outgrew. No
+//! basis-side mapping was needed for that; `basis`'s `tests/compact.rs` pins
+//! both so a change to either is noticed.
 //!
 //! basis does not paper over that. Inferring a failure from an estimate that
 //! crossed a threshold with no compaction after it would be a guess dressed as
