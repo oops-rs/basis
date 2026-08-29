@@ -171,3 +171,48 @@ fn a_custom_workspace_subdir_is_honoured() {
     assert_eq!(loaded.len(), 1);
     assert_eq!(loaded[0].render("world"), "Say hello to world.\n");
 }
+
+/// One workspace per prepared run, templates included.
+///
+/// `prepare_with_session` reports a `workspace` in the run header and a
+/// `templates_dirs` beside it. They have to be the same directory, or the
+/// header says the templates in effect hang off somewhere the run is not:
+/// discovery resolves the root (symlinks followed, `..` folded), and on macOS
+/// a `tempfile` root alone is enough to make the caller's spelling differ from
+/// the resolved one — `/var/folders/…` against `/private/var/folders/…`.
+#[tokio::test]
+async fn a_prepared_run_reports_one_workspace_for_its_header_and_its_templates() {
+    let tmp = tempfile::tempdir().expect("tempdir");
+    write(
+        &workspace_templates(tmp.path()),
+        "review.md",
+        "---\ndescription: Review a change\n---\nReview $1.\n",
+    );
+
+    let mock = mentra::test::MockRuntime::builder()
+        .model("mock-model", "openai")
+        .stream_text(vec!["done"])
+        .build()
+        .expect("mock runtime builds");
+    let session = mock
+        .runtime()
+        .create_session("test", mock.model())
+        .expect("session");
+
+    let prepared = basis::run::prepare_with_session(
+        session,
+        tmp.path(),
+        "go",
+        &basis::ContextConfig::none(),
+        "openai",
+        "mock-model",
+    )
+    .expect("prepared");
+
+    let context = prepared.context();
+    assert_eq!(
+        context.templates_dirs,
+        vec![context.workspace.join(DEFAULT_WORKSPACE_TEMPLATES_DIR)],
+        "the header's workspace and its templates must name one directory"
+    );
+}

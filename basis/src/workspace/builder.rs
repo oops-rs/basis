@@ -828,9 +828,9 @@ impl WorkspaceBuilder {
                 runtime.transcripts_dir().to_path_buf(),
             ),
             identifier: store::runtime_identifier(&path),
-            // Not `resolved_workspace` a second time: `path` *is* what
-            // discovery resolved, and asking again would reintroduce the second
-            // answer this open exists to do without.
+            // Not resolved a second time: `path` *is* what discovery resolved,
+            // and asking again would reintroduce the second answer this open
+            // exists to do without.
             root: path,
             provider: runtime.provider().to_string(),
             runtime,
@@ -934,26 +934,6 @@ pub(crate) fn load_templates(
     let dirs: Vec<PathBuf> = sources.iter().map(|source| source.path.clone()).collect();
 
     Ok((dirs, templates::load_sources(&sources)?))
-}
-
-/// The workspace as discovery resolved it, falling back to what was asked for.
-///
-/// Discovery follows symlinks so the parent walk is meaningful, which means a
-/// document's path can sit under a different spelling of the same directory
-/// than the caller typed. Reporting the resolved root keeps the header
-/// internally consistent — `workspace` and `context_files` name one place.
-///
-/// [`prepare_with_session`](crate::run::prepare_with_session) is the only
-/// caller left, for the same reason it is one of [`load_templates`]'s: it is
-/// the one path that does not open a workspace and must still report one the
-/// same way. [`open`](WorkspaceBuilder::open) does not use it — it resolves
-/// the root itself, before discovery, and hands that same value to discovery
-/// and to everything else.
-pub(crate) fn resolved_workspace(requested: &Path, context: &WorkspaceContext) -> PathBuf {
-    context
-        .root()
-        .map(Path::to_path_buf)
-        .unwrap_or_else(|| requested.to_path_buf())
 }
 
 /// Turns discovered context into the agent's system prompt, scopes the agent to

@@ -63,7 +63,7 @@ pub use roster::ToolRoster;
 pub(crate) use spec::DEFAULT_SESSION_NAME;
 pub use spec::RunSpec;
 
-pub(crate) use builder::{load_templates, resolved_workspace};
+pub(crate) use builder::load_templates;
 use lifecycle::{MintPosture, ReuseLease, ReuseLifecycle};
 
 #[cfg(feature = "mcp")]
