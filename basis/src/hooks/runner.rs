@@ -11,9 +11,9 @@
 //! way but hand that control over with it.
 //!
 //! What an answer *means* is not decided here — that is [`chain`](super::chain),
-//! one implementation for both bindings. This module is two adapters and a
-//! thread: asking a subprocess blocks, asking an interceptor awaits, and the
-//! answers meet in the same [`Chain`].
+//! one implementation for both bindings. This module is two adapters: asking a
+//! subprocess awaits mentra's bounded command, asking an interceptor awaits
+//! the host's code, and the answers meet in the same [`Chain`].
 //!
 //! # The order participants speak in
 //!
@@ -30,7 +30,7 @@
 //! It is not a claim that a later participant is powerless. A hook still sees,
 //! and can still refuse, whatever an interceptor rewrote.
 
-use std::{fmt, path::PathBuf, sync::Arc, time::Duration};
+use std::{fmt, future::Future, path::PathBuf, sync::Arc, time::Duration};
 
 use mentra::{
     error::RuntimeError,
@@ -117,15 +117,16 @@ impl HookRunner {
     /// carrying words, because an error here would reach the model as a bare
     /// blocked call with the reason thrown away.
     ///
-    /// Blocking: it spawns subprocesses and waits for them. Callers on an async
-    /// runtime should reach it through [`decide_async`](Self::decide_async)
-    /// rather than calling it directly.
+    /// Blocking: it spawns subprocesses and waits for them, on a runtime of
+    /// its own so that it works from any thread, a tokio worker included.
+    /// Callers on an async runtime should reach it through
+    /// [`decide_async`](Self::decide_async) rather than calling it directly.
     ///
     /// A runner with interceptors registered **denies here rather than
-    /// deciding**. An [`Interceptor`] is async by contract and there is nowhere
-    /// in a synchronous call to await one; skipping them would silently drop a
-    /// control the host believes is in place, which is the one failure this
-    /// whole module is arranged to avoid.
+    /// deciding**. An [`Interceptor`] is async by contract and belongs on the
+    /// host's runtime, not on one basis conjured for a synchronous call;
+    /// skipping them would silently drop a control the host believes is in
+    /// place, which is the one failure this whole module is arranged to avoid.
     pub fn decide(&self, call: &HookCall) -> HookOutcome {
         if !self.interceptors.is_empty() {
             return HookOutcome::Deny(
@@ -139,21 +140,23 @@ impl HookRunner {
             return HookOutcome::Allow;
         }
 
-        match self.consult_hooks(Chain::new(self.request(call))) {
-            Ok(chain) => chain.outcome(),
-            Err(outcome) => outcome,
+        match block_on_own_runtime(self.consult_hooks(Chain::new(self.request(call)))) {
+            Ok(Ok(chain)) => chain.outcome(),
+            Ok(Err(outcome)) => outcome,
+            Err(failure) => HookOutcome::Deny(format!("hook runner failed: {failure}")),
         }
     }
 
     /// Consults everybody: interceptors first, then hooks.
     ///
-    /// Hooks are subprocesses, so asking them blocks for as long as they take.
-    /// `spawn_blocking` puts that on a thread meant for it, which works on
-    /// every runtime flavor — the previous `block_in_place` dance existed only
-    /// because mentra's hook trait was synchronous and there was nowhere else
-    /// to put the wait (oops-rs/mentra#16, fixed in 0.16). Interceptors are
-    /// awaited instead, on the caller's own runtime, because they are async by
-    /// contract and a blocking thread is exactly where a future cannot go.
+    /// Both are awaited on the caller's own runtime. A hook is a subprocess,
+    /// and since mentra 0.24 spawning and waiting for one is an async
+    /// primitive rather than blocking work, so the `spawn_blocking` this used
+    /// to route hooks through has gone with the thread it needed — and with it
+    /// the one thing that thread could not do: a turn cancelled mid-hook now
+    /// drops the future and kills the program, where a blocking wait abandoned
+    /// the thread to it. That holds on every runtime flavor, `current_thread`
+    /// included.
     pub async fn decide_async(&self, call: &HookCall) -> HookOutcome {
         if self.is_empty() {
             return HookOutcome::Allow;
@@ -196,7 +199,7 @@ impl HookRunner {
         .await
     }
 
-    /// Interceptors on the caller's runtime, then hooks on a blocking thread.
+    /// Interceptors first, then hooks, both on the caller's runtime.
     ///
     /// One body for both events, because which of them this is is a fact about
     /// `request` — the participants, their order, and what a refusal does to
@@ -211,15 +214,9 @@ impl HookRunner {
             return chain.outcome();
         }
 
-        let runner = self.clone();
-
-        match tokio::task::spawn_blocking(move || runner.consult_hooks(chain)).await {
-            Ok(Ok(chain)) => chain.outcome(),
-            Ok(Err(outcome)) => outcome,
-            // The blocking task panicked, which a hook cannot cause — every
-            // failure inside `consult_hooks` is already an outcome. Denying
-            // keeps "a broken guard never silently allows" true even here.
-            Err(error) => HookOutcome::Deny(format!("hook runner failed: {error}")),
+        match self.consult_hooks(chain).await {
+            Ok(chain) => chain.outcome(),
+            Err(outcome) => outcome,
         }
     }
 
@@ -259,7 +256,7 @@ impl HookRunner {
     }
 
     /// The subprocess binding's adapter: spawn, parse, fold.
-    fn consult_hooks(&self, chain: Chain) -> Result<Chain, HookOutcome> {
+    async fn consult_hooks(&self, chain: Chain) -> Result<Chain, HookOutcome> {
         let mut chain = chain;
 
         for spec in &self.hooks {
@@ -270,7 +267,7 @@ impl HookRunner {
                 continue;
             }
 
-            let answer = match self.ask(spec, chain.request()) {
+            let answer = match self.ask(spec, chain.request()).await {
                 Ok(HookResponse::Allow { .. }) => Answer::Allow,
                 Ok(HookResponse::Deny { reason }) => Answer::Deny(reason),
                 Ok(HookResponse::Modify { input, reason }) => Answer::Modify { input, reason },
@@ -332,22 +329,25 @@ impl HookRunner {
         }
     }
 
-    fn ask(&self, spec: &HookSpec, request: &HookRequest) -> Result<HookResponse, HookFailure> {
+    async fn ask(
+        &self,
+        spec: &HookSpec,
+        request: &HookRequest,
+    ) -> Result<HookResponse, HookFailure> {
         let payload = serde_json::to_string(request).map_err(HookFailure::Payload)?;
 
-        // No environment of its own: a hook is asked a question, not handed a
-        // credential to act on. The tool binding is where `env` belongs.
-        let completion = subprocess::execute(
-            &spec.command,
-            &self.workspace,
-            &[],
-            &payload,
-            spec.timeout(),
-        )
-        .map_err(HookFailure::Spawn)?;
+        // The baseline and nothing of basis's own: a hook is asked a question,
+        // not handed a credential to act on. The tool binding is where `env`
+        // belongs.
+        let completion =
+            subprocess::execute(&spec.command, &self.workspace, [], &payload, spec.timeout())
+                .await
+                .map_err(HookFailure::Spawn)?;
 
+        // A timed-out hook carries whatever it printed before the kill, and
+        // basis does not read it: a half-written answer is not an answer.
         let (code, stdout, stderr) = match completion {
-            Completion::TimedOut => {
+            Completion::TimedOut { .. } => {
                 return Err(HookFailure::TimedOut {
                     timeout: spec.timeout(),
                 });
@@ -364,10 +364,20 @@ impl HookRunner {
         if code != Some(0) {
             return Err(HookFailure::Exited {
                 code: code.map_or_else(|| "a signal".to_string(), |code| format!("code {code}")),
-                stderr,
+                stderr: subprocess::stderr_text(&stderr),
             });
         }
 
+        // An answer the cap cut is not the answer the hook gave, and parsing
+        // the kept ends with an elision marker between them would only report
+        // a syntax error at the wrong place.
+        if stdout.truncated() {
+            return Err(HookFailure::Oversized {
+                limit: subprocess::OUTPUT_CAPTURE_LIMIT,
+            });
+        }
+
+        let stdout = subprocess::stdout_text(&stdout);
         if stdout.trim().is_empty() {
             return Err(HookFailure::NoAnswer);
         }
@@ -377,6 +387,35 @@ impl HookRunner {
             source,
         })
     }
+}
+
+/// Drives `future` to completion from a synchronous caller.
+///
+/// A fresh `current_thread` runtime on a thread of its own, rather than
+/// `Handle::current().block_on`: the latter panics inside an async context,
+/// and [`HookRunner::decide`] is documented as callable from anywhere — a test,
+/// a host's own thread, a blocking task on some runtime basis knows nothing
+/// about. The thread is scoped, so the future may borrow the runner. The cost
+/// is one thread and one runtime per synchronous decision, which is the price
+/// of asking for a synchronous answer to an asynchronous question and is paid
+/// by nothing on the runtime path.
+fn block_on_own_runtime<F>(future: F) -> Result<F::Output, String>
+where
+    F: Future + Send,
+    F::Output: Send,
+{
+    std::thread::scope(|scope| {
+        scope
+            .spawn(|| {
+                let runtime = tokio::runtime::Builder::new_current_thread()
+                    .enable_all()
+                    .build()
+                    .map_err(|error| format!("could not start a runtime: {error}"))?;
+                Ok(runtime.block_on(future))
+            })
+            .join()
+            .map_err(|_| "the hook thread panicked".to_string())?
+    })
 }
 
 #[async_trait::async_trait]
@@ -552,6 +591,9 @@ enum HookFailure {
 
     #[error("printed nothing; a hook answers with a JSON decision on stdout")]
     NoAnswer,
+
+    #[error("printed more than the {limit} bytes basis keeps; a decision is not that long")]
+    Oversized { limit: usize },
 
     #[error("printed something that is not a decision ({source}): {output}")]
     Malformed {

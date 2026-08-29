@@ -186,10 +186,13 @@ to the program's stdin, and stdout comes back as the tool's result. The manifest
 way the other conventions do (the workspace's file, then the global one, most specific
 winning) and expands `${VAR}` the way `.mcp.json` does, so a credential rides in `env`
 rather than in a committed file. The program's environment is three layers, each
-overriding the last: what the process inherits (never cleared — `PATH` lives there), the
-runtime's fixed command environment from `with_command_environment`, and the manifest's own
-`env`, which wins because it is the tool's own statement. Not behind the `mcp` feature:
-custom tools were never MCP's to own.
+overriding the last: basis's baseline (the program is spawned through mentra 0.24's
+`BoundedCommand`, which clears the environment, and basis passes back only what makes a
+program runnable — `PATH`, `HOME`, the temp and locale variables, each named with its
+reason in `basis/src/subprocess.rs`), the runtime's fixed command environment from
+`with_command_environment`, and the manifest's own `env`, which wins because it is the
+tool's own statement. Nothing else the basis process holds reaches the program. Not behind
+the `mcp` feature: custom tools were never MCP's to own.
 
 Three things about it are deliberate, and each answers a way the binding could have been
 unsafe rather than merely inconvenient. **The format cannot say "read-only"** — the only
@@ -378,12 +381,18 @@ flowchart LR
   `.mcp.json` and the skills roots are configuration carrying the workspace's authority,
   not inert data. `.mcp.json`'s servers are connected by `Workspace::open` itself, before
   a model has said anything; a `.basis/hooks.json` entry that omits `tools` is asked on
-  every tool call, reads included. Both spawn programs the file names, and neither clears
-  the environment it inherits, so each holds the same authority the account running basis
-  holds — the paragraph above, restated where a repository is the party naming the
-  program. ADR-0013 is the reason basis states this rather than narrowing it: a
-  repository's declarations are bounded by whatever confines the process, and in-process
-  that is nothing.
+  every tool call, reads included. Both spawn programs the file names, and each holds the
+  same authority the account running basis holds — the paragraph above, restated where a
+  repository is the party naming the program. What they are *handed* differs. A hook and a
+  declared tool run under mentra's `BoundedCommand` (since 0.24), which clears the
+  environment: a hook gets basis's baseline (`PATH`, `HOME`, temp and locale) and nothing
+  else, a declared tool gets the baseline plus the variables its manifest names, and the
+  process's own provider key and whatever the host exported reach neither. An `.mcp.json`
+  server is spawned by mentra's MCP client and still inherits the whole environment. None
+  of that is confinement — a hook can still read `~/.netrc` — it is which *ambient*
+  credentials stop arriving. ADR-0013 is the reason basis states the authority rather than
+  narrowing it: a repository's declarations are bounded by whatever confines the process,
+  and in-process that is nothing.
 - **The one deliberate exception** is `base_url` in a *workspace* `.basis/config.json`,
   which fails the open by name (§8, *Effort, providers, and custom endpoints*). A
   redirected endpoint carries the credential basis just read out of the environment to a

@@ -146,34 +146,46 @@
 //!
 //! # A hook takes as long as it takes
 //!
-//! Consulting a hook means spawning a process and waiting for it, so it is
-//! genuinely blocking work. mentra's hook trait is async (since 0.16), so the
-//! wait goes to `spawn_blocking` — a thread meant for it — rather than onto a
-//! runtime worker. That holds on every runtime flavor, including
-//! `current_thread`, which is what an embedder inside an editor or a
-//! single-threaded server is likely to have.
+//! Consulting a hook means spawning a process and waiting for it. Since mentra
+//! 0.24 that is an async primitive — [`mentra::process::BoundedCommand`], the
+//! same code mentra's own shell executor runs on — so the wait is awaited on
+//! the caller's runtime like any other future, on every flavor,
+//! `current_thread` included. A turn cancelled mid-hook drops the future and
+//! kills the program with it; the `spawn_blocking` this replaced could only
+//! abandon a thread to it.
 //!
-//! This used to require branching on `Handle::runtime_flavor()` and calling
-//! `block_in_place`, which panics on `current_thread` and otherwise stalled
-//! that runtime for the hook's whole timeout. The trait's shape was the reason
-//! ([oops-rs/mentra#16](https://github.com/oops-rs/mentra/issues/16), fixed in
-//! 0.16), and it mattered most for ACP, where ADR-0007 makes "the dispatch loop
-//! is never blocked" an invariant.
+//! The history is two steps. mentra's hook trait was synchronous until 0.16
+//! ([oops-rs/mentra#16](https://github.com/oops-rs/mentra/issues/16)), which
+//! forced a `block_in_place` dance that panicked on `current_thread`; the trait
+//! went async and the wait moved to `spawn_blocking`; 0.24 made the spawn
+//! itself async and the thread went too. It mattered most for ACP, where
+//! ADR-0007 makes "the dispatch loop is never blocked" an invariant.
 //!
-//! [`DEFAULT_HOOK_TIMEOUT`] still bounds how long any one hook can hold up the
-//! turn it is vetting, which is a different question from which thread waits.
-//! An interceptor is bounded by nothing basis imposes: it is the host's own code
-//! on the host's own runtime, and a deadline basis invented for it would be basis
-//! guessing at a budget the host can state.
+//! [`DEFAULT_HOOK_TIMEOUT`] bounds how long any one hook can hold up the turn
+//! it is vetting, and at the deadline the hook's whole process group is killed
+//! — a script that backgrounds work leaves nothing behind. An interceptor is
+//! bounded by nothing basis imposes: it is the host's own code on the host's
+//! own runtime, and a deadline basis invented for it would be basis guessing at
+//! a budget the host can state.
 //!
 //! # A hook is code from the workspace
 //!
 //! `.basis/hooks.json` is workspace data, so cloning a repository and running basis
 //! on it can execute commands that repository chose, before any tool call. That
 //! is the same exposure as [`crate::shell`] and is bounded the same way: by
-//! whatever confines the process (ADR-0004), not by a check in here. An
-//! interceptor carries no such exposure, which is the other half of why the
+//! whatever confines the process (ADR-0004, ADR-0013), not by a check in here.
+//! An interceptor carries no such exposure, which is the other half of why the
 //! host's own code speaks first.
+//!
+//! What a hook is *handed* is narrower than what it can reach. Its environment
+//! is basis's baseline — `PATH`, `HOME`, the temp and locale variables that
+//! make a program runnable, listed with their reasons in `crate::subprocess` —
+//! and nothing else this process holds: not the provider key the run was
+//! opened with, not a token the host exported. A hook is asked a question, not
+//! handed a credential; the declared-tool binding is where a manifest names
+//! the variables its program needs. This is hygiene rather than confinement: a
+//! hook can still read `~/.netrc` with the account's authority. What stops
+//! arriving is the *ambient* credential, the one nobody decided to pass.
 
 mod chain;
 pub mod contract;
