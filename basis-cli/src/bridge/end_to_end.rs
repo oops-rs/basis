@@ -19,8 +19,9 @@ use agent_client_protocol::{
     schema::{
         ProtocolVersion,
         v1::{
-            ContentBlock, InitializeRequest, NewSessionRequest, PromptRequest, SessionNotification,
-            SessionUpdate, StopReason, TextContent,
+            CloseSessionRequest, ContentBlock, ErrorCode, InitializeRequest, LoadSessionRequest,
+            NewSessionRequest, PromptRequest, SessionNotification, SessionUpdate, StopReason,
+            TextContent,
         },
     },
 };
@@ -77,6 +78,30 @@ impl SessionSource for MockSource {
             )
             .expect("session");
 
+        let context = basis::ContextConfig {
+            file_name: "AGENTS.md".to_string(),
+            global_dir: None,
+            walk_parents: false,
+        };
+
+        prepare_with_session(
+            session,
+            &self.workspace,
+            "",
+            &context,
+            "openai",
+            "mock-model",
+        )
+    }
+
+    /// The same pickup a second tab performs through `session/load`.
+    async fn resume(
+        &self,
+        agent_id: &str,
+        _cwd: PathBuf,
+        _mcp: Vec<basis::McpServer>,
+    ) -> Result<PreparedRun, RunError> {
+        let session = self.mock.runtime().resume_session(agent_id)?;
         let context = basis::ContextConfig {
             file_name: "AGENTS.md".to_string(),
             global_dir: None,
@@ -434,6 +459,134 @@ async fn two_connections_are_two_conversations() {
     assert_ne!(
         first_session, second_session,
         "one connection is one conversation, exactly as one stdio process is"
+    );
+}
+
+/// Drives one client over an open socket with `body`, under the timeout.
+async fn drive<F, Fut, T>(
+    socket: tokio_tungstenite::WebSocketStream<
+        tokio_tungstenite::MaybeTlsStream<tokio::net::TcpStream>,
+    >,
+    body: F,
+) -> T
+where
+    F: FnOnce(ConnectionTo<Agent>) -> Fut + Send + 'static,
+    Fut: std::future::Future<Output = Result<T, agent_client_protocol::Error>> + Send,
+    T: Send + 'static,
+{
+    let driven = Client.builder().connect_with(
+        websocket_transport(socket),
+        |connection: ConnectionTo<Agent>| async move {
+            connection
+                .send_request(InitializeRequest::new(ProtocolVersion::V1))
+                .block_task()
+                .await?;
+            body(connection).await
+        },
+    );
+
+    tokio::time::timeout(NOT_STUCK, driven)
+        .await
+        .expect("a conversation over loopback must not hang")
+        .expect("the client drives cleanly")
+}
+
+#[tokio::test]
+async fn two_tabs_cannot_drive_one_conversation_at_once() {
+    // Two tabs are two clients, but not two views of one agent: every
+    // connection is served from the one `ServeConfig` and so from the one
+    // runtime, and mentra leases an agent to the session holding it. The
+    // second tab is told so in words it can act on, and gets the conversation
+    // once the first has closed it.
+    let workspace = workspace();
+    let mock = Arc::new(
+        MockRuntime::builder()
+            .model("mock-model", "openai")
+            .with_policy(RuntimePolicy::permissive())
+            .text("first tab")
+            .text("second tab")
+            .build()
+            .expect("mock runtime builds"),
+    );
+    let address = start(loopback(), mock, workspace.path().to_path_buf()).await;
+
+    let (opened_tx, opened_rx) = tokio::sync::oneshot::channel();
+    let (refused_tx, refused_rx) = tokio::sync::oneshot::channel();
+    let (closed_tx, closed_rx) = tokio::sync::oneshot::channel();
+    let (done_tx, mut done_rx) = tokio::sync::mpsc::channel::<()>(1);
+
+    let first = dial(address, None).await.expect("the first tab connects");
+    let first = drive(first, |connection| async move {
+        let session = connection
+            .send_request(NewSessionRequest::new(PathBuf::from(".")))
+            .block_task()
+            .await?
+            .session_id;
+        // One turn, so the agent is persisted and there is something to load.
+        connection
+            .send_request(PromptRequest::new(
+                session.clone(),
+                vec![ContentBlock::Text(TextContent::new("hello"))],
+            ))
+            .block_task()
+            .await?;
+        let _ = opened_tx.send(session.clone());
+
+        let _ = refused_rx.await;
+        connection
+            .send_request(CloseSessionRequest::new(session))
+            .block_task()
+            .await?;
+        let _ = closed_tx.send(());
+
+        // Stays connected until the other tab is done, so closing — not the
+        // socket going away — is what released the conversation.
+        let _ = done_rx.recv().await;
+        Ok(())
+    });
+
+    let second = dial(address, None).await.expect("the second tab connects");
+    let second = drive(second, |connection| async move {
+        let session = opened_rx.await.expect("the first tab opened one");
+
+        let refused = connection
+            .send_request(LoadSessionRequest::new(session.clone(), PathBuf::from(".")))
+            .block_task()
+            .await
+            .expect_err("a conversation the first tab holds must be refused");
+        let _ = refused_tx.send(());
+
+        closed_rx.await.expect("the first tab closed it");
+        connection
+            .send_request(LoadSessionRequest::new(session.clone(), PathBuf::from(".")))
+            .block_task()
+            .await?;
+        let response = connection
+            .send_request(PromptRequest::new(
+                session,
+                vec![ContentBlock::Text(TextContent::new("hello again"))],
+            ))
+            .block_task()
+            .await?;
+        drop(done_tx);
+        Ok((refused, response.stop_reason))
+    });
+
+    let ((), (refused, stop_reason)) = tokio::join!(first, second);
+
+    assert_eq!(refused.code, ErrorCode::InvalidParams, "{refused:?}");
+    let reason = refused
+        .data
+        .map(|data| data.to_string())
+        .unwrap_or_default();
+    assert!(
+        reason.contains("another connection"),
+        "the second tab must be told who has it: {reason}"
+    );
+    assert_eq!(
+        stop_reason,
+        StopReason::EndTurn,
+        "and can drive it once the first tab let go"
     );
 }
 

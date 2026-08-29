@@ -277,7 +277,15 @@ where
         .expect("the conversation must not hang")
         .expect("the client drives cleanly");
 
-    server.abort();
+    // The client is gone, so the server must end — and it must have, before
+    // the next thing a test does, because what it does on the way out (letting
+    // go of the conversations this connection held) is what a second
+    // connection depends on. Aborting it here would skip exactly that.
+    tokio::time::timeout(NOT_STUCK, server)
+        .await
+        .expect("a server whose client went away must end")
+        .expect("the server task does not panic")
+        .expect("a client going away is the normal end of a connection, not an error");
 
     (result, observed)
 }

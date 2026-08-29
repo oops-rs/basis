@@ -450,6 +450,34 @@ fn a_missing_credential_is_an_authentication_failure_not_an_internal_one() {
 }
 
 #[test]
+fn a_conversation_open_elsewhere_is_a_conflict_the_client_can_act_on() {
+    // mentra leases an agent to the session holding it, so a second
+    // `session/load` — from another connection to this process, or from
+    // another process — is refused there. Reported as `-32603` that read as
+    // basis breaking; the client can actually act on "close it there first".
+    let error = setup_failed(RunError::Runtime(
+        mentra::error::RuntimeError::LeaseUnavailable(
+            "Agent 'agent-1' is already leased by another runtime".to_string(),
+        ),
+    ));
+
+    assert_eq!(error.code, ErrorCode::InvalidParams);
+    let data = error
+        .data
+        .as_ref()
+        .and_then(serde_json::Value::as_str)
+        .unwrap_or_default();
+    assert!(
+        data.contains("another connection"),
+        "the conflict must be named: {data}"
+    );
+    assert!(
+        data.contains("agent-1"),
+        "and mentra's own words kept, for the person reading a log: {data}"
+    );
+}
+
+#[test]
 fn other_setup_failures_stay_internal_errors() {
     // Reporting these as `auth_required` would send a client looking for a
     // login that would not have helped.
