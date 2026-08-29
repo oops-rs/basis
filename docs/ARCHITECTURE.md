@@ -405,11 +405,20 @@ flowchart LR
   which clears the environment: a hook gets basis's baseline (`PATH`, `HOME`, temp and
   locale) and nothing else, a declared tool gets the baseline plus the variables its
   manifest names, and the process's own provider key and whatever the host exported reach
-  neither. An `.mcp.json` server is spawned by mentra's MCP client and still inherits the
-  whole environment. None of that is confinement — a hook can still read `~/.netrc` — it
-  is which *ambient* credentials stop arriving. ADR-0013 is the reason basis states the
-  authority rather than narrowing it: a repository's declarations are bounded by whatever
-  confines the process, and in-process that is nothing.
+  neither. A stdio `.mcp.json` server now uses that same host-owned process discipline:
+  Mentra clears the ambient environment, restores the documented runnable baseline
+  (`PATH`, `HOME`, `TMPDIR`, `TMP`, `TEMP`, `LANG`, and `LC_ALL` on Unix; `PATH`,
+  `PATHEXT`, `SystemRoot`, `COMSPEC`, `TEMP`, and `TMP` on Windows), then layers the
+  variables the server's config explicitly names. The author must name every variable
+  outside that baseline, including provider credentials and proxy settings. The process is
+  grouped and its descendants are terminated together on disconnect or drop, while the
+  protocol frames and retained stderr stay bounded and stderr is continuously drained.
+  None of that is confinement — the server still has the host account's filesystem,
+  network, and account authority — it is hygiene that stops ambient credentials from
+  arriving without an explicit handoff. ADR-0013 is the reason basis states the authority
+  rather than narrowing it: a repository's declarations are bounded by whatever confines
+  the process, and in-process that is nothing. Streamable HTTP and legacy SSE are
+  unchanged.
 - **The one deliberate exception** is `base_url` in a *workspace* `.basis/config.json`,
   which fails the open by name (§8, *Effort, providers, and custom endpoints*). A
   redirected endpoint carries the credential basis just read out of the environment to a

@@ -29,9 +29,17 @@ each is *handed* is narrower: a hook and a declared tool run under mentra's
 `BoundedCommand`, which clears the environment, so a hook sees only basis's
 baseline (`PATH`, `HOME`, temp and locale) and a declared tool that plus the
 variables its manifest names — the provider key this process read, and
-anything the host exported, reach neither. An `.mcp.json` server is spawned by
-mentra's MCP client and still inherits everything. That is hygiene and not a
-boundary: a hook can still `cat ~/.netrc`; what stops is the ambient
+anything the host exported, reach neither. A stdio `.mcp.json` server now uses
+the same host-owned process discipline: Mentra clears the ambient environment,
+restores the documented runnable baseline (`PATH`, `HOME`, `TMPDIR`, `TMP`,
+`TEMP`, `LANG`, and `LC_ALL` on Unix; `PATH`, `PATHEXT`, `SystemRoot`,
+`COMSPEC`, `TEMP`, and `TMP` on Windows), then layers the variables its config
+explicitly names. A `.mcp.json` author must name every variable outside that
+baseline, including provider credentials and proxy settings. The process is
+grouped and its descendants are terminated together on disconnect or drop;
+protocol frames and retained stderr stay bounded, and stderr is continuously
+drained. That is hygiene and not a boundary: the server still has the host
+account's filesystem, network, and account authority; what stops is the ambient
 credential nobody decided to pass. Cloning a repository and opening it is
 therefore the same act as running what it ships
 ([ADR-0013](adr/0013-the-host-owns-the-boundary.md)).
