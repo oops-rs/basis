@@ -850,7 +850,7 @@ let workspace = basis::Workspace::builder("/repo")
     .with_compaction(
         basis::Compaction::default()
             .with_keep_recent_tool_results(Some(5))       // elide older ones; default None keeps all
-            .with_auto_threshold_tokens(Some(400_000))    // default Some(50_000); None never triggers this way
+            .with_auto_threshold_tokens(Some(400_000))    // default Some(50_000); None turns both triggers off
             .with_auto_threshold_percent(Some(80))        // default Some(75); wins when the window is known
             .with_preserve_recent_user_tokens(20_000),
     )
@@ -866,8 +866,15 @@ carries it.
 know. `auto_threshold_percent` is the one that did not exist until mentra could ask the
 model itself how big it is, and it wins whenever the window *is* known — 50,000 tokens is
 most of a small model's window and a rounding error in a 1M-token one, so no single constant
-was ever going to be right for both. A run reads the same two figures a host would need to
-decide this for itself:
+was ever going to be right for both.
+
+The two are one setting, though, not two independent triggers. mentra resolves them
+together and treats a cleared `auto_threshold_tokens` as *off* before it looks at the
+percentage at all, so clearing the absolute number disables the window-relative trigger
+with it. A host that wants the percentage to be what decides leaves a large absolute
+number in place rather than clearing it.
+
+A run reads the same two figures a host would need to decide this for itself:
 
 ```rust
 if let Some(window) = run.context_window() {
@@ -899,6 +906,17 @@ if let Some(compacted) = run.compact(Some("keep the migration plan"), &mut sink)
     println!("{} items replaced by a summary", compacted.replaced_items);
 }
 ```
+
+A pass that *fails* puts an `Event::Error` on the sink before returning the error, so a
+client watching the stream is told why a conversation it expected to shrink did not. The
+transcript is untouched and the next turn goes out on the unshortened history.
+
+Two limits worth knowing, both upstream's and neither worked around here. A summarizing
+call is billed by the provider but does not appear in `RunReport::usage` and is not
+charged against a token budget or a `BudgetPool`: mentra reports no usage for it, and
+basis tallies only what is reported. And an *automatic* pass that fails is retried and
+then dropped silently — the run carries on with an unshortened history, but nothing on
+the stream says so. The pass a host asks for itself is the one whose failure is visible.
 
 The instructions are **added** to mentra's standing continuity requirements rather than
 substituted for them, so asking for one extra thing cannot cost the file paths and command
