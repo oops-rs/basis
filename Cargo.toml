@@ -61,14 +61,16 @@ basis-tasks = { version = "0.10", path = "basis-tasks" }
 # of code for that last one, which is exactly why the floor has to carry it: on
 # an older runtime it would be lost with nothing here to notice.
 #
-# And three basis has not taken up yet but moved the floor for, because each
-# is a primitive it would otherwise have to hand-roll: `BoundedCommand`, the
-# spawn discipline basis's subprocess hooks and declared tools want as one
-# thing rather than as a copy that loses `env_clear` or the group kill a field
-# at a time; `unregister_skills_dir`, for a workspace that closes on a runtime
-# other workspaces are still running on, whose skills stay reachable without
-# it; and `validate_mcp_server_name`, which refuses a server name that would
-# collide in a bridged tool name before it is connected rather than after.
+# The other 0.24 floor reasons are adopted now, too. `BoundedCommand` is the
+# spawn discipline basis's subprocess hooks and declared tools use as one
+# primitive rather than a hand-rolled copy that loses `env_clear` or the group
+# kill a field at a time; `unregister_skills_dir(s)` lets a workspace that
+# closes on a runtime other workspaces are still running on take its skills
+# back instead of leaving them reachable without it; and
+# `validate_mcp_server_name` refuses a server name that would collide in a
+# bridged tool name before it is connected rather than after. They remain hard
+# floor reasons: lowering the floor would make basis recreate these runtime
+# contracts locally, against ADR-0005's seam discipline.
 # The 0.23.4 floor's reasons still hold beneath it: it
 # reserves generated terminal output before execution and validates a
 # candidate before that tool may terminate, which is the contract behind
