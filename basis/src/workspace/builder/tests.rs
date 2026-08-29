@@ -801,6 +801,11 @@ async fn a_relative_path_is_made_absolute_at_open() {
     }
 }
 
+// Unix only, like every other symlink test in this crate
+// (`runtime::dispatch::tests`, `fingerprint`): `std::os::unix` does not exist
+// on Windows, so an ungated call here is a build failure rather than a test
+// failure — and CI compiles this crate's tests on all three platforms.
+#[cfg(unix)]
 #[tokio::test]
 async fn a_symlinked_spelling_opens_the_directory_it_names() {
     let base = tempfile::tempdir().expect("tempdir");
