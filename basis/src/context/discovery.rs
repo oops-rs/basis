@@ -4,7 +4,7 @@
 
 use std::{
     collections::HashSet,
-    path::{Path, PathBuf},
+    path::{Component, Path, PathBuf},
 };
 
 use super::{ContextConfig, ContextDocument, ContextError, ContextScope};
@@ -19,6 +19,11 @@ pub(super) fn discover(
     workspace: &Path,
     config: &ContextConfig,
 ) -> Result<(PathBuf, Vec<ContextDocument>), ContextError> {
+    // First, before the workspace is even resolved: a name that is not a name
+    // is a configuration mistake and not a runtime condition, the same ruling
+    // `validate_target_names` makes about command targets.
+    validate_file_name(&config.file_name)?;
+
     let workspace = validate_workspace(workspace)?;
 
     let mut seen = HashSet::new();
@@ -60,6 +65,46 @@ pub(super) fn discover(
     )?;
 
     Ok((workspace, documents))
+}
+
+/// Rejects a [`ContextConfig::file_name`] that is a path rather than a name.
+///
+/// [`collect`] joins the configured name onto *every* candidate directory —
+/// the global one, each ancestor, the workspace root — so a name carrying `..`
+/// or a leading `/` makes each of them contribute a document from somewhere
+/// else, reported under that directory's scope. The field is a `String` named
+/// `file_name`, [`file_names`](ContextConfig::file_names) calls what it
+/// returns *names*, and both defaults are bare (`AGENTS.md`, `CLAUDE.md`);
+/// this is the type system catching up with what the code and its docs already
+/// say.
+///
+/// Not a boundary, and not claimed as one (ADR-0013): a host that wants basis
+/// to read a file elsewhere can say so with
+/// [`SystemPrompt`](super::SystemPrompt), or point
+/// [`global_dir`](ContextConfig::global_dir) — a *directory* — wherever it
+/// likes. Naming a directory is a host taking responsibility for a path, the
+/// same latitude the memory roots have. A *name* silently naming a place is
+/// the thing that has no honest reading, so it is refused by name at the open
+/// instead of loading instructions from a file nobody named.
+///
+/// Empty is [`ContextConfig::none`] and is not a name at all — nothing is ever
+/// looked for, so there is nothing to check.
+fn validate_file_name(name: &str) -> Result<(), ContextError> {
+    if name.is_empty() {
+        return Ok(());
+    }
+
+    let mut components = Path::new(name).components();
+    let bare =
+        matches!(components.next(), Some(Component::Normal(_))) && components.next().is_none();
+
+    if bare {
+        Ok(())
+    } else {
+        Err(ContextError::ContextFileNameNotBare {
+            name: name.to_string(),
+        })
+    }
 }
 
 /// Rejects a workspace that is missing or is not a directory, and resolves it
