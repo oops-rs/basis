@@ -44,8 +44,10 @@ impl DataDir {
         Self::from_path(root)
     }
 
+    /// Opens a root at an explicit path, fixing it to one place first: see
+    /// [`absolutize`].
     pub(crate) fn from_path(path: impl Into<PathBuf>) -> io::Result<Self> {
-        let root = path.into();
+        let root = absolutize(path.into(), std::env::current_dir)?;
         fs::create_dir_all(&root)?;
         restrict_directory(&root)?;
         Ok(Self { root })
@@ -224,6 +226,33 @@ impl AgentPaths {
     }
 }
 
+/// Resolves a root to an absolute path once, against the directory current
+/// when it was opened.
+///
+/// `BASIS_DATA_DIR` is a path a person types, and a typed path can be
+/// relative — at which point it names a *different* directory to every reader
+/// with a different cwd. Two readers are guaranteed: a host that changes
+/// directory after opening [`DataDir`], and a task's own spawned command,
+/// which inherits the variable (ADR-0022 decision 6 publishes that
+/// inheritance) and resolves it from wherever it happens to run. Pinning the
+/// root here means everything derived from it — every task directory, and the
+/// `BASIS_DATA_DIR` `task_runtime` exports to children — is already absolute.
+///
+/// Absolute, not canonical: symlinks are the operator's arrangement, and a
+/// root that resolves them would stop matching the path they configured. The
+/// cwd is taken as a function so an already-absolute path never asks for one
+/// (a process whose directory has been deleted still has a usable root) and
+/// so the rule is testable without moving the process.
+fn absolutize(
+    path: PathBuf,
+    current_dir: impl FnOnce() -> io::Result<PathBuf>,
+) -> io::Result<PathBuf> {
+    if path.is_absolute() {
+        return Ok(path);
+    }
+    Ok(current_dir()?.join(path))
+}
+
 pub(crate) fn canonical_workspace(path: &Path) -> io::Result<PathBuf> {
     let path = if path.is_absolute() {
         path.to_path_buf()
@@ -344,6 +373,36 @@ mod tests {
         let key = workspace_key(Path::new("/a/very/long/workspace/path"));
         assert_eq!(key.len(), 16);
         assert_eq!(key, workspace_key(Path::new("/a/very/long/workspace/path")));
+    }
+
+    /// The rule `from_path` applies to every root it opens, checked against a
+    /// supplied cwd rather than the process's own — moving the process is a
+    /// global this crate's tests share, and the end-to-end property has
+    /// `tests/relative_data_dir.rs`, which owns a process to move.
+    #[test]
+    fn a_relative_root_is_pinned_to_the_directory_it_was_opened_from() {
+        let resolved = absolutize(PathBuf::from("data"), || Ok(PathBuf::from("/home/agent")))
+            .expect("a supplied cwd always resolves");
+        assert_eq!(resolved, Path::new("/home/agent/data"));
+
+        let already = absolutize(PathBuf::from("/srv/basis"), || {
+            panic!("an absolute root must never ask for the current directory")
+        })
+        .expect("absolute stays put");
+        assert_eq!(already, Path::new("/srv/basis"));
+    }
+
+    #[test]
+    fn a_root_opened_from_a_path_is_absolute() {
+        let dir = tempfile::tempdir().unwrap();
+        let data = DataDir::from_path(dir.path()).unwrap();
+        assert!(
+            data.root().is_absolute(),
+            "everything derived from the root — task directories, and the \
+             BASIS_DATA_DIR a spawned command inherits — is only fixed if the \
+             root is: {}",
+            data.root().display()
+        );
     }
 
     #[test]

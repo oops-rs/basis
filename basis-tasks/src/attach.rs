@@ -805,6 +805,11 @@ fn run_parts(meta: &TaskMeta) -> (WorkspaceBuilder, RunSpec) {
 /// options, plus the identity a spawned command needs to find the same data
 /// directory and name its own children.
 ///
+/// The exported `BASIS_DATA_DIR` is absolute because `DataDir` resolves its
+/// root once at construction (see `data_dir::absolutize`): a child re-reads
+/// this variable from its own working directory, so a relative value here
+/// would name a second data directory rather than this one.
+///
 /// One runtime per task (ADR-0018): the environment below names *this* task,
 /// and a runtime's command environment is fixed for every workspace on it, so
 /// two concurrent tasks sharing one runtime would tell their subprocesses the

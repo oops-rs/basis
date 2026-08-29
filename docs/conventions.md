@@ -287,7 +287,7 @@ reads, migrates, or shadows.
 | Variable | What it does |
 | --- | --- |
 | `BASIS_CONFIG_DIR` | The global config directory. Overrides `$XDG_CONFIG_HOME/basis` and `$HOME/.config/basis` |
-| `BASIS_DATA_DIR` | Where tasks and conversations are kept. Overrides `$XDG_DATA_HOME` and the platform data home |
+| `BASIS_DATA_DIR` | Where tasks and conversations are kept. Overrides `$XDG_DATA_HOME` and the platform data home. A relative path is resolved once, against the directory current when the root is opened, and passed on to spawned commands absolute — so a process that changes directory, and a nested `basis` that inherits the variable, read one directory rather than one each |
 | `BASIS_BASE_URL` | An OpenAI-compatible endpoint. `OPENAI_BASE_URL` is read after it, because gateways already tell their users to set that one |
 | `BASIS_API_KEY` | The key for that endpoint. `OPENAI_API_KEY` is read after it |
 | `BASIS_TASK_ID` | Set by basis on every process a run spawns: which task this is. Read by a nested `basis` to route its own `spawn` |
