@@ -74,6 +74,18 @@ base64 = "0.22"
 # itself, to inspect the first line before serving (ADR-0015).
 blocking = "1"
 clap = { version = "4.6", features = ["derive"] }
+# `std::fs::canonicalize` on Windows returns the verbatim form (`\\?\C:\repo`),
+# and basis resolves the workspace root exactly once and then hands that one
+# value to mentra as a policy root and an agent base directory. mentra compares
+# a candidate against a root with `starts_with` over components it normalizes
+# without simplifying the prefix, so a verbatim root never prefixes the plain
+# absolute path a model supplies and every such path would be denied. `dunce`
+# is the crate for exactly this question and answers it more carefully than a
+# hand-rolled strip would: it leaves the verbatim form alone when a plain one
+# would name something else or nothing at all — a reserved DOS name, a segment
+# ending in a dot or space, a path past `MAX_PATH`. Zero dependencies, and a
+# `const fn` no-op off Windows, so it costs the other two platforms nothing.
+dunce = "1"
 # `Sink`/`Stream` adapters for the two transports basis builds itself: `basis-acp`'s
 # peekable stdio one and the binary's websocket bridge. Already in the tree via
 # agent-client-protocol, whose own transports are defined in terms of these traits.

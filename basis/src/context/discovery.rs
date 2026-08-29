@@ -4,7 +4,7 @@
 
 use std::{
     collections::HashSet,
-    path::{Path, PathBuf},
+    path::{Component, Path, PathBuf},
 };
 
 use super::{ContextConfig, ContextDocument, ContextError, ContextScope};
@@ -19,6 +19,11 @@ pub(super) fn discover(
     workspace: &Path,
     config: &ContextConfig,
 ) -> Result<(PathBuf, Vec<ContextDocument>), ContextError> {
+    // First, before the workspace is even resolved: a name that is not a name
+    // is a configuration mistake and not a runtime condition, the same ruling
+    // `validate_target_names` makes about command targets.
+    validate_file_name(&config.file_name)?;
+
     let workspace = validate_workspace(workspace)?;
 
     let mut seen = HashSet::new();
@@ -62,9 +67,84 @@ pub(super) fn discover(
     Ok((workspace, documents))
 }
 
+/// Rejects a [`ContextConfig::file_name`] that is a path rather than a name.
+///
+/// [`collect`] joins the configured name onto *every* candidate directory —
+/// the global one, each ancestor, the workspace root — so a name carrying `..`
+/// or a leading `/` makes each of them contribute a document from somewhere
+/// else, reported under that directory's scope. The field is a `String` named
+/// `file_name`, [`file_names`](ContextConfig::file_names) calls what it
+/// returns *names*, and both defaults are bare (`AGENTS.md`, `CLAUDE.md`);
+/// this is the type system catching up with what the code and its docs already
+/// say.
+///
+/// Not a boundary, and not claimed as one (ADR-0013): a host that wants basis
+/// to read a file elsewhere can say so with
+/// [`SystemPrompt`](super::SystemPrompt), or point
+/// [`global_dir`](ContextConfig::global_dir) — a *directory* — wherever it
+/// likes. Naming a directory is a host taking responsibility for a path, the
+/// same latitude the memory roots have. A *name* silently naming a place is
+/// the thing that has no honest reading, so it is refused by name at the open
+/// instead of loading instructions from a file nobody named.
+///
+/// Empty is [`ContextConfig::none`] and is not a name at all — nothing is ever
+/// looked for, so there is nothing to check.
+///
+/// One component, and `./AGENTS.md` is therefore refused along with the rest.
+/// That spelling names the same file the bare name does and reaches nowhere
+/// else, so refusing it buys no hygiene — what it buys is a rule with one
+/// spelling. "A bare name" is a rule a host can hold and this function can
+/// state in a line; "a path that happens to resolve to a bare name" is neither,
+/// and it is the version that has to answer for `./../x` and
+/// `a/../AGENTS.md`. The cost is one clear error at the open, from a message
+/// that names the field and says what it wants. Pinned by test, so it is a
+/// decision rather than a side effect of how `Components` treats a leading dot.
+fn validate_file_name(name: &str) -> Result<(), ContextError> {
+    if name.is_empty() {
+        return Ok(());
+    }
+
+    let mut components = Path::new(name).components();
+    let bare =
+        matches!(components.next(), Some(Component::Normal(_))) && components.next().is_none();
+
+    if bare {
+        Ok(())
+    } else {
+        Err(ContextError::ContextFileNameNotBare {
+            name: name.to_string(),
+        })
+    }
+}
+
 /// Rejects a workspace that is missing or is not a directory, and resolves it
 /// so the parent walk and the duplicate check agree on identity.
-fn validate_workspace(workspace: &Path) -> Result<PathBuf, ContextError> {
+///
+/// `pub(crate)` because [`WorkspaceBuilder::open`] resolves the root through
+/// this same function before anything else reads it: the parent walk, the
+/// dispatcher key, the runtime's policy roots and the agent's base directory
+/// must all name one directory, and they do that by resolving *once* rather
+/// than each canonicalizing its own copy. Calling it again here is free —
+/// canonicalizing a canonical path returns it unchanged — and keeps
+/// [`WorkspaceContext::discover_with`](super::WorkspaceContext::discover_with)
+/// correct for the hosts that call it directly.
+///
+/// # Why the Windows verbatim prefix comes back off
+///
+/// Because this one value leaves basis: it becomes mentra's policy root and
+/// the agent's base directory, and mentra decides whether a path the model
+/// named is allowed by `starts_with` against that root
+/// (`RuntimePolicy::path_is_allowed`). Its normalizer copies a
+/// `Component::Prefix` through untouched, so the verbatim form
+/// `std::fs::canonicalize` returns on Windows — `\\?\C:\repo` — would never
+/// prefix the plain `C:\repo\file.txt` a model writes, and every absolute path
+/// the model named would be refused. Simplified here rather than at each
+/// consumer, because one spelling for one directory is the whole point of
+/// resolving once. `dunce` leaves the verbatim form in place in the cases
+/// where a plain one would name something else or nothing at all — a reserved
+/// DOS name, a segment ending in a dot or a space, a path past `MAX_PATH` —
+/// and is a no-op on the other two platforms.
+pub(crate) fn validate_workspace(workspace: &Path) -> Result<PathBuf, ContextError> {
     let metadata = std::fs::metadata(workspace).map_err(|source| match source.kind() {
         std::io::ErrorKind::NotFound => ContextError::WorkspaceMissing {
             path: workspace.to_path_buf(),
@@ -81,10 +161,13 @@ fn validate_workspace(workspace: &Path) -> Result<PathBuf, ContextError> {
         });
     }
 
-    std::fs::canonicalize(workspace).map_err(|source| ContextError::WorkspaceUnresolvable {
-        path: workspace.to_path_buf(),
-        source,
-    })
+    let canonical =
+        std::fs::canonicalize(workspace).map_err(|source| ContextError::WorkspaceUnresolvable {
+            path: workspace.to_path_buf(),
+            source,
+        })?;
+
+    Ok(dunce::simplified(&canonical).to_path_buf())
 }
 
 /// The workspace's ancestors, ordered outermost first so that walking them in

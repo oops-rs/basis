@@ -758,3 +758,131 @@ async fn every_tool_result_the_model_read_is_still_in_front_of_it() {
         );
     }
 }
+
+/// A workspace that opens without contacting anything: an explicit model id
+/// short-circuits resolution, discovery is off so nothing on the machine
+/// running this can move an assertion, and the base URL is a closed port.
+fn offline(path: &Path) -> WorkspaceBuilder {
+    Workspace::builder(path)
+        .with_runtime_builder(
+            RuntimeBuilder::default()
+                .with_base_url("http://127.0.0.1:1/v1")
+                .with_api_key("test-key")
+                .with_ephemeral_history(),
+        )
+        .with_model(ModelSelector::Id("test-model".to_string()))
+        .without_discovery()
+}
+
+/// What an open is expected to have made of a spelling: canonical, and in the
+/// form every program on the platform accepts. `Path::canonicalize` alone is
+/// the wrong expectation on Windows, where it yields the verbatim `\\?\C:\…`
+/// that the open deliberately simplifies away — see `validate_workspace`.
+fn resolved(path: &Path) -> PathBuf {
+    let canonical = path.canonicalize().expect("canonical path");
+    dunce::simplified(&canonical).to_path_buf()
+}
+
+/// Every name one opened workspace answers to for the directory it is scoped
+/// to. They must be one path, or two of them disagree about where the run is.
+///
+/// Four of the five seams `open`'s doc comment promises. The fifth — the
+/// private runtime's policy roots — cannot be read back: mentra's
+/// `RuntimePolicy` keeps `allowed_working_roots`, `allowed_read_roots` and
+/// `allowed_write_roots` private and offers no reader for them (an upstream
+/// candidate), so nothing here can fail if a future edit hands
+/// `workspace_bounded` a second spelling. The memory root and the run header
+/// derive from `root()` rather than from `path` and are covered by it.
+fn spellings(workspace: &Workspace) -> Vec<&Path> {
+    vec![
+        workspace.root(),
+        workspace.path(),
+        workspace.agent.workspace.base_dir.as_path(),
+        workspace.declared_registration.root(),
+        workspace.hook_registration.key(),
+    ]
+}
+
+#[tokio::test]
+async fn a_relative_path_is_made_absolute_at_open() {
+    let workspace = offline(Path::new(".")).open().await.expect("opens");
+    let here = resolved(&std::env::current_dir().expect("a working directory"));
+
+    for spelling in spellings(&workspace) {
+        assert_eq!(
+            spelling, here,
+            "a relative spelling must not survive the open"
+        );
+    }
+}
+
+// Unix only, like every other symlink test in this crate
+// (`runtime::dispatch::tests`, `fingerprint`): `std::os::unix` does not exist
+// on Windows, so an ungated call here is a build failure rather than a test
+// failure — and CI compiles this crate's tests on all three platforms.
+#[cfg(unix)]
+#[tokio::test]
+async fn a_symlinked_spelling_opens_the_directory_it_names() {
+    let base = tempfile::tempdir().expect("tempdir");
+    let real = base.path().join("real");
+    std::fs::create_dir(&real).expect("create the real directory");
+    let link = base.path().join("link");
+    std::os::unix::fs::symlink(&real, &link).expect("symlink");
+
+    let workspace = offline(&link).open().await.expect("opens");
+    let canonical = resolved(&real);
+
+    for spelling in spellings(&workspace) {
+        assert_eq!(
+            spelling, canonical,
+            "a symlinked spelling must resolve once, at the open"
+        );
+    }
+}
+
+#[tokio::test]
+async fn a_dotted_spelling_is_folded_at_open() {
+    let base = tempfile::tempdir().expect("tempdir");
+    let nested = base.path().join("nested");
+    std::fs::create_dir(&nested).expect("create the nested directory");
+
+    let workspace = offline(&nested.join("..").join("nested"))
+        .open()
+        .await
+        .expect("opens");
+    let canonical = resolved(&nested);
+
+    for spelling in spellings(&workspace) {
+        assert_eq!(spelling, canonical, "`..` must not survive the open");
+    }
+}
+
+/// The resolved root is the spelling the rest of the world uses.
+///
+/// `std::fs::canonicalize` answers `\\?\C:\repo` on Windows, and this one
+/// value becomes mentra's policy root and the agent's base directory. mentra
+/// asks whether a path the model named is allowed with `starts_with` against
+/// that root over components whose `Prefix` it copies through untouched, so a
+/// verbatim root does not prefix the plain `C:\repo\file.txt` a model writes:
+/// every absolute path it named would be refused. Nothing off Windows can
+/// notice, which is why this is pinned here rather than left to the shared
+/// assertions above.
+#[cfg(windows)]
+#[tokio::test]
+async fn the_resolved_root_is_not_a_verbatim_windows_path() {
+    let base = tempfile::tempdir().expect("tempdir");
+    let workspace = offline(base.path()).open().await.expect("opens");
+
+    for spelling in spellings(&workspace) {
+        assert!(
+            !spelling.as_os_str().to_string_lossy().starts_with(r"\\?\"),
+            "a verbatim root denies every absolute path the model names: {}",
+            spelling.display()
+        );
+        assert!(
+            spelling.is_absolute(),
+            "simplifying must not cost the root its prefix: {}",
+            spelling.display()
+        );
+    }
+}

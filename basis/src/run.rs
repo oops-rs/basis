@@ -36,10 +36,7 @@ use crate::{
     context::{ContextConfig, WorkspaceContext},
     event::RunOutcome,
     templates::TemplatesConfig,
-    workspace::{
-        DEFAULT_SESSION_NAME, RunSpec, Workspace, WorkspaceBuilder, load_templates,
-        resolved_workspace,
-    },
+    workspace::{DEFAULT_SESSION_NAME, RunSpec, Workspace, WorkspaceBuilder, load_templates},
 };
 
 pub use bounds::Bounds;
@@ -388,15 +385,24 @@ pub fn prepare_with_session(
         session.set_name(spec.session_name.clone())?;
     }
 
-    let discovered = WorkspaceContext::discover_with(workspace, context)?;
+    // The one resolution, for the same reason
+    // [`WorkspaceBuilder::open`](crate::WorkspaceBuilder::open) has one: this
+    // is the other path that reports a workspace, and everything below names
+    // it through this value. Resolving inside discovery and leaving the
+    // caller's spelling to the rest would put a header's `workspace` and its
+    // `templates_dirs` on two different directories for any relative or
+    // symlinked path — the same split, in the one place it survived.
+    let workspace = crate::context::resolve_workspace(workspace)?;
+
+    let discovered = WorkspaceContext::discover_with(&workspace, context)?;
     // Unlike skills, templates are registered on nothing — so basis can discover
     // them here without touching a runtime it does not own.
-    let (templates_dirs, templates) = load_templates(workspace, &TemplatesConfig::default())?;
+    let (templates_dirs, templates) = load_templates(&workspace, &TemplatesConfig::default())?;
 
     let mut prepared = PreparedRun::new(
         session,
         RunContext {
-            workspace: resolved_workspace(workspace, &discovered),
+            workspace,
             prompt: spec.prompt.clone(),
             provider: provider.into(),
             model: model.into(),

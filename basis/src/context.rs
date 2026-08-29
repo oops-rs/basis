@@ -17,6 +17,12 @@
 mod discovery;
 mod render;
 
+/// The workspace root, absolute and canonical, or the error that says why the
+/// path is not one. [`WorkspaceBuilder::open`](crate::WorkspaceBuilder::open)
+/// is the caller: one resolution, at the open, for every part of a workspace
+/// that names its directory.
+pub(crate) use discovery::validate_workspace as resolve_workspace;
+
 use std::path::{Path, PathBuf};
 
 use thiserror::Error;
@@ -74,11 +80,25 @@ pub struct ContextDocument {
 pub struct ContextConfig {
     /// File name to look for in each candidate directory.
     ///
+    /// A bare name and nothing else: this is joined onto every candidate
+    /// directory, so a `..` or a leading `/` here would make each of them
+    /// contribute a document from elsewhere while still being reported under
+    /// that directory's scope. A path is refused at discovery with
+    /// [`ContextError::ContextFileNameNotBare`] rather than followed; a host
+    /// that wants a file from somewhere else names a
+    /// [`global_dir`](Self::global_dir) or supplies a
+    /// [`SystemPrompt`] instead. Empty is
+    /// [`none`](Self::none): no name, so nothing is looked for.
+    ///
     /// Left at [`DEFAULT_CONTEXT_FILE`] this is the *first* of two names —
     /// see [`file_names`](Self::file_names) for the fallback and for why
     /// renaming opts out of it.
     pub file_name: String,
     /// Directory holding the user-global context file, if any.
+    ///
+    /// A directory, so it may be anywhere — naming a path is a host taking
+    /// responsibility for it, the same latitude
+    /// [`MemoryConfig`](crate::MemoryConfig)'s roots have.
     pub global_dir: Option<PathBuf>,
     /// Whether to walk from the workspace root up to the filesystem root.
     pub walk_parents: bool,
@@ -164,8 +184,22 @@ fn default_global_dir() -> Option<PathBuf> {
 }
 
 /// Anything that can go wrong while discovering context.
+///
+/// `#[non_exhaustive]` for the reason [`RunError`](crate::RunError) is, and
+/// added in the same release as the variant that made the point: this enum was
+/// the last public error type here a caller could match exhaustively, so every
+/// new way discovery can fail broke that match. `ContextFileNameNotBare` is
+/// the last variant addition that costs a downstream crate a compile.
 #[derive(Debug, Error)]
+#[non_exhaustive]
 pub enum ContextError {
+    #[error(
+        "context file name '{name}' is not a file name; \
+         `file_name` names a file to look for in each candidate directory, \
+         not a path to one"
+    )]
+    ContextFileNameNotBare { name: String },
+
     #[error("workspace path does not exist: {path}")]
     WorkspaceMissing { path: PathBuf },
 
@@ -699,5 +733,67 @@ mod tests {
         let weaker = rendered.find("WEAKER").expect("weaker present");
         let stronger = rendered.find("STRONGER").expect("stronger present");
         assert!(weaker < stronger, "more specific context must come last");
+    }
+
+    /// `file_name` is a *name*, not a path: `collect` joins it onto every
+    /// candidate directory, so a path there would make each of them
+    /// contribute a document from somewhere else entirely — and the report
+    /// would still label it `workspace` or `global`. ADR-0013 makes this
+    /// hygiene rather than a boundary: nothing here stops a host reading
+    /// whatever it likes, it stops a *name*-shaped knob quietly naming a
+    /// place.
+    #[test]
+    fn a_context_file_name_that_is_a_path_is_refused_by_name() {
+        let tmp = tempfile::tempdir().expect("tempdir");
+        let workspace = tmp.path().join("repo");
+        write(&workspace, DEFAULT_CONTEXT_FILE, "workspace rules");
+
+        // `./AGENTS.md` is in the list deliberately. It names the same file
+        // the bare name does and reaches nowhere else, so refusing it buys no
+        // hygiene — what it buys is one rule with one spelling. "A bare name"
+        // is a rule a host can hold; "a path that happens to resolve to a bare
+        // name" is not, and it is the rule that has to answer for `./../x` and
+        // `a/../AGENTS.md`. The refusal names the field and says what it wants,
+        // so the cost of the strictness is one clear error at the open.
+        for name in [
+            "../AGENTS.md",
+            "/etc/agents.md",
+            "nested/AGENTS.md",
+            "./AGENTS.md",
+            "..",
+        ] {
+            let config = ContextConfig {
+                file_name: name.to_string(),
+                global_dir: None,
+                walk_parents: false,
+            };
+
+            let error = WorkspaceContext::discover_with(&workspace, &config)
+                .expect_err("a path is not a file name");
+
+            assert!(
+                matches!(error, ContextError::ContextFileNameNotBare { name: ref found } if found == name),
+                "{error:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn a_bare_context_file_name_is_what_the_rule_allows() {
+        let tmp = tempfile::tempdir().expect("tempdir");
+        let workspace = tmp.path().join("repo");
+        write(&workspace, "HOUSE.md", "house rules");
+
+        let config = ContextConfig {
+            file_name: "HOUSE.md".to_string(),
+            global_dir: None,
+            walk_parents: false,
+        };
+
+        let context =
+            WorkspaceContext::discover_with(&workspace, &config).expect("a bare name is fine");
+
+        assert_eq!(context.documents().len(), 1);
+        assert_eq!(context.documents()[0].content, "house rules");
     }
 }
