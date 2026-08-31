@@ -129,7 +129,15 @@ fn effort_for(id: &str) -> Result<Option<Effort>, ConfigError> {
 fn effort_id(effort: Option<Effort>) -> &'static str {
     match effort {
         None => AS_OPENED,
-        Some(effort) => effort.type_tag(),
+        Some(Effort::Low) => Effort::Low.type_tag(),
+        Some(Effort::Medium) => Effort::Medium.type_tag(),
+        Some(Effort::High) => Effort::High.type_tag(),
+        Some(Effort::XHigh) => Effort::XHigh.type_tag(),
+        Some(Effort::Max) => Effort::Max.type_tag(),
+        // ACP requires currentValue to be one of the offered values. A future
+        // basis effort has no ACP option in this older build, so retain the
+        // safe shape until this list is deliberately extended.
+        Some(_) => AS_OPENED,
     }
 }
 
