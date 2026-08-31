@@ -402,7 +402,14 @@ pub(crate) fn render_terminal(
 }
 
 fn terminal_result_code(record: &TerminalRecord) -> u8 {
-    if record.stopped_by.is_some() {
+    // `stopped_by` is a durable string and newer basis versions may add a
+    // bound this typed view does not know. Preserve the old exit contract:
+    // every present, non-null bound is bounded, even when it cannot be typed.
+    if record
+        .raw
+        .get("stopped_by")
+        .is_some_and(|bound| !bound.is_null())
+    {
         return EXIT_BOUNDED;
     }
     match record.terminal.as_ref() {
@@ -596,6 +603,20 @@ mod tests {
             terminal_result_code(&terminal_record(Terminal::Cancelled, None)),
             EXIT_FAILED
         );
+    }
+
+    #[test]
+    fn an_unknown_non_null_bound_still_exits_bounded() {
+        let mut record = terminal_record(
+            Terminal::Failed {
+                error: "stopped".to_string(),
+            },
+            None,
+        );
+        record.raw["stopped_by"] = json!("newer_bound");
+
+        assert_eq!(record.stopped_by, None, "the typed view stays honest");
+        assert_eq!(terminal_result_code(&record), EXIT_BOUNDED);
     }
 
     #[test]
