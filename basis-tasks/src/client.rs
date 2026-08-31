@@ -34,7 +34,7 @@ use crate::{
     live::{DriveContext, LiveSink},
     lock, policy,
     spec::{Continuation, DEFAULT_DEADLINE, RunSpec},
-    state::{self, RunOptions, TaskMeta},
+    state::{self, InboxRecord, RunOptions, TaskMeta, TerminalRecord},
     tasks::{self, TaskSummary},
     watch::EventCursor,
 };
@@ -461,7 +461,7 @@ impl Tasks {
         })
         .await?;
         match resolved {
-            Some(payload) => Ok(WaitOutcome::Terminal(payload)),
+            Some(payload) => Ok(WaitOutcome::Terminal(TerminalRecord::from_raw(payload))),
             None => attach::wait_for_message(
                 &self.data,
                 handle.as_str(),
@@ -508,7 +508,7 @@ impl Tasks {
         })
         .await?;
         match resolved {
-            Some(terminal) => Ok(WaitOutcome::Terminal(terminal)),
+            Some(terminal) => Ok(WaitOutcome::Terminal(TerminalRecord::from_raw(terminal))),
             None => self.wait_unvalidated(handle, timeout, live).await,
         }
     }
@@ -542,7 +542,7 @@ impl Tasks {
         })
         .await?;
         if let Some(terminal) = resolved {
-            return Ok(WaitOutcome::Terminal(terminal));
+            return Ok(WaitOutcome::Terminal(TerminalRecord::from_raw(terminal)));
         }
         let ctx = self.ctx(live);
         attach::wait_for_terminal(&self.data, handle.as_str(), timeout, &ctx)
@@ -625,12 +625,15 @@ impl Tasks {
         Ok(EventCursor::new(EventTail::new(&paths, 0)))
     }
 
-    /// The raw terminal record, or `None` for a task still resumable.
+    /// The terminal record, raw and typed side by side, or `None` for a task
+    /// still resumable.
     /// Repeatable and lock-free: existence of `terminal.json` *is* the
     /// completion signal (ADR-0019).
-    pub fn terminal(&self, handle: &TaskHandle) -> Result<Option<Value>, Error> {
+    pub fn terminal(&self, handle: &TaskHandle) -> Result<Option<TerminalRecord>, Error> {
         let paths = attach::resolve(&self.data, handle.as_str()).map_err(Error::new)?;
-        state::read_terminal(&paths).map_err(Error::new)
+        state::read_terminal(&paths)
+            .map(|record| record.map(TerminalRecord::from_raw))
+            .map_err(Error::new)
     }
 
     /// Whether a live executor currently holds the task's attach lock.
@@ -641,10 +644,10 @@ impl Tasks {
 
     /// Every message accepted on the task's inbox, bounded 4 KiB summaries
     /// with truncation metadata — the `basis inbox` payload shape.
-    pub fn inbox(&self, handle: &TaskHandle) -> Result<Value, Error> {
+    pub fn inbox(&self, handle: &TaskHandle) -> Result<InboxRecord, Error> {
         let paths = attach::resolve(&self.data, handle.as_str()).map_err(Error::new)?;
         let messages = inbox::load(&paths).map_err(Error::new)?;
-        Ok(inbox::inbox_payload(handle.as_str(), &messages))
+        Ok(inbox::inbox_record(handle.as_str(), &messages))
     }
 
     /// The workspace the task was spawned against, as it was recorded at
@@ -749,8 +752,8 @@ mod tests {
         let WaitOutcome::Terminal(payload) = outcome else {
             panic!("a tight deadline settles immediately rather than timing the wait out");
         };
-        assert_eq!(payload["state"], "failed");
-        assert_eq!(payload["stopped_by"], "deadline");
+        assert_eq!(payload.raw["state"], "failed");
+        assert_eq!(payload.stopped_by, Some(basis::Bound::Deadline));
     }
 
     /// `Approve::Prompt` names a question nobody can answer without a

@@ -371,6 +371,7 @@ mod tests {
         MessageRecord {
             id: format!("m{created_ms}"),
             body: "more".to_string(),
+            body_truncated: false,
             state: MessageState::Pending,
             created_ms,
             reply: None,

@@ -76,9 +76,9 @@ use crate::{
     live::DriveContext,
     lock,
     state::{
-        MAX_RESULT_BYTES, MAX_TASKS, MessageReply, PendingTerminal, TaskMeta, bounded_text,
-        cancel_requested, load_meta, now_ms, read_terminal, request_cancel, save_meta,
-        write_terminal,
+        MAX_RESULT_BYTES, MAX_TASKS, MessageReply, TaskMeta, Terminal, TerminalRecord,
+        bounded_text, cancel_requested, load_meta, now_ms, read_terminal, request_cancel,
+        save_meta, write_terminal,
     },
 };
 
@@ -92,10 +92,10 @@ pub const POLL: Duration = Duration::from_millis(100);
 /// enough said about it to retry sensibly.
 #[derive(Debug, Clone, PartialEq)]
 pub enum WaitOutcome {
-    /// The raw terminal payload, as `terminal.json` holds it — or, for
-    /// `wait_for_message`, the correlated reply or terminal-tagged payload
-    /// `message_payload_for_dispatch` resolved.
-    Terminal(Value),
+    /// The terminal payload, with its exact JSON and typed fields side by
+    /// side. For `wait_for_message`, this is the correlated reply or
+    /// terminal-tagged payload `message_payload_for_dispatch` resolved.
+    Terminal(TerminalRecord),
     /// The bounded wait elapsed; `attached` reports whether a live executor
     /// held the lock at that moment.
     TimedOut { attached: bool },
@@ -137,7 +137,7 @@ pub(crate) async fn wait_for_terminal(
     let ctx = ctx.clone().until(deadline.map(Instant::into_std));
     loop {
         if let Some(terminal) = poll_once(data.clone(), task.to_string(), ctx.clone()).await? {
-            return Ok(WaitOutcome::Terminal(terminal));
+            return Ok(WaitOutcome::Terminal(TerminalRecord::from_raw(terminal)));
         }
         if deadline.is_some_and(|deadline| Instant::now() >= deadline) {
             return Ok(WaitOutcome::TimedOut {
@@ -237,7 +237,9 @@ pub(crate) async fn wait_for_message(
         )
         .await?
         {
-            MessagePoll::Resolved(payload) => return Ok(WaitOutcome::Terminal(payload)),
+            MessagePoll::Resolved(payload) => {
+                return Ok(WaitOutcome::Terminal(TerminalRecord::from_raw(payload)));
+            }
             // A turn ran (for this message or another) but did not resolve
             // ours: recheck immediately, the way the pre-thread-split loop
             // did with its own `continue` — no reason to sleep when there is
@@ -478,7 +480,7 @@ async fn run_model(
         return record_pending(
             paths,
             meta,
-            PendingTerminal::Failed {
+            Terminal::Failed {
                 error: "task deadline elapsed before the next turn".to_string(),
             },
             Some(Bound::Deadline),
@@ -487,7 +489,7 @@ async fn run_model(
     // A cancel before any turn — on a never-attached or between-attaches
     // agent — settles without opening a workspace or touching the model.
     if cancel_requested(paths) {
-        return record_pending(paths, meta, PendingTerminal::Cancelled, None);
+        return record_pending(paths, meta, Terminal::Cancelled, None);
     }
     inbox::revert_in_flight(paths)?;
 
@@ -563,14 +565,14 @@ async fn run_model(
         // running is never cut short by any of them except the task's own
         // deadline (below, around the execution itself).
         if cancel_requested(paths) {
-            return record_pending(paths, meta, PendingTerminal::Cancelled, None);
+            return record_pending(paths, meta, Terminal::Cancelled, None);
         }
         let remaining = remaining_deadline(meta.deadline_at_ms);
         if remaining.as_ref().is_some_and(Duration::is_zero) {
             return record_pending(
                 paths,
                 meta,
-                PendingTerminal::Failed {
+                Terminal::Failed {
                     error: "task deadline elapsed before the next turn".to_string(),
                 },
                 Some(Bound::Deadline),
@@ -597,12 +599,7 @@ async fn run_model(
         if initial_done && message.is_none() {
             let (result, truncated) = bounded_text(last_result, MAX_RESULT_BYTES);
             meta.result_truncated = truncated;
-            return record_pending(
-                paths,
-                meta,
-                PendingTerminal::Succeeded { result },
-                last_stopped_by,
-            );
+            return record_pending(paths, meta, Terminal::Succeeded { result }, last_stopped_by);
         }
 
         let mut turn = TurnOptions::default().with_cancel(cancellation.clone());
@@ -635,7 +632,7 @@ async fn run_model(
                     return record_pending(
                         paths,
                         meta,
-                        PendingTerminal::Failed {
+                        Terminal::Failed {
                             error: "task deadline elapsed during the turn".to_string(),
                         },
                         Some(Bound::Deadline),
@@ -659,7 +656,7 @@ async fn run_model(
         match report.outcome {
             RunOutcome::Error { message } => {
                 return if cancel_requested(paths) {
-                    record_pending(paths, meta, PendingTerminal::Cancelled, None)
+                    record_pending(paths, meta, Terminal::Cancelled, None)
                 } else {
                     record_failure(paths, meta, message, stopped_by)
                 };
@@ -703,10 +700,10 @@ async fn run_model(
 fn record_pending(
     paths: &AgentPaths,
     meta: &mut TaskMeta,
-    completion: PendingTerminal,
+    completion: Terminal,
     stopped_by: Option<Bound>,
 ) -> Result<Turns, String> {
-    if matches!(completion, PendingTerminal::Cancelled) {
+    if matches!(completion, Terminal::Cancelled) {
         meta.result_truncated = false;
         meta.stopped_by = None;
     } else {
@@ -726,7 +723,7 @@ fn record_failure(
 ) -> Result<Turns, String> {
     let (error, _) = bounded_text(message, MAX_RESULT_BYTES);
     meta.result_truncated = false;
-    record_pending(paths, meta, PendingTerminal::Failed { error }, stopped_by)
+    record_pending(paths, meta, Terminal::Failed { error }, stopped_by)
 }
 
 /// The settle pass: parent scope as one ordering constraint, then two writes
@@ -745,10 +742,7 @@ async fn settle(
     ctx: &DriveContext,
 ) -> Result<Value, String> {
     reconsider_cancel(paths, meta)?;
-    let cancel_children = !matches!(
-        meta.pending_terminal,
-        Some(PendingTerminal::Succeeded { .. })
-    );
+    let cancel_children = !matches!(meta.pending_terminal, Some(Terminal::Succeeded { .. }));
     settle_children(data, meta, cancel_children, ctx).await?;
     // A cancel that arrived while children settled still lands before the
     // terminal record, exactly as the daemon replaced a pending completion.
@@ -763,9 +757,8 @@ async fn settle(
 }
 
 fn reconsider_cancel(paths: &AgentPaths, meta: &mut TaskMeta) -> Result<(), String> {
-    if cancel_requested(paths) && !matches!(meta.pending_terminal, Some(PendingTerminal::Cancelled))
-    {
-        record_pending(paths, meta, PendingTerminal::Cancelled, None)?;
+    if cancel_requested(paths) && !matches!(meta.pending_terminal, Some(Terminal::Cancelled)) {
+        record_pending(paths, meta, Terminal::Cancelled, None)?;
     }
     Ok(())
 }

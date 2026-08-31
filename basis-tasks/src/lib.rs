@@ -62,7 +62,10 @@ pub use error::{Error, Hint};
 pub use handle::TaskHandle;
 pub use live::LiveSink;
 pub use spec::{Continuation, DEFAULT_DEADLINE, RunSpec};
-pub use state::{MAX_TASKS, now_ms};
+pub use state::{
+    InboxRecord, MAX_TASKS, MessageRecord, MessageReply, MessageState, Terminal, TerminalRecord,
+    now_ms,
+};
 pub use tasks::{TaskSummary, probe_state};
 pub use watch::{EventCursor, WatchRecord};
 

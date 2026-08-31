@@ -21,6 +21,7 @@ use std::{
 };
 
 use basis::{Event, RunUsage, event::tool_result_elision_line};
+use basis_tasks::{Terminal, TerminalRecord};
 use serde::Deserialize;
 use serde_json::Value;
 
@@ -95,20 +96,22 @@ impl Live {
     /// stream, and neither was a result this process only read off disk.
     pub(crate) fn settled(
         &self,
-        payload: &Value,
+        record: &TerminalRecord,
         structured: bool,
     ) -> Result<ExitCode, ClientError> {
-        if !self.repeats(payload, structured) {
-            return render_result(payload, structured);
+        if !self.repeats(record, structured) {
+            return render_terminal(record, structured);
         }
-        print_hint(payload);
+        print_hint(&record.raw);
         flush_stdout()?;
-        Ok(ExitCode::from(result_code(payload)))
+        Ok(ExitCode::from(terminal_result_code(record)))
     }
 
-    /// Whether rendering `payload` would say the answer a second time.
-    fn repeats(&self, payload: &Value, structured: bool) -> bool {
-        !structured && self.answered() && payload["state"] == "succeeded"
+    /// Whether rendering `record` would say the answer a second time.
+    fn repeats(&self, record: &TerminalRecord, structured: bool) -> bool {
+        !structured
+            && self.answered()
+            && matches!(record.terminal.as_ref(), Some(Terminal::Succeeded { .. }))
     }
 }
 
@@ -326,21 +329,17 @@ fn one_line(text: &str, budget: usize) -> String {
 
 /// Decorates a raw terminal record with its handle and the follow-up its
 /// state admits.
-pub(crate) fn decorate_terminal(task: &str, mut payload: Value) -> Value {
-    let object = payload
+pub(crate) fn decorate_terminal(task: &str, mut record: TerminalRecord) -> TerminalRecord {
+    let object = record
+        .raw
         .as_object_mut()
         .expect("terminal payload is an object");
-    let state = object
-        .get("state")
-        .and_then(Value::as_str)
-        .unwrap_or_default()
-        .to_string();
     object.insert("task".to_string(), serde_json::json!(task));
     object.insert(
         "next".to_string(),
-        serde_json::json!(next_step(&state, task)),
+        serde_json::json!(next_step(record.terminal.as_ref(), task)),
     );
-    payload
+    record
 }
 
 /// The one follow-up a record's state actually admits.
@@ -351,20 +350,56 @@ pub(crate) fn decorate_terminal(task: &str, mut payload: Value) -> Value {
 /// settled task is never told to continue a conversation it has closed, and a
 /// settled *failure* is not told to read an inbox that will be empty when the
 /// reason is already on stderr.
-fn next_step(state: &str, task: &str) -> String {
-    match state {
+fn next_step(terminal: Option<&Terminal>, task: &str) -> String {
+    match terminal {
         // Answered. The journal is the one thing this handle still holds that
         // the terminal does not — and the one thing a redirected stdout, or a
         // scrollback that has moved on, did not keep.
-        "succeeded" => format!("basis watch {task}"),
+        Some(Terminal::Succeeded { .. }) => format!("basis watch {task}"),
         // No answer was produced and none will be: this handle is spent, and
         // the work continues as a new task rather than as a message to a
         // closed one.
-        "failed" | "cancelled" => "basis spawn <PROMPT>".to_string(),
-        // Minted and unstarted. It advances exactly when something attaches.
-        "resumable" => format!("basis wait {task}"),
-        // Still moving: follow it, or read what it has already been sent.
-        _ => format!("basis watch {task} or basis inbox {task}"),
+        Some(Terminal::Failed { .. } | Terminal::Cancelled) => "basis spawn <PROMPT>".to_string(),
+        // A newer terminal state stays available through `raw`; this build
+        // offers only the observation paths it can promise are safe.
+        None => format!("basis watch {task} or basis inbox {task}"),
+    }
+}
+
+pub(crate) fn render_terminal(
+    record: &TerminalRecord,
+    structured: bool,
+) -> Result<ExitCode, ClientError> {
+    if structured {
+        println!("{}", record.raw);
+        return Ok(ExitCode::from(terminal_result_code(record)));
+    }
+
+    match record.terminal.as_ref() {
+        Some(Terminal::Succeeded { result }) => {
+            if !result.is_empty() {
+                print!("{result}");
+                if !result.ends_with('\n') {
+                    println!();
+                }
+            }
+        }
+        Some(Terminal::Failed { error }) => eprintln!("basis: task failed: {error}"),
+        Some(Terminal::Cancelled) => eprintln!("basis: task was cancelled"),
+        None => println!("task state: unknown"),
+    }
+    print_hint(&record.raw);
+    flush_stdout()?;
+    Ok(ExitCode::from(terminal_result_code(record)))
+}
+
+fn terminal_result_code(record: &TerminalRecord) -> u8 {
+    if record.stopped_by.is_some() {
+        return EXIT_BOUNDED;
+    }
+    match record.terminal.as_ref() {
+        Some(Terminal::Succeeded { .. }) => EXIT_OK,
+        Some(Terminal::Failed { .. } | Terminal::Cancelled) | None => EXIT_FAILED,
     }
 }
 
@@ -448,7 +483,7 @@ fn write_hint(payload: &Value, err: &mut impl Write) -> io::Result<()> {
 mod tests {
     use super::*;
     use basis::{
-        Mutability, RunOutcome,
+        Bound, Mutability, RunOutcome,
         event::{
             ContextFile, ElidedToolResult, RequestToolResultElisionPolicy, ToolResultContentKind,
             ToolResultElisionAction,
@@ -514,21 +549,59 @@ mod tests {
         })
     }
 
+    fn terminal_record(terminal: Terminal, stopped_by: Option<Bound>) -> TerminalRecord {
+        let mut raw = serde_json::to_value(&terminal).expect("terminal serializes");
+        if let Some(bound) = stopped_by {
+            raw["stopped_by"] = serde_json::json!(bound);
+        }
+        TerminalRecord {
+            raw,
+            terminal: Some(terminal),
+            stopped_by,
+            usage: None,
+            result_truncated: false,
+        }
+    }
+
     #[test]
     fn terminal_codes_do_not_depend_on_rendering() {
-        assert_eq!(result_code(&json!({"state": "succeeded"})), EXIT_OK);
-        assert_eq!(result_code(&json!({"state": "failed"})), EXIT_FAILED);
         assert_eq!(result_code(&json!({"state": "resumable"})), EXIT_OK);
         assert_eq!(
-            result_code(&json!({"state": "failed", "stopped_by": "deadline"})),
+            terminal_result_code(&terminal_record(
+                Terminal::Failed {
+                    error: "failed".to_string(),
+                },
+                Some(Bound::Deadline),
+            )),
             EXIT_BOUNDED
+        );
+        assert_eq!(
+            terminal_result_code(&terminal_record(
+                Terminal::Succeeded {
+                    result: "done".to_string(),
+                },
+                None,
+            )),
+            EXIT_OK
+        );
+        assert_eq!(
+            terminal_result_code(&terminal_record(Terminal::Cancelled, None)),
+            EXIT_FAILED
         );
     }
 
     #[test]
     fn a_terminal_payload_carries_the_handle_it_settled_under() {
-        let payload = decorate_terminal("w/t", json!({"state": "succeeded", "result": "done"}));
-        assert_eq!(payload["task"], "w/t");
+        let record = decorate_terminal(
+            "w/t",
+            terminal_record(
+                Terminal::Succeeded {
+                    result: "done".to_string(),
+                },
+                None,
+            ),
+        );
+        assert_eq!(record.raw["task"], "w/t");
     }
 
     /// A hint is a promise: the command it names has to work on the task it
@@ -540,20 +613,26 @@ mod tests {
     #[test]
     fn each_state_is_told_the_follow_up_that_works_on_it() {
         let hints = [
-            ("succeeded", "basis watch w/t"),
-            ("failed", "basis spawn <PROMPT>"),
-            ("cancelled", "basis spawn <PROMPT>"),
-            ("resumable", "basis wait w/t"),
-            ("running", "basis watch w/t or basis inbox w/t"),
-            ("accepted", "basis watch w/t or basis inbox w/t"),
-            ("cancel_requested", "basis watch w/t or basis inbox w/t"),
+            (
+                Terminal::Succeeded {
+                    result: "done".to_string(),
+                },
+                "basis watch w/t",
+            ),
+            (
+                Terminal::Failed {
+                    error: "failed".to_string(),
+                },
+                "basis spawn <PROMPT>",
+            ),
+            (Terminal::Cancelled, "basis spawn <PROMPT>"),
         ];
 
-        for (state, expected) in hints {
+        for (terminal, expected) in hints {
             assert_eq!(
-                decorate_terminal("w/t", json!({"state": state}))["next"],
+                decorate_terminal("w/t", terminal_record(terminal, None)).raw["next"],
                 expected,
-                "the follow-up offered for {state}"
+                "the follow-up offered for the terminal state"
             );
         }
     }
@@ -752,7 +831,12 @@ mod tests {
     #[test]
     fn a_streamed_answer_is_not_printed_again_underneath_itself() {
         let live = Live::when(true);
-        let succeeded = json!({"state": "succeeded", "result": "done"});
+        let succeeded = terminal_record(
+            Terminal::Succeeded {
+                result: "done".to_string(),
+            },
+            None,
+        );
         assert!(!live.repeats(&succeeded, false), "nothing streamed yet");
 
         live.show_to(&delta("done"), &mut Vec::new(), &mut Vec::new())
@@ -763,8 +847,14 @@ mod tests {
             !live.repeats(&succeeded, true),
             "`--json` prints the object it was asked for, whatever a terminal saw"
         );
+        let failed = terminal_record(
+            Terminal::Failed {
+                error: "boom".to_string(),
+            },
+            None,
+        );
         assert!(
-            !live.repeats(&json!({"state": "failed", "error": "boom"}), false),
+            !live.repeats(&failed, false),
             "a failure was never on the stream, so it still has to be said"
         );
     }
