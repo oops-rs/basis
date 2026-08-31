@@ -18,7 +18,10 @@ basis.workspace = true
 
 async-trait.workspace = true
 serde = { workspace = true }
+tokio.workspace = true
 
 [dev-dependencies]
 serde_json.workspace = true
+mentra = { workspace = true, features = ["test-utils"] }
+tempfile.workspace = true
 tokio = { workspace = true, features = ["time"] }

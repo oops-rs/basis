@@ -10,4 +10,7 @@
 //! `basis-cli`; durable task coordination stays in `basis-tasks`.
 
 mod approval;
+mod session;
+
 pub use approval::{ApprovalPolicy, PolicyApprover, SessionApproval};
+pub use session::{HostSession, Interrupt, SessionRegistry};
