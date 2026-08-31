@@ -21,8 +21,8 @@ use super::{
     data_dir::{AgentPaths, write_private_atomic},
     lock,
     state::{
-        MAX_MESSAGE, MAX_MESSAGES, MessageRecord, MessageReply, MessageState, bounded_text,
-        cancel_requested, load_meta, now_ms, read_terminal,
+        InboxRecord, MAX_MESSAGE, MAX_MESSAGES, MessageRecord, MessageReply, MessageState,
+        bounded_text, cancel_requested, load_meta, now_ms, read_terminal,
     },
 };
 
@@ -112,6 +112,7 @@ pub(crate) fn enqueue(paths: &AgentPaths, task: &str, body: String) -> Result<St
         messages.push(MessageRecord {
             id: id.clone(),
             body,
+            body_truncated: false,
             state: MessageState::Pending,
             created_ms: now_ms(),
             reply: None,
@@ -181,33 +182,56 @@ pub(crate) fn finish_unanswered(messages: &mut [MessageRecord]) {
 }
 
 /// The `basis inbox` payload: bounded 4 KiB summaries with truncation metadata.
-pub(crate) fn inbox_payload(task: &str, messages: &[MessageRecord]) -> Value {
-    let messages: Vec<Value> = messages
+pub(crate) fn inbox_record(task: &str, messages: &[MessageRecord]) -> InboxRecord {
+    let messages: Vec<MessageRecord> = messages
         .iter()
         .map(|message| {
             let (body, body_truncated) = bounded_text(message.body.clone(), 4 * 1024);
             let reply = message.reply.as_ref().map(|reply| {
                 let (result, result_truncated) = bounded_text(reply.result.clone(), 4 * 1024);
+                MessageReply {
+                    result,
+                    result_truncated: reply.result_truncated || result_truncated,
+                    stopped_by: reply.stopped_by,
+                }
+            });
+            MessageRecord {
+                id: message.id.clone(),
+                body,
+                body_truncated: message.body_truncated || body_truncated,
+                state: message.state,
+                created_ms: message.created_ms,
+                reply,
+            }
+        })
+        .collect();
+    let raw_messages: Vec<Value> = messages
+        .iter()
+        .map(|message| {
+            let reply = message.reply.as_ref().map(|reply| {
                 json!({
-                    "result": result,
-                    "result_truncated": reply.result_truncated || result_truncated,
+                    "result": reply.result,
+                    "result_truncated": reply.result_truncated,
                     "stopped_by": reply.stopped_by,
                 })
             });
             json!({
                 "id": message.id,
                 "state": message.state,
-                "body": body,
-                "body_truncated": body_truncated,
+                "body": message.body,
+                "body_truncated": message.body_truncated,
                 "reply": reply,
             })
         })
         .collect();
-    json!({
-        "task": task,
-        "messages": messages,
-        "next": format!("basis watch {task}"),
-    })
+    InboxRecord {
+        raw: json!({
+            "task": task,
+            "messages": raw_messages,
+            "next": format!("basis watch {task}"),
+        }),
+        messages,
+    }
 }
 
 /// Resolves a `wait --message` dispatch: the correlated reply when one exists,
@@ -365,6 +389,23 @@ mod tests {
         }
         let error = enqueue(&paths, &task, "one too many".to_string()).unwrap_err();
         assert!(error.contains("full"), "{error}");
+    }
+
+    #[test]
+    fn inbox_record_keeps_the_raw_payload_and_bounded_typed_messages() {
+        let dir = tempfile::tempdir().unwrap();
+        let (paths, task) = agent(&dir);
+        enqueue(&paths, &task, "x".repeat(5 * 1024)).unwrap();
+
+        let stored = load(&paths).unwrap();
+        let record = inbox_record(&task, &stored);
+
+        assert_eq!(record.raw["messages"][0]["body"], record.messages[0].body);
+        assert_eq!(record.raw["messages"][0]["body_truncated"], true);
+        assert!(record.messages[0].body_truncated);
+        assert_eq!(record.messages[0].body.len(), 4 * 1024);
+        assert!(record.raw["messages"][0].get("created_ms").is_none());
+        assert_eq!(record.messages[0].created_ms, stored[0].created_ms);
     }
 
     #[test]

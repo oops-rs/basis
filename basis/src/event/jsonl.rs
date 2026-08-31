@@ -30,14 +30,22 @@ impl<W: Write> JsonlWriter<W> {
     /// Writes one event and returns the sequence number it was given.
     pub fn write(&mut self, event: Event) -> std::io::Result<u64> {
         let seq = self.next_seq;
-        let line = EventLine::new(seq, event);
+        self.write_line(EventLine::new(seq, event))?;
+        Ok(seq)
+    }
+
+    /// Writes one already-numbered line and returns the encoded byte count,
+    /// including its newline.
+    pub fn write_line(&mut self, line: EventLine) -> std::io::Result<usize> {
+        let seq = line.seq;
         let encoded = serde_json::to_string(&line).map_err(std::io::Error::other)?;
+        let written = encoded.len().saturating_add(1);
 
         writeln!(self.writer, "{encoded}")?;
         self.writer.flush()?;
 
-        self.next_seq += 1;
-        Ok(seq)
+        self.next_seq = seq.saturating_add(1);
+        Ok(written)
     }
 
     /// The sequence number the next write will use.
@@ -144,5 +152,25 @@ mod tests {
             .expect_err("write fails");
 
         assert_eq!(error.kind(), std::io::ErrorKind::BrokenPipe);
+    }
+
+    #[test]
+    fn writing_a_presequenced_line_advances_the_next_sequence() {
+        let mut writer = JsonlWriter::new(Vec::new());
+
+        let byte_count = writer
+            .write_line(EventLine::new(
+                7,
+                Event::AssistantDelta {
+                    text: "x".to_string(),
+                },
+            ))
+            .expect("writes");
+
+        assert_eq!(writer.next_seq(), 8);
+        let buffer = writer.into_inner();
+        assert_eq!(byte_count, buffer.len());
+        let written = lines(&buffer);
+        assert_eq!(written[0]["seq"], 7);
     }
 }

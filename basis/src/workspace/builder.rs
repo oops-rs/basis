@@ -810,11 +810,11 @@ impl WorkspaceBuilder {
 
                 (connections, files, names)
             } else {
-                (
-                    McpConnections::empty(Arc::clone(&runtime), &path),
-                    Vec::new(),
-                    Vec::new(),
-                )
+                let servers = mcp::configured_supplied(&self.mcp)?;
+                let connections =
+                    McpConnections::connect(Arc::clone(&runtime), &path, servers).await;
+                let names = connections.names().to_vec();
+                (connections, Vec::new(), names)
             }
         };
         #[cfg(not(feature = "mcp"))]

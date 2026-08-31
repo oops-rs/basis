@@ -72,9 +72,13 @@ pub struct ProviderChoice {
 /// which one won, and it says nothing about the value.
 impl std::fmt::Debug for ProviderChoice {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        let credential = self
+            .api_key
+            .as_ref()
+            .map(|_| self.source_var.unwrap_or("direct"));
         f.debug_struct("ProviderChoice")
             .field("provider", &self.provider)
-            .field("api_key", &"<redacted>")
+            .field("api_key", &crate::redaction::redacted_env(credential))
             .field("source_var", &self.source_var)
             .field("base_url", &self.base_url)
             .finish()

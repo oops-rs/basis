@@ -51,12 +51,6 @@ pub(crate) const EFFORT: &str = "effort";
 /// here rather than this value. Picking it clears the request.
 const AS_OPENED: &str = "default";
 
-const LOW: &str = "low";
-const MEDIUM: &str = "medium";
-const HIGH: &str = "high";
-const XHIGH: &str = "xhigh";
-const MAX: &str = "max";
-
 /// What a client asked to change.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum Change {
@@ -120,11 +114,11 @@ fn selected<'a>(
 fn effort_for(id: &str) -> Result<Option<Effort>, ConfigError> {
     match id {
         AS_OPENED => Ok(None),
-        LOW => Ok(Some(Effort::Low)),
-        MEDIUM => Ok(Some(Effort::Medium)),
-        HIGH => Ok(Some(Effort::High)),
-        XHIGH => Ok(Some(Effort::XHigh)),
-        MAX => Ok(Some(Effort::Max)),
+        id if id == Effort::Low.type_tag() => Ok(Some(Effort::Low)),
+        id if id == Effort::Medium.type_tag() => Ok(Some(Effort::Medium)),
+        id if id == Effort::High.type_tag() => Ok(Some(Effort::High)),
+        id if id == Effort::XHigh.type_tag() => Ok(Some(Effort::XHigh)),
+        id if id == Effort::Max.type_tag() => Ok(Some(Effort::Max)),
         unknown => Err(ConfigError::UnknownValue {
             option: EFFORT,
             value: unknown.to_string(),
@@ -135,19 +129,7 @@ fn effort_for(id: &str) -> Result<Option<Effort>, ConfigError> {
 fn effort_id(effort: Option<Effort>) -> &'static str {
     match effort {
         None => AS_OPENED,
-        Some(Effort::Low) => LOW,
-        Some(Effort::Medium) => MEDIUM,
-        Some(Effort::High) => HIGH,
-        Some(Effort::XHigh) => XHIGH,
-        Some(Effort::Max) => MAX,
-        // `Effort` is `#[non_exhaustive]`, so a level added upstream reaches
-        // here with no id of its own. ACP's select expects `currentValue` to
-        // be one of the listed values, and an id that is in neither the list
-        // nor the client's vocabulary leaves the picker with nothing selected
-        // at all. Falling back to the one value that is always listed is
-        // wrong about the level and right about the shape; the fix is a new
-        // id here, and the test below is what notices it is missing.
-        _ => AS_OPENED,
+        Some(effort) => effort.type_tag(),
     }
 }
 
@@ -192,14 +174,15 @@ fn effort_values() -> Vec<SessionConfigSelectOption> {
     vec![
         SessionConfigSelectOption::new(AS_OPENED, "Default")
             .description("Ask for no particular level, and take the provider's own."),
-        SessionConfigSelectOption::new(LOW, "Low")
+        SessionConfigSelectOption::new(Effort::Low.type_tag(), "Low")
             .description("Answer quickly. For gathering, not for deciding."),
-        SessionConfigSelectOption::new(MEDIUM, "Medium").description("The usual trade."),
-        SessionConfigSelectOption::new(HIGH, "High")
+        SessionConfigSelectOption::new(Effort::Medium.type_tag(), "Medium")
+            .description("The usual trade."),
+        SessionConfigSelectOption::new(Effort::High.type_tag(), "High")
             .description("Think before answering. Slower, and worth it on a hard change."),
-        SessionConfigSelectOption::new(XHIGH, "Extra high")
+        SessionConfigSelectOption::new(Effort::XHigh.type_tag(), "Extra high")
             .description("More than high, where the provider offers a level above it."),
-        SessionConfigSelectOption::new(MAX, "Max")
+        SessionConfigSelectOption::new(Effort::Max.type_tag(), "Max")
             .description("Everything the model has. The slowest and the most expensive."),
     ]
 }
@@ -239,7 +222,7 @@ mod tests {
 
         assert_eq!(options.len(), 2);
         assert_eq!(current(&options, MODEL), "gpt-5");
-        assert_eq!(current(&options, EFFORT), HIGH);
+        assert_eq!(current(&options, EFFORT), Effort::High.type_tag());
         assert_eq!(
             options
                 .iter()

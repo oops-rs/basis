@@ -83,14 +83,15 @@ impl Workspace {
     }
 
     /// Discovers hooks and puts one tool call to them.
-    fn decide(&self, tool_name: &str, input_json: &str) -> HookOutcome {
+    async fn decide(&self, tool_name: &str, input_json: &str) -> HookOutcome {
         let hooks = hooks::load(self.path(), &self.config()).expect("the hooks file parses");
 
         // Failure reports go nowhere here so the suite stays quiet; the unit
         // tests are where their content is checked.
         HookRunner::new(self.path(), hooks)
             .with_reporter(|_| {})
-            .decide(&HookCall::new("agent-1", tool_name, "call-1", input_json))
+            .decide_async(&HookCall::new("agent-1", tool_name, "call-1", input_json))
+            .await
     }
 }
 
@@ -106,8 +107,8 @@ fn deny_reason(outcome: HookOutcome) -> String {
     }
 }
 
-#[test]
-fn a_hook_that_allows_lets_the_call_through() {
+#[tokio::test]
+async fn a_hook_that_allows_lets_the_call_through() {
     let workspace = Workspace::new();
     let script = workspace.script("allow.sh", r#"echo '{"decision":"allow"}'"#);
     workspace.hooks_file(&format!(
@@ -115,13 +116,13 @@ fn a_hook_that_allows_lets_the_call_through() {
     ));
 
     assert_eq!(
-        workspace.decide("shell", r#"{"command":"ls"}"#),
+        workspace.decide("shell", r#"{"command":"ls"}"#).await,
         HookOutcome::Allow
     );
 }
 
-#[test]
-fn a_hook_that_denies_blocks_the_call_and_explains() {
+#[tokio::test]
+async fn a_hook_that_denies_blocks_the_call_and_explains() {
     let workspace = Workspace::new();
     let script = workspace.script(
         "deny.sh",
@@ -131,7 +132,11 @@ fn a_hook_that_denies_blocks_the_call_and_explains() {
         r#"{{"schema": 1, "hooks": [{{"name": "no-force-push", "command": ["{script}"]}}]}}"#
     ));
 
-    let reason = deny_reason(workspace.decide("shell", r#"{"command":"git push --force"}"#));
+    let reason = deny_reason(
+        workspace
+            .decide("shell", r#"{"command":"git push --force"}"#)
+            .await,
+    );
 
     assert!(reason.contains("no-force-push"), "got {reason}");
     assert!(
@@ -140,8 +145,8 @@ fn a_hook_that_denies_blocks_the_call_and_explains() {
     );
 }
 
-#[test]
-fn a_hook_reads_the_call_it_is_being_asked_about() {
+#[tokio::test]
+async fn a_hook_reads_the_call_it_is_being_asked_about() {
     let workspace = Workspace::new();
     // The hook decides from the request it was handed, which is the whole
     // point of the wire contract: deny only the command it was told about.
@@ -160,15 +165,19 @@ fn a_hook_reads_the_call_it_is_being_asked_about() {
         r#"{{"schema": 1, "hooks": [{{"name": "inspect", "command": ["{script}"]}}]}}"#
     ));
 
-    let denied = workspace.decide("shell", r#"{"command":"git push --force"}"#);
-    let allowed = workspace.decide("shell", r#"{"command":"git status"}"#);
+    let denied = workspace
+        .decide("shell", r#"{"command":"git push --force"}"#)
+        .await;
+    let allowed = workspace
+        .decide("shell", r#"{"command":"git status"}"#)
+        .await;
 
     assert!(deny_reason(denied).contains("saw the force flag"));
     assert_eq!(allowed, HookOutcome::Allow);
 }
 
-#[test]
-fn a_hook_is_told_which_schema_it_is_talking_to() {
+#[tokio::test]
+async fn a_hook_is_told_which_schema_it_is_talking_to() {
     let workspace = Workspace::new();
     let script = workspace.script(
         "version.sh",
@@ -185,14 +194,14 @@ fn a_hook_is_told_which_schema_it_is_talking_to() {
     ));
 
     assert_eq!(
-        workspace.decide("shell", "{}"),
+        workspace.decide("shell", "{}").await,
         HookOutcome::Allow,
         "a hook must be able to check the contract before trusting the rest"
     );
 }
 
-#[test]
-fn a_hook_that_hangs_is_killed_and_the_call_is_denied() {
+#[tokio::test]
+async fn a_hook_that_hangs_is_killed_and_the_call_is_denied() {
     let workspace = Workspace::new();
     let script = workspace.script("hang.sh", "sleep 60");
     workspace.hooks_file(&format!(
@@ -202,7 +211,7 @@ fn a_hook_that_hangs_is_killed_and_the_call_is_denied() {
     ));
 
     let started = Instant::now();
-    let reason = deny_reason(workspace.decide("shell", "{}"));
+    let reason = deny_reason(workspace.decide("shell", "{}").await);
     let elapsed = started.elapsed();
 
     assert!(reason.contains("250ms"), "got {reason}");
@@ -212,8 +221,8 @@ fn a_hook_that_hangs_is_killed_and_the_call_is_denied() {
     );
 }
 
-#[test]
-fn a_hook_that_exits_non_zero_denies_by_default() {
+#[tokio::test]
+async fn a_hook_that_exits_non_zero_denies_by_default() {
     let workspace = Workspace::new();
     // It printed a perfectly good allow — and then failed. The exit code is
     // what decides whether anything it said counts.
@@ -222,20 +231,20 @@ fn a_hook_that_exits_non_zero_denies_by_default() {
         r#"{{"schema": 1, "hooks": [{{"name": "crasher", "command": ["{script}"]}}]}}"#
     ));
 
-    let reason = deny_reason(workspace.decide("shell", "{}"));
+    let reason = deny_reason(workspace.decide("shell", "{}").await);
 
     assert!(reason.contains("code 2"), "got {reason}");
 }
 
-#[test]
-fn a_hook_that_prints_something_else_denies_by_default() {
+#[tokio::test]
+async fn a_hook_that_prints_something_else_denies_by_default() {
     let workspace = Workspace::new();
     let script = workspace.script("babble.sh", "echo looks fine to me");
     workspace.hooks_file(&format!(
         r#"{{"schema": 1, "hooks": [{{"name": "babbler", "command": ["{script}"]}}]}}"#
     ));
 
-    let reason = deny_reason(workspace.decide("shell", "{}"));
+    let reason = deny_reason(workspace.decide("shell", "{}").await);
 
     assert!(reason.contains("not a decision"), "got {reason}");
     assert!(
@@ -244,33 +253,33 @@ fn a_hook_that_prints_something_else_denies_by_default() {
     );
 }
 
-#[test]
-fn a_hook_that_says_nothing_is_not_taken_as_consent() {
+#[tokio::test]
+async fn a_hook_that_says_nothing_is_not_taken_as_consent() {
     let workspace = Workspace::new();
     let script = workspace.script("mute.sh", "exit 0");
     workspace.hooks_file(&format!(
         r#"{{"schema": 1, "hooks": [{{"name": "mute", "command": ["{script}"]}}]}}"#
     ));
 
-    let reason = deny_reason(workspace.decide("shell", "{}"));
+    let reason = deny_reason(workspace.decide("shell", "{}").await);
 
     assert!(reason.contains("printed nothing"), "got {reason}");
 }
 
-#[test]
-fn a_program_that_does_not_exist_denies_rather_than_disappearing() {
+#[tokio::test]
+async fn a_program_that_does_not_exist_denies_rather_than_disappearing() {
     let workspace = Workspace::new();
     workspace.hooks_file(
         r#"{"schema": 1, "hooks": [{"name": "missing", "command": ["./hooks/never-written.sh"]}]}"#,
     );
 
-    let reason = deny_reason(workspace.decide("shell", "{}"));
+    let reason = deny_reason(workspace.decide("shell", "{}").await);
 
     assert!(reason.contains("could not be started"), "got {reason}");
 }
 
-#[test]
-fn an_observer_hook_can_be_configured_to_fail_open() {
+#[tokio::test]
+async fn an_observer_hook_can_be_configured_to_fail_open() {
     let workspace = Workspace::new();
     let broken = workspace.script("notify.sh", "exit 1");
     let guard = workspace.script("guard.sh", r#"echo '{"decision":"allow"}'"#);
@@ -282,14 +291,14 @@ fn an_observer_hook_can_be_configured_to_fail_open() {
     ));
 
     assert_eq!(
-        workspace.decide("shell", "{}"),
+        workspace.decide("shell", "{}").await,
         HookOutcome::Allow,
         "a broken observer must not cost the turn, when the file says so"
     );
 }
 
-#[test]
-fn a_hook_only_hears_about_the_tools_it_listed() {
+#[tokio::test]
+async fn a_hook_only_hears_about_the_tools_it_listed() {
     let workspace = Workspace::new();
     let marker = workspace.path().join("was-asked");
     let script = workspace.script(
@@ -305,18 +314,18 @@ fn a_hook_only_hears_about_the_tools_it_listed() {
         ]}}"#
     ));
 
-    assert_eq!(workspace.decide("shell", "{}"), HookOutcome::Allow);
+    assert_eq!(workspace.decide("shell", "{}").await, HookOutcome::Allow);
     assert!(
         !marker.exists(),
         "a hook scoped to one tool must not even be spawned for another"
     );
 
-    assert_eq!(workspace.decide("files", "{}"), HookOutcome::Allow);
+    assert_eq!(workspace.decide("files", "{}").await, HookOutcome::Allow);
     assert!(marker.exists(), "the tool it listed must reach it");
 }
 
-#[test]
-fn a_global_denial_stops_a_workspace_hook_from_ever_running() {
+#[tokio::test]
+async fn a_global_denial_stops_a_workspace_hook_from_ever_running() {
     let workspace = Workspace::new();
     let global = workspace.path().join("global");
     let marker = workspace.path().join("workspace-hook-ran");
@@ -354,7 +363,8 @@ fn a_global_denial_stops_a_workspace_hook_from_ever_running() {
 
     let outcome = HookRunner::new(workspace.path(), hooks)
         .with_reporter(|_| {})
-        .decide(&HookCall::new("agent-1", "shell", "call-1", "{}"));
+        .decide_async(&HookCall::new("agent-1", "shell", "call-1", "{}"))
+        .await;
 
     assert!(deny_reason(outcome).contains("my machine, my rules"));
     assert!(
@@ -363,8 +373,8 @@ fn a_global_denial_stops_a_workspace_hook_from_ever_running() {
     );
 }
 
-#[test]
-fn a_hooks_file_that_does_not_parse_stops_the_run() {
+#[tokio::test]
+async fn a_hooks_file_that_does_not_parse_stops_the_run() {
     let workspace = Workspace::new();
     workspace.hooks_file(r#"{"schema": 1, "hooks": [ oops"#);
 
@@ -377,8 +387,8 @@ fn a_hooks_file_that_does_not_parse_stops_the_run() {
     );
 }
 
-#[test]
-fn a_workspace_with_no_hooks_file_costs_nothing() {
+#[tokio::test]
+async fn a_workspace_with_no_hooks_file_costs_nothing() {
     let workspace = Workspace::new();
 
     let hooks =
@@ -386,13 +396,15 @@ fn a_workspace_with_no_hooks_file_costs_nothing() {
 
     assert!(hooks.is_empty());
     assert_eq!(
-        HookRunner::new(workspace.path(), hooks).decide(&HookCall::new("a", "shell", "c", "{}")),
+        HookRunner::new(workspace.path(), hooks)
+            .decide_async(&HookCall::new("a", "shell", "c", "{}"))
+            .await,
         HookOutcome::Allow
     );
 }
 
-#[test]
-fn a_hook_can_rewrite_the_call_instead_of_refusing_it() {
+#[tokio::test]
+async fn a_hook_can_rewrite_the_call_instead_of_refusing_it() {
     let workspace = Workspace::new();
     // Denying a call with a secret in it costs a round trip and often does not
     // converge; handing back a redacted one does.
@@ -404,7 +416,9 @@ fn a_hook_can_rewrite_the_call_instead_of_refusing_it() {
         r#"{{"schema": 1, "hooks": [{{"name": "redact", "command": ["{script}"]}}]}}"#
     ));
 
-    let outcome = workspace.decide("shell", r#"{"command":"deploy --token hunter2"}"#);
+    let outcome = workspace
+        .decide("shell", r#"{"command":"deploy --token hunter2"}"#)
+        .await;
 
     let HookOutcome::Modify { input, reason } = outcome else {
         panic!("expected a modification, got {outcome:?}");
@@ -417,8 +431,8 @@ fn a_hook_can_rewrite_the_call_instead_of_refusing_it() {
     );
 }
 
-#[test]
-fn modifications_compose_and_a_later_hook_still_decides() {
+#[tokio::test]
+async fn modifications_compose_and_a_later_hook_still_decides() {
     let workspace = Workspace::new();
     // Each hook answers based on what it was shown, so the chain's result is
     // only reachable if every hook saw its predecessor's output.
@@ -444,7 +458,9 @@ fn modifications_compose_and_a_later_hook_still_decides() {
         ]}}"#
     ));
 
-    let outcome = workspace.decide("shell", r#"{"command":"git push --force"}"#);
+    let outcome = workspace
+        .decide("shell", r#"{"command":"git push --force"}"#)
+        .await;
 
     let HookOutcome::Modify { input, reason } = outcome else {
         panic!("expected a modification, got {outcome:?}");
@@ -453,8 +469,8 @@ fn modifications_compose_and_a_later_hook_still_decides() {
     assert_eq!(reason, Some("hook 'pin'; hook 'check'".to_string()));
 }
 
-#[test]
-fn a_rewrite_cannot_smuggle_a_call_past_a_later_guard() {
+#[tokio::test]
+async fn a_rewrite_cannot_smuggle_a_call_past_a_later_guard() {
     let workspace = Workspace::new();
     let rewriter = workspace.script(
         "rewrite.sh",
@@ -471,7 +487,7 @@ fn a_rewrite_cannot_smuggle_a_call_past_a_later_guard() {
         ]}}"#
     ));
 
-    let reason = deny_reason(workspace.decide("shell", "{}"));
+    let reason = deny_reason(workspace.decide("shell", "{}").await);
 
     assert!(
         reason.contains("no rewrite makes this fine"),
@@ -479,8 +495,8 @@ fn a_rewrite_cannot_smuggle_a_call_past_a_later_guard() {
     );
 }
 
-#[test]
-fn a_rewrite_lan_cannot_use_blocks_the_call() {
+#[tokio::test]
+async fn a_rewrite_lan_cannot_use_blocks_the_call() {
     let workspace = Workspace::new();
     // Running the original would silently ignore a hook that believed it had
     // intervened, which is the one outcome nobody asked for.
@@ -489,7 +505,7 @@ fn a_rewrite_lan_cannot_use_blocks_the_call() {
         r#"{{"schema": 1, "hooks": [{{"name": "broken", "command": ["{script}"]}}]}}"#
     ));
 
-    let reason = deny_reason(workspace.decide("shell", "{}"));
+    let reason = deny_reason(workspace.decide("shell", "{}").await);
 
     assert!(reason.contains("not a JSON object"), "got {reason}");
 }

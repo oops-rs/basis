@@ -1,7 +1,7 @@
 //! The append-only per-agent event journal, `events.jsonl`.
 //!
 //! One line per event, in the same flat shape `basis --json` streams —
-//! basis's `EventLine`, the `seq` spliced into the event object:
+//! basis's [`basis::EventLine`], with its sequence number beside the event:
 //! `{"seq":N,"type":...}`. One schema on disk and on stdout, so a consumer
 //! written against either reads both. The executor is the only writer (it
 //! holds `attach.lock`); watchers tail the file concurrently, which Rust's
@@ -16,10 +16,11 @@
 
 use std::{
     fs::{File, OpenOptions},
-    io::{self, BufRead, BufReader, Read, Seek, SeekFrom, Write},
+    io::{self, BufRead, BufReader, Read, Seek, SeekFrom},
     path::PathBuf,
 };
 
+use basis::{Event, EventLine, JsonlWriter, event::NoticeSeverity};
 use serde_json::Value;
 
 use super::{
@@ -30,7 +31,7 @@ use super::{
 /// The single writer's append handle. Sequence numbers continue from whatever
 /// the file already holds, so a resumed agent's journal stays monotonic.
 pub(crate) struct EventLog {
-    file: File,
+    writer: JsonlWriter<File>,
     next_seq: u64,
     written: u64,
     capped: bool,
@@ -48,7 +49,7 @@ impl EventLog {
         let written = file.seek(SeekFrom::End(0))?;
         let next_seq = last_seq(&path)?.map_or(1, |seq| seq.saturating_add(1));
         Ok(Self {
-            file,
+            writer: JsonlWriter::new(file),
             next_seq,
             written,
             capped: written >= MAX_EVENTS_BYTES,
@@ -58,7 +59,7 @@ impl EventLog {
     /// Appends one event, substituting a small notice for an oversized one and
     /// stopping (with one final notice) at the byte cap. Errors are the
     /// caller's to ignore: a run is never failed for observability.
-    pub(crate) fn append(&mut self, event: Value) -> io::Result<()> {
+    pub(crate) fn append(&mut self, event: Event) -> io::Result<()> {
         if self.capped {
             return Ok(());
         }
@@ -66,48 +67,30 @@ impl EventLog {
         {
             event
         } else {
-            serde_json::json!({
-                "type": "notice",
-                "severity": "warning",
-                "message": format!("event omitted because it exceeded {MAX_EVENT_BYTES} bytes"),
-            })
+            Event::Notice {
+                severity: NoticeSeverity::Warning,
+                message: format!("event omitted because it exceeded {MAX_EVENT_BYTES} bytes"),
+            }
         };
         self.write_line(event)?;
         if self.written >= MAX_EVENTS_BYTES {
             self.capped = true;
-            self.write_line(serde_json::json!({
-                "type": "notice",
-                "severity": "warning",
-                "message": format!(
+            self.write_line(Event::Notice {
+                severity: NoticeSeverity::Warning,
+                message: format!(
                     "event journal reached {MAX_EVENTS_BYTES} bytes; further events are not recorded"
                 ),
-            }))?;
+            })?;
         }
         Ok(())
     }
 
-    fn write_line(&mut self, event: Value) -> io::Result<()> {
-        // The flat `EventLine` shape: the seq keyed into the event object
-        // itself. An event is always a JSON object; anything else would be a
-        // caller bug, and wrapping it keeps the journal parseable instead of
-        // losing the line.
-        let mut object = match event {
-            Value::Object(object) => object,
-            other => {
-                let mut object = serde_json::Map::new();
-                object.insert("event".to_string(), other);
-                object
-            }
-        };
-        object.insert("seq".to_string(), Value::from(self.next_seq));
-
-        let mut line = serde_json::to_vec(&Value::Object(object))
-            .map_err(|error| io::Error::new(io::ErrorKind::InvalidData, error))?;
-        line.push(b'\n');
-        self.file.write_all(&line)?;
-        self.file.flush()?;
+    fn write_line(&mut self, event: Event) -> io::Result<()> {
+        let written = self
+            .writer
+            .write_line(EventLine::new(self.next_seq, event))?;
         self.next_seq = self.next_seq.saturating_add(1);
-        self.written = self.written.saturating_add(line.len() as u64);
+        self.written = self.written.saturating_add(written as u64);
         Ok(())
     }
 }
@@ -129,11 +112,7 @@ fn normalized(line: &[u8]) -> Option<(u64, Value)> {
         object.insert("seq".to_string(), Value::from(seq));
         return Some((seq, Value::Object(object)));
     }
-    // Flat lines — and the wrapped non-object `write_line` kept rather than
-    // lost. That one passes through as-is, seq intact, so the tailer still
-    // sees it, `last_seq` still counts it, and a reopened log never reuses
-    // its number; the renderer degrades to an `unrecognized event` line,
-    // which is the honest rendering of a line nothing can type.
+    // Flat lines pass through as-is.
     Some((seq, value))
 }
 
@@ -215,18 +194,23 @@ mod tests {
         paths
     }
 
+    fn notice(message: impl Into<String>) -> Event {
+        Event::Notice {
+            severity: NoticeSeverity::Info,
+            message: message.into(),
+        }
+    }
+
     #[test]
     fn sequence_numbers_survive_reopening_the_log() {
         let dir = tempfile::tempdir().unwrap();
         let paths = agent(&dir);
         {
             let mut log = EventLog::open(&paths).unwrap();
-            log.append(serde_json::json!({"type": "notice", "message": "one"}))
-                .unwrap();
+            log.append(notice("one")).unwrap();
         }
         let mut log = EventLog::open(&paths).unwrap();
-        log.append(serde_json::json!({"type": "notice", "message": "two"}))
-            .unwrap();
+        log.append(notice("two")).unwrap();
 
         let mut tail = EventTail::new(&paths, 0);
         let records = tail.poll().unwrap();
@@ -254,8 +238,7 @@ mod tests {
         .unwrap();
 
         let mut log = EventLog::open(&paths).unwrap();
-        log.append(serde_json::json!({"type": "notice", "message": "new"}))
-            .unwrap();
+        log.append(notice("new")).unwrap();
 
         let written = std::fs::read_to_string(paths.events()).unwrap();
         let last = written.lines().last().unwrap();
@@ -279,8 +262,10 @@ mod tests {
         let dir = tempfile::tempdir().unwrap();
         let paths = agent(&dir);
         let mut log = EventLog::open(&paths).unwrap();
-        log.append(serde_json::json!({"text": "x".repeat(MAX_EVENT_BYTES)}))
-            .unwrap();
+        log.append(Event::AssistantMessage {
+            text: "x".repeat(MAX_EVENT_BYTES),
+        })
+        .unwrap();
 
         let records = EventTail::new(&paths, 0).poll().unwrap();
         assert_eq!(records.len(), 1);
@@ -291,45 +276,20 @@ mod tests {
         );
     }
 
-    /// The defensive wrap in `write_line` must stay visible to the reader: a
-    /// kept line holds a seq the next writer must not reuse, and a tailer
-    /// that skipped it would hide that something was appended at all.
-    #[test]
-    fn a_wrapped_non_object_event_keeps_its_seq_and_reaches_the_tailer() {
-        let dir = tempfile::tempdir().unwrap();
-        let paths = agent(&dir);
-        {
-            let mut log = EventLog::open(&paths).unwrap();
-            log.append(serde_json::json!(42)).unwrap();
-        }
-        let mut log = EventLog::open(&paths).unwrap();
-        log.append(serde_json::json!({"type": "notice", "severity": "info", "message": "next"}))
-            .unwrap();
-
-        let records = EventTail::new(&paths, 0).poll().unwrap();
-        assert_eq!(records.len(), 2, "the kept line is not invisible");
-        assert_eq!(records[0]["seq"], 1);
-        assert_eq!(records[0]["event"], 42);
-        assert_eq!(
-            records[1]["seq"], 2,
-            "a reopened log continues past the wrapped line's number"
-        );
-    }
-
     #[test]
     fn the_tail_reads_incrementally_and_respects_since() {
         let dir = tempfile::tempdir().unwrap();
         let paths = agent(&dir);
         let mut log = EventLog::open(&paths).unwrap();
-        log.append(serde_json::json!({"n": 1})).unwrap();
-        log.append(serde_json::json!({"n": 2})).unwrap();
+        log.append(notice("one")).unwrap();
+        log.append(notice("two")).unwrap();
 
         let mut tail = EventTail::new(&paths, 1);
         let first = tail.poll().unwrap();
         assert_eq!(first.len(), 1);
         assert_eq!(first[0]["seq"], 2);
 
-        log.append(serde_json::json!({"n": 3})).unwrap();
+        log.append(notice("three")).unwrap();
         let second = tail.poll().unwrap();
         assert_eq!(second.len(), 1);
         assert_eq!(second[0]["seq"], 3);
@@ -344,9 +304,9 @@ mod tests {
         let paths = agent(&dir);
         let mut log = EventLog::open(&paths).unwrap();
         let mut tail = EventTail::new(&paths, 0);
-        log.append(serde_json::json!({"n": 1})).unwrap();
+        log.append(notice("one")).unwrap();
         assert_eq!(tail.poll().unwrap().len(), 1);
-        log.append(serde_json::json!({"n": 2})).unwrap();
+        log.append(notice("two")).unwrap();
         assert_eq!(tail.poll().unwrap().len(), 1);
     }
 }

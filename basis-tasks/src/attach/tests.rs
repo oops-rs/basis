@@ -16,7 +16,7 @@ fn record(
     task: &str,
     parent: Option<&str>,
     detached: bool,
-    pending: Option<PendingTerminal>,
+    pending: Option<Terminal>,
 ) -> AgentPaths {
     let paths = data.agent_dir(task).unwrap();
     std::fs::create_dir_all(paths.dir()).unwrap();
@@ -64,7 +64,7 @@ async fn a_recorded_completion_resumes_to_the_same_terminal() {
         &task,
         None,
         true,
-        Some(PendingTerminal::Succeeded {
+        Some(Terminal::Succeeded {
             result: "done".to_string(),
         }),
     );
@@ -85,7 +85,7 @@ async fn successful_parent_finalizes_only_after_attached_child() {
         &parent,
         None,
         true,
-        Some(PendingTerminal::Succeeded {
+        Some(Terminal::Succeeded {
             result: "parent".to_string(),
         }),
     );
@@ -94,7 +94,7 @@ async fn successful_parent_finalizes_only_after_attached_child() {
         &child,
         Some(&parent),
         false,
-        Some(PendingTerminal::Succeeded {
+        Some(Terminal::Succeeded {
             result: "child".to_string(),
         }),
     );
@@ -122,7 +122,7 @@ async fn failed_parent_cancels_children_but_not_detached_work() {
         &parent,
         None,
         true,
-        Some(PendingTerminal::Failed {
+        Some(Terminal::Failed {
             error: "boom".to_string(),
         }),
     );
@@ -179,7 +179,7 @@ async fn a_late_cancel_replaces_a_pending_completion() {
         &task,
         None,
         true,
-        Some(PendingTerminal::Succeeded {
+        Some(Terminal::Succeeded {
             result: "done".to_string(),
         }),
     );
@@ -198,7 +198,7 @@ async fn a_duration_too_large_to_be_a_deadline_waits_rather_than_panics() {
         &task,
         None,
         true,
-        Some(PendingTerminal::Succeeded {
+        Some(Terminal::Succeeded {
             result: "done".to_string(),
         }),
     );
@@ -211,7 +211,9 @@ async fn a_duration_too_large_to_be_a_deadline_waits_rather_than_panics() {
         .expect("does not panic");
     assert_eq!(
         outcome,
-        WaitOutcome::Terminal(json!({"state": "succeeded", "result": "done"}))
+        WaitOutcome::Terminal(TerminalRecord::from_raw(
+            json!({"state": "succeeded", "result": "done"})
+        ))
     );
 }
 
@@ -225,7 +227,7 @@ async fn terminal_failure_resolves_unanswered_messages() {
     inbox::start_next(&paths).unwrap();
     // The worker fails after accepting the messages.
     let mut meta = load_meta(&paths).unwrap();
-    meta.pending_terminal = Some(PendingTerminal::Failed {
+    meta.pending_terminal = Some(Terminal::Failed {
         error: "provider failed".to_string(),
     });
     save_meta(&paths, &meta).unwrap();
@@ -257,7 +259,7 @@ async fn a_crash_between_the_settle_pass_writes_recovers_on_the_next_attach() {
     // What run_model has already done by the time settle is ever reached:
     // pending_terminal recorded, durably, before either of settle's writes.
     let mut meta = load_meta(&paths).unwrap();
-    meta.pending_terminal = Some(PendingTerminal::Succeeded {
+    meta.pending_terminal = Some(Terminal::Succeeded {
         result: "done".to_string(),
     });
     save_meta(&paths, &meta).unwrap();
@@ -388,7 +390,8 @@ fn an_unknown_provider_fails_the_task_rather_than_going_unread() {
     let task = handle(1);
     let paths = record(&data, &task, None, true, None);
     let meta = load_meta(&paths).unwrap();
-    assert!(task_runtime(&data, &task, &meta).is_err());
+    let runtime = task_runtime(&data, &task, &meta).expect("base runtime");
+    assert!(run_parts(&meta, runtime).is_err());
 }
 
 /// ADR-0020: `prompt` is answerable exactly when a process is driving the

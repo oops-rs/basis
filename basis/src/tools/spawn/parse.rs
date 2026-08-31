@@ -20,7 +20,7 @@
 use serde_json::Value;
 
 /// The field the model fills in. One string, because the tool takes one thing.
-pub(crate) const INPUT_FIELD: &str = "input";
+pub const INPUT_FIELD: &str = "input";
 
 /// What the wire contract calls *here*, and therefore a name no target may
 /// take (ADR-0021).
@@ -37,7 +37,7 @@ pub(crate) const LOCAL_TARGET: &str = "local";
 
 /// Which of the two acts a call turned out to be.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub(crate) enum Mode {
+pub enum Mode {
     /// `!…` — run this.
     Command,
     /// Anything else — a prompt for a subagent.
@@ -48,7 +48,7 @@ impl Mode {
     /// The wire spelling, which is what an approver reads and what a pattern
     /// rule globs against. Pinned by a test: changing it silently rewrites
     /// every rule an operator has already stored.
-    pub(crate) const fn as_str(self) -> &'static str {
+    pub const fn as_str(self) -> &'static str {
         match self {
             Self::Command => "command",
             Self::Agent => "agent",
@@ -58,7 +58,7 @@ impl Mode {
 
 /// A call, after the only reading of it that ever happens.
 #[derive(Debug, Clone, PartialEq, Eq)]
-pub(crate) struct Spawn {
+pub struct Spawn {
     mode: Mode,
     body: String,
     /// Where the command runs, or `None` for *here* (ADR-0021). Always `None`
@@ -68,17 +68,18 @@ pub(crate) struct Spawn {
 }
 
 impl Spawn {
-    pub(crate) const fn mode(&self) -> Mode {
+    pub const fn mode(&self) -> Mode {
         self.mode
     }
 
-    pub(crate) fn body(&self) -> &str {
+    pub fn body(&self) -> &str {
         &self.body
     }
 
     /// The registered target this command named, or `None` for the local
-    /// executor. Never `Some("local")` — see [`LOCAL_TARGET`].
-    pub(crate) fn target(&self) -> Option<&str> {
+    /// executor. Never `Some("local")`: `local` is the reserved wire spelling
+    /// for the executor in this process, not a registered target name.
+    pub fn target(&self) -> Option<&str> {
         self.target.as_deref()
     }
 }
@@ -88,7 +89,7 @@ impl Spawn {
 /// The error text reaches the model as that call's result — mentra turns a
 /// failed preview into `Tool execution denied: <this>` — so it says what to
 /// write instead rather than merely that something was wrong.
-pub(crate) fn parse(input: &Value) -> Result<Spawn, String> {
+pub fn parse(input: &Value) -> Result<Spawn, String> {
     let raw = input
         .get(INPUT_FIELD)
         .and_then(Value::as_str)

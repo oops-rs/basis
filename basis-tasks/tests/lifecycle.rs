@@ -76,13 +76,13 @@ async fn spawn_ask_wait_and_list_from_rust_with_no_binary_involved() {
     let WaitOutcome::Terminal(reply_payload) = reply.outcome else {
         panic!("a scripted endpoint always answers inside the timeout");
     };
-    assert_eq!(reply_payload["state"], "succeeded", "{reply_payload}");
-    assert_eq!(reply_payload["message"], reply.message_id);
+    assert_eq!(reply_payload.raw["state"], "succeeded", "{reply_payload:?}");
+    assert_eq!(reply_payload.raw["message"], reply.message_id);
     assert!(
-        reply_payload["result"]
+        reply_payload.raw["result"]
             .as_str()
             .is_some_and(|text| !text.is_empty()),
-        "{reply_payload}"
+        "{reply_payload:?}"
     );
 
     // The task settles once its inbox empties — repeatable, and readable
@@ -94,7 +94,10 @@ async fn spawn_ask_wait_and_list_from_rust_with_no_binary_involved() {
     let WaitOutcome::Terminal(terminal) = outcome else {
         panic!("a settled task's terminal is read straight off disk");
     };
-    assert_eq!(terminal["state"], "succeeded");
+    assert!(matches!(
+        terminal.terminal,
+        Some(basis_tasks::Terminal::Succeeded { .. })
+    ));
 
     // And it is the workspace's task: `list` finds it, in the terminal state
     // the files say it is in, without ever touching an attach lock.
@@ -200,8 +203,10 @@ async fn a_wait_past_its_deadline_stops_between_turns_and_leaves_the_task_resuma
     let WaitOutcome::Terminal(terminal) = outcome else {
         panic!("a resumed task runs to its terminal inside a generous timeout");
     };
-    assert_eq!(terminal["state"], "succeeded", "{terminal}");
-    assert_eq!(terminal["result"], "reply-3", "{terminal}");
+    assert!(matches!(
+        terminal.terminal,
+        Some(basis_tasks::Terminal::Succeeded { ref result }) if result == "reply-3"
+    ));
     assert_eq!(
         endpoint.served(),
         3,

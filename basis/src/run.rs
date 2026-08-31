@@ -152,6 +152,19 @@ impl From<Effort> for mentra::provider::ReasoningEffort {
     }
 }
 
+impl Effort {
+    /// The stable string id basis writes for this level.
+    pub const fn type_tag(self) -> &'static str {
+        match self {
+            Self::Low => "low",
+            Self::Medium => "medium",
+            Self::High => "high",
+            Self::XHigh => "xhigh",
+            Self::Max => "max",
+        }
+    }
+}
+
 /// The level a session is set to, read back as basis names it.
 ///
 /// The direction [`PreparedRun::effort`](crate::PreparedRun::effort) needs, and
@@ -217,6 +230,27 @@ pub enum Bound {
     /// and a pooled run can cross the line without being the run that was
     /// stopped by it.
     TokenBudget,
+}
+
+impl Bound {
+    /// The stable string id basis writes for this bound.
+    pub const fn type_tag(self) -> &'static str {
+        match self {
+            Self::Deadline => "deadline",
+            Self::ToolBudget => "tool_budget",
+            Self::TokenBudget => "token_budget",
+        }
+    }
+
+    /// Reads a stable string id written by [`Self::type_tag`].
+    pub fn from_type_tag(tag: &str) -> Option<Self> {
+        match tag {
+            "deadline" => Some(Self::Deadline),
+            "tool_budget" => Some(Self::ToolBudget),
+            "token_budget" => Some(Self::TokenBudget),
+            _ => None,
+        }
+    }
 }
 
 /// What a completed run produced, alongside the sink it wrote to.
@@ -452,6 +486,27 @@ mod tests {
         ] {
             assert_eq!(ReasoningEffort::from(effort), expected);
         }
+    }
+
+    #[test]
+    fn stable_run_ids_match_the_wire_and_bound_reader() {
+        for effort in [
+            Effort::Low,
+            Effort::Medium,
+            Effort::High,
+            Effort::XHigh,
+            Effort::Max,
+        ] {
+            let written = serde_json::to_value(effort).expect("serializes");
+            assert_eq!(written.as_str().expect("string"), effort.type_tag());
+        }
+
+        for bound in [Bound::Deadline, Bound::ToolBudget, Bound::TokenBudget] {
+            let written = serde_json::to_value(bound).expect("serializes");
+            assert_eq!(written.as_str().expect("string"), bound.type_tag());
+            assert_eq!(Bound::from_type_tag(bound.type_tag()), Some(bound));
+        }
+        assert_eq!(Bound::from_type_tag("newer_bound"), None);
     }
 
     #[tokio::test]

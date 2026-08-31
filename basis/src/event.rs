@@ -182,6 +182,19 @@ pub struct ElidedToolResult {
     pub projected_content_bytes: usize,
 }
 
+/// One operator-facing line summarizing request-only tool-result reduction.
+pub fn tool_result_elision_line(
+    canonical_bytes: usize,
+    projected_bytes: usize,
+    changed: usize,
+) -> String {
+    let result = if changed == 1 { "result" } else { "results" };
+    format!(
+        "request tool results reduced: {canonical_bytes} -> {projected_bytes} bytes; \
+         {changed} {result} changed"
+    )
+}
+
 /// How a run ended.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(tag = "status", rename_all = "snake_case")]
@@ -196,6 +209,16 @@ pub enum RunOutcome {
     /// mentra builds from the bare message alone and puts on the stream for
     /// the same failure.
     Error { message: String },
+}
+
+impl RunOutcome {
+    /// The stable string id basis writes for this outcome.
+    pub const fn type_tag(&self) -> &'static str {
+        match self {
+            Self::Ok => "ok",
+            Self::Error { .. } => "error",
+        }
+    }
 }
 
 /// A skill the run can load by name. Bodies stay out of the stream — they are
@@ -533,6 +556,22 @@ mod tests {
         ] {
             let written = serde_json::to_value(&event).expect("serializes");
             assert_eq!(written["type"].as_str().expect("tagged"), event.type_tag());
+        }
+    }
+
+    #[test]
+    fn the_run_outcome_type_tag_is_the_status_serde_writes() {
+        for outcome in [
+            RunOutcome::Ok,
+            RunOutcome::Error {
+                message: "failed".to_string(),
+            },
+        ] {
+            let written = serde_json::to_value(&outcome).expect("serializes");
+            assert_eq!(
+                written["status"].as_str().expect("tagged"),
+                outcome.type_tag()
+            );
         }
     }
 

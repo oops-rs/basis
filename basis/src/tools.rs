@@ -54,4 +54,7 @@ pub use mentra::tool::{
     ToolAuthorizationPreview, ToolCapability, ToolContext, ToolDefinition, ToolDurability,
     ToolExecutionCategory, ToolExecutor, ToolResult, ToolSideEffectLevel,
 };
-pub use spawn::{ChildContext, ChildSpec, DEFAULT_DELEGATION_DEPTH, SPAWN, SpawnTool};
+pub use spawn::{
+    ChildContext, ChildSpec, DEFAULT_DELEGATION_DEPTH, SPAWN, SPAWN_INPUT_FIELD, SpawnInput,
+    SpawnMode, SpawnTool, parse_spawn_input,
+};

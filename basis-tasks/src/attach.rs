@@ -60,9 +60,8 @@ use std::{
 };
 
 use basis::{
-    AllowAll, Approver, Bound, CancellationToken, DenyAll, Event, EventSink, ModelSelector,
-    RunOutcome, RunSpec, Runtime, RuntimeBuilder, ShellAccess, TurnOptions, Workspace,
-    WorkspaceBuilder, provider,
+    AllowAll, Approver, Bound, CancellationToken, DenyAll, Event, EventSink, RunOutcome, RunSpec,
+    Runtime, RuntimeBuilder, ShellAccess, TurnOptions, Workspace, WorkspaceBuilder,
 };
 use serde_json::Value;
 use tokio::time::{self, Instant};
@@ -76,9 +75,9 @@ use crate::{
     live::DriveContext,
     lock,
     state::{
-        MAX_RESULT_BYTES, MAX_TASKS, MessageReply, PendingTerminal, TaskMeta, bounded_text,
-        cancel_requested, load_meta, now_ms, read_terminal, request_cancel, save_meta,
-        write_terminal,
+        MAX_RESULT_BYTES, MAX_TASKS, MessageReply, TaskMeta, Terminal, TerminalRecord,
+        bounded_text, cancel_requested, load_meta, now_ms, read_terminal, request_cancel,
+        save_meta, write_terminal,
     },
 };
 
@@ -92,10 +91,10 @@ pub const POLL: Duration = Duration::from_millis(100);
 /// enough said about it to retry sensibly.
 #[derive(Debug, Clone, PartialEq)]
 pub enum WaitOutcome {
-    /// The raw terminal payload, as `terminal.json` holds it — or, for
-    /// `wait_for_message`, the correlated reply or terminal-tagged payload
-    /// `message_payload_for_dispatch` resolved.
-    Terminal(Value),
+    /// The terminal payload, with its exact JSON and typed fields side by
+    /// side. For `wait_for_message`, this is the correlated reply or
+    /// terminal-tagged payload `message_payload_for_dispatch` resolved.
+    Terminal(TerminalRecord),
     /// The bounded wait elapsed; `attached` reports whether a live executor
     /// held the lock at that moment.
     TimedOut { attached: bool },
@@ -137,7 +136,7 @@ pub(crate) async fn wait_for_terminal(
     let ctx = ctx.clone().until(deadline.map(Instant::into_std));
     loop {
         if let Some(terminal) = poll_once(data.clone(), task.to_string(), ctx.clone()).await? {
-            return Ok(WaitOutcome::Terminal(terminal));
+            return Ok(WaitOutcome::Terminal(TerminalRecord::from_raw(terminal)));
         }
         if deadline.is_some_and(|deadline| Instant::now() >= deadline) {
             return Ok(WaitOutcome::TimedOut {
@@ -237,7 +236,9 @@ pub(crate) async fn wait_for_message(
         )
         .await?
         {
-            MessagePoll::Resolved(payload) => return Ok(WaitOutcome::Terminal(payload)),
+            MessagePoll::Resolved(payload) => {
+                return Ok(WaitOutcome::Terminal(TerminalRecord::from_raw(payload)));
+            }
             // A turn ran (for this message or another) but did not resolve
             // ours: recheck immediately, the way the pre-thread-split loop
             // did with its own `continue` — no reason to sleep when there is
@@ -478,7 +479,7 @@ async fn run_model(
         return record_pending(
             paths,
             meta,
-            PendingTerminal::Failed {
+            Terminal::Failed {
                 error: "task deadline elapsed before the next turn".to_string(),
             },
             Some(Bound::Deadline),
@@ -487,7 +488,7 @@ async fn run_model(
     // A cancel before any turn — on a never-attached or between-attaches
     // agent — settles without opening a workspace or touching the model.
     if cancel_requested(paths) {
-        return record_pending(paths, meta, PendingTerminal::Cancelled, None);
+        return record_pending(paths, meta, Terminal::Cancelled, None);
     }
     inbox::revert_in_flight(paths)?;
 
@@ -509,8 +510,11 @@ async fn run_model(
         Ok(runtime) => runtime,
         Err(error) => return record_failure(paths, meta, error, None),
     };
-    let (builder, spec) = run_parts(meta);
-    let workspace = match builder.with_runtime_builder(runtime).open().await {
+    let (builder, spec) = match run_parts(meta, runtime) {
+        Ok(parts) => parts,
+        Err(error) => return record_failure(paths, meta, error, None),
+    };
+    let workspace = match builder.open().await {
         Ok(workspace) => Arc::new(workspace),
         Err(error) => return record_failure(paths, meta, error.to_string(), None),
     };
@@ -563,14 +567,14 @@ async fn run_model(
         // running is never cut short by any of them except the task's own
         // deadline (below, around the execution itself).
         if cancel_requested(paths) {
-            return record_pending(paths, meta, PendingTerminal::Cancelled, None);
+            return record_pending(paths, meta, Terminal::Cancelled, None);
         }
         let remaining = remaining_deadline(meta.deadline_at_ms);
         if remaining.as_ref().is_some_and(Duration::is_zero) {
             return record_pending(
                 paths,
                 meta,
-                PendingTerminal::Failed {
+                Terminal::Failed {
                     error: "task deadline elapsed before the next turn".to_string(),
                 },
                 Some(Bound::Deadline),
@@ -597,12 +601,7 @@ async fn run_model(
         if initial_done && message.is_none() {
             let (result, truncated) = bounded_text(last_result, MAX_RESULT_BYTES);
             meta.result_truncated = truncated;
-            return record_pending(
-                paths,
-                meta,
-                PendingTerminal::Succeeded { result },
-                last_stopped_by,
-            );
+            return record_pending(paths, meta, Terminal::Succeeded { result }, last_stopped_by);
         }
 
         let mut turn = TurnOptions::default().with_cancel(cancellation.clone());
@@ -635,7 +634,7 @@ async fn run_model(
                     return record_pending(
                         paths,
                         meta,
-                        PendingTerminal::Failed {
+                        Terminal::Failed {
                             error: "task deadline elapsed during the turn".to_string(),
                         },
                         Some(Bound::Deadline),
@@ -659,7 +658,7 @@ async fn run_model(
         match report.outcome {
             RunOutcome::Error { message } => {
                 return if cancel_requested(paths) {
-                    record_pending(paths, meta, PendingTerminal::Cancelled, None)
+                    record_pending(paths, meta, Terminal::Cancelled, None)
                 } else {
                     record_failure(paths, meta, message, stopped_by)
                 };
@@ -689,7 +688,7 @@ async fn run_model(
                 return record_failure(
                     paths,
                     meta,
-                    format!("unrecognized run outcome: {outcome:?}"),
+                    format!("unrecognized run outcome: {}", outcome.type_tag()),
                     stopped_by,
                 );
             }
@@ -703,10 +702,10 @@ async fn run_model(
 fn record_pending(
     paths: &AgentPaths,
     meta: &mut TaskMeta,
-    completion: PendingTerminal,
+    completion: Terminal,
     stopped_by: Option<Bound>,
 ) -> Result<Turns, String> {
-    if matches!(completion, PendingTerminal::Cancelled) {
+    if matches!(completion, Terminal::Cancelled) {
         meta.result_truncated = false;
         meta.stopped_by = None;
     } else {
@@ -726,7 +725,7 @@ fn record_failure(
 ) -> Result<Turns, String> {
     let (error, _) = bounded_text(message, MAX_RESULT_BYTES);
     meta.result_truncated = false;
-    record_pending(paths, meta, PendingTerminal::Failed { error }, stopped_by)
+    record_pending(paths, meta, Terminal::Failed { error }, stopped_by)
 }
 
 /// The settle pass: parent scope as one ordering constraint, then two writes
@@ -745,10 +744,7 @@ async fn settle(
     ctx: &DriveContext,
 ) -> Result<Value, String> {
     reconsider_cancel(paths, meta)?;
-    let cancel_children = !matches!(
-        meta.pending_terminal,
-        Some(PendingTerminal::Succeeded { .. })
-    );
+    let cancel_children = !matches!(meta.pending_terminal, Some(Terminal::Succeeded { .. }));
     settle_children(data, meta, cancel_children, ctx).await?;
     // A cancel that arrived while children settled still lands before the
     // terminal record, exactly as the daemon replaced a pending completion.
@@ -763,9 +759,8 @@ async fn settle(
 }
 
 fn reconsider_cancel(paths: &AgentPaths, meta: &mut TaskMeta) -> Result<(), String> {
-    if cancel_requested(paths) && !matches!(meta.pending_terminal, Some(PendingTerminal::Cancelled))
-    {
-        record_pending(paths, meta, PendingTerminal::Cancelled, None)?;
+    if cancel_requested(paths) && !matches!(meta.pending_terminal, Some(Terminal::Cancelled)) {
+        record_pending(paths, meta, Terminal::Cancelled, None)?;
     }
     Ok(())
 }
@@ -825,20 +820,23 @@ async fn settle_children(
     }
 }
 
-/// The per-workspace and per-run halves of the recorded options.
-///
-/// The provider and the base URL are the other half — process facts since
-/// ADR-0018 — and are stated on [`task_runtime`]'s recipe instead. Saying them
-/// here as well would build a value that
-/// [`with_runtime_builder`](basis::WorkspaceBuilder::with_runtime_builder)
-/// then replaces.
-fn run_parts(meta: &TaskMeta) -> (WorkspaceBuilder, RunSpec) {
+/// Applies the recorded process/workspace options to the runtime recipe, then
+/// builds this turn's run spec.
+fn run_parts(
+    meta: &TaskMeta,
+    runtime: RuntimeBuilder,
+) -> Result<(WorkspaceBuilder, RunSpec), String> {
     let options = &meta.options;
-    let mut builder = Workspace::builder(Path::new(&meta.workspace))
-        .with_shell(ShellAccess::from_flag(!options.no_shell));
-    if let Some(model) = &options.model {
-        builder = builder.with_model(ModelSelector::Id(model.clone()));
-    }
+    let (runtime, mut builder) = crate::configure_builders(
+        runtime,
+        Workspace::builder(Path::new(&meta.workspace)),
+        options.provider.as_deref(),
+        options.base_url.as_deref(),
+        options.model.as_deref(),
+        ShellAccess::from_flag(!options.no_shell),
+    )
+    .map_err(|error| error.to_string())?;
+    builder = builder.with_runtime_builder(runtime);
     // Recorded as the type it is; `load_meta` has already folded the
     // pre-0.6 two-string spelling into this one field.
     if let Some(system_prompt) = options.system_prompt.clone() {
@@ -858,12 +856,12 @@ fn run_parts(meta: &TaskMeta) -> (WorkspaceBuilder, RunSpec) {
     if let Some(token_budget) = options.token_budget {
         spec = spec.with_token_budget(token_budget);
     }
-    (builder, spec)
+    Ok((builder, spec))
 }
 
-/// The recipe for this task's own runtime: the process half of the recorded
-/// options, plus the identity a spawned command needs to find the same data
-/// directory and name its own children.
+/// The base recipe for this task's own runtime: store and command identity.
+/// [`run_parts`] applies the recorded provider and endpoint through the same
+/// concrete builder mapping as the attended CLI route.
 ///
 /// The exported `BASIS_DATA_DIR` is absolute because `DataDir` resolves its
 /// root once at construction (see `data_dir::absolutize`): a child re-reads
@@ -882,12 +880,6 @@ fn task_runtime(data: &DataDir, task: &str, meta: &TaskMeta) -> Result<RuntimeBu
         .with_store_dir(data.store_dir(key))
         .with_command_environment(crate::BASIS_TASK_ID, task)
         .with_command_environment(crate::BASIS_DATA_DIR, data.root().to_string_lossy());
-    if let Some(name) = &meta.options.provider {
-        runtime = runtime.with_provider(provider::parse(name).map_err(|error| error.to_string())?);
-    }
-    if let Some(base_url) = &meta.options.base_url {
-        runtime = runtime.with_base_url(base_url);
-    }
     if let Some(parent) = &meta.parent {
         runtime = runtime.with_command_environment(crate::BASIS_PARENT_TASK_ID, parent);
     }
@@ -940,10 +932,10 @@ struct FileSink {
 
 impl EventSink for FileSink {
     fn emit(&mut self, event: Event) -> io::Result<()> {
-        if let Ok(value) = serde_json::to_value(event) {
+        if let Ok(value) = serde_json::to_value(&event) {
             self.ctx.show(&value);
             if let Ok(mut log) = self.log.lock() {
-                let _ = log.append(value);
+                let _ = log.append(event);
             }
         }
         Ok(())

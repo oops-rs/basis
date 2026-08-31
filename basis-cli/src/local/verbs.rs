@@ -8,7 +8,7 @@
 
 use std::{path::PathBuf, process::ExitCode, sync::Arc, time::Duration};
 
-use basis_tasks::{Continuation, RunSpec, TaskHandle, Tasks, WaitOutcome};
+use basis_tasks::{Continuation, MessageState, RunSpec, TaskHandle, Tasks, WaitOutcome};
 use serde_json::json;
 
 use crate::{
@@ -21,7 +21,7 @@ use crate::{
 use super::{
     error::{ClientError, message_timeout, wait_timeout, watch_timeout},
     prompt_host::CliPromptHost,
-    render::{Live, decorate_terminal, print_hint, render_result},
+    render::{Live, decorate_terminal, print_hint, render_result, render_terminal},
 };
 
 const DEFAULT_WAIT: Duration = Duration::from_secs(30 * 60);
@@ -67,7 +67,8 @@ pub(crate) async fn spawn(args: RunArgs, attach: bool) -> Result<ExitCode, Clien
         .await?;
     match outcome {
         WaitOutcome::Terminal(terminal) => {
-            live.settled(&decorate_terminal(handle.as_ref(), terminal), args.json)
+            let terminal = decorate_terminal(handle.as_ref(), terminal);
+            live.settled(&terminal, args.json)
         }
         WaitOutcome::TimedOut { attached } => Err(wait_timeout(handle.as_ref(), timeout, attached)),
     }
@@ -189,7 +190,7 @@ async fn send_message(
         .ask(&handle, caller.as_ref(), message, timeout)
         .await?;
     match reply.outcome {
-        WaitOutcome::Terminal(payload) => render_result(&payload, json),
+        WaitOutcome::Terminal(record) => render_terminal(&record, json),
         WaitOutcome::TimedOut { .. } => Err(message_timeout(&task, &reply.message_id, timeout)),
     }
 }
@@ -221,14 +222,15 @@ pub(crate) async fn wait(args: WaitArgs) -> Result<ExitCode, ClientError> {
             .wait_message(&handle, caller.as_ref(), &message_id, timeout)
             .await?
         {
-            WaitOutcome::Terminal(payload) => render_result(&payload, args.json),
+            WaitOutcome::Terminal(record) => render_terminal(&record, args.json),
             WaitOutcome::TimedOut { .. } => Err(message_timeout(&args.task, &message_id, timeout)),
         };
     }
 
     // A terminal result is repeatably observable before any policy question.
     if let Some(terminal) = tasks.terminal(&handle)? {
-        return render_result(&decorate_terminal(&args.task, terminal), args.json);
+        let terminal = decorate_terminal(&args.task, terminal);
+        return render_terminal(&terminal, args.json);
     }
     // Waiting on an unattached agent means driving it, which puts this
     // process in exactly the seat `spawn` is in: the run is happening here,
@@ -244,7 +246,8 @@ pub(crate) async fn wait(args: WaitArgs) -> Result<ExitCode, ClientError> {
         .await?
     {
         WaitOutcome::Terminal(terminal) => {
-            live.settled(&decorate_terminal(&args.task, terminal), args.json)
+            let terminal = decorate_terminal(&args.task, terminal);
+            live.settled(&terminal, args.json)
         }
         WaitOutcome::TimedOut { attached } => Err(wait_timeout(&args.task, timeout, attached)),
     }
@@ -260,7 +263,8 @@ pub(crate) async fn cancel(args: CancelArgs) -> Result<ExitCode, ClientError> {
     // cancellation it had no standing to ask for had happened.
     tasks.validate_cancel_target(caller.as_ref(), &handle)?;
     if let Some(terminal) = tasks.terminal(&handle)? {
-        return render_result(&decorate_terminal(&args.task, terminal), args.json);
+        let terminal = decorate_terminal(&args.task, terminal);
+        return render_terminal(&terminal, args.json);
     }
     tasks.cancel(&handle, caller.as_ref())?;
     let payload = json!({
@@ -302,7 +306,8 @@ pub(crate) async fn watch(args: WatchArgs) -> Result<ExitCode, ClientError> {
             }
         }
         if let Some(terminal) = terminal {
-            return live.settled(&decorate_terminal(&args.task, terminal), args.json);
+            let terminal = decorate_terminal(&args.task, terminal);
+            return live.settled(&terminal, args.json);
         }
         if tokio::time::Instant::now() >= deadline {
             return Err(watch_timeout(&args.task, tasks.is_attached(&handle)?));
@@ -320,29 +325,30 @@ pub(crate) async fn inbox(args: InboxArgs) -> Result<ExitCode, ClientError> {
         })?;
     let handle = TaskHandle::parse(task.clone())?;
     let tasks = open_tasks(current_dir()?)?;
-    let payload = tasks.inbox(&handle)?;
+    let record = tasks.inbox(&handle)?;
     if args.json {
-        println!("{payload}");
+        println!("{}", record.raw);
         return Ok(ExitCode::from(EXIT_OK));
     }
 
-    let messages = payload["messages"].as_array().cloned().unwrap_or_default();
-    if messages.is_empty() {
+    if record.messages.is_empty() {
         println!("inbox is empty");
     } else {
-        for message in messages {
-            let state = message["state"].as_str().unwrap_or("unknown");
-            let id = message["id"].as_str().unwrap_or("?");
-            let body = message["body"].as_str().unwrap_or_default();
-            println!("[{state}] {id}: {body}");
-            if let Some(reply) = message["reply"]["result"].as_str()
-                && !reply.is_empty()
+        for message in &record.messages {
+            let state = match message.state {
+                MessageState::Pending => "pending",
+                MessageState::InFlight => "in_flight",
+                MessageState::Delivered => "delivered",
+            };
+            println!("[{state}] {}: {}", message.id, message.body);
+            if let Some(reply) = &message.reply
+                && !reply.result.is_empty()
             {
-                println!("  reply: {reply}");
+                println!("  reply: {}", reply.result);
             }
         }
     }
-    print_hint(&payload);
+    print_hint(&record.raw);
     Ok(ExitCode::from(EXIT_OK))
 }
 

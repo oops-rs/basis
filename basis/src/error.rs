@@ -349,3 +349,28 @@ pub enum RunError {
     #[error("a host tool could not be registered: {0}")]
     HostTool(#[from] mentra::tool::ToolNameCollision),
 }
+
+impl RunError {
+    /// Whether this failure means another holder already has the conversation open.
+    pub fn is_open_elsewhere(&self) -> bool {
+        matches!(
+            self,
+            Self::Runtime(mentra::error::RuntimeError::LeaseUnavailable(_))
+        )
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn open_elsewhere_identifies_only_a_lease_conflict() {
+        let conflict = RunError::Runtime(mentra::error::RuntimeError::LeaseUnavailable(
+            "already leased".to_string(),
+        ));
+
+        assert!(conflict.is_open_elsewhere());
+        assert!(!RunError::EmptyPrompt.is_open_elsewhere());
+    }
+}

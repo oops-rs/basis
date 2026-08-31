@@ -48,11 +48,11 @@ impl Reports {
     }
 }
 
-fn decide(hooks: Vec<HookSpec>) -> (HookOutcome, Vec<String>) {
+async fn decide(hooks: Vec<HookSpec>) -> (HookOutcome, Vec<String>) {
     let reports = Reports::default();
     let runner = reports.install(HookRunner::new(".", hooks));
 
-    let outcome = runner.decide(&call("shell"));
+    let outcome = runner.decide_async(&call("shell")).await;
 
     (outcome, reports.all())
 }
@@ -94,28 +94,29 @@ fn allows(_call: &HookRequest) -> Result<HookOutcome, InterceptorError> {
     Ok(HookOutcome::Allow)
 }
 
-#[test]
-fn no_participants_means_no_subprocess_and_no_opinion() {
-    let (outcome, reports) = decide(Vec::new());
+#[tokio::test]
+async fn no_participants_means_no_subprocess_and_no_opinion() {
+    let (outcome, reports) = decide(Vec::new()).await;
 
     assert_eq!(outcome, HookOutcome::Allow);
     assert!(reports.is_empty());
 }
 
-#[test]
-fn a_hook_that_allows_lets_the_call_through() {
-    let (outcome, reports) = decide(vec![sh("ok", r#"echo '{"decision":"allow"}'"#)]);
+#[tokio::test]
+async fn a_hook_that_allows_lets_the_call_through() {
+    let (outcome, reports) = decide(vec![sh("ok", r#"echo '{"decision":"allow"}'"#)]).await;
 
     assert_eq!(outcome, HookOutcome::Allow);
     assert!(reports.is_empty(), "a working hook is not news");
 }
 
-#[test]
-fn a_denial_carries_the_hook_name_and_its_reason() {
+#[tokio::test]
+async fn a_denial_carries_the_hook_name_and_its_reason() {
     let (outcome, _) = decide(vec![sh(
         "guard",
         r#"echo '{"decision":"deny","reason":"not here"}'"#,
-    )]);
+    )])
+    .await;
 
     assert_eq!(
         outcome,
@@ -123,13 +124,14 @@ fn a_denial_carries_the_hook_name_and_its_reason() {
     );
 }
 
-#[test]
-fn the_hook_is_told_what_the_tool_wants() {
+#[tokio::test]
+async fn the_hook_is_told_what_the_tool_wants() {
     // Echoing the request back proves the wire contract reached stdin.
     let (outcome, _) = decide(vec![sh(
         "echoer",
         r#"printf '{"decision":"deny","reason":%s}' "\"$(cat | tr -d '\n' | cut -c1-200)\"" "#,
-    )]);
+    )])
+    .await;
 
     let reason = denied(outcome);
     assert!(reason.contains("hook_schema"));
@@ -137,15 +139,16 @@ fn the_hook_is_told_what_the_tool_wants() {
     assert!(reason.contains("call-1"));
 }
 
-#[test]
-fn the_first_refusal_stops_the_chain() {
+#[tokio::test]
+async fn the_first_refusal_stops_the_chain() {
     let (outcome, _) = decide(vec![
         sh("first", r#"echo '{"decision":"deny","reason":"mine"}'"#),
         sh(
             "second",
             r#"echo '{"decision":"deny","reason":"also mine"}'"#,
         ),
-    ]);
+    ])
+    .await;
 
     assert_eq!(
         outcome,
@@ -154,27 +157,31 @@ fn the_first_refusal_stops_the_chain() {
     );
 }
 
-#[test]
-fn a_hook_only_hears_about_the_tools_it_asked_for() {
+#[tokio::test]
+async fn a_hook_only_hears_about_the_tools_it_asked_for() {
     let runner = HookRunner::new(
         ".",
         vec![sh("guard", r#"echo '{"decision":"deny"}'"#).with_tools(vec!["files".to_string()])],
     )
     .with_reporter(|_| {});
 
-    assert_eq!(runner.decide(&call("shell")), HookOutcome::Allow);
     assert_eq!(
-        runner.decide(&call("files")),
+        runner.decide_async(&call("shell")).await,
+        HookOutcome::Allow
+    );
+    assert_eq!(
+        runner.decide_async(&call("files")).await,
         HookOutcome::Deny("denied by hook 'guard'".to_string())
     );
 }
 
-#[test]
-fn a_modify_replaces_the_input() {
+#[tokio::test]
+async fn a_modify_replaces_the_input() {
     let (outcome, reports) = decide(vec![sh(
         "redact",
         r#"echo '{"decision":"modify","input":{"command":"ls"},"reason":"stripped the token"}'"#,
-    )]);
+    )])
+    .await;
 
     assert_eq!(
         outcome,
@@ -186,8 +193,8 @@ fn a_modify_replaces_the_input() {
     assert!(reports.is_empty(), "modifying is not a failure");
 }
 
-#[test]
-fn modifications_compose_in_order() {
+#[tokio::test]
+async fn modifications_compose_in_order() {
     // The second hook answers differently depending on what it was shown,
     // so its output proves it was asked about the rewritten call.
     let (outcome, _) = decide(vec![
@@ -206,7 +213,8 @@ fn modifications_compose_in_order() {
             esac
             "#,
         ),
-    ]);
+    ])
+    .await;
 
     let HookOutcome::Modify { input, reason } = outcome else {
         panic!("expected a modification");
@@ -219,15 +227,16 @@ fn modifications_compose_in_order() {
     );
 }
 
-#[test]
-fn a_later_hook_can_still_deny_a_modified_call() {
+#[tokio::test]
+async fn a_later_hook_can_still_deny_a_modified_call() {
     let (outcome, _) = decide(vec![
         sh(
             "rewriter",
             r#"echo '{"decision":"modify","input":{"command":"sneaky"}}'"#,
         ),
         sh("guard", r#"echo '{"decision":"deny","reason":"still no"}'"#),
-    ]);
+    ])
+    .await;
 
     assert_eq!(
         outcome,
@@ -236,12 +245,13 @@ fn a_later_hook_can_still_deny_a_modified_call() {
     );
 }
 
-#[test]
-fn a_replacement_that_is_not_an_object_is_refused() {
+#[tokio::test]
+async fn a_replacement_that_is_not_an_object_is_refused() {
     let (outcome, reports) = decide(vec![sh(
         "confused",
         r#"echo '{"decision":"modify","input":"ls -l"}'"#,
-    )]);
+    )])
+    .await;
 
     assert!(
         denied(outcome).contains("not a JSON object"),
@@ -250,8 +260,8 @@ fn a_replacement_that_is_not_an_object_is_refused() {
     assert_eq!(reports.len(), 1);
 }
 
-#[test]
-fn a_broken_hook_denies_by_default_and_says_so() {
+#[tokio::test]
+async fn a_broken_hook_denies_by_default_and_says_so() {
     let cases = [
         ("gone", sh("gone", "exit 7"), "exited with code 7"),
         ("silent", sh("silent", "true"), "printed nothing"),
@@ -268,7 +278,7 @@ fn a_broken_hook_denies_by_default_and_says_so() {
     ];
 
     for (name, spec, expected) in cases {
-        let (outcome, reports) = decide(vec![spec]);
+        let (outcome, reports) = decide(vec![spec]).await;
 
         let reason = denied(outcome);
         assert!(
@@ -280,29 +290,31 @@ fn a_broken_hook_denies_by_default_and_says_so() {
     }
 }
 
-#[test]
-fn a_hooks_stderr_reaches_the_reason() {
-    let (outcome, _) = decide(vec![sh("noisy", "echo 'no python' >&2; exit 1")]);
+#[tokio::test]
+async fn a_hooks_stderr_reaches_the_reason() {
+    let (outcome, _) = decide(vec![sh("noisy", "echo 'no python' >&2; exit 1")]).await;
 
     assert!(denied(outcome).contains("no python"));
 }
 
-#[test]
-fn a_hanging_hook_denies_rather_than_hanging_the_turn() {
+#[tokio::test]
+async fn a_hanging_hook_denies_rather_than_hanging_the_turn() {
     let (outcome, reports) = decide(vec![
         sh("stuck", "sleep 30").with_timeout(Duration::from_millis(150)),
-    ]);
+    ])
+    .await;
 
     assert!(denied(outcome).contains("150ms"));
     assert_eq!(reports.len(), 1);
 }
 
-#[test]
-fn an_observer_can_choose_to_fail_open() {
+#[tokio::test]
+async fn an_observer_can_choose_to_fail_open() {
     let (outcome, reports) = decide(vec![
         sh("logger", "exit 1").with_on_failure(OnFailure::Allow),
         sh("guard", r#"echo '{"decision":"allow"}'"#),
-    ]);
+    ])
+    .await;
 
     assert_eq!(
         outcome,
@@ -316,8 +328,8 @@ fn an_observer_can_choose_to_fail_open() {
     );
 }
 
-#[test]
-fn a_hook_is_handed_the_baseline_and_nothing_from_the_parent() {
+#[tokio::test]
+async fn a_hook_is_handed_the_baseline_and_nothing_from_the_parent() {
     // A hook is asked a question, not handed a credential: the only variables
     // it sees are the baseline that makes a program runnable at all. The hook
     // reports every name it was given as its reason, so the assertion reads
@@ -325,7 +337,8 @@ fn a_hook_is_handed_the_baseline_and_nothing_from_the_parent() {
     let (outcome, _) = decide(vec![sh(
         "env",
         r#"printf '{"decision":"deny","reason":"%s"}' "$(env | cut -d= -f1 | tr '\n' ' ')""#,
-    )]);
+    )])
+    .await;
 
     let reason = denied(outcome);
     let listed: Vec<&str> = reason
@@ -347,8 +360,8 @@ fn a_hook_is_handed_the_baseline_and_nothing_from_the_parent() {
     }
 }
 
-#[test]
-fn a_command_is_never_handed_to_a_shell() {
+#[tokio::test]
+async fn a_command_is_never_handed_to_a_shell() {
     // `;` is shell syntax; as argv it is just an argument. If basis ever
     // started interpreting the command, `touch` would run.
     let tmp = tempfile::tempdir().expect("tempdir");
@@ -361,7 +374,7 @@ fn a_command_is_never_handed_to_a_shell() {
         ],
     );
 
-    let (outcome, _) = decide(vec![spec]);
+    let (outcome, _) = decide(vec![spec]).await;
 
     // The whole line is echoed, so it is not a decision — which is itself
     // the proof that nothing split it on the semicolon.
@@ -550,17 +563,6 @@ async fn an_interceptor_that_panics_denies_rather_than_taking_the_turn() {
 }
 
 #[tokio::test]
-async fn a_synchronous_decision_refuses_rather_than_skipping_an_interceptor() {
-    // Silently deciding without a registered guard is the one failure this
-    // module is arranged to avoid, so the synchronous path says no.
-    let runner = HookRunner::new(".", Vec::new())
-        .with_interceptor(Fixed::new("guard", allows))
-        .with_reporter(|_| {});
-
-    assert!(denied(runner.decide(&call("shell"))).contains("decide_async"));
-}
-
-#[tokio::test]
 async fn an_interceptor_may_await_on_a_current_thread_runtime() {
     struct Awaits;
 
@@ -648,8 +650,8 @@ async fn a_hook_runs_from_inside_a_current_thread_runtime() {
     );
 }
 
-#[test]
-fn the_debug_view_names_both_bindings_without_leaking_the_reporter() {
+#[tokio::test]
+async fn the_debug_view_names_both_bindings_without_leaking_the_reporter() {
     let runner = HookRunner::new("/repo", vec![sh("guard", "true")])
         .with_interceptor(Fixed::new("redact", allows));
 

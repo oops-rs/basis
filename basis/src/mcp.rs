@@ -116,14 +116,7 @@ impl std::fmt::Debug for McpServer {
                 .field("command", &config.command)
                 .field("args", &config.args)
                 .field("cwd", &config.cwd)
-                .field(
-                    "env",
-                    &config
-                        .env
-                        .keys()
-                        .map(|key| (key, "<redacted>"))
-                        .collect::<std::collections::BTreeMap<_, _>>(),
-                )
+                .field("env", &crate::redaction::redacted_env(config.env.keys()))
                 .finish(),
             Self::Sse(config) => f
                 .debug_struct("Sse")
@@ -438,6 +431,13 @@ pub(crate) fn configured(
 ) -> Result<Vec<ConfiguredServer>, McpError> {
     let discovered = discovered(workspace, config)?;
 
+    Ok(layer(configured_supplied(config)?.into_iter().chain(
+        discovered.into_iter().flat_map(|source| source.configured),
+    )))
+}
+
+/// The host-supplied servers only, with no file discovery.
+pub(crate) fn configured_supplied(config: &McpConfig) -> Result<Vec<ConfiguredServer>, McpError> {
     // `.mcp.json` and an ACP client's `mcpServers` already check their own
     // entries at the door — see [`McpServer::validate_name`]. A Rust host's
     // own list, set through [`crate::workspace::WorkspaceBuilder::with_mcp`],
@@ -452,37 +452,30 @@ pub(crate) fn configured(
         })?;
     }
 
-    Ok(layer(
-        config
-            .supplied
-            .iter()
-            .cloned()
-            // A supplied server arrived in a typed variant; nothing about its
-            // transport was inferred.
-            .map(|server| ConfiguredServer {
-                server,
-                sse_inferred: false,
-            })
-            .chain(discovered.into_iter().flat_map(|source| source.configured)),
-    ))
+    Ok(layer(config.supplied.iter().cloned().map(|server| {
+        // A supplied server arrived in a typed variant; nothing about its
+        // transport was inferred.
+        ConfiguredServer {
+            server,
+            sse_inferred: false,
+        }
+    })))
 }
 
 /// Keeps the first server seen under each name.
 ///
 /// Callers pass strongest-first, so "first wins" is "most specific wins".
 fn layer(servers: impl IntoIterator<Item = ConfiguredServer>) -> Vec<ConfiguredServer> {
-    let mut kept: Vec<ConfiguredServer> = Vec::new();
-
-    for candidate in servers {
-        if !kept
-            .iter()
-            .any(|seen| seen.server.name() == candidate.server.name())
-        {
-            kept.push(candidate);
-        }
-    }
-
-    kept
+    let roots = servers.into_iter().enumerate().map(|(index, server)| {
+        let mut root = std::collections::BTreeMap::new();
+        root.insert(server.server.name().to_string(), (index, server));
+        Ok::<_, std::convert::Infallible>(root)
+    });
+    let mut kept = crate::named_roots::merge_roots(roots).expect("the roots are infallible");
+    // `merge_roots` is name-keyed; restore the caller's order after it chooses
+    // the strongest writer so the connect order does not change.
+    kept.sort_by_key(|(index, _)| *index);
+    kept.into_iter().map(|(_, server)| server).collect()
 }
 
 fn read(path: PathBuf, scope: ContextScope) -> Result<ReadSource, McpError> {

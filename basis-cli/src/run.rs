@@ -18,8 +18,7 @@ use std::{
     process::ExitCode,
 };
 
-use basis::{JsonlWriter, RunProfile, RunSpec, Runtime, ShellAccess, Workspace, provider};
-use mentra::ModelSelector;
+use basis::{JsonlWriter, RunProfile, RunSpec, Runtime, ShellAccess, Workspace};
 
 use crate::{cli::RunArgs, exit::exit_code};
 
@@ -59,20 +58,18 @@ pub(crate) async fn execute_run(args: RunArgs) -> Result<ExitCode, String> {
 
     // The process half seeds the private runtime the workspace builds
     // (ADR-0018): which provider answers, and at which endpoint.
-    let mut runtime = Runtime::builder().with_store_dir(store_dir);
-    if let Some(name) = &args.provider {
-        runtime = runtime.with_provider(provider::parse(name).map_err(|error| error.to_string())?);
-    }
-    if let Some(base_url) = args.base_url {
-        runtime = runtime.with_base_url(base_url);
-    }
-
-    let mut builder = Workspace::builder(workspace)
-        .with_runtime_builder(runtime)
-        .with_shell(ShellAccess::from_flag(!args.no_shell));
-    if let Some(model) = args.model {
-        builder = builder.with_model(ModelSelector::Id(model));
-    }
+    let runtime = Runtime::builder().with_store_dir(store_dir);
+    let builder = Workspace::builder(workspace);
+    let (runtime, builder) = basis_tasks::configure_builders(
+        runtime,
+        builder,
+        args.provider.as_deref(),
+        args.base_url.as_deref(),
+        args.model.as_deref(),
+        ShellAccess::from_flag(!args.no_shell),
+    )
+    .map_err(|error| error.to_string())?;
+    let builder = builder.with_runtime_builder(runtime);
 
     // Every consequential call is put to this one, and nothing else decides:
     // `always` allows, `never` refuses, `prompt` asks the person.

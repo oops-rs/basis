@@ -123,7 +123,7 @@ where
     D: serde::Deserializer<'de>,
 {
     let name = Option::<String>::deserialize(deserializer)?;
-    Ok(name.and_then(|name| serde_json::from_value(Value::String(name)).ok()))
+    Ok(name.and_then(|name| Bound::from_type_tag(&name)))
 }
 
 /// A task whose own work has finished, but whose attached children may still
@@ -132,25 +132,76 @@ where
 /// resumable with the model work already done.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(tag = "state", rename_all = "snake_case")]
-pub(crate) enum PendingTerminal {
+pub enum Terminal {
+    /// The task produced its final answer.
     Succeeded { result: String },
+    /// The task stopped with a failure message.
     Failed { error: String },
+    /// The task stopped because cancellation was requested.
     Cancelled,
 }
 
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+/// A terminal payload exactly as written, with the basis-owned fields this
+/// build recognizes alongside it.
+#[derive(Debug, Clone, PartialEq)]
+pub struct TerminalRecord {
+    /// The exact terminal or message-terminal JSON read from disk.
+    pub raw: Value,
+    /// The typed terminal state, or `None` when a newer writer used a state
+    /// this build does not know.
+    pub terminal: Option<Terminal>,
+    /// The bound that stopped the run, when one did.
+    pub stopped_by: Option<Bound>,
+    /// Usage reported by the completed task, when present.
+    pub usage: Option<RunUsage>,
+    /// Whether the result text was truncated before it was recorded.
+    pub result_truncated: bool,
+}
+
+impl TerminalRecord {
+    pub(crate) fn from_raw(raw: Value) -> Self {
+        let terminal = serde_json::from_value(raw.clone()).ok();
+        let stopped_by = raw
+            .get("stopped_by")
+            .and_then(Value::as_str)
+            .and_then(Bound::from_type_tag);
+        let usage = raw
+            .get("usage")
+            .cloned()
+            .and_then(|usage| serde_json::from_value(usage).ok());
+        let result_truncated = raw
+            .get("result_truncated")
+            .and_then(Value::as_bool)
+            .unwrap_or(false);
+        Self {
+            raw,
+            terminal,
+            stopped_by,
+            usage,
+            result_truncated,
+        }
+    }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
-pub(crate) enum MessageState {
+pub enum MessageState {
+    /// Accepted but not yet presented to the task.
     Pending,
+    /// Presented to the task in the current turn.
     InFlight,
+    /// Presented to a completed turn.
     Delivered,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-pub(crate) struct MessageReply {
+pub struct MessageReply {
+    /// The reply text.
     pub result: String,
+    /// Whether the reply text was truncated.
     #[serde(default, skip_serializing_if = "is_false")]
     pub result_truncated: bool,
+    /// The bound that stopped the reply's turn, when one did.
     #[serde(
         default,
         skip_serializing_if = "Option::is_none",
@@ -160,13 +211,30 @@ pub(crate) struct MessageReply {
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-pub(crate) struct MessageRecord {
+pub struct MessageRecord {
+    /// The durable message id.
     pub id: String,
+    /// The message text.
     pub body: String,
+    /// Whether the bounded public view shortened [`Self::body`].
+    #[serde(default, skip_serializing_if = "is_false")]
+    pub body_truncated: bool,
+    /// Delivery state.
     pub state: MessageState,
+    /// Milliseconds since the Unix epoch when the message was accepted.
     pub created_ms: u64,
+    /// The correlated reply, when the task produced one.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub reply: Option<MessageReply>,
+}
+
+/// The exact `basis inbox` payload with its bounded typed messages alongside.
+#[derive(Debug, Clone, PartialEq)]
+pub struct InboxRecord {
+    /// The exact JSON shape printed by `basis inbox --json`.
+    pub raw: Value,
+    /// Bounded message views, oldest first.
+    pub messages: Vec<MessageRecord>,
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
@@ -197,7 +265,7 @@ pub(crate) struct TaskMeta {
     pub prompt: String,
     pub options: RunOptions,
     #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub pending_terminal: Option<PendingTerminal>,
+    pub pending_terminal: Option<Terminal>,
     #[serde(default, skip_serializing_if = "is_false")]
     pub result_truncated: bool,
     #[serde(
@@ -286,18 +354,18 @@ impl TaskMeta {
     /// the daemon's journal produced, minted once into `terminal.json`.
     pub(crate) fn terminal_payload(&self) -> Option<Value> {
         let payload = match self.pending_terminal.as_ref()? {
-            PendingTerminal::Succeeded { result } => {
+            Terminal::Succeeded { result } => {
                 let mut terminal = serde_json::json!({"state": "succeeded", "result": result});
                 if self.result_truncated {
                     terminal["result_truncated"] = Value::Bool(true);
                 }
                 with_stopped_by(terminal, self.stopped_by)
             }
-            PendingTerminal::Failed { error } => with_stopped_by(
+            Terminal::Failed { error } => with_stopped_by(
                 serde_json::json!({"state": "failed", "error": error}),
                 self.stopped_by,
             ),
-            PendingTerminal::Cancelled => serde_json::json!({"state": "cancelled"}),
+            Terminal::Cancelled => serde_json::json!({"state": "cancelled"}),
         };
         Some(with_usage(payload, self.usage))
     }
@@ -461,7 +529,7 @@ mod tests {
         assert!(read_terminal(&paths).unwrap().is_none());
 
         let mut record = meta(&paths);
-        record.pending_terminal = Some(PendingTerminal::Succeeded {
+        record.pending_terminal = Some(Terminal::Succeeded {
             result: "done".to_string(),
         });
         let payload = record.terminal_payload().unwrap();
@@ -476,11 +544,45 @@ mod tests {
     }
 
     #[test]
+    fn terminal_record_keeps_raw_json_beside_the_typed_view() {
+        let raw = serde_json::json!({
+            "state": "succeeded",
+            "result": "done",
+            "result_truncated": true,
+            "stopped_by": "token_budget",
+            "usage": {
+                "input_tokens": 7,
+                "output_tokens": 3,
+                "cache_read_tokens": 0,
+                "cache_creation_tokens": 0
+            },
+            "newer_field": "kept",
+        });
+        let record = TerminalRecord::from_raw(raw.clone());
+
+        assert_eq!(record.raw, raw);
+        assert_eq!(
+            record.terminal,
+            Some(Terminal::Succeeded {
+                result: "done".to_string()
+            })
+        );
+        assert_eq!(record.stopped_by, Some(Bound::TokenBudget));
+        assert_eq!(record.usage.expect("typed usage").input_tokens, 7);
+        assert!(record.result_truncated);
+
+        let unknown = serde_json::json!({"state": "paused_by_newer_basis", "detail": 1});
+        let record = TerminalRecord::from_raw(unknown.clone());
+        assert_eq!(record.raw, unknown);
+        assert_eq!(record.terminal, None);
+    }
+
+    #[test]
     fn terminal_payloads_carry_truncation_and_bound_metadata() {
         let dir = tempfile::tempdir().unwrap();
         let paths = agent(&dir);
         let mut record = meta(&paths);
-        record.pending_terminal = Some(PendingTerminal::Failed {
+        record.pending_terminal = Some(Terminal::Failed {
             error: "took too long".to_string(),
         });
         record.stopped_by = Some(Bound::Deadline);
@@ -489,7 +591,7 @@ mod tests {
             serde_json::json!({"state": "failed", "error": "took too long", "stopped_by": "deadline"})
         );
 
-        record.pending_terminal = Some(PendingTerminal::Cancelled);
+        record.pending_terminal = Some(Terminal::Cancelled);
         assert_eq!(
             record.terminal_payload().unwrap(),
             serde_json::json!({"state": "cancelled"}),
@@ -506,7 +608,7 @@ mod tests {
         let dir = tempfile::tempdir().unwrap();
         let paths = agent(&dir);
         let mut record = meta(&paths);
-        record.pending_terminal = Some(PendingTerminal::Succeeded {
+        record.pending_terminal = Some(Terminal::Succeeded {
             result: "done".to_string(),
         });
 

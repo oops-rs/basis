@@ -18,8 +18,8 @@ use agent_client_protocol::schema::v1::{
 use serde_json::Value;
 
 use basis::{
-    event::{Event, Mutability},
-    tools::SPAWN,
+    event::{Event, Mutability, tool_result_elision_line},
+    tools::{SPAWN, SpawnMode, parse_spawn_input},
 };
 
 /// Maps one basis event to an ACP session update.
@@ -206,18 +206,6 @@ fn text_block(text: &str) -> ContentBlock {
     ContentBlock::Text(TextContent::new(text.to_string()))
 }
 
-fn tool_result_elision_line(
-    canonical_bytes: usize,
-    projected_bytes: usize,
-    changed: usize,
-) -> String {
-    let result = if changed == 1 { "result" } else { "results" };
-    format!(
-        "request tool results reduced: {canonical_bytes} -> {projected_bytes} bytes; \
-         {changed} {result} changed"
-    )
-}
-
 /// What to call the tool call in a client's UI.
 ///
 /// mentra's summary is written for a person ("Run 'cargo test'"), so it is the
@@ -286,12 +274,6 @@ fn tool_kind(tool_name: &str, mutability: Mutability, input: &Value) -> ToolKind
     }
 }
 
-/// The field `spawn` takes its one string in.
-///
-/// A literal because `basis` keeps the name private; see [`spawn_kind`] for
-/// what that costs and what it does not.
-const SPAWN_INPUT: &str = "input";
-
 /// What ACP calls handing work to a subagent, which is nothing.
 ///
 /// `ToolKind` in schema v1 offers `Read`, `Edit`, `Delete`, `Move`, `Search`,
@@ -311,36 +293,19 @@ const DELEGATION: ToolKind = ToolKind::Other;
 
 /// `spawn`'s kind, which its *mode* decides rather than its name (ADR-0016).
 ///
-/// The mode is re-derived from the raw string here, and that is a knowing
-/// second reading of the convention `basis::tools::spawn` parses exactly
-/// once. It is not free: if the two ever disagree — a new escape, a different
-/// trim — a client renders the wrong icon and nothing says so. What keeps it
-/// tolerable is that this path decides nothing. The typed
-/// `{mode, body, cwd, target}` is what reaches the approver, the rule store,
-/// the hooks and the audit trail;
-/// what reaches ACP is a `ToolQueued` event carrying the string the model
-/// wrote, and basis exports no reader for it. The fix is that reader,
-/// exported from the crate that owns the convention — not a second copy that
-/// grows.
+/// The convention is read by basis's exported parser, the same parser the
+/// executor and workspace guard use. `cwd` is deliberately absent from this
+/// input view: basis derives it later from the tool context, while the icon
+/// depends only on whether this call is a command or a delegation.
 fn spawn_kind(input: &Value) -> ToolKind {
-    let Some(body) = input.get(SPAWN_INPUT).and_then(Value::as_str) else {
-        // Nothing to read, and spawn's own preview will refuse this call before
-        // it runs. Reported as the stronger of the two modes for the reason
-        // spawn's static descriptor is `Process`: a tool that can run commands
-        // should not describe itself as something milder when there is nothing
-        // per-call to go on.
-        return ToolKind::Execute;
-    };
-
-    match body.trim().strip_prefix('!') {
-        // `!!` is the escape a task whose own text starts with `!` is written
-        // with, so it is a delegation and not a command.
-        Some(rest) if rest.starts_with('!') => DELEGATION,
-        // Everything else after a single `!` is a command, `!@<target> …`
-        // included: ADR-0021 made *where* a dimension of a command rather than
-        // a third mode, so there is no third kind for a client to render.
-        Some(_) => ToolKind::Execute,
-        None => DELEGATION,
+    match parse_spawn_input(input) {
+        Ok(parsed) => match parsed.mode() {
+            SpawnMode::Command => ToolKind::Execute,
+            SpawnMode::Agent => DELEGATION,
+        },
+        // Nothing trustworthy to classify from, and spawn's static descriptor
+        // is the stronger of the two acts.
+        Err(_) => ToolKind::Execute,
     }
 }
 

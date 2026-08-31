@@ -63,11 +63,7 @@ impl std::fmt::Debug for DeclaredTool {
             .field("workspace", &self.workspace)
             .field(
                 "environment",
-                &self
-                    .environment
-                    .iter()
-                    .map(|(name, _)| (name, "<redacted>"))
-                    .collect::<std::collections::BTreeMap<_, _>>(),
+                &crate::redaction::redacted_env(self.environment.iter().map(|(name, _)| name)),
             )
             .finish()
     }
