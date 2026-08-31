@@ -940,10 +940,10 @@ struct FileSink {
 
 impl EventSink for FileSink {
     fn emit(&mut self, event: Event) -> io::Result<()> {
-        if let Ok(value) = serde_json::to_value(event) {
+        if let Ok(value) = serde_json::to_value(&event) {
             self.ctx.show(&value);
             if let Ok(mut log) = self.log.lock() {
-                let _ = log.append(value);
+                let _ = log.append(event);
             }
         }
         Ok(())
