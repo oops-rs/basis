@@ -623,6 +623,7 @@ fn offline_workspace(path: &Path, runtime: Arc<basis::Runtime>) -> basis::Worksp
         .with_tools(basis::tools::declared::ToolsConfig {
             workspace_file: std::path::PathBuf::from(".basis/tools.json"),
             global_dir: None,
+            supplied: Vec::new(),
         })
         .with_memory(basis::MemoryConfig::disabled())
 }

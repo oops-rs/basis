@@ -314,6 +314,7 @@ fn configured_builder(
         .with_tools(ToolsConfig {
             workspace_file: PathBuf::from(".basis/tools.json"),
             global_dir: Some(home.to_path_buf()),
+            supplied: Vec::new(),
         });
 
     #[cfg(feature = "mcp")]

@@ -38,8 +38,16 @@ pub(crate) struct DeclaredTools {
 }
 
 impl DeclaredTools {
+    pub(crate) fn register(
+        runtime: Arc<Runtime>,
+        root: &Path,
+        sources: &[ToolsSource],
+    ) -> Result<Self, DeclaredToolError> {
+        Self::register_with_supplied(runtime, root, sources, &[])
+    }
+
     /// Claims every name, then registers the tools this open is the first
-    /// holder of.
+    /// holder of. Supplied declarations are layered before file sources.
     ///
     /// Two passes rather than one, and the order is the point: a manifest whose
     /// fourth tool collides must leave the first three unregistered, because on
@@ -54,12 +62,13 @@ impl DeclaredTools {
     /// `register_tool` on it directly, and a claim it walked past would
     /// otherwise be a repository's program silently answering to the host's
     /// name, or the reverse.
-    pub(crate) fn register(
+    pub(crate) fn register_with_supplied(
         runtime: Arc<Runtime>,
         root: &Path,
         sources: &[ToolsSource],
+        supplied: &[DeclaredToolSpec],
     ) -> Result<Self, DeclaredToolError> {
-        let declared = layer(sources);
+        let declared = layer(supplied, sources);
 
         let mut claimed = Self {
             runtime,
@@ -74,11 +83,7 @@ impl DeclaredTools {
             let fresh = claimed
                 .runtime
                 .claim_declared_tool(&spec.name, root)
-                .map_err(|reason| DeclaredToolError::NameTaken {
-                    path: path.clone(),
-                    name: spec.name.clone(),
-                    reason,
-                })?;
+                .map_err(|reason| name_taken(path.as_deref(), &spec.name, reason))?;
             claimed.names.push(spec.name.clone());
             first_holder.push(fresh);
         }
@@ -95,12 +100,14 @@ impl DeclaredTools {
                 .runtime
                 .mentra_runtime()
                 .try_register_tool(wrapped(&claimed.runtime, spec, root))
-                .map_err(|collision| DeclaredToolError::NameTaken {
-                    path,
-                    name: collision.name,
-                    reason: "something registered a tool by that name on this runtime while this \
-                             workspace was opening"
-                        .to_string(),
+                .map_err(|collision| {
+                    name_taken(
+                        path.as_deref(),
+                        &collision.name,
+                        "something registered a tool by that name on this runtime while this \
+                         workspace was opening"
+                            .to_string(),
+                    )
                 })?;
         }
 
@@ -118,6 +125,20 @@ impl DeclaredTools {
     /// hiding its own tools.
     pub(crate) fn root(&self) -> &Path {
         &self.root
+    }
+}
+
+fn name_taken(path: Option<&Path>, name: &str, reason: String) -> DeclaredToolError {
+    match path {
+        Some(path) => DeclaredToolError::NameTaken {
+            path: path.to_path_buf(),
+            name: name.to_string(),
+            reason,
+        },
+        None => DeclaredToolError::SuppliedNameTaken {
+            name: name.to_string(),
+            reason,
+        },
     }
 }
 

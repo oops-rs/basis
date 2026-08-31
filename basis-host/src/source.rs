@@ -595,6 +595,7 @@ mod tests {
             tools: ToolsConfig {
                 workspace_file: PathBuf::from(".basis/tools.json"),
                 global_dir: None,
+                supplied: Vec::new(),
             },
             mcp: McpConfig {
                 workspace_file: PathBuf::from(".mcp.json"),

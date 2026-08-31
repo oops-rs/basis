@@ -152,12 +152,25 @@ impl DeclaredToolSpec {
 }
 
 /// Where to look for declared tools.
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Clone, PartialEq, Eq)]
 pub struct ToolsConfig {
     /// Path relative to the workspace root.
     pub workspace_file: PathBuf,
     /// The global config directory, if any. `tools.json` inside it is used.
     pub global_dir: Option<PathBuf>,
+    /// Typed, final declarations supplied by the embedding host. They outrank
+    /// file declarations of the same name and are never environment-expanded.
+    pub supplied: Vec<DeclaredToolSpec>,
+}
+
+impl std::fmt::Debug for ToolsConfig {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("ToolsConfig")
+            .field("workspace_file", &self.workspace_file)
+            .field("global_dir", &self.global_dir)
+            .field("supplied", &format_args!("{} tools", self.supplied.len()))
+            .finish()
+    }
 }
 
 impl Default for ToolsConfig {
@@ -165,7 +178,15 @@ impl Default for ToolsConfig {
         Self {
             workspace_file: PathBuf::from(DEFAULT_WORKSPACE_TOOLS_FILE),
             global_dir: crate::context::ContextConfig::default().global_dir,
+            supplied: Vec::new(),
         }
+    }
+}
+
+impl ToolsConfig {
+    /// Replaces the declarations supplied directly by the embedding host.
+    pub fn with_supplied(self, supplied: Vec<DeclaredToolSpec>) -> Self {
+        Self { supplied, ..self }
     }
 }
 
@@ -229,12 +250,18 @@ pub enum DeclaredToolError {
         reason: String,
     },
 
+    #[error("supplied tool `{name}` {reason}")]
+    InvalidSupplied { name: String, reason: String },
+
     #[error("{path}: tool `{name}` cannot be registered because {reason}")]
     NameTaken {
         path: PathBuf,
         name: String,
         reason: String,
     },
+
+    #[error("supplied tool `{name}` cannot be registered because {reason}")]
+    SuppliedNameTaken { name: String, reason: String },
 }
 
 /// Every manifest that exists, most specific first.
@@ -269,32 +296,55 @@ pub fn discover(
     Ok(sources)
 }
 
-/// Every tool a workspace declares, after layering: the workspace's own first,
-/// name-ordered within each manifest, since the entries are a JSON object and
-/// an object has no order of its own to preserve.
+/// Every tool a workspace declares, after layering: supplied first, then the
+/// workspace and global files, name-ordered within each manifest since its
+/// entries are a JSON object and an object has no order of its own to preserve.
 pub fn load(
     workspace: &Path,
     config: &ToolsConfig,
 ) -> Result<Vec<DeclaredToolSpec>, DeclaredToolError> {
-    Ok(layer(&discover(workspace, config)?)
+    let supplied = load_supplied(config)?;
+    Ok(layer(&supplied, &discover(workspace, config)?)
         .into_iter()
         .map(|(_, spec)| spec)
         .collect())
 }
 
+/// The supplied typed declarations only, with no file discovery.
+pub(crate) fn load_supplied(
+    config: &ToolsConfig,
+) -> Result<Vec<DeclaredToolSpec>, DeclaredToolError> {
+    for spec in &config.supplied {
+        validate_spec(spec).map_err(|reason| DeclaredToolError::InvalidSupplied {
+            name: spec.name.clone(),
+            reason,
+        })?;
+    }
+    Ok(config.supplied.clone())
+}
+
 /// Keeps the first declaration of each name, with the file it came from.
 ///
-/// Sources arrive most specific first, so "first wins" is "the workspace's own
-/// declaration shadows the personal one" — `crate::mcp`'s rule, for the same
+/// Sources arrive strongest first — supplied, workspace, global — so "first
+/// wins" is the precedence rule. This is `crate::mcp`'s rule, for the same
 /// reason: the name *is* the tool, so two declarations under one name are one
 /// tool with a precedence question, never two tools.
-pub(super) fn layer(sources: &[ToolsSource]) -> Vec<(PathBuf, DeclaredToolSpec)> {
-    let mut kept: Vec<(PathBuf, DeclaredToolSpec)> = Vec::new();
+pub(super) fn layer(
+    supplied: &[DeclaredToolSpec],
+    sources: &[ToolsSource],
+) -> Vec<(Option<PathBuf>, DeclaredToolSpec)> {
+    let mut kept: Vec<(Option<PathBuf>, DeclaredToolSpec)> = Vec::new();
+
+    for spec in supplied {
+        if !kept.iter().any(|(_, seen)| seen.name == spec.name) {
+            kept.push((None, spec.clone()));
+        }
+    }
 
     for source in sources {
         for spec in &source.tools {
             if !kept.iter().any(|(_, seen)| seen.name == spec.name) {
-                kept.push((source.path.clone(), spec.clone()));
+                kept.push((Some(source.path.clone()), spec.clone()));
             }
         }
     }
@@ -416,45 +466,31 @@ impl RawTool {
                 .map_err(|reason| invalid(format!("has a `{field}` value that {reason}")))
         };
 
-        check_name(&name).map_err(invalid)?;
+        check_name(&name).map_err(&invalid)?;
 
-        let description = self
-            .description
-            .as_deref()
-            .map(str::trim)
-            .filter(|description| !description.is_empty())
-            .ok_or_else(|| {
-                invalid(
-                    "has no `description`, which is the only thing telling the model what it is \
+        let description = self.description.ok_or_else(|| {
+            invalid(
+                "has no `description`, which is the only thing telling the model what it is \
                      for"
-                    .to_string(),
-                )
-            })?
-            .to_string();
+                .to_string(),
+            )
+        })?;
+        check_description(&description).map_err(&invalid)?;
+        let description = description.trim().to_string();
 
         let input_schema = self
             .input_schema
             .ok_or_else(|| invalid("has no `input_schema`".to_string()))?;
-        check_schema(&input_schema).map_err(invalid)?;
-
+        check_schema(&input_schema).map_err(&invalid)?;
         let command = self
             .command
-            .filter(|command| !command.is_empty())
             .ok_or_else(|| invalid("has no `command` to run".to_string()))?
             .iter()
             .enumerate()
             .map(|(index, argument)| expanded(&format!("command[{index}]"), argument))
             .collect::<Result<Vec<_>, _>>()?;
-
-        if command[0].trim().is_empty() {
-            return Err(invalid("names an empty program".to_string()));
-        }
-
-        if self.timeout_ms == Some(0) {
-            return Err(invalid(
-                "has a `timeout_ms` of 0, which is a deadline that has already passed".to_string(),
-            ));
-        }
+        check_command(&command).map_err(&invalid)?;
+        check_timeout(self.timeout_ms).map_err(&invalid)?;
 
         Ok(DeclaredToolSpec {
             description,
@@ -476,6 +512,43 @@ impl RawTool {
             name,
         })
     }
+}
+
+fn validate_spec(spec: &DeclaredToolSpec) -> Result<(), String> {
+    check_name(&spec.name)?;
+    check_description(&spec.description)?;
+    check_schema(&spec.input_schema)?;
+    check_command(&spec.command)?;
+    check_timeout(spec.timeout_ms)
+}
+
+fn check_description(description: &str) -> Result<(), String> {
+    if description.trim().is_empty() {
+        return Err(
+            "has no `description`, which is the only thing telling the model what it is for"
+                .to_string(),
+        );
+    }
+    Ok(())
+}
+
+fn check_command(command: &[String]) -> Result<(), String> {
+    let Some(program) = command.first() else {
+        return Err("has no `command` to run".to_string());
+    };
+    if program.trim().is_empty() {
+        return Err("names an empty program".to_string());
+    }
+    Ok(())
+}
+
+fn check_timeout(timeout_ms: Option<u64>) -> Result<(), String> {
+    if timeout_ms == Some(0) {
+        return Err(
+            "has a `timeout_ms` of 0, which is a deadline that has already passed".to_string(),
+        );
+    }
+    Ok(())
 }
 
 /// A name is the tool's identity everywhere it appears — the model's roster, a

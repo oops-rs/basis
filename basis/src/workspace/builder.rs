@@ -435,14 +435,18 @@ impl WorkspaceBuilder {
         Self { hooks, ..self }
     }
 
-    /// Sets where declared subprocess tools are discovered.
+    /// Sets the host-supplied declared tools and where file declarations are
+    /// discovered.
     ///
     /// A declared tool is a command the workspace offers the *model* as a tool,
     /// with a JSON schema for its input; see [`crate::tools::declared`] for the
     /// manifest and for what a failing one tells the model. The tools are
     /// registered on the runtime this workspace borrows and deregistered — as
     /// far as mentra's registry allows — when the workspace drops, so a
-    /// repository's tools never reach another repository's runs.
+    /// repository's tools never reach another repository's runs. Typed
+    /// [`ToolsConfig::supplied`](crate::tools::declared::ToolsConfig::supplied)
+    /// entries outrank workspace and global files and remain active when file
+    /// discovery is disabled.
     pub fn with_tools(self, tools: ToolsConfig) -> Self {
         Self { tools, ..self }
     }
@@ -618,10 +622,12 @@ impl WorkspaceBuilder {
             hooks::load_supplied(&self.hooks)?
         };
 
-        // Read here for the same reason, and one of its own: a manifest that
-        // does not parse is a tool the model's instructions assume and will not
-        // find. Registering it needs the runtime, so that waits until there is
-        // one.
+        // Validate supplied values and read files here for the same reason, and
+        // one of their own: an invalid declaration is a tool the model's
+        // instructions assume and will not find. Registering needs the runtime,
+        // so that waits until there is one. Discovery-off keeps the typed list
+        // and touches no manifest path.
+        let supplied_tools = declared::load_supplied(&self.tools)?;
         let declared_sources = if self.discovery_enabled {
             declared::discover(&path, &self.tools)?
         } else {
@@ -764,8 +770,12 @@ impl WorkspaceBuilder {
         // without. Registration and lookup still meet on one key, because the
         // lookup side canonicalizes the *call's* directory, which is the side
         // that has not been resolved yet.
-        let declared_tools =
-            DeclaredTools::register(Arc::clone(&runtime), &path, &declared_sources)?;
+        let declared_tools = DeclaredTools::register_with_supplied(
+            Arc::clone(&runtime),
+            &path,
+            &declared_sources,
+            &supplied_tools,
+        )?;
         let declared_tool_names = declared_tools.names().to_vec();
 
         // Templates need no runtime registration — they are basis-side convention

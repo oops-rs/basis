@@ -289,6 +289,7 @@ fn controlled_builder(root: &Path, shared: Shared) -> basis::WorkspaceBuilder {
         .with_tools(ToolsConfig {
             workspace_file: PathBuf::from(".basis/tools.json"),
             global_dir: None,
+            supplied: Vec::new(),
         })
         .with_memory(MemoryConfig::disabled());
 

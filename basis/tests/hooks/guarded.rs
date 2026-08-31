@@ -122,6 +122,7 @@ fn opened_on(shared: Arc<Runtime>, path: &Path, shell: ShellAccess) -> basis::Wo
         .with_tools(ToolsConfig {
             workspace_file: PathBuf::from(".basis/tools.json"),
             global_dir: None,
+            supplied: Vec::new(),
         })
         // A malformed file in the developer's own config must never fail this
         // suite, which is not about memory at all.

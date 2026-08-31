@@ -671,6 +671,7 @@ fn offline(workspace: &Path) -> WorkspaceBuilder {
         .with_tools(ToolsConfig {
             workspace_file: PathBuf::from(".basis/tools.json"),
             global_dir: None,
+            supplied: Vec::new(),
         })
         // A malformed file in the developer's own ~/.config/basis/memory must
         // never be able to fail this suite (G1); this test is not about

@@ -205,6 +205,7 @@ fn discovery_builder(path: &Path, provider: CapturingProvider) -> WorkspaceBuild
         .with_tools(ToolsConfig {
             workspace_file: PathBuf::from(".basis/tools.json"),
             global_dir: None,
+            supplied: Vec::new(),
         })
         .with_memory(MemoryConfig::disabled());
 
