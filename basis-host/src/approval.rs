@@ -222,14 +222,19 @@ mod tests {
 
     #[test]
     fn the_tags_round_trip() {
+        assert_eq!(ApprovalPolicy::default(), ApprovalPolicy::Prompt);
+
         for policy in [
             ApprovalPolicy::Always,
             ApprovalPolicy::Prompt,
             ApprovalPolicy::Never,
         ] {
+            let tag = policy.type_tag();
+            assert_eq!(ApprovalPolicy::from_type_tag(tag), Some(policy));
+            assert_eq!(serde_json::to_value(policy).unwrap(), json!(tag));
             assert_eq!(
-                ApprovalPolicy::from_type_tag(policy.type_tag()),
-                Some(policy)
+                serde_json::from_value::<ApprovalPolicy>(json!(tag)).unwrap(),
+                policy
             );
         }
         assert_eq!(ApprovalPolicy::from_type_tag("architect"), None);
