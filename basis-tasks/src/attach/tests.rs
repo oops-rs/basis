@@ -3,7 +3,7 @@
 //! deadline boundaries, and the runtime recipe.
 
 use super::*;
-use crate::approve::{Approve, validate_approval};
+use crate::approve::Approve;
 use crate::state::{MessageState, RunOptions};
 use serde_json::{Value, json};
 
@@ -392,35 +392,4 @@ fn an_unknown_provider_fails_the_task_rather_than_going_unread() {
     let meta = load_meta(&paths).unwrap();
     let runtime = task_runtime(&data, &task, &meta).expect("base runtime");
     assert!(run_parts(&meta, runtime).is_err());
-}
-
-/// ADR-0020: `prompt` is answerable exactly when a process is driving the
-/// agent *and* has somewhere to put the question. The interactive half cannot
-/// be integration-tested — a test harness has no prompt host — so the rule is
-/// pinned here, where both halves can be stated.
-#[test]
-fn prompt_approval_needs_a_driver_that_can_ask() {
-    for mode in [Approve::Always, Approve::Never] {
-        assert!(
-            validate_approval(mode, false).is_ok(),
-            "{mode:?} asks nobody"
-        );
-        assert!(
-            validate_approval(mode, true).is_ok(),
-            "{mode:?} asks nobody"
-        );
-    }
-
-    assert!(
-        validate_approval(Approve::Prompt, true).is_ok(),
-        "a host that can ask is exactly what `prompt` needs"
-    );
-
-    let refused = validate_approval(Approve::Prompt, false)
-        .expect_err("nobody able to ask means nobody to ask")
-        .to_string();
-    assert!(refused.contains("ask"), "{refused}");
-
-    // An unknown mode is no longer spellable here at all: the record holds
-    // `Approve` itself, so a corrupted value fails at decode instead.
 }

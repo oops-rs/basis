@@ -15,6 +15,7 @@ categories = ["development-tools"]
 # `mcp` explicitly rather than by default: ACP carries `mcpServers` on
 # `session/new`, so `from_acp` has nothing to convert into without it.
 basis = { workspace = true, features = ["mcp"] }
+basis-host.workspace = true
 
 agent-client-protocol.workspace = true
 async-trait.workspace = true

@@ -161,7 +161,7 @@ fn acp_config(args: AcpArgs) -> Result<basis_acp::ServeConfig, String> {
         template = template.with_effort(effort.into());
     }
 
-    Ok(basis_acp::ServeConfig::new(template).with_initial_mode(args.approve.into()))
+    Ok(basis_acp::ServeConfig::new(template).with_initial_mode(args.approve))
 }
 
 #[cfg(test)]

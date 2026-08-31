@@ -18,6 +18,7 @@ categories = ["development-tools"]
 # basis exposes beside `answered_turns` so this crate never has to match on
 # `mentra::Role`, and so never has to name mentra to do it.
 basis.workspace = true
+basis-host.workspace = true
 
 # The attach lock: one writer, ever, per task (ADR-0019). Already in the tree
 # via basis-cli, which is where this crate's implementation lived before

@@ -89,7 +89,7 @@ pub(super) async fn prompt(
         // and mentra refuses the turn before anything is asked.
         None => asking,
     };
-    let approver = ModedApprover::new(session.modes().clone(), asking);
+    let approver = ModedApprover::new(session.modes().approval().clone(), asking);
 
     let report = run.send_parts(parts, sink, approver, options).await;
     session.end_turn();
