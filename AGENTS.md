@@ -34,7 +34,7 @@ implementation.
   is the adapter-neutral host kit over it (ADR-0025); `basis-tasks` is the durable task layer
   (ADR-0022); `basis-acp` is the ACP adapter; `basis-cli` publishes the `basis` binary over
   all four libraries. Anything that would put a JSON-RPC, websocket, or
-  terminal dependency into `basis` belongs in one of the other three. MCP lives behind
+  terminal dependency into `basis` belongs in one of the other four. MCP lives behind
   `basis`'s default-on `mcp` feature (ADR-0012).
 
 ## Workflow Discipline
