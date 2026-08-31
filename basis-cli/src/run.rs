@@ -18,9 +18,12 @@ use std::{
     process::ExitCode,
 };
 
-use basis::{JsonlWriter, RunProfile, RunSpec, Runtime, ShellAccess, Workspace};
+use basis::{
+    AllowAll, Approver, DenyAll, JsonlWriter, RunProfile, RunSpec, Runtime, ShellAccess, Workspace,
+};
+use basis_host::ApprovalPolicy;
 
-use crate::{cli::RunArgs, exit::exit_code};
+use crate::{approver::TerminalApprover, cli::RunArgs, exit::exit_code};
 
 pub(crate) async fn execute_run(args: RunArgs) -> Result<ExitCode, String> {
     let prompt = prompt_from(args.prompt.clone())?;
@@ -73,7 +76,7 @@ pub(crate) async fn execute_run(args: RunArgs) -> Result<ExitCode, String> {
 
     // Every consequential call is put to this one, and nothing else decides:
     // `always` allows, `never` refuses, `prompt` asks the person.
-    let approver = args.approve.approver();
+    let approver = approver(args.approve);
 
     // Held open past the mint: the workspace's hooks and MCP connections live
     // exactly as long as it does, and the turn below still needs them.
@@ -89,6 +92,14 @@ pub(crate) async fn execute_run(args: RunArgs) -> Result<ExitCode, String> {
         .await
         .map_err(|error| error.to_string())?;
     Ok(ExitCode::from(exit_code(&report)))
+}
+
+fn approver(policy: ApprovalPolicy) -> Box<dyn Approver> {
+    match policy {
+        ApprovalPolicy::Always => Box::new(AllowAll),
+        ApprovalPolicy::Prompt => Box::new(TerminalApprover::new()),
+        ApprovalPolicy::Never => Box::new(DenyAll),
+    }
 }
 
 /// The [`RunSpec`] one attended `spawn` invocation asks for: the CLI flags

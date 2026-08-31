@@ -29,7 +29,7 @@ const DAYS_TO_MARCH_ZERO: u64 = 719_468;
 const SECONDS_PER_DAY: u64 = 86_400;
 
 /// One epoch second, as `YYYY-MM-DDThh:mm:ssZ`.
-pub(crate) fn rfc3339(seconds: u64) -> String {
+pub fn rfc3339(seconds: u64) -> String {
     let days = seconds / SECONDS_PER_DAY;
     let time_of_day = seconds % SECONDS_PER_DAY;
 

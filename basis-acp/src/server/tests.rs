@@ -6,10 +6,7 @@
 //! `tests/acp/`; what is left here is the pieces that can be checked without
 //! one, which is why they sit together rather than beside each handler.
 
-use std::{
-    path::{Path, PathBuf},
-    sync::Arc,
-};
+use std::path::{Path, PathBuf};
 
 use agent_client_protocol::schema::{
     ProtocolVersion,
@@ -20,18 +17,14 @@ use agent_client_protocol::schema::{
     },
 };
 
-use super::config::{Discovery, ServeConfig, SessionSource, SessionTemplate};
+use super::config::{ServeConfig, SessionSource, SessionTemplate};
 use super::initialize;
 use super::lifecycle::{delete_session, list_sessions, session_info, setup_failed};
 use super::turn::{Ended, prompt_parts, prompt_text, stop_reason, stop_reason_for, usage_update};
-use super::workspaces::{ConfiguredSource, WorkspaceKey};
 use crate::mode::ApprovalMode;
 use basis::{
-    ContextConfig, McpServer, PersistedSession, PreparedRun, PromptPart, RunError, Runtime,
-    ToolsConfig, hooks::HooksConfig, mcp::McpConfig, provider::ProviderError, skills::SkillsConfig,
-    templates::TemplatesConfig,
+    McpServer, PersistedSession, PreparedRun, PromptPart, RunError, provider::ProviderError,
 };
-use mentra::ModelSelector;
 
 /// A source that cannot enumerate, which is what most hosts supplying
 /// their own sessions are.
@@ -433,26 +426,6 @@ fn an_unknown_window_sends_nothing() {
 }
 
 #[test]
-fn the_clients_mcp_servers_reach_the_config() {
-    let source = ConfiguredSource::new(None);
-
-    let built = source.session_mcp(vec![McpServer::Stdio(mentra::McpServerConfig {
-        name: "fs".to_string(),
-        command: "/bin/mcp-fs".to_string(),
-        args: Vec::new(),
-        env: Default::default(),
-        cwd: None,
-    })]);
-
-    let supplied: Vec<&str> = built.supplied.iter().map(McpServer::name).collect();
-    assert_eq!(
-        supplied,
-        vec!["fs"],
-        "session/new is where a client says which servers it wants"
-    );
-}
-
-#[test]
 fn a_session_opens_asking_unless_the_operator_says_otherwise() {
     // The library default is to allow everything, which is right for a
     // headless run and wrong here: a client that can be asked should be.
@@ -522,148 +495,4 @@ fn other_setup_failures_stay_internal_errors() {
     let error = setup_failed(RunError::NoSuchSession);
 
     assert_eq!(error.code, ErrorCode::InternalError);
-}
-
-/// A runtime that resolves offline: a loopback endpoint nothing here dials and
-/// a placeholder credential, so building it does no more than pick a provider.
-/// Its history is ephemeral, so a test suite writes no database.
-fn offline_runtime() -> Arc<Runtime> {
-    Arc::new(
-        Runtime::builder()
-            .with_base_url("http://127.0.0.1:1/v1")
-            .with_api_key("test-key")
-            .with_ephemeral_history()
-            .build()
-            .expect("a runtime builds without touching the network"),
-    )
-}
-
-/// A template that looks nowhere except where a test put something.
-///
-/// Pinned to an id, which is what keeps model resolution off the network.
-fn offline_template() -> SessionTemplate {
-    SessionTemplate::new().with_model(ModelSelector::Id("test-model".to_string()))
-}
-
-/// Every discovery root is pinned, global ones to `None`: an unpinned one would
-/// read the developer's own configuration — and, for MCP, spawn the servers
-/// their `mcp.json` names.
-fn offline_discovery() -> Discovery {
-    Discovery {
-        context: ContextConfig {
-            file_name: "AGENTS.md".to_string(),
-            global_dir: None,
-            walk_parents: false,
-        },
-        skills: SkillsConfig {
-            workspace_subdir: Some(PathBuf::from(".basis/skills")),
-            shared_workspace_dir: true,
-            global_dir: None,
-            shared_home_dir: false,
-        },
-        templates: TemplatesConfig {
-            workspace_subdir: PathBuf::from(".basis/templates"),
-            global_dir: None,
-        },
-        hooks: HooksConfig {
-            workspace_file: PathBuf::from(".basis/hooks.json"),
-            global_dir: None,
-        },
-        tools: ToolsConfig {
-            workspace_file: PathBuf::from(".basis/tools.json"),
-            global_dir: None,
-        },
-        mcp: McpConfig {
-            workspace_file: PathBuf::from(".mcp.json"),
-            global_dir: None,
-            supplied: Vec::new(),
-        },
-    }
-}
-
-/// ADR-0018's acceptance for basis-acp: a server holding two sessions on one
-/// `cwd` holds one runtime and one workspace, not two of each.
-///
-/// Identity rather than a count of store files, which cannot tell the two
-/// shapes apart — N private runtimes still share mentra's one default
-/// directory. What a runtime per session actually cost was a second provider
-/// resolution, a second store handle, and a second copy of every MCP server
-/// and hook the repository configures; pointer identity is what says none of
-/// that happened twice.
-#[tokio::test]
-async fn two_sessions_on_one_workspace_share_one_runtime() {
-    let repository = tempfile::tempdir().expect("tempdir");
-    let runtime = offline_runtime();
-    let source = ConfiguredSource::on_runtime(
-        Arc::clone(&runtime),
-        Some(offline_template().with_discovery(offline_discovery())),
-    );
-
-    let first = source
-        .create(repository.path().to_path_buf(), Vec::new())
-        .await
-        .expect("the first session opens");
-    let second = source
-        .create(repository.path().to_path_buf(), Vec::new())
-        .await
-        .expect("the second session opens");
-
-    assert_ne!(
-        first.agent_id(),
-        second.agent_id(),
-        "two sessions, not one conversation handed out twice"
-    );
-
-    let opened = source.opened();
-    assert_eq!(
-        opened.len(),
-        1,
-        "one directory is one workspace, however many sessions were minted on it"
-    );
-    assert!(
-        std::ptr::eq(opened[0].mentra_runtime(), runtime.mentra_runtime()),
-        "and both were minted on the one runtime this process built"
-    );
-}
-
-/// The other half of the same key: two sessions share a workspace only when
-/// they asked for the same servers.
-///
-/// Sharing on the directory alone would hand the second session the first
-/// one's roster and drop what it asked for, which reads exactly like a server
-/// with nothing to offer. Asserted on the key rather than on two opened
-/// workspaces, because opening one spawns the programs it names.
-#[test]
-fn a_session_that_asked_for_different_servers_is_a_different_workspace() {
-    let server = |command: &str| {
-        vec![McpServer::Stdio(mentra::McpServerConfig {
-            name: "fs".to_string(),
-            command: command.to_string(),
-            args: Vec::new(),
-            env: Default::default(),
-            cwd: None,
-        })]
-    };
-    let key = |mcp: Vec<McpServer>| WorkspaceKey::new(Path::new("/repo"), &mcp);
-
-    assert_eq!(
-        key(Vec::new()),
-        key(Vec::new()),
-        "the same directory asked about the same way is one workspace"
-    );
-    assert_ne!(
-        key(Vec::new()),
-        key(server("/bin/mcp-fs")),
-        "a supplied server is not none"
-    );
-    assert_ne!(
-        key(server("/bin/mcp-fs")),
-        key(server("/bin/other-fs")),
-        "one name, two commands: a client that named a different program must get it"
-    );
-    assert_ne!(
-        key(Vec::new()),
-        WorkspaceKey::new(Path::new("/other-repo"), &[]),
-        "and a directory is a key"
-    );
 }

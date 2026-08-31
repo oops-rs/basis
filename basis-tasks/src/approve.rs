@@ -8,22 +8,9 @@
 
 use basis::Approver;
 
-/// Every consequential call is put to this, exactly once per task: `Always`
-/// allows, `Never` refuses, `Prompt` asks whoever is executing the task's
-/// current turn.
-#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
-#[serde(rename_all = "lowercase")]
-pub enum Approve {
-    /// Allow consequential calls without asking.
-    Always,
-    /// Ask whatever [`PromptHost`] the executing process supplied. Refused at
-    /// spawn and at attach for a process with none, or with one that cannot
-    /// currently ask (see [`validate_approval`]).
-    #[default]
-    Prompt,
-    /// Refuse anything that changes state outside the process.
-    Never,
-}
+/// The shared host policy, under the durable task layer's existing public
+/// name.
+pub use basis_host::ApprovalPolicy as Approve;
 
 /// How a process answers `Approve::Prompt` while it executes a task's turns,
 /// and whether there is anyone there to ask at all.

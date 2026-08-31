@@ -61,57 +61,21 @@
 //!
 //! `tests/acp/permission.rs` pins both directions.
 
-use std::{
-    collections::HashMap,
-    sync::{Arc, Mutex},
-};
-
 use agent_client_protocol::schema::v1::{SessionMode, SessionModeId, SessionModeState};
+use basis_host::SessionApproval;
 
-use basis::approval::{ApprovalAnswer, ApprovalDecision, ApprovalRequest, Approver};
-
-/// What a session does about a call that changes state outside the process.
-///
-/// The three answers a person at a client can hold an opinion about. Each is a
-/// way of answering an [`Approver`]'s question rather than a policy the runtime
-/// enforces — see the module docs on where the mode is applied.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
-pub enum ApprovalMode {
-    /// Act without asking.
-    Always,
-    /// Ask the client, every time. The default over ACP: there is a client to
-    /// ask, which is the whole reason the protocol carries a permission
-    /// request.
-    #[default]
-    Prompt,
-    /// Refuse, so the session can read a workspace and report and cannot touch
-    /// it.
-    Never,
-}
+pub use basis_host::{ApprovalPolicy as ApprovalMode, PolicyApprover as ModedApprover};
 
 /// Mode ids on the wire. basis chooses them, a client echoes them back, and
 /// [`mode_for`] reads them — a contract with ourselves, so it lives in one
 /// place.
-const ALWAYS: &str = "always";
-const PROMPT: &str = "prompt";
-const NEVER: &str = "never";
-
 /// The mode an id selects, or `None` for an id basis never offered.
 fn mode_for(id: &str) -> Option<ApprovalMode> {
-    match id {
-        ALWAYS => Some(ApprovalMode::Always),
-        PROMPT => Some(ApprovalMode::Prompt),
-        NEVER => Some(ApprovalMode::Never),
-        _ => None,
-    }
+    ApprovalMode::from_type_tag(id)
 }
 
 fn mode_id(mode: ApprovalMode) -> SessionModeId {
-    SessionModeId::new(match mode {
-        ApprovalMode::Always => ALWAYS,
-        ApprovalMode::Prompt => PROMPT,
-        ApprovalMode::Never => NEVER,
-    })
+    SessionModeId::new(mode.type_tag())
 }
 
 /// How each mode is described in a client's picker.
@@ -162,15 +126,9 @@ impl std::fmt::Display for ModeError {
 /// and ACP says explicitly that it may.
 #[derive(Clone)]
 pub struct SessionModes {
-    inner: Arc<Mutex<State>>,
-}
-
-struct State {
-    current: ApprovalMode,
+    approval: SessionApproval,
     /// False when the session was opened read-only. See [`SessionModes::new`].
     switchable: bool,
-    /// Tools the client answered "…for this session" about, and how.
-    remembered: HashMap<String, bool>,
 }
 
 impl SessionModes {
@@ -184,33 +142,34 @@ impl SessionModes {
     /// the protocol, and a client cannot lift what it was never given.
     pub fn new(initial: ApprovalMode) -> Self {
         Self {
-            inner: Arc::new(Mutex::new(State {
-                current: initial,
-                switchable: !matches!(initial, ApprovalMode::Never),
-                remembered: HashMap::new(),
-            })),
+            approval: SessionApproval::new(initial),
+            switchable: !matches!(initial, ApprovalMode::Never),
         }
     }
 
     pub fn current(&self) -> ApprovalMode {
-        self.lock().current
+        self.approval.current()
+    }
+
+    pub(crate) fn approval(&self) -> &SessionApproval {
+        &self.approval
     }
 
     /// The modes and the current one, as `session/new` and `session/load`
     /// report them.
     pub fn state(&self) -> SessionModeState {
-        let state = self.lock();
-        let available = if state.switchable {
+        let current = self.current();
+        let available = if self.switchable {
             vec![
                 describe(ApprovalMode::Always),
                 describe(ApprovalMode::Prompt),
                 describe(ApprovalMode::Never),
             ]
         } else {
-            vec![describe(state.current)]
+            vec![describe(current)]
         };
 
-        SessionModeState::new(mode_id(state.current), available)
+        SessionModeState::new(mode_id(current), available)
     }
 
     /// Switches to `id`, returning the mode now in force.
@@ -222,150 +181,18 @@ impl SessionModes {
     pub fn set(&self, id: &SessionModeId) -> Result<ApprovalMode, ModeError> {
         let mode = mode_for(&id.0).ok_or(ModeError::Unknown)?;
 
-        let mut state = self.lock();
-        if !state.switchable && mode != state.current {
+        if !self.switchable && mode != self.current() {
             return Err(ModeError::NotOffered);
         }
 
-        state.current = mode;
-        state.remembered.clear();
+        self.approval.set(mode);
         Ok(mode)
-    }
-
-    fn remember(&self, tool_name: &str, allow: bool) {
-        self.lock().remembered.insert(tool_name.to_string(), allow);
-    }
-
-    fn remembered(&self, tool_name: &str) -> Option<bool> {
-        self.lock().remembered.get(tool_name).copied()
-    }
-
-    fn lock(&self) -> std::sync::MutexGuard<'_, State> {
-        // A poisoned mode means some other task panicked mid-update. The mode
-        // itself is a plain enum and a map; refusing to serve the rest of the
-        // session over it would turn one panic into a dead conversation.
-        self.inner
-            .lock()
-            .unwrap_or_else(|poisoned| poisoned.into_inner())
-    }
-}
-
-/// Applies the session's mode to each approval request, asking `inner` only
-/// when the mode says to ask.
-pub struct ModedApprover<A> {
-    modes: SessionModes,
-    inner: A,
-}
-
-impl<A> ModedApprover<A> {
-    pub fn new(modes: SessionModes, inner: A) -> Self {
-        Self { modes, inner }
-    }
-}
-
-#[async_trait::async_trait]
-impl<A: Approver> Approver for ModedApprover<A> {
-    async fn approve(&mut self, request: &ApprovalRequest) -> ApprovalAnswer {
-        // Read-only calls never reach here: basis's gate allows them
-        // outright, because prompting for reads trains people to approve
-        // without reading.
-        match self.modes.current() {
-            ApprovalMode::Always => ApprovalDecision::Allow.into(),
-            ApprovalMode::Never => ApprovalAnswer::new(ApprovalDecision::Deny).because(format!(
-                "{} changes state outside this process, and this session is set to refuse that",
-                request.tool_name
-            )),
-            ApprovalMode::Prompt => self.ask(request).await,
-        }
-    }
-}
-
-impl<A: Approver> ModedApprover<A> {
-    async fn ask(&mut self, request: &ApprovalRequest) -> ApprovalAnswer {
-        if let Some(allow) = self.modes.remembered(&request.tool_name) {
-            return if allow {
-                ApprovalDecision::Allow.into()
-            } else {
-                ApprovalAnswer::new(ApprovalDecision::Deny).because(format!(
-                    "{} was refused earlier in this session, and that answer still stands",
-                    request.tool_name
-                ))
-            };
-        }
-
-        // The two "…for this session" answers are collapsed to a plain one
-        // before mentra sees them, and remembered here instead — see the
-        // module docs. The reason survives the collapse, because it is what
-        // the model reads.
-        let answer = self.inner.approve(request).await;
-        match answer.decision {
-            ApprovalDecision::AllowForSession => {
-                self.modes.remember(&request.tool_name, true);
-                ApprovalAnswer {
-                    decision: ApprovalDecision::Allow,
-                    ..answer
-                }
-            }
-            ApprovalDecision::DenyForSession => {
-                self.modes.remember(&request.tool_name, false);
-                ApprovalAnswer {
-                    decision: ApprovalDecision::Deny,
-                    ..answer
-                }
-            }
-            _ => answer,
-        }
     }
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
-    use basis::ToolSideEffectLevel;
-    use serde_json::json;
-    use std::sync::atomic::{AtomicUsize, Ordering};
-
-    /// Counts how often it was consulted, so a test can prove a mode answered
-    /// without asking.
-    struct Counting {
-        asked: Arc<AtomicUsize>,
-        answer: ApprovalDecision,
-    }
-
-    #[async_trait::async_trait]
-    impl Approver for Counting {
-        async fn approve(&mut self, _request: &ApprovalRequest) -> ApprovalAnswer {
-            self.asked.fetch_add(1, Ordering::SeqCst);
-            self.answer.into()
-        }
-    }
-
-    fn request(tool_name: &str) -> ApprovalRequest {
-        ApprovalRequest {
-            request_id: "r1".to_string(),
-            tool_call_id: "c1".to_string(),
-            tool_name: tool_name.to_string(),
-            description: "wants to write".to_string(),
-            input: json!({}),
-            side_effect_level: Some(ToolSideEffectLevel::LocalState),
-        }
-    }
-
-    fn gate(
-        initial: ApprovalMode,
-        answer: ApprovalDecision,
-    ) -> (SessionModes, ModedApprover<Counting>, Arc<AtomicUsize>) {
-        let modes = SessionModes::new(initial);
-        let asked = Arc::new(AtomicUsize::new(0));
-        let approver = ModedApprover::new(
-            modes.clone(),
-            Counting {
-                asked: Arc::clone(&asked),
-                answer,
-            },
-        );
-        (modes, approver, asked)
-    }
 
     #[test]
     fn every_offered_mode_maps_back_to_one_lan_can_read() {
@@ -387,7 +214,7 @@ mod tests {
     fn the_state_reports_the_current_mode_and_all_three() {
         let state = SessionModes::new(ApprovalMode::Prompt).state();
 
-        assert_eq!(&*state.current_mode_id.0, PROMPT);
+        assert_eq!(&*state.current_mode_id.0, ApprovalMode::Prompt.type_tag());
         assert_eq!(state.available_modes.len(), 3);
     }
 
@@ -397,9 +224,9 @@ mod tests {
         let state = modes.state();
 
         assert_eq!(state.available_modes.len(), 1);
-        assert_eq!(&*state.current_mode_id.0, NEVER);
+        assert_eq!(&*state.current_mode_id.0, ApprovalMode::Never.type_tag());
         assert_eq!(
-            modes.set(&SessionModeId::new(ALWAYS)),
+            modes.set(&SessionModeId::new(ApprovalMode::Always.type_tag())),
             Err(ModeError::NotOffered),
             "a client cannot lift a prohibition it was never given"
         );
@@ -410,7 +237,7 @@ mod tests {
         let modes = SessionModes::new(ApprovalMode::Prompt);
 
         assert_eq!(
-            modes.set(&SessionModeId::new(ALWAYS)),
+            modes.set(&SessionModeId::new(ApprovalMode::Always.type_tag())),
             Ok(ApprovalMode::Always)
         );
         assert_eq!(modes.current(), ApprovalMode::Always);
@@ -429,116 +256,5 @@ mod tests {
             ApprovalMode::Prompt,
             "a refused switch must leave the session where it was"
         );
-    }
-
-    #[tokio::test]
-    async fn allow_and_refuse_answer_without_asking() {
-        for (mode, expected) in [
-            (ApprovalMode::Always, ApprovalDecision::Allow),
-            (ApprovalMode::Never, ApprovalDecision::Deny),
-        ] {
-            let (_modes, mut approver, asked) = gate(mode, ApprovalDecision::Allow);
-
-            assert_eq!(approver.approve(&request("shell")).await.decision, expected);
-            assert_eq!(
-                asked.load(Ordering::SeqCst),
-                0,
-                "{mode:?} has nothing to ask about"
-            );
-        }
-    }
-
-    #[tokio::test]
-    async fn a_read_only_session_says_so_when_it_refuses() {
-        // The model reads this as the tool result, and "denied" on its own
-        // would have it try the same write again.
-        let (_modes, mut approver, _asked) = gate(ApprovalMode::Never, ApprovalDecision::Allow);
-
-        assert_eq!(
-            approver.approve(&request("shell")).await.reason.as_deref(),
-            Some(
-                "shell changes state outside this process, \
-                 and this session is set to refuse that"
-            )
-        );
-    }
-
-    #[tokio::test]
-    async fn asking_puts_the_request_to_the_client() {
-        let (_modes, mut approver, asked) = gate(ApprovalMode::Prompt, ApprovalDecision::Allow);
-
-        assert_eq!(
-            approver.approve(&request("shell")).await.decision,
-            ApprovalDecision::Allow
-        );
-        assert_eq!(asked.load(Ordering::SeqCst), 1);
-    }
-
-    #[tokio::test]
-    async fn an_answer_for_the_session_is_not_asked_twice() {
-        let (_modes, mut approver, asked) =
-            gate(ApprovalMode::Prompt, ApprovalDecision::AllowForSession);
-
-        // Collapsed to a plain allow so mentra does not store a rule of its
-        // own — the one basis keeps is the one a mode change can clear.
-        assert_eq!(
-            approver.approve(&request("shell")).await.decision,
-            ApprovalDecision::Allow
-        );
-        assert_eq!(
-            approver.approve(&request("shell")).await.decision,
-            ApprovalDecision::Allow
-        );
-        assert_eq!(asked.load(Ordering::SeqCst), 1);
-
-        // A different tool was never answered for.
-        assert_eq!(
-            approver.approve(&request("files")).await.decision,
-            ApprovalDecision::Allow
-        );
-        assert_eq!(asked.load(Ordering::SeqCst), 2);
-    }
-
-    #[tokio::test]
-    async fn changing_mode_forgets_what_was_allowed_for_the_session() {
-        let (modes, mut approver, _asked) =
-            gate(ApprovalMode::Prompt, ApprovalDecision::AllowForSession);
-
-        approver.approve(&request("shell")).await;
-        modes.set(&SessionModeId::new(NEVER)).expect("switches");
-
-        assert_eq!(
-            approver.approve(&request("shell")).await.decision,
-            ApprovalDecision::Deny,
-            "a stale allow must not survive the mode that replaced it"
-        );
-
-        // And it stays forgotten on the way back, rather than reappearing.
-        modes.set(&SessionModeId::new(PROMPT)).expect("switches");
-        assert_eq!(
-            approver.approve(&request("shell")).await.decision,
-            ApprovalDecision::Allow,
-            "the client is asked again, and answered again"
-        );
-    }
-
-    #[tokio::test]
-    async fn a_refusal_for_the_session_is_also_remembered() {
-        let (_modes, mut approver, asked) =
-            gate(ApprovalMode::Prompt, ApprovalDecision::DenyForSession);
-
-        assert_eq!(
-            approver.approve(&request("shell")).await.decision,
-            ApprovalDecision::Deny
-        );
-
-        let repeated = approver.approve(&request("shell")).await;
-        assert_eq!(repeated.decision, ApprovalDecision::Deny);
-        assert_eq!(
-            repeated.reason.as_deref(),
-            Some("shell was refused earlier in this session, and that answer still stands"),
-            "a remembered refusal still owes the model a reason"
-        );
-        assert_eq!(asked.load(Ordering::SeqCst), 1);
     }
 }

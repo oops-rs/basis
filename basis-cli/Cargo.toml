@@ -14,6 +14,7 @@ categories = ["development-tools", "command-line-utilities"]
 [dependencies]
 basis.workspace = true
 basis-acp.workspace = true
+basis-host.workspace = true
 # The durable task layer (ADR-0019, D8): the CLI's lifecycle verbs are the
 # first client of this, not its implementation.
 basis-tasks.workspace = true

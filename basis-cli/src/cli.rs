@@ -13,18 +13,17 @@
 //! sees them. The rewrite that turns a bare prompt into a `spawn` happens before
 //! any of this, in [`shorthand`](crate::shorthand).
 //!
-//! The conversions are the exception to "only the shape". [`EffortArg`],
-//! [`ApproveMode`] and [`system_prompt`] each turn a spelling into a type in
+//! The conversions are the exception to "only the shape". [`EffortArg`] and
+//! [`system_prompt`] each turn a spelling into a type in
 //! the layer below, and each is named by two commands — keeping the conversion
 //! next to the spelling is what stops `spawn` and `serve` drifting into meaning
 //! different things by the same word.
 
 use std::{net::SocketAddr, path::PathBuf};
 
-use basis::{AllowAll, Approver, DenyAll, SystemPrompt};
-
-use crate::approver::TerminalApprover;
 use crate::duration_arg::DurationArg;
+use basis::SystemPrompt;
+use basis_host::ApprovalPolicy;
 use clap::{Parser, Subcommand};
 
 #[derive(Debug, Parser)]
@@ -291,8 +290,13 @@ pub(crate) struct AcpArgs {
     /// When to ask before the agent changes anything. Defaults to asking the
     /// ACP client, which is the point of a protocol with a permission request
     /// in it.
-    #[arg(long, value_name = "MODE", default_value = "prompt")]
-    pub(crate) approve: ApproveMode,
+    #[arg(
+        long,
+        value_name = "MODE",
+        default_value = "prompt",
+        value_parser = parse_approval_policy
+    )]
+    pub(crate) approve: ApprovalPolicy,
 }
 
 #[derive(Debug, clap::Args)]
@@ -406,8 +410,13 @@ pub(crate) struct RunArgs {
     /// of whichever process is driving the agent, so it needs both a terminal
     /// on stdin and a route that drives one (ADR-0020). It is rejected for
     /// `--resumable` work, which has nobody to ask.
-    #[arg(long, value_name = "MODE", default_value = "always")]
-    pub(crate) approve: ApproveMode,
+    #[arg(
+        long,
+        value_name = "MODE",
+        default_value = "always",
+        value_parser = parse_approval_policy
+    )]
+    pub(crate) approve: ApprovalPolicy,
 
     /// Give up on the run after this long: 90s, 30m, 2h.
     ///
@@ -464,57 +473,9 @@ pub(crate) struct FingerprintArgs {
     pub(crate) workspace: Option<PathBuf>,
 }
 
-#[derive(
-    Debug,
-    Clone,
-    Copy,
-    Default,
-    PartialEq,
-    Eq,
-    clap::ValueEnum,
-    serde::Serialize,
-    serde::Deserialize,
-)]
-#[serde(rename_all = "lowercase")]
-pub(crate) enum ApproveMode {
-    /// Allow consequential calls without asking.
-    Always,
-    /// Ask the protocol client. Valid for ACP; rejected for local async work.
-    #[default]
-    Prompt,
-    /// Refuse anything that changes state outside the process.
-    Never,
-}
-
-impl ApproveMode {
-    /// Installs the binary approver for the legacy attended JSONL path.
-    pub(crate) fn approver(self) -> Box<dyn Approver> {
-        match self {
-            Self::Always => Box::new(AllowAll),
-            Self::Prompt => Box::new(TerminalApprover::new()),
-            Self::Never => Box::new(DenyAll),
-        }
-    }
-}
-
-impl From<ApproveMode> for basis_acp::ApprovalMode {
-    fn from(mode: ApproveMode) -> Self {
-        match mode {
-            ApproveMode::Always => Self::Always,
-            ApproveMode::Prompt => Self::Prompt,
-            ApproveMode::Never => Self::Never,
-        }
-    }
-}
-
-impl From<ApproveMode> for basis_tasks::Approve {
-    fn from(mode: ApproveMode) -> Self {
-        match mode {
-            ApproveMode::Always => Self::Always,
-            ApproveMode::Prompt => Self::Prompt,
-            ApproveMode::Never => Self::Never,
-        }
-    }
+fn parse_approval_policy(value: &str) -> Result<ApprovalPolicy, String> {
+    ApprovalPolicy::from_type_tag(value)
+        .ok_or_else(|| "expected one of: always, prompt, never".to_string())
 }
 
 #[cfg(test)]

@@ -38,7 +38,7 @@ const MAX_WAIT: Duration = Duration::from_secs(7 * 24 * 60 * 60);
 pub(crate) async fn spawn(args: RunArgs, attach: bool) -> Result<ExitCode, ClientError> {
     let workspace = workspace_or_current(args.workspace.clone())?;
     let prompt = prompt_from(args.prompt.clone())?;
-    let approve: basis_tasks::Approve = args.approve.into();
+    let approve = args.approve;
     // `Tasks::spawn` refuses `Approve::Prompt` itself when this `Tasks` has
     // no way to answer it — the same check this used to make here, ahead of
     // it, against `attach` rather than against whether this `Tasks` can ever
