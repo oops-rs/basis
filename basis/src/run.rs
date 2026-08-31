@@ -45,7 +45,7 @@ pub use output::{
     OutputReservation, OutputSpec,
 };
 pub use prepared::{
-    AgentEventTapGuard, Compacted, HistoryRole, LoadedSkill, PreparedRun, PromptPart, RunContext,
+    AgentEventTapGuard, Compacted, LoadedSkill, PreparedRun, PromptPart, RunContext,
 };
 pub use sink::{
     CollectingSink, EventFanIn, EventSink, FnSink, MergedEvents, NullSink, TaggedEvent, TaggedSink,

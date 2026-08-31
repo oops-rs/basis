@@ -194,8 +194,8 @@ async fn the_session_survives_and_reports_its_history() {
     let said: Vec<String> = prepared
         .text_history()
         .filter_map(|(role, text)| match role {
-            basis::HistoryRole::User => Some(text),
-            basis::HistoryRole::Assistant => None,
+            basis::runtime::Role::User => Some(text),
+            basis::runtime::Role::Assistant | basis::runtime::Role::Unknown(_) => None,
         })
         .collect();
     assert_eq!(said, vec!["first".to_string(), "second".to_string()]);
