@@ -11,8 +11,8 @@
 //! # Why the ids live here and not in the core
 //!
 //! The same argument [`mode`](crate::mode) makes. basis has
-//! [`Effort`] — five levels and an unset — and mentra has
-//! [`Session::set_model`](mentra::Session::set_model), and neither is
+//! [`Effort`] — five levels and an unset — and a run has
+//! [`PreparedRun::set_model`](basis::PreparedRun::set_model), and neither is
 //! *enumerable* the way a picker needs: ACP wants an id, a label, and a
 //! description per value, which is a protocol binding and belongs with the
 //! protocol.
