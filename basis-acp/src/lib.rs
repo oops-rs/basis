@@ -24,8 +24,8 @@
 //! - [`SessionModes`] is the client's permission switch: ACP session modes over
 //!   basis's [`Approver`](basis::Approver) seam, applied in front of the
 //!   approver so the answer can still change mid-session. The three modes are
-//!   [`ApprovalMode`], which is basis-acp's own because an enumerable mode list
-//!   is a protocol concept — the core has the trait and nothing else.
+//!   the shared [`ApprovalMode`]; basis-acp owns only their enumerable wire
+//!   presentation and the read-only session's offering rule.
 //! - `options` is the other switch a client holds: `session/set_config_option`
 //!   over [`PreparedRun::set_model`](basis::PreparedRun::set_model) and
 //!   [`set_effort`](basis::PreparedRun::set_effort), advertised per session
@@ -33,13 +33,13 @@
 //!   `initialize`.
 //! - `history` replays a resumed conversation, which is what separates
 //!   `session/load` from `session/resume`.
-//! - [`SessionRegistry`] holds the open conversations, keyed by mentra's
-//!   persisted agent id so that `session/load` is just
+//! - [`SessionRegistry`] adapts basis-host's open-conversation registry to ACP
+//!   ids, keyed by mentra's persisted agent id so that `session/load` is just
 //!   [`Workspace::resume`](basis::Workspace::resume).
-//! - [`serve`] wires the handlers onto a connection, over one
-//!   [`Runtime`](basis::Runtime) for the process and one
-//!   [`Workspace`](basis::Workspace) per directory a client names
-//!   (ADR-0018).
+//! - [`serve`] wires the handlers onto a connection; basis-host owns the one
+//!   [`Runtime`](basis::Runtime) per process and one
+//!   [`Workspace`](basis::Workspace) per configured directory (ADR-0018,
+//!   ADR-0025).
 //! - [`serve_stdio`] is the stdin/stdout transport, and the one place basis looks
 //!   at what a peer sent before serving it.
 //! - [`available_commands`] and [`from_acp`] are the two mappings between a

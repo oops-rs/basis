@@ -1,13 +1,13 @@
 # basis — Architecture
 
-> rev 13 · 2026-08-22 · **basis** — the minimal set everything else is built from
+> rev 14 · 2026-09-01 · **basis** — the minimal set everything else is built from
 > The *how*. For the *why* — problem, idea, bets — see [`PROPOSAL.md`](PROPOSAL.md);
 > locked decisions live in [`adr/`](adr/); deferred ideas in [`proposals/`](proposals/);
 > research grounding in [`p0-groundwork.md`](p0-groundwork.md).
 > **Note (2026-08-11):** ADR-0010…0015 redirect the design toward an SDK-first
 > shape. **Phases A, B, C and D of that transition have landed** — watch retired,
 > bounds moved onto runs, shell default flipped, no shipped container, the CLI
-> grammar of ADR-0015; the split into `basis` / `basis-acp` / the binary with
+> grammar of ADR-0015; the split into five dependency-weighted crates with
 > MCP behind a feature and approval as a trait; the SDK proper — a
 > `Workspace` opened once that mints runs, typed output, cancellation, a shared
 > budget, and tagged event fan-in; and the bindings — interception as one
@@ -27,7 +27,10 @@
 > hook runs after a tool as well as before, compaction knows the model's
 > window, a conversation can be compacted, renamed, listed by recency and
 > deleted, and a delegated run's spend is finally in its parent's tally. The
-> ledger and phases are in [`REDESIGN.md`](REDESIGN.md).
+> adapter-neutral approval policy, served-session source, runtime/workspace
+> pool, and turn discipline have since moved out of ACP into `basis-host`, with
+> ACP retaining only protocol translation (ADR-0025). The ledger and phases are
+> in [`REDESIGN.md`](REDESIGN.md).
 > Reference bar: [pi](https://github.com/earendil-works/pi) (earendil-works) — minimal core, complete harness.
 > General-purpose: no domain assumptions. Periodic bug-checking is one use case, never a design input.
 
@@ -163,8 +166,8 @@ cancellation request them downward first. A finished worker accepts no new
 messages and no new children. `--detached` creates a new root. `watch` tails the
 event journal, which makes replay the default rather than a feature, while
 terminal state is a separate file, so a slow watcher cannot strand completion.
-All of this lives in the binary; `basis` remains protocol- and
-transport-free.
+All of this lives in `basis-tasks`, driven by the binary; `basis` remains
+protocol- and transport-free.
 
 ## 3. Extension model (without embedding a scripting language)
 
@@ -248,7 +251,13 @@ flowchart LR
     br["ws bridge (extractable)"]
   end
   subgraph adapter["basis-acp — the ACP adapter"]
-    srv["server · session mapping · modes"]
+    srv["server · wire session mapping · mode presentation"]
+  end
+  subgraph tasks["basis-tasks — durable tasks"]
+    durable["handles · inbox · attach lock · journal"]
+  end
+  subgraph hostkit["basis-host — adapter-neutral host kit"]
+    hosted["approval policy · sessions · runtime/workspace pool"]
   end
   subgraph lib["basis — the SDK"]
     ws["Workspace — opened once: context · model · MCP · seams"]
@@ -268,9 +277,15 @@ flowchart LR
   web -- ws --> br
   br --> srv
   entry --> srv
+  entry --> durable
   entry --> lib
   host --> lib
+  host --> hosted
+  srv --> hosted
   srv --> lib
+  durable --> hosted
+  durable --> lib
+  hosted --> lib
   rt --> wsp
   rt --> llm
   ctx --> ws
@@ -283,17 +298,26 @@ flowchart LR
 ```
 
 - **Crate layering mirrors pi's package layering**: mentra-provider ≈ pi-ai, mentra ≈
-  pi-agent-core, basis ≈ pi-coding-agent minus TUI. Since ADR-0011 basis is itself four crates,
+  pi-agent-core, basis ≈ pi-coding-agent minus TUI. Basis is itself five crates,
   split by dependency weight rather than by release schedule (they share one version):
   **`basis`** is the in-process SDK and carries no protocol, no transport, and no TTY
-  code; **`basis-tasks`** is the durable task layer over it, reachable from Rust without the
-  binary (ADR-0022); **`basis-acp`** is the ACP adapter over `basis`'s event stream and seams,
-  opt-in by dependency; **`basis`** is the binary over all three, and the explicit
+  code; **`basis-host`** is the adapter-neutral approval, session, and served-workspace kit
+  over it (ADR-0025); **`basis-tasks`** is the durable task layer, reachable from Rust without
+  the binary (ADR-0022); **`basis-acp`** is the ACP adapter over the SDK and host kit, opt-in by
+  dependency; **`basis-cli`** publishes the `basis` binary over all four libraries, and the explicit
   `basis serve --acp` command is what an editor spawns. MCP is a
   default-on `mcp` feature of `basis`, so an embedder can compile a core that has never
   heard of it (ADR-0012). The websocket bridge stays in the binary, marked extractable: it
   is ACP-ecosystem tooling with no basis-specific knowledge, and never an identity argument
   for basis.
+- **The host kit moves behavior; it does not generalize it** (ADR-0025). `ApprovalPolicy`
+  and its session-scoped remembered answers are shared by ACP, tasks, and the CLI;
+  `HostSession` keeps one turn lock with cancellation reachable outside it; and
+  `ConfiguredSource` keeps one lazy runtime per process plus one never-evicted workspace per
+  canonical directory and supplied-MCP digest. `SessionSource`, `SessionTemplate`, and
+  `Discovery` are the same concrete served-session seam ACP already exposed. ACP retains
+  `SessionId`, mode descriptions/errors, permission RPC, lifecycle error mapping, and handler
+  scheduling. No frontend/adapter trait or registry was added.
 - **ACP is explicit** — `basis serve --acp` serves the protocol on stdio and
   `basis serve --bridge` serves it over a websocket. Bare `basis` prints usage; making a
   long-lived server an explicit command keeps a prompt invocation from accidentally

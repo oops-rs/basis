@@ -6,9 +6,10 @@
 basis is an agent harness you **embed**. `basis` is the harness itself, as a library: open a
 `Workspace`, mint runs from it, read one event stream, plug your own code into the seams. It carries
 no protocol, no transport and no terminal code, so an embedding host's dependency graph states what
-it uses ([ADR-0011](docs/adr/0011-layered-crates.md)); `basis-tasks` is the durable task layer
-over it ([ADR-0022](docs/adr/0022-the-task-layer-is-a-crate.md)), and `basis-acp` and the binary
-are thin shells.
+it uses ([ADR-0011](docs/adr/0011-layered-crates.md)). `basis-host` is the adapter-neutral host kit
+over it ([ADR-0025](docs/adr/0025-the-host-kit-is-a-crate.md)); `basis-tasks` is the durable task
+layer ([ADR-0022](docs/adr/0022-the-task-layer-is-a-crate.md)); `basis-acp` and `basis-cli` are the
+protocol and command shells.
 
 ```rust
 // [dependencies] basis = "0.11"
@@ -52,7 +53,7 @@ exported — is spoken to with no `Authorization` header at all; one that wanted
   gets there is argued in the workspace manifest, including the one deliberately absent:
   `panic = "abort"` turns any panic into a dead process, which is what an embedded harness and a
   long-lived server exist to avoid.
-- **~29k lines of Rust** across the four crates, ~40k with tests.
+- **~29k lines of Rust** across the five crates, ~40k with tests.
 
 ## The SDK
 
@@ -404,7 +405,7 @@ side-effect level rides mentra's `PermissionRequested.classification`; `SideEffe
 deleted. `.mcp.json` `type: "http"` connects (Streamable HTTP). Memory is a directory convention
 (`memory/` roots of frontmatter Markdown, indexed into the prompt) and mentra's memory engine is
 off. New knobs: `ToolRoster`, `with_provider_instance`, `TurnOptions::with_round_strategy`,
-`MemoryConfig`, `with_delegation_depth`, and basis-acp's `SessionTemplate` + `Discovery`. The
+`MemoryConfig`, `with_delegation_depth`, and basis-host's `SessionTemplate` + `Discovery`. The
 mentra floor is 0.20.0. Old CLI journals and task records still load; the wire schema number is
 unchanged.
 
@@ -484,11 +485,14 @@ bridge; branching; compaction, whose defaults are basis's own — every tool res
 shown stays in front of it — and whose knobs are `WorkspaceBuilder::with_compaction`; and the SDK
 proper — and since 0.7, conversations as plain files, a child a delegating parent can shape, and
 `basis-tasks` for a Rust host that wants durable handles; since 0.8, a lossless in-process event tap
-and strict private-runtime consume/rebuild for host-defined checkouts. Named honestly, still open:
+and strict private-runtime consume/rebuild for host-defined checkouts; and now `basis-host`, with
+the shared approval policy, served-session source, workspace pool, and turn/cancellation discipline
+that a third frontend otherwise had to recover from ACP. Named honestly, still open:
 the packages convention and provider OAuth; surfacing `team_*`, which stays hidden until a concrete
 use case asks for it; and **nobody has driven this from Zed or JetBrains yet** — it is verified against the
-protocol and its official client library, not against the ecosystem. The four published crates are
-on crates.io at one version, as is mentra. CI runs fmt, clippy at
+protocol and its official client library, not against the ecosystem. The five workspace crates
+share one version; the 0.11 crates already published remain on crates.io, while `basis-host` joins
+them only when the user performs the next release. CI runs fmt, clippy at
 `-D warnings`, and the full suite on Linux, macOS and Windows, plus MSRV (1.88, edition 2024).
 
 Every addition faces one check: does it make embedding cheaper for a Rust host, is it a convention
@@ -500,7 +504,7 @@ for `--effort`, custom endpoints, and the hooks `shell`→`spawn` migration) ·
 [conventions.md](docs/conventions.md) (every file and variable basis reads, in precedence order) ·
 [embedding.md](docs/embedding.md) (the SDK in detail) · [targets.md](docs/targets.md) (running a
 command somewhere else) · [REDESIGN.md](docs/REDESIGN.md) (ledger) ·
-[adr/](docs/adr/) (24 locked decisions) · [proposals/](docs/proposals/) (deferred ideas).
+[adr/](docs/adr/) (25 locked decisions) · [proposals/](docs/proposals/) (deferred ideas).
 
 ## License
 

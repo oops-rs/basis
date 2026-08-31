@@ -5,9 +5,10 @@
 //! needs regardless of protocol. The first shared seam is approval policy and
 //! its session-scoped remembered answers.
 //!
-//! The layer line is ADR-0011's: this crate depends on [`basis`] and nothing
-//! heavier. Protocol bindings stay in `basis-acp`; terminal bindings stay in
-//! `basis-cli`; durable task coordination stays in `basis-tasks`.
+//! The layer line is ADR-0025's application of ADR-0011: this crate depends on
+//! [`basis`] and nothing heavier. Protocol bindings stay in `basis-acp`;
+//! terminal bindings stay in `basis-cli`; durable task coordination stays in
+//! `basis-tasks`.
 
 mod approval;
 mod config;
