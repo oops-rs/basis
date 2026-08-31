@@ -211,6 +211,16 @@ pub enum RunOutcome {
     Error { message: String },
 }
 
+impl RunOutcome {
+    /// The stable string id basis writes for this outcome.
+    pub const fn type_tag(&self) -> &'static str {
+        match self {
+            Self::Ok => "ok",
+            Self::Error { .. } => "error",
+        }
+    }
+}
+
 /// A skill the run can load by name. Bodies stay out of the stream — they are
 /// what `load_skill` is for, and keeping them out is what makes skills cheap.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]

@@ -292,16 +292,6 @@ impl<S> RunReport<S> {
     }
 }
 
-impl RunOutcome {
-    /// The stable string id basis writes for this outcome.
-    pub const fn type_tag(&self) -> &'static str {
-        match self {
-            Self::Ok => "ok",
-            Self::Error { .. } => "error",
-        }
-    }
-}
-
 pub use crate::error::RunError;
 
 /// Runs one prompt to completion, streaming events into `sink`.
