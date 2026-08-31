@@ -77,7 +77,8 @@ impl Spawn {
     }
 
     /// The registered target this command named, or `None` for the local
-    /// executor. Never `Some("local")` — see [`LOCAL_TARGET`].
+    /// executor. Never `Some("local")`: `local` is the reserved wire spelling
+    /// for the executor in this process, not a registered target name.
     pub fn target(&self) -> Option<&str> {
         self.target.as_deref()
     }
