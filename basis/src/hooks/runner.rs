@@ -117,7 +117,8 @@ impl HookRunner {
     /// carrying words, because an error here would reach the model as a bare
     /// blocked call with the reason thrown away.
     ///
-    /// Consults everybody: interceptors first, then hooks.
+    /// Consults everybody: in-process interceptors first, then subprocess
+    /// hooks.
     ///
     /// Both are awaited on the caller's own runtime. A hook is a subprocess,
     /// and since mentra 0.24 spawning and waiting for one is an async
