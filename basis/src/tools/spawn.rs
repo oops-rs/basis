@@ -168,6 +168,17 @@ pub struct SpawnTool {
     workspaces: Option<Arc<HookDispatch>>,
 }
 
+/// The per-call facts both authorization preview and execution must decide.
+enum SpawnDecision {
+    Command,
+    Agent {
+        depth: usize,
+        spec: ChildSpec,
+        /// Resolved only when a child policy needed it.
+        workspace: Option<std::path::PathBuf>,
+    },
+}
+
 /// Hand-written for the policy field: a `dyn Fn` has no `Debug`, and presence
 /// is all it can honestly print.
 impl std::fmt::Debug for SpawnTool {
@@ -340,6 +351,37 @@ impl SpawnTool {
             )
         })
     }
+
+    /// Decides one parsed call. Both consumers invoke this independently:
+    /// preview so the approver sees the real decision, execution again so a
+    /// missing authorizer cannot remove a floor.
+    fn decide(
+        &self,
+        spawn: &Spawn,
+        agent_id: &str,
+        resolve_workspace: impl FnOnce() -> Result<std::path::PathBuf, String>,
+    ) -> Result<SpawnDecision, String> {
+        self.authorize_target(spawn)?;
+        match spawn.mode() {
+            Mode::Command => Ok(SpawnDecision::Command),
+            Mode::Agent => {
+                let depth = self.depth.authorize_delegation(agent_id)?;
+                let (spec, workspace) = match self.policy.as_ref() {
+                    Some(_) => {
+                        let workspace = resolve_workspace()?;
+                        let spec = self.child_spec(spawn.body(), agent_id, &workspace);
+                        (spec, Some(workspace))
+                    }
+                    None => (ChildSpec::inherit(), None),
+                };
+                Ok(SpawnDecision::Agent {
+                    depth,
+                    spec,
+                    workspace,
+                })
+            }
+        }
+    }
 }
 
 impl ToolDefinition for SpawnTool {
@@ -415,20 +457,20 @@ impl ToolExecutor for SpawnTool {
         // the depth floor: not a judgement call, so not a question for a
         // person (ADR-0021). Both checks run before the child policy is
         // consulted, so no host policy runs for a call the floor refuses.
-        self.authorize_target(&spawn)?;
-        if spawn.mode() == Mode::Agent {
-            self.depth.authorize_delegation(&ctx.agent_id)?;
-        }
-        let cwd = ctx.resolve_working_directory(None)?;
-
-        // What the child will be, for a delegation under a policy that says
-        // so — the additive `child` key the preview's docs describe. Never
-        // for a command, and never when the answer is inherit.
-        let child = match spawn.mode() {
-            Mode::Agent => self
-                .child_spec(spawn.body(), &ctx.agent_id, &cwd)
-                .preview_value(),
-            Mode::Command => None,
+        let decision = self.decide(&spawn, &ctx.agent_id, || {
+            ctx.resolve_working_directory(None)
+        })?;
+        let (cwd, child) = match decision {
+            SpawnDecision::Command => (ctx.resolve_working_directory(None)?, None),
+            SpawnDecision::Agent {
+                spec, workspace, ..
+            } => {
+                let cwd = match workspace {
+                    Some(workspace) => workspace,
+                    None => ctx.resolve_working_directory(None)?,
+                };
+                (cwd, spec.preview_value())
+            }
         };
 
         Ok(preview(&spawn, cwd, &self.descriptor(), input, child))
@@ -445,38 +487,30 @@ impl ToolExecutor for SpawnTool {
 
     async fn execute_mut(&self, mut ctx: ToolContext<'_>, input: Value) -> ToolResult {
         let spawn = parse(&input)?;
+        // Deliberately decided again: preview is skipped when no authorizer is
+        // installed, and that must not remove target or depth floors.
+        let decision = self.decide(&spawn, &ctx.agent_id, || {
+            ctx.resolve_working_directory(None)
+        })?;
 
-        match spawn.mode() {
-            Mode::Command => {
-                // Asked again rather than trusted from the preview, for the
-                // reason the depth floor is: the preview is only reached when
-                // an authorizer is installed, and a guard that a missing
-                // authorizer removes is not a guard.
-                self.authorize_target(&spawn)?;
-                execute::command(&ctx, spawn.body(), spawn.target()).await
-            }
-            Mode::Agent => {
-                // Asked again rather than trusted from the preview: the preview
-                // is only reached when an authorizer is installed, and a floor
-                // that a missing authorizer removes is not a floor.
-                let depth = self.depth.authorize_delegation(&ctx.agent_id)?;
-                // The policy too is asked again, for the same reason — and the
-                // working directory it reads is resolved only when there is a
-                // policy to read it, so the policy-free path stays exactly the
-                // path it has always been.
-                let (spec, denied) = if self.policy.is_none() {
-                    (ChildSpec::inherit(), BTreeSet::new())
-                } else {
-                    let cwd = ctx.resolve_working_directory(None)?;
-                    let spec = self.child_spec(spawn.body(), &ctx.agent_id, &cwd);
-                    // Read only when a roster override is what would drop it:
-                    // every other spec keeps the parent's cloned profile,
-                    // per-mint hides and all.
-                    let denied = match spec.overrides_roster() {
-                        true => self.denied_to_parent(&cwd),
-                        false => BTreeSet::new(),
-                    };
-                    (spec, denied)
+        match decision {
+            SpawnDecision::Command => execute::command(&ctx, spawn.body(), spawn.target()).await,
+            SpawnDecision::Agent {
+                depth,
+                spec,
+                workspace,
+            } => {
+                // Read only when a roster override is what would drop it:
+                // every other spec keeps the parent's cloned profile,
+                // per-mint hides and all. An override can only come from a
+                // policy, which is also the only path that resolves `workspace`.
+                let denied = match spec.overrides_roster() {
+                    true => self.denied_to_parent(
+                        workspace
+                            .as_deref()
+                            .expect("a roster override came from a child policy"),
+                    ),
+                    false => BTreeSet::new(),
                 };
                 execute::delegate(&self.depth, &mut ctx, spawn.body(), depth, spec, denied).await
             }
