@@ -19,7 +19,7 @@ use serde_json::Value;
 
 use basis::{
     event::{Event, Mutability, tool_result_elision_line},
-    tools::{SPAWN, SpawnMode, parse_spawn_input},
+    tools::{SPAWN, SpawnMode, classify_spawn_input},
 };
 
 /// Maps one basis event to an ACP session update.
@@ -293,19 +293,17 @@ const DELEGATION: ToolKind = ToolKind::Other;
 
 /// `spawn`'s kind, which its *mode* decides rather than its name (ADR-0016).
 ///
-/// The convention is read by basis's exported parser, the same parser the
-/// executor and workspace guard use. `cwd` is deliberately absent from this
-/// input view: basis derives it later from the tool context, while the icon
-/// depends only on whether this call is a command or a delegation.
+/// The convention is read by basis's exported lexical classifier, which its
+/// parser also consumes. `cwd` is deliberately absent from this input view:
+/// basis derives it later from the tool context, while the icon depends only
+/// on whether this call is a command or a delegation.
 fn spawn_kind(input: &Value) -> ToolKind {
-    match parse_spawn_input(input) {
-        Ok(parsed) => match parsed.mode() {
-            SpawnMode::Command => ToolKind::Execute,
-            SpawnMode::Agent => DELEGATION,
-        },
+    match classify_spawn_input(input) {
+        Some(SpawnMode::Command) => ToolKind::Execute,
+        Some(SpawnMode::Agent) => DELEGATION,
         // Nothing trustworthy to classify from, and spawn's static descriptor
         // is the stronger of the two acts.
-        Err(_) => ToolKind::Execute,
+        None => ToolKind::Execute,
     }
 }
 
@@ -658,6 +656,11 @@ mod tests {
             ),
             ToolKind::Other,
             "`!!` escapes a task whose own text starts with `!`; it is not a command"
+        );
+        assert_eq!(
+            tool_kind(SPAWN, Mutability::Unknown, &json!({"input": "   "})),
+            ToolKind::Other,
+            "an empty body is still lexically a delegation before preview refuses it"
         );
         assert_eq!(
             tool_kind(

@@ -56,7 +56,9 @@ impl Mode {
     }
 }
 
-/// A call, after the only reading of it that ever happens.
+/// Every fact the spawn input parser owns: mode, normalized body, and optional
+/// command target. The working directory is not model input; the tool context
+/// resolves it later when building the authorization preview.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Spawn {
     mode: Mode,
@@ -100,31 +102,47 @@ pub fn parse(input: &Value) -> Result<Spawn, String> {
             )
         })?;
 
-    read(raw)
+    let mode = classify_spawn_input(input).expect("the same string field was read above");
+    read(raw, mode)
+}
+
+/// Classifies the lexical spawn mode without validating that the body is
+/// executable.
+///
+/// `None` means the input field is missing or not a string. Empty and
+/// whitespace-only strings are still lexically delegations even though
+/// [`parse`] subsequently refuses their empty body.
+pub fn classify_spawn_input(input: &Value) -> Option<Mode> {
+    let raw = input.get(INPUT_FIELD).and_then(Value::as_str)?;
+    Some(classify_raw(raw))
+}
+
+fn classify_raw(raw: &str) -> Mode {
+    match raw.trim().strip_prefix('!') {
+        Some(rest) if !rest.starts_with('!') => Mode::Command,
+        Some(_) | None => Mode::Agent,
+    }
 }
 
 /// The prefix rule itself, over a plain string.
 ///
 /// Split from [`parse`] so the JSON shape and the `!` convention are two
 /// separately readable rules rather than one nested match.
-fn read(raw: &str) -> Result<Spawn, String> {
+fn read(raw: &str, mode: Mode) -> Result<Spawn, String> {
     // Trimmed once, here, so that a model's stray leading newline cannot be
     // the difference between a command and a prompt. Every later reader sees
     // the trimmed body, so there is no second normalization to disagree with.
     let trimmed = raw.trim();
 
-    let Some(rest) = trimmed.strip_prefix('!') else {
-        return delegation(trimmed);
-    };
-
-    // `!!` is the escape, and it consumes exactly one `!`: what remains still
-    // begins with the one the prompt meant to have. This is the only way to
-    // delegate a task whose own text starts with `!`. Checked before `@`, so
-    // `!!@x` stays what it has always been — a delegation of the task `!@x` —
-    // and adding a routing prefix cannot quietly reinterpret an escape.
-    if rest.starts_with('!') {
-        return delegation(rest);
+    if mode == Mode::Agent {
+        // `!!` is the escape, and it consumes exactly one `!`: what remains
+        // still begins with the one the prompt meant to have.
+        return delegation(trimmed.strip_prefix('!').unwrap_or(trimmed));
     }
+
+    let rest = trimmed
+        .strip_prefix('!')
+        .expect("command classification requires a leading bang");
 
     match rest.strip_prefix('@') {
         Some(targeted) => target(targeted),

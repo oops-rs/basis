@@ -132,6 +132,7 @@ where
 /// resumable with the model work already done.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(tag = "state", rename_all = "snake_case")]
+#[non_exhaustive]
 pub enum Terminal {
     /// The task produced its final answer.
     Succeeded { result: String },

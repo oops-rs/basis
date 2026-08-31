@@ -167,6 +167,23 @@ fn an_empty_body_says_what_to_write_instead() {
 }
 
 #[test]
+fn lexical_mode_classification_covers_unreadable_empty_escaped_and_command_inputs() {
+    assert_eq!(classify_spawn_input(&json!({})), None);
+    assert_eq!(
+        classify_spawn_input(&json!({(INPUT_FIELD): "   "})),
+        Some(Mode::Agent)
+    );
+    assert_eq!(
+        classify_spawn_input(&json!({(INPUT_FIELD): "!!urgent"})),
+        Some(Mode::Agent)
+    );
+    assert_eq!(
+        classify_spawn_input(&json!({(INPUT_FIELD): "!cargo test"})),
+        Some(Mode::Command)
+    );
+}
+
+#[test]
 fn a_call_with_no_string_in_it_is_told_which_field_to_fill() {
     for input in [json!({}), json!({ "input": 7 }), json!({ "command": "ls" })] {
         let error = parse(&input).expect_err("only a string input parses");

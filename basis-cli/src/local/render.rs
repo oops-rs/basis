@@ -338,6 +338,7 @@ fn one_line(text: &str, budget: usize) -> String {
 /// Decorates a raw terminal record with its handle and the follow-up its
 /// state admits.
 pub(crate) fn decorate_terminal(task: &str, mut record: TerminalRecord) -> TerminalRecord {
+    let state = terminal_state(&record).to_string();
     let object = record
         .raw
         .as_object_mut()
@@ -345,7 +346,7 @@ pub(crate) fn decorate_terminal(task: &str, mut record: TerminalRecord) -> Termi
     object.insert("task".to_string(), serde_json::json!(task));
     object.insert(
         "next".to_string(),
-        serde_json::json!(next_step(record.terminal.as_ref(), task)),
+        serde_json::json!(next_step(&state, task)),
     );
     record
 }
@@ -358,20 +359,28 @@ pub(crate) fn decorate_terminal(task: &str, mut record: TerminalRecord) -> Termi
 /// settled task is never told to continue a conversation it has closed, and a
 /// settled *failure* is not told to read an inbox that will be empty when the
 /// reason is already on stderr.
-fn next_step(terminal: Option<&Terminal>, task: &str) -> String {
-    match terminal {
+fn next_step(state: &str, task: &str) -> String {
+    match state {
         // Answered. The journal is the one thing this handle still holds that
         // the terminal does not — and the one thing a redirected stdout, or a
         // scrollback that has moved on, did not keep.
-        Some(Terminal::Succeeded { .. }) => format!("basis watch {task}"),
+        "succeeded" => format!("basis watch {task}"),
         // No answer was produced and none will be: this handle is spent, and
         // the work continues as a new task rather than as a message to a
         // closed one.
-        Some(Terminal::Failed { .. } | Terminal::Cancelled) => "basis spawn <PROMPT>".to_string(),
+        "failed" | "cancelled" => "basis spawn <PROMPT>".to_string(),
         // A newer terminal state stays available through `raw`; this build
         // offers only the observation paths it can promise are safe.
-        None => format!("basis watch {task} or basis inbox {task}"),
+        _ => format!("basis watch {task} or basis inbox {task}"),
     }
+}
+
+fn terminal_state(record: &TerminalRecord) -> &str {
+    record
+        .raw
+        .get("state")
+        .and_then(Value::as_str)
+        .unwrap_or("unknown")
 }
 
 pub(crate) fn render_terminal(
@@ -394,7 +403,7 @@ pub(crate) fn render_terminal(
         }
         Some(Terminal::Failed { error }) => eprintln!("basis: task failed: {error}"),
         Some(Terminal::Cancelled) => eprintln!("basis: task was cancelled"),
-        None => println!("task state: unknown"),
+        Some(_) | None => println!("task state: {}", terminal_state(record)),
     }
     print_hint(&record.raw);
     flush_stdout()?;
@@ -402,12 +411,23 @@ pub(crate) fn render_terminal(
 }
 
 fn terminal_result_code(record: &TerminalRecord) -> u8 {
-    if record.stopped_by.is_some() {
+    // `stopped_by` is a durable string and newer basis versions may add a
+    // bound this typed view does not know. Preserve the old exit contract:
+    // every present, non-null bound is bounded, even when it cannot be typed.
+    if record
+        .raw
+        .get("stopped_by")
+        .is_some_and(|bound| !bound.is_null())
+    {
         return EXIT_BOUNDED;
     }
     match record.terminal.as_ref() {
         Some(Terminal::Succeeded { .. }) => EXIT_OK,
-        Some(Terminal::Failed { .. } | Terminal::Cancelled) | None => EXIT_FAILED,
+        Some(Terminal::Failed { .. } | Terminal::Cancelled) => EXIT_FAILED,
+        Some(_) | None => match terminal_state(record) {
+            "succeeded" => EXIT_OK,
+            _ => EXIT_FAILED,
+        },
     }
 }
 
@@ -599,6 +619,20 @@ mod tests {
     }
 
     #[test]
+    fn an_unknown_non_null_bound_still_exits_bounded() {
+        let mut record = terminal_record(
+            Terminal::Failed {
+                error: "stopped".to_string(),
+            },
+            None,
+        );
+        record.raw["stopped_by"] = json!("newer_bound");
+
+        assert_eq!(record.stopped_by, None, "the typed view stays honest");
+        assert_eq!(terminal_result_code(&record), EXIT_BOUNDED);
+    }
+
+    #[test]
     fn a_terminal_payload_carries_the_handle_it_settled_under() {
         let record = decorate_terminal(
             "w/t",
@@ -610,6 +644,19 @@ mod tests {
             ),
         );
         assert_eq!(record.raw["task"], "w/t");
+
+        let unknown = decorate_terminal(
+            "w/t",
+            TerminalRecord {
+                raw: json!({"state": "paused_by_newer_basis"}),
+                terminal: None,
+                stopped_by: None,
+                usage: None,
+                result_truncated: false,
+            },
+        );
+        assert_eq!(terminal_state(&unknown), "paused_by_newer_basis");
+        assert_eq!(unknown.raw["next"], "basis watch w/t or basis inbox w/t");
     }
 
     /// A hint is a promise: the command it names has to work on the task it

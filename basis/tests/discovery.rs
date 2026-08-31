@@ -460,12 +460,17 @@ async fn absent_explicit_config_means_no_config_discovery() {
 #[tokio::test]
 async fn discovery_off_still_applies_supplied_mcp_servers() {
     let workspace = tempfile::tempdir().expect("workspace");
+    let marker = workspace.path().join("supplied-mcp-started");
     write(
         &workspace.path().join(".mcp.json"),
         "{malformed discovery must stay unread",
     );
+    let process = process_command(&marker, "supplied-mcp");
+    let process = process
+        .as_array()
+        .expect("the existing process fixture is argv");
     let provider = HostProvider::default();
-    let error = Workspace::builder(workspace.path())
+    let _workspace = Workspace::builder(workspace.path())
         .with_runtime_builder(runtime_builder(
             provider,
             Arc::new(AtomicUsize::new(0)),
@@ -477,21 +482,24 @@ async fn discovery_off_still_applies_supplied_mcp_servers() {
             workspace_file: PathBuf::from(".mcp.json"),
             global_dir: None,
             supplied: vec![McpServer::Stdio(mentra::mcp::McpServerConfig {
-                name: "invalid__supplied".to_string(),
-                command: "never-started".to_string(),
-                args: Vec::new(),
+                name: "supplied-marker".to_string(),
+                command: process[0].as_str().expect("program").to_string(),
+                args: process[1..]
+                    .iter()
+                    .map(|argument| argument.as_str().expect("argument").to_string())
+                    .collect(),
                 env: Default::default(),
                 cwd: None,
             })],
         })
         .open()
         .await
-        .expect_err("the explicit supplied server is still validated");
+        .expect("the malformed discovered file stays inert");
 
-    let RunError::Mcp(basis::McpError::Invalid { origin, .. }) = error else {
-        panic!("expected supplied MCP validation, got {error}");
-    };
-    assert_eq!(origin, "the supplied MCP server list");
+    assert!(
+        marker.is_file(),
+        "the valid supplied config must be applied even though file discovery is off"
+    );
 }
 
 #[tokio::test]
