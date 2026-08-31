@@ -13,8 +13,6 @@ use std::{
     },
 };
 
-#[cfg(feature = "mcp")]
-use basis::McpConfig;
 use basis::{
     CollectingSink, Config, ContextConfig, ContextScope, HookOutcome, HookRequest, HooksConfig,
     Interceptor, InterceptorError, MemoryConfig, ModelInfo, Provider, RunError, RunOutcome,
@@ -32,6 +30,8 @@ use basis::{
         declared::ToolsConfig,
     },
 };
+#[cfg(feature = "mcp")]
+use basis::{McpConfig, McpServer};
 use serde_json::{Value, json};
 
 const PROVIDER: &str = "host-provider";
@@ -454,6 +454,44 @@ async fn absent_explicit_config_means_no_config_discovery() {
     assert_eq!(provider.streams.load(Ordering::SeqCst), 0);
     assert_eq!(tool_calls.load(Ordering::SeqCst), 0);
     assert_eq!(interceptions.load(Ordering::SeqCst), 0);
+}
+
+#[cfg(feature = "mcp")]
+#[tokio::test]
+async fn discovery_off_still_applies_supplied_mcp_servers() {
+    let workspace = tempfile::tempdir().expect("workspace");
+    write(
+        &workspace.path().join(".mcp.json"),
+        "{malformed discovery must stay unread",
+    );
+    let provider = HostProvider::default();
+    let error = Workspace::builder(workspace.path())
+        .with_runtime_builder(runtime_builder(
+            provider,
+            Arc::new(AtomicUsize::new(0)),
+            Arc::new(AtomicUsize::new(0)),
+        ))
+        .with_resolved_model(resolved_model())
+        .without_discovery()
+        .with_mcp(McpConfig {
+            workspace_file: PathBuf::from(".mcp.json"),
+            global_dir: None,
+            supplied: vec![McpServer::Stdio(mentra::mcp::McpServerConfig {
+                name: "invalid__supplied".to_string(),
+                command: "never-started".to_string(),
+                args: Vec::new(),
+                env: Default::default(),
+                cwd: None,
+            })],
+        })
+        .open()
+        .await
+        .expect_err("the explicit supplied server is still validated");
+
+    let RunError::Mcp(basis::McpError::Invalid { origin, .. }) = error else {
+        panic!("expected supplied MCP validation, got {error}");
+    };
+    assert_eq!(origin, "the supplied MCP server list");
 }
 
 #[tokio::test]

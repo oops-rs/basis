@@ -431,6 +431,13 @@ pub(crate) fn configured(
 ) -> Result<Vec<ConfiguredServer>, McpError> {
     let discovered = discovered(workspace, config)?;
 
+    Ok(layer(configured_supplied(config)?.into_iter().chain(
+        discovered.into_iter().flat_map(|source| source.configured),
+    )))
+}
+
+/// The host-supplied servers only, with no file discovery.
+pub(crate) fn configured_supplied(config: &McpConfig) -> Result<Vec<ConfiguredServer>, McpError> {
     // `.mcp.json` and an ACP client's `mcpServers` already check their own
     // entries at the door — see [`McpServer::validate_name`]. A Rust host's
     // own list, set through [`crate::workspace::WorkspaceBuilder::with_mcp`],
@@ -445,19 +452,14 @@ pub(crate) fn configured(
         })?;
     }
 
-    Ok(layer(
-        config
-            .supplied
-            .iter()
-            .cloned()
-            // A supplied server arrived in a typed variant; nothing about its
-            // transport was inferred.
-            .map(|server| ConfiguredServer {
-                server,
-                sse_inferred: false,
-            })
-            .chain(discovered.into_iter().flat_map(|source| source.configured)),
-    ))
+    Ok(layer(config.supplied.iter().cloned().map(|server| {
+        // A supplied server arrived in a typed variant; nothing about its
+        // transport was inferred.
+        ConfiguredServer {
+            server,
+            sse_inferred: false,
+        }
+    })))
 }
 
 /// Keeps the first server seen under each name.
