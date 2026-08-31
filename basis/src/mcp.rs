@@ -116,14 +116,7 @@ impl std::fmt::Debug for McpServer {
                 .field("command", &config.command)
                 .field("args", &config.args)
                 .field("cwd", &config.cwd)
-                .field(
-                    "env",
-                    &config
-                        .env
-                        .keys()
-                        .map(|key| (key, "<redacted>"))
-                        .collect::<std::collections::BTreeMap<_, _>>(),
-                )
+                .field("env", &crate::redaction::redacted_env(config.env.keys()))
                 .finish(),
             Self::Sse(config) => f
                 .debug_struct("Sse")

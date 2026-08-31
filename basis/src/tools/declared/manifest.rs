@@ -126,11 +126,7 @@ impl std::fmt::Debug for DeclaredToolSpec {
             .field("cwd", &self.cwd)
             .field(
                 "env",
-                &self
-                    .env
-                    .iter()
-                    .map(|(key, _)| (key, "<redacted>"))
-                    .collect::<BTreeMap<_, _>>(),
+                &crate::redaction::redacted_env(self.env.iter().map(|(key, _)| key)),
             )
             .field("timeout_ms", &self.timeout_ms)
             .field("side_effect", &self.side_effect)

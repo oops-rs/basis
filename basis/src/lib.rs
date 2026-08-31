@@ -75,6 +75,7 @@ pub mod memory;
 mod named_roots;
 mod paths;
 pub mod provider;
+mod redaction;
 pub mod run;
 pub mod runtime;
 pub mod shell;
