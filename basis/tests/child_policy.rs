@@ -618,6 +618,7 @@ fn offline_workspace(path: &Path, runtime: Arc<basis::Runtime>) -> basis::Worksp
         .with_hooks(basis::hooks::HooksConfig {
             workspace_file: std::path::PathBuf::from(".basis/hooks.json"),
             global_dir: None,
+            supplied: Vec::new(),
         })
         .with_tools(basis::tools::declared::ToolsConfig {
             workspace_file: std::path::PathBuf::from(".basis/tools.json"),

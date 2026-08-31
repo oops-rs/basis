@@ -421,12 +421,16 @@ impl WorkspaceBuilder {
         Self { templates, ..self }
     }
 
-    /// Sets where subprocess hooks are discovered.
+    /// Sets the host-supplied subprocess hooks and where file hooks are
+    /// discovered.
     ///
     /// A hook is an external command that gets a say over each tool call; see
     /// [`crate::hooks`] for the wire contract and for what happens when one
     /// breaks. [`RuntimeBuilder::with_interceptor`](crate::RuntimeBuilder::with_interceptor)
     /// is the same say, in the host's process — host scope is runtime scope.
+    /// Typed [`HooksConfig::supplied`](crate::hooks::HooksConfig::supplied)
+    /// hooks run before global and workspace file hooks; disabling discovery
+    /// retains only that typed list.
     pub fn with_hooks(self, hooks: HooksConfig) -> Self {
         Self { hooks, ..self }
     }
@@ -611,7 +615,7 @@ impl WorkspaceBuilder {
         let loaded_hooks = if self.discovery_enabled {
             hooks::load(&path, &self.hooks)?
         } else {
-            Vec::new()
+            hooks::load_supplied(&self.hooks)?
         };
 
         // Read here for the same reason, and one of its own: a manifest that
@@ -774,8 +778,9 @@ impl WorkspaceBuilder {
 
         // One runner for both interception bindings, host interceptors folded
         // first: the chain order host interceptors → global hooks → workspace
-        // hooks predates the runtime split and survives it — only the
-        // registration point moved, onto the runtime's dispatcher.
+        // hooks predates the runtime split and survives it — supplied hooks
+        // sit before file hooks, while only the registration point moved onto
+        // the runtime's dispatcher.
         let runner = runtime.interceptors().iter().cloned().fold(
             HookRunner::new(&path, loaded_hooks),
             |runner, interceptor| runner.with_interceptor(interceptor),

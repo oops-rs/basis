@@ -76,10 +76,14 @@
 //!
 //! # Configuration
 //!
-//! `.basis/hooks.json` in the workspace, and `hooks.json` in the global config
-//! directory. JSON rather than TOML because the wire contract is already JSON
-//! and basis already parses it; `.basis/` because that is where basis's other
-//! workspace data lives (`.basis/skills`).
+//! Hooks may be supplied directly as typed [`HookSpec`] values on
+//! [`HooksConfig`], or discovered from `.basis/hooks.json` in the workspace and
+//! `hooks.json` in the global config directory. Supplied hooks run before file
+//! hooks; global file hooks still run before workspace file hooks, and every
+//! same-name entry survives because hooks compose rather than shadow. JSON
+//! rather than TOML because the wire contract is already JSON and basis already
+//! parses it; `.basis/` because that is where basis's other workspace data
+//! lives (`.basis/skills`).
 //!
 //! ```json
 //! {
@@ -201,6 +205,7 @@ pub mod wire;
 
 mod config;
 
+pub(crate) use config::load_supplied;
 pub use config::{
     DEFAULT_GLOBAL_HOOKS_FILE, DEFAULT_HOOK_TIMEOUT, DEFAULT_WORKSPACE_HOOKS_FILE, HookConfigError,
     HookSpec, HooksConfig, HooksFile, HooksSource, OnFailure, discover, load,
