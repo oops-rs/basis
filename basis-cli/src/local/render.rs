@@ -237,6 +237,14 @@ fn progress_line(event: &Event) -> Option<String> {
         // Both are pauses with a reason, and a terminal that does not name
         // them looks stuck for as long as they last.
         Event::CompactionStarted { .. } => "basis: compacting the conversation".to_string(),
+        Event::CompactionCompleted {
+            replaced_items,
+            preserved_items,
+            ..
+        } => format!(
+            "basis: context compacted: {replaced_items} earlier items replaced by a summary, \
+             {preserved_items} kept"
+        ),
         Event::RequestToolResultsElided {
             canonical_tool_result_content_bytes,
             projected_tool_result_content_bytes,
@@ -681,6 +689,24 @@ mod tests {
             "the answer must never be duplicated onto stderr: {err}"
         );
         assert!(live.answered(), "the answer reached the terminal");
+    }
+
+    #[test]
+    fn completed_compaction_reports_what_was_replaced_and_kept() {
+        let line = progress_line(&Event::CompactionCompleted {
+            agent_id: "agent-1".to_string(),
+            replaced_items: 42,
+            preserved_items: 8,
+            transcript_len: 50,
+            extracted_facts: 3,
+            summary_preview: "summary".to_string(),
+        })
+        .expect("compaction completion is progress");
+
+        assert_eq!(
+            line,
+            "basis: context compacted: 42 earlier items replaced by a summary, 8 kept"
+        );
     }
 
     /// What the run cost, once, at the end, on stderr.
