@@ -37,9 +37,9 @@ adapter abstraction.**
 
 2. **Turn coordination is host behavior.** `HostSession` owns one async turn
    lock and a cancellation token plus awaitable `Interrupt` reachable without
-   that lock. `SessionRegistry` keys the concrete sessions by persisted agent
-   id. ACP wraps those values only to convert `SessionId` and carry its mode
-   presentation. Closing or deleting still removes the registry entry, trips
+   that lock. ACP owns one registry entry pairing that concrete session with
+   its `SessionId` and protocol mode presentation; the pairing is inserted,
+   read, and removed under one mutex. Closing or deleting still removes the registry entry, trips
    cancellation, waits for the turn lock, drops the session, and only then
    removes persisted state.
 
