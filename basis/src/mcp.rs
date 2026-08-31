@@ -471,18 +471,16 @@ pub(crate) fn configured(
 ///
 /// Callers pass strongest-first, so "first wins" is "most specific wins".
 fn layer(servers: impl IntoIterator<Item = ConfiguredServer>) -> Vec<ConfiguredServer> {
-    let mut kept: Vec<ConfiguredServer> = Vec::new();
-
-    for candidate in servers {
-        if !kept
-            .iter()
-            .any(|seen| seen.server.name() == candidate.server.name())
-        {
-            kept.push(candidate);
-        }
-    }
-
-    kept
+    let roots = servers.into_iter().enumerate().map(|(index, server)| {
+        let mut root = std::collections::BTreeMap::new();
+        root.insert(server.server.name().to_string(), (index, server));
+        Ok::<_, std::convert::Infallible>(root)
+    });
+    let mut kept = crate::named_roots::merge_roots(roots).expect("the roots are infallible");
+    // `merge_roots` is name-keyed; restore the caller's order after it chooses
+    // the strongest writer so the connect order does not change.
+    kept.sort_by_key(|(index, _)| *index);
+    kept.into_iter().map(|(_, server)| server).collect()
 }
 
 fn read(path: PathBuf, scope: ContextScope) -> Result<ReadSource, McpError> {

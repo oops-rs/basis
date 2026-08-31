@@ -2,10 +2,7 @@
 //!
 //! [`WorkspaceContext::discover_with`]: super::WorkspaceContext::discover_with
 
-use std::{
-    collections::HashSet,
-    path::{Component, Path, PathBuf},
-};
+use std::path::{Component, Path, PathBuf};
 
 use super::{ContextConfig, ContextDocument, ContextError, ContextScope};
 
@@ -26,7 +23,7 @@ pub(super) fn discover(
 
     let workspace = validate_workspace(workspace)?;
 
-    let mut seen = HashSet::new();
+    let mut seen = Vec::new();
     let mut documents = Vec::new();
 
     if let Some(global_dir) = &config.global_dir {
@@ -200,7 +197,7 @@ fn collect(
     dir: &Path,
     scope: ContextScope,
     config: &ContextConfig,
-    seen: &mut HashSet<PathBuf>,
+    seen: &mut Vec<PathBuf>,
     documents: &mut Vec<ContextDocument>,
 ) -> Result<(), ContextError> {
     let candidate = config
@@ -216,10 +213,10 @@ fn collect(
     // also sits in the parent chain, or a symlinked path. Identity is the
     // canonical path; precedence goes to whichever scope found it first,
     // which is the weaker one, so a document never silently gains strength.
-    let identity = std::fs::canonicalize(&path).unwrap_or_else(|_| path.clone());
-    if !seen.insert(identity) {
+    if seen.iter().any(|seen| crate::paths::same_dir(seen, &path)) {
         return Ok(());
     }
+    seen.push(path.clone());
 
     let content = std::fs::read_to_string(&path).map_err(|source| ContextError::Read {
         path: path.clone(),
