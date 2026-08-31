@@ -173,7 +173,7 @@ enum SpawnDecision {
     Command,
     Agent {
         depth: usize,
-        spec: ChildSpec,
+        spec: Box<ChildSpec>,
         /// Resolved only when a child policy needed it.
         workspace: Option<std::path::PathBuf>,
     },
@@ -376,7 +376,7 @@ impl SpawnTool {
                 };
                 Ok(SpawnDecision::Agent {
                     depth,
-                    spec,
+                    spec: Box::new(spec),
                     workspace,
                 })
             }
@@ -512,7 +512,7 @@ impl ToolExecutor for SpawnTool {
                     ),
                     false => BTreeSet::new(),
                 };
-                execute::delegate(&self.depth, &mut ctx, spawn.body(), depth, spec, denied).await
+                execute::delegate(&self.depth, &mut ctx, spawn.body(), depth, *spec, denied).await
             }
         }
     }
