@@ -44,7 +44,7 @@ impl<W: Write> JsonlWriter<W> {
         writeln!(self.writer, "{encoded}")?;
         self.writer.flush()?;
 
-        self.next_seq = seq.saturating_add(1);
+        self.next_seq = self.next_seq.max(seq.saturating_add(1));
         Ok(written)
     }
 
@@ -158,7 +158,7 @@ mod tests {
     fn writing_a_presequenced_line_advances_the_next_sequence() {
         let mut writer = JsonlWriter::new(Vec::new());
 
-        let byte_count = writer
+        let first_bytes = writer
             .write_line(EventLine::new(
                 7,
                 Event::AssistantDelta {
@@ -168,9 +168,27 @@ mod tests {
             .expect("writes");
 
         assert_eq!(writer.next_seq(), 8);
+        let lower_bytes = writer
+            .write_line(EventLine::new(
+                3,
+                Event::AssistantDelta {
+                    text: "older".to_string(),
+                },
+            ))
+            .expect("a lower explicit sequence still writes");
+        assert_eq!(writer.next_seq(), 8, "an older line cannot rewind the writer");
+        let assigned = writer
+            .write(Event::AssistantDelta {
+                text: "next".to_string(),
+            })
+            .expect("the automatic sequence remains monotonic");
+        assert_eq!(assigned, 8);
+
         let buffer = writer.into_inner();
-        assert_eq!(byte_count, buffer.len());
+        assert!(first_bytes + lower_bytes < buffer.len());
         let written = lines(&buffer);
         assert_eq!(written[0]["seq"], 7);
+        assert_eq!(written[1]["seq"], 3);
+        assert_eq!(written[2]["seq"], 8);
     }
 }
