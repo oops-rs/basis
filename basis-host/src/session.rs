@@ -35,10 +35,7 @@
 //! [`Workspace::resume`](basis::Workspace::resume) takes, so a host can
 //! reconnect to a conversation this process never saw.
 
-use std::{
-    collections::HashMap,
-    sync::{Arc, Mutex},
-};
+use std::sync::{Arc, Mutex};
 
 use tokio::sync::watch;
 
@@ -162,65 +159,9 @@ impl HostSession {
     }
 }
 
-/// Every conversation this host connection is holding.
-///
-/// Cloneable: each clone shares one map, which is what lets a spawned prompt
-/// task and the dispatch loop reach the same session.
-#[derive(Clone, Default)]
-pub struct SessionRegistry {
-    sessions: Arc<Mutex<HashMap<String, HostSession>>>,
-}
-
-impl SessionRegistry {
-    pub fn new() -> Self {
-        Self::default()
-    }
-
-    /// Files a session under its own id and hands that id back.
-    pub fn insert(&self, session: HostSession) -> String {
-        let id = session.agent_id().to_string();
-        self.lock().insert(id.clone(), session);
-        id
-    }
-
-    pub fn get(&self, id: &str) -> Option<HostSession> {
-        self.lock().get(id).cloned()
-    }
-
-    pub fn remove(&self, id: &str) -> Option<HostSession> {
-        self.lock().remove(id)
-    }
-
-    pub fn len(&self) -> usize {
-        self.lock().len()
-    }
-
-    pub fn is_empty(&self) -> bool {
-        self.len() == 0
-    }
-
-    fn lock(&self) -> std::sync::MutexGuard<'_, HashMap<String, HostSession>> {
-        // A poisoned registry means some other task panicked mid-update. The
-        // map itself is still structurally sound, and refusing to serve every
-        // later request over it would turn one panic into a dead connection.
-        self.sessions
-            .lock()
-            .unwrap_or_else(|poisoned| poisoned.into_inner())
-    }
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
-
-    #[test]
-    fn an_unknown_session_is_not_found() {
-        let registry = SessionRegistry::new();
-
-        assert!(registry.is_empty());
-        assert!(registry.get("nobody").is_none());
-        assert!(registry.remove("nobody").is_none());
-    }
 
     /// A session over a scripted runtime, for tests that arm turns without
     /// running one.
@@ -288,14 +229,5 @@ mod tests {
             .await
             .expect("a waiter on a finished turn must not wait forever");
         assert!(session.interrupt().is_none());
-    }
-
-    #[test]
-    fn clones_share_one_map() {
-        let registry = SessionRegistry::new();
-        let clone = registry.clone();
-
-        assert_eq!(registry.len(), clone.len());
-        assert!(clone.is_empty());
     }
 }

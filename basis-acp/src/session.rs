@@ -13,7 +13,7 @@ use agent_client_protocol::schema::v1::SessionId;
 
 use crate::mode::{ApprovalMode, SessionModes};
 use basis::{PreparedRun, run::TurnOptions};
-use basis_host::{HostSession, SessionRegistry as HostRegistry};
+use basis_host::HostSession;
 
 pub use basis_host::Interrupt;
 
@@ -80,8 +80,7 @@ impl AcpSession {
 /// task and the dispatch loop reach the same session.
 #[derive(Clone, Default)]
 pub struct SessionRegistry {
-    sessions: HostRegistry,
-    modes: Arc<Mutex<HashMap<String, SessionModes>>>,
+    sessions: Arc<Mutex<HashMap<SessionId, AcpSession>>>,
 }
 
 impl SessionRegistry {
@@ -92,38 +91,55 @@ impl SessionRegistry {
     /// Files a session under its own id and hands that id back.
     pub fn insert(&self, session: AcpSession) -> SessionId {
         let id = session.id();
-        self.mode_lock()
-            .insert(id.0.to_string(), session.modes.clone());
-        self.sessions.insert(session.host);
+        self.lock().insert(id.clone(), session);
         id
     }
 
     pub fn get(&self, id: &SessionId) -> Option<AcpSession> {
-        let host = self.sessions.get(&id.0)?;
-        let modes = self.mode_lock().get(&*id.0).cloned()?;
-        Some(AcpSession { host, modes })
+        self.lock().get(id).cloned()
     }
 
     pub fn remove(&self, id: &SessionId) -> Option<AcpSession> {
-        let host = self.sessions.remove(&id.0)?;
-        let modes = self.mode_lock().remove(&*id.0)?;
-        Some(AcpSession { host, modes })
+        self.lock().remove(id)
     }
 
     pub fn len(&self) -> usize {
-        self.sessions.len()
+        self.lock().len()
     }
 
     pub fn is_empty(&self) -> bool {
         self.len() == 0
     }
 
-    fn mode_lock(&self) -> std::sync::MutexGuard<'_, HashMap<String, SessionModes>> {
+    fn lock(&self) -> std::sync::MutexGuard<'_, HashMap<SessionId, AcpSession>> {
         // A poisoned registry means some other task panicked mid-update. The
         // map itself is still structurally sound, and refusing to serve every
         // later request over it would turn one panic into a dead connection.
-        self.modes
+        self.sessions
             .lock()
             .unwrap_or_else(|poisoned| poisoned.into_inner())
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn an_unknown_session_is_not_found() {
+        let registry = SessionRegistry::new();
+
+        assert!(registry.is_empty());
+        assert!(registry.get(&SessionId::new("nobody")).is_none());
+        assert!(registry.remove(&SessionId::new("nobody")).is_none());
+    }
+
+    #[test]
+    fn clones_share_one_map() {
+        let registry = SessionRegistry::new();
+        let clone = registry.clone();
+
+        assert_eq!(registry.len(), clone.len());
+        assert!(clone.is_empty());
     }
 }

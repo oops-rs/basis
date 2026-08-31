@@ -33,8 +33,9 @@
 //!   `initialize`.
 //! - `history` replays a resumed conversation, which is what separates
 //!   `session/load` from `session/resume`.
-//! - [`SessionRegistry`] adapts basis-host's open-conversation registry to ACP
-//!   ids, keyed by mentra's persisted agent id so that `session/load` is just
+//! - [`SessionRegistry`] owns one atomic ACP-id map whose entries pair a
+//!   basis-host session with its protocol mode state. It is keyed by mentra's
+//!   persisted agent id so that `session/load` is just
 //!   [`Workspace::resume`](basis::Workspace::resume).
 //! - [`serve`] wires the handlers onto a connection; basis-host owns the one
 //!   [`Runtime`](basis::Runtime) per process and one

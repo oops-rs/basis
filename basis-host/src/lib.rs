@@ -18,6 +18,6 @@ mod timestamp;
 
 pub use approval::{ApprovalPolicy, PolicyApprover, SessionApproval};
 pub use config::{Discovery, SessionSource, SessionTemplate};
-pub use session::{HostSession, Interrupt, SessionRegistry};
+pub use session::{HostSession, Interrupt};
 pub use source::ConfiguredSource;
 pub use timestamp::rfc3339;
