@@ -32,7 +32,8 @@
 //! [`ToolSideEffectLevel::LocalState`]; both are consequential, so
 //! [`is_consequential`](crate::approval::is_consequential) never waves either
 //! through under the reads-are-never-asked rule. The preview's
-//! `structured_input` is the parsed `{mode, body, cwd, target}` — the thing an
+//! parser owns `{mode, body, target}`; after the tool context resolves the
+//! working directory, `structured_input` carries `{mode, body, cwd, target}` — the thing an
 //! approver renders, and the thing mentra globs a remembered rule's pattern against
 //! (`RuleStore::matching_rule`). A `RuleKey { tool_name: "spawn", pattern }` is
 //! therefore a command allowlist expressible as data. A delegation whose child
@@ -81,7 +82,7 @@ use parse::{INPUT_FIELD, Mode, Spawn, parse};
 // the rule: the `!` prefix is read exactly once, here. Re-exported crate-wide
 // so the dispatcher asks this parser rather than becoming a second reader.
 pub use parse::{
-    INPUT_FIELD as SPAWN_INPUT_FIELD, Mode as SpawnMode, Spawn as SpawnInput,
+    INPUT_FIELD as SPAWN_INPUT_FIELD, Mode as SpawnMode, Spawn as SpawnInput, classify_spawn_input,
     parse as parse_spawn_input,
 };
 pub(crate) use parse::{LOCAL_TARGET, is_target_name, parse as parse_spawn};
