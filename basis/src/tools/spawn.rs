@@ -80,7 +80,8 @@ use parse::{INPUT_FIELD, Mode, Spawn, parse};
 // before denying it for a shell-off workspace, and the module docs above make
 // the rule: the `!` prefix is read exactly once, here. Re-exported crate-wide
 // so the dispatcher asks this parser rather than becoming a second reader.
-pub(crate) use parse::{LOCAL_TARGET, Mode as SpawnMode, is_target_name, parse as parse_spawn};
+pub use parse::{INPUT_FIELD as SPAWN_INPUT_FIELD, Mode as SpawnMode, Spawn as SpawnInput};
+pub(crate) use parse::{LOCAL_TARGET, is_target_name, parse as parse_spawn};
 
 pub use child::{ChildContext, ChildSpec};
 pub use depth::DEFAULT_DELEGATION_DEPTH;

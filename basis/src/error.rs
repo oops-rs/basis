@@ -349,3 +349,13 @@ pub enum RunError {
     #[error("a host tool could not be registered: {0}")]
     HostTool(#[from] mentra::tool::ToolNameCollision),
 }
+
+impl RunError {
+    /// Whether this failure means another holder already has the conversation open.
+    pub fn is_open_elsewhere(&self) -> bool {
+        matches!(
+            self,
+            Self::Runtime(mentra::error::RuntimeError::LeaseUnavailable(_))
+        )
+    }
+}

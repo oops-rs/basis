@@ -182,6 +182,19 @@ pub struct ElidedToolResult {
     pub projected_content_bytes: usize,
 }
 
+/// One operator-facing line summarizing request-only tool-result reduction.
+pub fn tool_result_elision_line(
+    canonical_bytes: usize,
+    projected_bytes: usize,
+    changed: usize,
+) -> String {
+    let result = if changed == 1 { "result" } else { "results" };
+    format!(
+        "request tool results reduced: {canonical_bytes} -> {projected_bytes} bytes; \
+         {changed} {result} changed"
+    )
+}
+
 /// How a run ended.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(tag = "status", rename_all = "snake_case")]

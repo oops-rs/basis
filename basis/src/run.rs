@@ -152,6 +152,19 @@ impl From<Effort> for mentra::provider::ReasoningEffort {
     }
 }
 
+impl Effort {
+    /// The stable string id basis writes for this level.
+    pub const fn type_tag(self) -> &'static str {
+        match self {
+            Self::Low => "low",
+            Self::Medium => "medium",
+            Self::High => "high",
+            Self::XHigh => "xhigh",
+            Self::Max => "max",
+        }
+    }
+}
+
 /// The level a session is set to, read back as basis names it.
 ///
 /// The direction [`PreparedRun::effort`](crate::PreparedRun::effort) needs, and
@@ -219,6 +232,17 @@ pub enum Bound {
     TokenBudget,
 }
 
+impl Bound {
+    /// The stable string id basis writes for this bound.
+    pub const fn type_tag(self) -> &'static str {
+        match self {
+            Self::Deadline => "deadline",
+            Self::ToolBudget => "tool_budget",
+            Self::TokenBudget => "token_budget",
+        }
+    }
+}
+
 /// What a completed run produced, alongside the sink it wrote to.
 #[derive(Debug)]
 pub struct RunReport<S> {
@@ -255,6 +279,16 @@ pub struct RunReport<S> {
 impl<S> RunReport<S> {
     pub fn succeeded(&self) -> bool {
         matches!(self.outcome, RunOutcome::Ok)
+    }
+}
+
+impl RunOutcome {
+    /// The stable string id basis writes for this outcome.
+    pub const fn type_tag(&self) -> &'static str {
+        match self {
+            Self::Ok => "ok",
+            Self::Error { .. } => "error",
+        }
     }
 }
 
