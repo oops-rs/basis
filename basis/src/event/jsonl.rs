@@ -176,7 +176,11 @@ mod tests {
                 },
             ))
             .expect("a lower explicit sequence still writes");
-        assert_eq!(writer.next_seq(), 8, "an older line cannot rewind the writer");
+        assert_eq!(
+            writer.next_seq(),
+            8,
+            "an older line cannot rewind the writer"
+        );
         let assigned = writer
             .write(Event::AssistantDelta {
                 text: "next".to_string(),
