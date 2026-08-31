@@ -60,9 +60,8 @@ use std::{
 };
 
 use basis::{
-    AllowAll, Approver, Bound, CancellationToken, DenyAll, Event, EventSink, ModelSelector,
-    RunOutcome, RunSpec, Runtime, RuntimeBuilder, ShellAccess, TurnOptions, Workspace,
-    WorkspaceBuilder, provider,
+    AllowAll, Approver, Bound, CancellationToken, DenyAll, Event, EventSink, RunOutcome, RunSpec,
+    Runtime, RuntimeBuilder, ShellAccess, TurnOptions, Workspace, WorkspaceBuilder,
 };
 use serde_json::Value;
 use tokio::time::{self, Instant};
@@ -511,8 +510,11 @@ async fn run_model(
         Ok(runtime) => runtime,
         Err(error) => return record_failure(paths, meta, error, None),
     };
-    let (builder, spec) = run_parts(meta);
-    let workspace = match builder.with_runtime_builder(runtime).open().await {
+    let (builder, spec) = match run_parts(meta, runtime) {
+        Ok(parts) => parts,
+        Err(error) => return record_failure(paths, meta, error, None),
+    };
+    let workspace = match builder.open().await {
         Ok(workspace) => Arc::new(workspace),
         Err(error) => return record_failure(paths, meta, error.to_string(), None),
     };
@@ -818,20 +820,23 @@ async fn settle_children(
     }
 }
 
-/// The per-workspace and per-run halves of the recorded options.
-///
-/// The provider and the base URL are the other half — process facts since
-/// ADR-0018 — and are stated on [`task_runtime`]'s recipe instead. Saying them
-/// here as well would build a value that
-/// [`with_runtime_builder`](basis::WorkspaceBuilder::with_runtime_builder)
-/// then replaces.
-fn run_parts(meta: &TaskMeta) -> (WorkspaceBuilder, RunSpec) {
+/// Applies the recorded process/workspace options to the runtime recipe, then
+/// builds this turn's run spec.
+fn run_parts(
+    meta: &TaskMeta,
+    runtime: RuntimeBuilder,
+) -> Result<(WorkspaceBuilder, RunSpec), String> {
     let options = &meta.options;
-    let mut builder = Workspace::builder(Path::new(&meta.workspace))
-        .with_shell(ShellAccess::from_flag(!options.no_shell));
-    if let Some(model) = &options.model {
-        builder = builder.with_model(ModelSelector::Id(model.clone()));
-    }
+    let (runtime, mut builder) = crate::configure_builders(
+        runtime,
+        Workspace::builder(Path::new(&meta.workspace)),
+        options.provider.as_deref(),
+        options.base_url.as_deref(),
+        options.model.as_deref(),
+        ShellAccess::from_flag(!options.no_shell),
+    )
+    .map_err(|error| error.to_string())?;
+    builder = builder.with_runtime_builder(runtime);
     // Recorded as the type it is; `load_meta` has already folded the
     // pre-0.6 two-string spelling into this one field.
     if let Some(system_prompt) = options.system_prompt.clone() {
@@ -851,12 +856,12 @@ fn run_parts(meta: &TaskMeta) -> (WorkspaceBuilder, RunSpec) {
     if let Some(token_budget) = options.token_budget {
         spec = spec.with_token_budget(token_budget);
     }
-    (builder, spec)
+    Ok((builder, spec))
 }
 
-/// The recipe for this task's own runtime: the process half of the recorded
-/// options, plus the identity a spawned command needs to find the same data
-/// directory and name its own children.
+/// The base recipe for this task's own runtime: store and command identity.
+/// [`run_parts`] applies the recorded provider and endpoint through the same
+/// concrete builder mapping as the attended CLI route.
 ///
 /// The exported `BASIS_DATA_DIR` is absolute because `DataDir` resolves its
 /// root once at construction (see `data_dir::absolutize`): a child re-reads
@@ -875,12 +880,6 @@ fn task_runtime(data: &DataDir, task: &str, meta: &TaskMeta) -> Result<RuntimeBu
         .with_store_dir(data.store_dir(key))
         .with_command_environment(crate::BASIS_TASK_ID, task)
         .with_command_environment(crate::BASIS_DATA_DIR, data.root().to_string_lossy());
-    if let Some(name) = &meta.options.provider {
-        runtime = runtime.with_provider(provider::parse(name).map_err(|error| error.to_string())?);
-    }
-    if let Some(base_url) = &meta.options.base_url {
-        runtime = runtime.with_base_url(base_url);
-    }
     if let Some(parent) = &meta.parent {
         runtime = runtime.with_command_environment(crate::BASIS_PARENT_TASK_ID, parent);
     }

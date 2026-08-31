@@ -41,6 +41,7 @@
 
 mod approve;
 mod attach;
+mod builders;
 mod client;
 mod data_dir;
 mod error;
@@ -57,6 +58,7 @@ mod watch;
 
 pub use approve::{Approve, PromptHost, validate_approval};
 pub use attach::POLL;
+pub use builders::configure_builders;
 pub use client::{Reply, Tasks, WaitOutcome};
 pub use error::{Error, Hint};
 pub use handle::TaskHandle;
