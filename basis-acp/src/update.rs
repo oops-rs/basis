@@ -18,7 +18,7 @@ use agent_client_protocol::schema::v1::{
 use serde_json::Value;
 
 use basis::{
-    event::{Event, Mutability},
+    event::{Event, Mutability, tool_result_elision_line},
     tools::{SPAWN, SpawnMode, parse_spawn_input},
 };
 
@@ -204,18 +204,6 @@ fn chunk(text: &str) -> ContentChunk {
 
 fn text_block(text: &str) -> ContentBlock {
     ContentBlock::Text(TextContent::new(text.to_string()))
-}
-
-fn tool_result_elision_line(
-    canonical_bytes: usize,
-    projected_bytes: usize,
-    changed: usize,
-) -> String {
-    let result = if changed == 1 { "result" } else { "results" };
-    format!(
-        "request tool results reduced: {canonical_bytes} -> {projected_bytes} bytes; \
-         {changed} {result} changed"
-    )
 }
 
 /// What to call the tool call in a client's UI.
