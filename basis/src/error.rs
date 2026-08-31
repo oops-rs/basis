@@ -359,3 +359,18 @@ impl RunError {
         )
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn open_elsewhere_identifies_only_a_lease_conflict() {
+        let conflict = RunError::Runtime(mentra::error::RuntimeError::LeaseUnavailable(
+            "already leased".to_string(),
+        ));
+
+        assert!(conflict.is_open_elsewhere());
+        assert!(!RunError::EmptyPrompt.is_open_elsewhere());
+    }
+}

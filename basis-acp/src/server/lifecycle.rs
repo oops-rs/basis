@@ -410,7 +410,7 @@ pub(super) fn setup_failed(error: basis::RunError) -> Error {
         return Error::auth_required().data(error.to_string());
     }
 
-    if is_open_elsewhere(&error) {
+    if error.is_open_elsewhere() {
         return Error::invalid_params().data(format!(
             "this conversation is already open — on another connection to this process, or in \
              another process — and one connection drives it at a time; close it there first \
@@ -425,12 +425,5 @@ fn is_missing_credential(error: &basis::RunError) -> bool {
     matches!(
         error,
         RunError::Provider(ProviderError::NoCredential | ProviderError::MissingCredential { .. })
-    )
-}
-
-fn is_open_elsewhere(error: &basis::RunError) -> bool {
-    matches!(
-        error,
-        RunError::Runtime(mentra::error::RuntimeError::LeaseUnavailable(_))
     )
 }
