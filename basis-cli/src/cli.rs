@@ -24,7 +24,10 @@ use std::{net::SocketAddr, path::PathBuf};
 use crate::duration_arg::DurationArg;
 use basis::SystemPrompt;
 use basis_host::ApprovalPolicy;
-use clap::{Parser, Subcommand};
+use clap::{
+    Parser, Subcommand,
+    builder::{PossibleValuesParser, TypedValueParser},
+};
 
 #[derive(Debug, Parser)]
 #[command(
@@ -294,7 +297,7 @@ pub(crate) struct AcpArgs {
         long,
         value_name = "MODE",
         default_value = "prompt",
-        value_parser = parse_approval_policy
+        value_parser = approval_policy_parser()
     )]
     pub(crate) approve: ApprovalPolicy,
 }
@@ -414,7 +417,7 @@ pub(crate) struct RunArgs {
         long,
         value_name = "MODE",
         default_value = "always",
-        value_parser = parse_approval_policy
+        value_parser = approval_policy_parser()
     )]
     pub(crate) approve: ApprovalPolicy,
 
@@ -473,9 +476,11 @@ pub(crate) struct FingerprintArgs {
     pub(crate) workspace: Option<PathBuf>,
 }
 
-fn parse_approval_policy(value: &str) -> Result<ApprovalPolicy, String> {
-    ApprovalPolicy::from_type_tag(value)
-        .ok_or_else(|| "expected one of: always, prompt, never".to_string())
+fn approval_policy_parser() -> impl TypedValueParser<Value = ApprovalPolicy> {
+    PossibleValuesParser::new(["always", "prompt", "never"]).map(|value| {
+        ApprovalPolicy::from_type_tag(&value)
+            .unwrap_or_else(|| unreachable!("possible values are the policy's stable ids"))
+    })
 }
 
 #[cfg(test)]
@@ -491,6 +496,30 @@ mod tests {
         ("xhigh", EffortArg::XHigh),
         ("max", EffortArg::Max),
     ];
+
+    #[test]
+    fn approval_values_are_typed_and_advertised() {
+        for (value, expected) in [
+            ("always", ApprovalPolicy::Always),
+            ("prompt", ApprovalPolicy::Prompt),
+            ("never", ApprovalPolicy::Never),
+        ] {
+            let cli = Cli::try_parse_from(["basis", "spawn", "hello", "--approve", value])
+                .expect("an advertised approval policy should parse");
+            let Some(Command::Spawn(args)) = cli.command else {
+                panic!("spawn command should parse");
+            };
+            assert_eq!(args.approve, expected);
+        }
+
+        let help = Cli::try_parse_from(["basis", "spawn", "--help"])
+            .expect_err("help exits through clap")
+            .to_string();
+        assert!(
+            help.contains("possible values: always, prompt, never"),
+            "help and completion metadata must retain the policy vocabulary: {help}"
+        );
+    }
 
     #[test]
     fn run_accepts_exactly_the_five_effort_spellings() {
