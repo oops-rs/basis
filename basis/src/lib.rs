@@ -125,7 +125,8 @@ pub use hooks::{
 };
 #[cfg(feature = "mcp")]
 pub use mcp::{
-    DEFAULT_GLOBAL_MCP_FILE, DEFAULT_WORKSPACE_MCP_FILE, McpConfig, McpError, McpServer, McpSource,
+    DEFAULT_GLOBAL_MCP_FILE, DEFAULT_WORKSPACE_MCP_FILE, McpConfig, McpError, McpServer,
+    McpServerConfig, McpSource, McpSseServerConfig, McpStreamableHttpServerConfig,
 };
 // The memory *configuration* comes to the root, beside its siblings
 // `SkillsConfig` and `TemplatesConfig` — a host pointing basis at different
@@ -134,8 +135,8 @@ pub use mcp::{
 pub use memory::{MemoryConfig, WorkspaceMemoryRoot};
 pub use run::{
     AgentEvent, AgentEventTapGuard, Bound, Bounds, CancellationToken, CollectingSink, Compacted,
-    ContentBlock, Effort, EventFanIn, EventSink, FnSink, MergedEvents, ModelInfo, NullSink,
-    OutputAttempt, OutputAttemptReport, OutputDecision, OutputFailure, OutputReport,
+    ContentBlock, Effort, EventFanIn, EventSink, FnSink, HistoryRole, MergedEvents, ModelInfo,
+    NullSink, OutputAttempt, OutputAttemptReport, OutputDecision, OutputFailure, OutputReport,
     OutputReservation, OutputSpec, PreparedRun, PromptPart, ReasoningChange, ReasoningOptions,
     ReasoningSummary, RoundAdjustment, RoundBoundary, RoundContext, RoundDecision, RoundStrategy,
     RoundToolResult, RunContext, RunFailure, RunFailureCategory, RunReport, RunUsage, TaggedEvent,

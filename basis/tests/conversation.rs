@@ -191,11 +191,12 @@ async fn the_session_survives_and_reports_its_history() {
         .await
         .expect("second turn");
 
-    let history = prepared.history();
-    let said: Vec<String> = history
-        .iter()
-        .filter(|message| message.role == Role::User)
-        .map(|message| message.text())
+    let said: Vec<String> = prepared
+        .text_history()
+        .filter_map(|(role, text)| match role {
+            basis::HistoryRole::User => Some(text),
+            basis::HistoryRole::Assistant => None,
+        })
         .collect();
     assert_eq!(said, vec!["first".to_string(), "second".to_string()]);
 

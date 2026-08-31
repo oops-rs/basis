@@ -50,6 +50,21 @@ pub use header::{LoadedSkill, RunContext};
 pub use observer::AgentEventTapGuard;
 pub use prompt::PromptPart;
 
+/// The two chat roles basis replays as ordinary conversation.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum HistoryRole {
+    User,
+    Assistant,
+}
+
+fn history_text(message: &mentra::Message) -> Option<(HistoryRole, String)> {
+    match message.role {
+        mentra::Role::User => Some((HistoryRole::User, message.text())),
+        mentra::Role::Assistant => Some((HistoryRole::Assistant, message.text())),
+        mentra::Role::Unknown(_) => None,
+    }
+}
+
 /// A session and the prompt to send it. Nothing has been sent yet.
 pub struct PreparedRun {
     session: Session,
@@ -331,6 +346,15 @@ impl PreparedRun {
         self.session.history()
     }
 
+    /// This run's committed conversation as basis roles plus assembled text.
+    ///
+    /// Narrower than [`history`](Self::history): only the two chat roles a host
+    /// commonly needs, and only the assembled text each one said. Unknown roles
+    /// stay in `history()` for callers that want the full transcript.
+    pub fn text_history(&self) -> impl DoubleEndedIterator<Item = (HistoryRole, String)> + '_ {
+        self.session.history().iter().filter_map(history_text)
+    }
+
     /// How many of the assistant's turns this run's history has committed.
     ///
     /// The count, not the presence: a session resumed with `--continue` or
@@ -349,10 +373,8 @@ impl PreparedRun {
     /// a role of basis's own, which a caller wanting the *text* of a message
     /// still would not need.
     pub fn answered_turns(&self) -> usize {
-        self.session
-            .history()
-            .iter()
-            .filter(|message| matches!(message.role, mentra::Role::Assistant))
+        self.text_history()
+            .filter(|(role, _)| matches!(role, HistoryRole::Assistant))
             .count()
     }
 
@@ -372,12 +394,12 @@ impl PreparedRun {
     /// borrowed because the text is assembled from the message's parts, not
     /// stored as one string.
     pub fn last_assistant_text(&self) -> Option<String> {
-        self.session
-            .history()
-            .iter()
+        self.text_history()
             .rev()
-            .find(|message| matches!(message.role, mentra::Role::Assistant))
-            .map(|message| message.text())
+            .find_map(|(role, text)| match role {
+                HistoryRole::Assistant => Some(text),
+                HistoryRole::User => None,
+            })
     }
 
     /// This run's model's context window, when it is known.
