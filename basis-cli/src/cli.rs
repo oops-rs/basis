@@ -296,7 +296,7 @@ pub(crate) struct AcpArgs {
     #[arg(
         long,
         value_name = "MODE",
-        default_value = "prompt",
+        default_value = ApprovalPolicy::Prompt.type_tag(),
         value_parser = approval_policy_parser()
     )]
     pub(crate) approve: ApprovalPolicy,
@@ -416,7 +416,7 @@ pub(crate) struct RunArgs {
     #[arg(
         long,
         value_name = "MODE",
-        default_value = "always",
+        default_value = ApprovalPolicy::Always.type_tag(),
         value_parser = approval_policy_parser()
     )]
     pub(crate) approve: ApprovalPolicy,
@@ -477,7 +477,12 @@ pub(crate) struct FingerprintArgs {
 }
 
 fn approval_policy_parser() -> impl TypedValueParser<Value = ApprovalPolicy> {
-    PossibleValuesParser::new(["always", "prompt", "never"]).map(|value| {
+    PossibleValuesParser::new([
+        ApprovalPolicy::Always.type_tag(),
+        ApprovalPolicy::Prompt.type_tag(),
+        ApprovalPolicy::Never.type_tag(),
+    ])
+    .map(|value| {
         ApprovalPolicy::from_type_tag(&value)
             .unwrap_or_else(|| unreachable!("possible values are the policy's stable ids"))
     })
