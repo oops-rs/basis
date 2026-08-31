@@ -13,16 +13,14 @@
 //! a client redrawing a conversation needs the conversation.
 
 use agent_client_protocol::schema::v1::{ContentBlock, ContentChunk, SessionUpdate, TextContent};
-use mentra::{Message, Role};
+use basis::HistoryRole;
 
 /// The updates that replay `history`, oldest first.
-pub fn replay(history: &[Message]) -> Vec<SessionUpdate> {
-    history.iter().filter_map(replayed).collect()
+pub fn replay(history: impl IntoIterator<Item = (HistoryRole, String)>) -> Vec<SessionUpdate> {
+    history.into_iter().filter_map(replayed).collect()
 }
 
-fn replayed(message: &Message) -> Option<SessionUpdate> {
-    let text = message.text();
-
+fn replayed((role, text): (HistoryRole, String)) -> Option<SessionUpdate> {
     // A turn that only called tools leaves an assistant message with no text.
     // Replaying it as an empty chunk would draw an empty bubble.
     if text.trim().is_empty() {
@@ -31,19 +29,15 @@ fn replayed(message: &Message) -> Option<SessionUpdate> {
 
     let chunk = ContentChunk::new(ContentBlock::Text(TextContent::new(text)));
 
-    match message.role {
-        Role::User => Some(SessionUpdate::UserMessageChunk(chunk)),
-        Role::Assistant => Some(SessionUpdate::AgentMessageChunk(chunk)),
-        // A role neither side named — a tool result, or something a provider
-        // invented. It is not part of the conversation a person had.
-        Role::Unknown(_) => None,
+    match role {
+        HistoryRole::User => Some(SessionUpdate::UserMessageChunk(chunk)),
+        HistoryRole::Assistant => Some(SessionUpdate::AgentMessageChunk(chunk)),
     }
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
-    use mentra::ContentBlock as MentraContent;
 
     fn text_of(update: &SessionUpdate) -> String {
         let chunk = match update {
@@ -60,9 +54,9 @@ mod tests {
 
     #[test]
     fn a_conversation_replays_in_order_and_keeps_who_said_what() {
-        let updates = replay(&[
-            Message::user(MentraContent::text("remember 41")),
-            Message::assistant(MentraContent::text("noted")),
+        let updates = replay([
+            (HistoryRole::User, "remember 41".to_string()),
+            (HistoryRole::Assistant, "noted".to_string()),
         ]);
 
         assert_eq!(updates.len(), 2);
@@ -76,16 +70,13 @@ mod tests {
     fn a_message_with_no_text_is_not_replayed() {
         // What a tool-calling turn leaves behind. An empty bubble is worse
         // than no bubble.
-        let updates = replay(&[
-            Message::assistant(MentraContent::text("   ")),
-            Message::unknown("tool", MentraContent::text("output")),
-        ]);
+        let updates = replay([(HistoryRole::Assistant, "   ".to_string())]);
 
         assert!(updates.is_empty());
     }
 
     #[test]
     fn an_empty_history_replays_nothing() {
-        assert!(replay(&[]).is_empty());
+        assert!(replay(Vec::<(HistoryRole, String)>::new()).is_empty());
     }
 }

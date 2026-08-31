@@ -27,12 +27,10 @@ use std::collections::HashMap;
 use agent_client_protocol::schema::v1::{
     HttpHeader, McpServer as AcpServer, McpServerHttp, McpServerSse, McpServerStdio,
 };
-use mentra::{
-    McpServerConfig, McpSseServerConfig, McpStreamableHttpConfigError,
+use basis::mcp::{
+    McpError, McpServer, McpServerConfig, McpSseServerConfig, McpStreamableHttpConfigError,
     McpStreamableHttpServerConfig,
 };
-
-use basis::mcp::{McpError, McpServer};
 
 /// How an error from this module names where the configuration came from.
 const ORIGIN: &str = "the ACP client";
@@ -246,7 +244,7 @@ mod tests {
             config
                 .headers
                 .get("authorization")
-                .map(mentra::mcp::SecretString::expose_secret),
+                .map(basis::mcp::SecretString::expose_secret),
             Some("Bearer t")
         );
     }
@@ -265,7 +263,7 @@ mod tests {
             config
                 .headers
                 .get("authorization")
-                .map(mentra::mcp::SecretString::expose_secret),
+                .map(basis::mcp::SecretString::expose_secret),
             Some("Bearer t")
         );
     }

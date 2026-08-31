@@ -63,10 +63,15 @@ mod file;
 
 use std::path::{Path, PathBuf};
 
-use mentra::{McpServerConfig, McpSseServerConfig, McpStreamableHttpServerConfig};
 use thiserror::Error;
 
 use crate::context::ContextScope;
+
+pub use mentra::mcp::SecretString;
+pub use mentra::{
+    McpServerConfig, McpSseLimits, McpSseServerConfig, McpStreamableHttpConfigError,
+    McpStreamableHttpLimits, McpStreamableHttpServerConfig,
+};
 
 /// Where basis looks inside a workspace, relative to its root.
 pub const DEFAULT_WORKSPACE_MCP_FILE: &str = ".mcp.json";

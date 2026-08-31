@@ -45,8 +45,7 @@ use agent_client_protocol::schema::v1::SessionId;
 use tokio::sync::watch;
 
 use crate::mode::{ApprovalMode, SessionModes};
-use basis::{PreparedRun, run::TurnOptions};
-use mentra::runtime::CancellationToken;
+use basis::{CancellationToken, PreparedRun, run::TurnOptions};
 
 /// The half of a cancellation an approver can wait on.
 ///

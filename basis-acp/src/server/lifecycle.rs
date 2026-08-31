@@ -206,7 +206,7 @@ pub(super) async fn open_persisted(
         let commands = crate::available_commands(&run.context().templates);
         let settings = options::options(&run.context().model, run.effort());
         let updates = match replay {
-            Replay::Yes => history::replay(run.history()),
+            Replay::Yes => history::replay(run.text_history()),
             Replay::No => Vec::new(),
         };
         // Dropped before anything is sent: holding a turn lock across a write

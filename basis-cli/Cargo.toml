@@ -17,7 +17,6 @@ basis-acp.workspace = true
 # The durable task layer (ADR-0019, D8): the CLI's lifecycle verbs are the
 # first client of this, not its implementation.
 basis-tasks.workspace = true
-mentra.workspace = true
 
 # The bridge speaks ACP's transport traits without speaking ACP itself: it
 # relays frames between a websocket and the server basis-acp already serves.
@@ -33,6 +32,7 @@ tokio.workspace = true
 tokio-tungstenite.workspace = true
 
 [dev-dependencies]
+# Tests still use mentra's mock runtime and scripted providers directly.
 mentra = { workspace = true, features = ["test-utils"] }
 tokio = { workspace = true, features = ["time"] }
 # The bridge tests dial the bridge, which the binary itself never does.

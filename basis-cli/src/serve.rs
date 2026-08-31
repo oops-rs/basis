@@ -17,9 +17,8 @@
 
 use std::process::ExitCode;
 
-use basis::{ShellAccess, provider};
+use basis::{ModelSelector, ShellAccess, provider};
 use basis_acp::StdioError;
-use mentra::ModelSelector;
 
 use crate::{
     bridge, cli,
