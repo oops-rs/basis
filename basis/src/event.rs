@@ -550,6 +550,22 @@ mod tests {
     }
 
     #[test]
+    fn the_run_outcome_type_tag_is_the_status_serde_writes() {
+        for outcome in [
+            RunOutcome::Ok,
+            RunOutcome::Error {
+                message: "failed".to_string(),
+            },
+        ] {
+            let written = serde_json::to_value(&outcome).expect("serializes");
+            assert_eq!(
+                written["status"].as_str().expect("tagged"),
+                outcome.type_tag()
+            );
+        }
+    }
+
+    #[test]
     fn a_line_is_one_flat_object() {
         let line = EventLine::new(
             7,

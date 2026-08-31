@@ -123,7 +123,7 @@ where
     D: serde::Deserializer<'de>,
 {
     let name = Option::<String>::deserialize(deserializer)?;
-    Ok(name.and_then(|name| serde_json::from_value(Value::String(name)).ok()))
+    Ok(name.and_then(|name| Bound::from_type_tag(&name)))
 }
 
 /// A task whose own work has finished, but whose attached children may still

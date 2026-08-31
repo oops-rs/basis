@@ -689,7 +689,7 @@ async fn run_model(
                 return record_failure(
                     paths,
                     meta,
-                    format!("unrecognized run outcome: {outcome:?}"),
+                    format!("unrecognized run outcome: {}", outcome.type_tag()),
                     stopped_by,
                 );
             }
