@@ -249,7 +249,8 @@ async fn a_hook_answers_only_at_the_event_it_declared() {
     assert_eq!(
         HookRunner::new(".", both.clone())
             .with_reporter(|_| {})
-            .decide(&call("shell")),
+            .decide_async(&call("shell"))
+            .await,
         HookOutcome::Deny("denied by hook 'before': pre only".to_string())
     );
     assert_eq!(

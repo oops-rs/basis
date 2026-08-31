@@ -30,7 +30,7 @@
 //! It is not a claim that a later participant is powerless. A hook still sees,
 //! and can still refuse, whatever an interceptor rewrote.
 
-use std::{fmt, future::Future, path::PathBuf, sync::Arc, time::Duration};
+use std::{fmt, path::PathBuf, sync::Arc, time::Duration};
 
 use mentra::{
     error::RuntimeError,
@@ -117,36 +117,6 @@ impl HookRunner {
     /// carrying words, because an error here would reach the model as a bare
     /// blocked call with the reason thrown away.
     ///
-    /// Blocking: it spawns subprocesses and waits for them, on a runtime of
-    /// its own so that it works from any thread, a tokio worker included.
-    /// Callers on an async runtime should reach it through
-    /// [`decide_async`](Self::decide_async) rather than calling it directly.
-    ///
-    /// A runner with interceptors registered **denies here rather than
-    /// deciding**. An [`Interceptor`] is async by contract and belongs on the
-    /// host's runtime, not on one basis conjured for a synchronous call;
-    /// skipping them would silently drop a control the host believes is in
-    /// place, which is the one failure this whole module is arranged to avoid.
-    pub fn decide(&self, call: &HookCall) -> HookOutcome {
-        if !self.interceptors.is_empty() {
-            return HookOutcome::Deny(
-                "in-process interceptors are registered and cannot be consulted synchronously; \
-                 this call belongs on HookRunner::decide_async"
-                    .to_string(),
-            );
-        }
-
-        if self.hooks.is_empty() {
-            return HookOutcome::Allow;
-        }
-
-        match block_on_own_runtime(self.consult_hooks(Chain::new(self.request(call)))) {
-            Ok(Ok(chain)) => chain.outcome(),
-            Ok(Err(outcome)) => outcome,
-            Err(failure) => HookOutcome::Deny(format!("hook runner failed: {failure}")),
-        }
-    }
-
     /// Consults everybody: interceptors first, then hooks.
     ///
     /// Both are awaited on the caller's own runtime. A hook is a subprocess,
@@ -218,10 +188,6 @@ impl HookRunner {
             Ok(chain) => chain.outcome(),
             Err(outcome) => outcome,
         }
-    }
-
-    fn request(&self, call: &HookCall) -> HookRequest {
-        HookRequest::from_call(HookEvent::PreToolUse, &self.workspace, call)
     }
 
     /// The in-process binding's adapter: ask, translate, fold.
@@ -387,35 +353,6 @@ impl HookRunner {
             source,
         })
     }
-}
-
-/// Drives `future` to completion from a synchronous caller.
-///
-/// A fresh `current_thread` runtime on a thread of its own, rather than
-/// `Handle::current().block_on`: the latter panics inside an async context,
-/// and [`HookRunner::decide`] is documented as callable from anywhere — a test,
-/// a host's own thread, a blocking task on some runtime basis knows nothing
-/// about. The thread is scoped, so the future may borrow the runner. The cost
-/// is one thread and one runtime per synchronous decision, which is the price
-/// of asking for a synchronous answer to an asynchronous question and is paid
-/// by nothing on the runtime path.
-fn block_on_own_runtime<F>(future: F) -> Result<F::Output, String>
-where
-    F: Future + Send,
-    F::Output: Send,
-{
-    std::thread::scope(|scope| {
-        scope
-            .spawn(|| {
-                let runtime = tokio::runtime::Builder::new_current_thread()
-                    .enable_all()
-                    .build()
-                    .map_err(|error| format!("could not start a runtime: {error}"))?;
-                Ok(runtime.block_on(future))
-            })
-            .join()
-            .map_err(|_| "the hook thread panicked".to_string())?
-    })
 }
 
 #[async_trait::async_trait]
