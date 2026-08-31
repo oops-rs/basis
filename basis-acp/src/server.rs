@@ -4,9 +4,9 @@
 //! The handlers themselves are split by what they touch:
 //! [`lifecycle`] holds the `session/*` methods that open, list, switch and
 //! close a conversation, [`turn`] holds the one that runs the agent,
-//! [`config`] holds what the connection was configured with, and
-//! [`workspaces`] holds what basis's own sessions are built on — one runtime for
-//! the process, one workspace per directory (ADR-0018). What stays here is the
+//! [`config`] holds what the connection was configured with. `basis-host`
+//! holds what basis's own sessions are built on — one runtime for the process,
+//! one workspace per directory (ADR-0018). What stays here is the
 //! wiring, the capabilities answer that describes all of it, and the two sends
 //! a handler may make from either side of the rule below.
 //!
@@ -60,7 +60,6 @@
 mod config;
 mod lifecycle;
 mod turn;
-mod workspaces;
 
 pub use config::{Discovery, ServeConfig, SessionSource, SessionTemplate};
 

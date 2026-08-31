@@ -1,7 +1,7 @@
 //! What basis's own sessions are built on: one runtime for the server process,
 //! one workspace for each directory a client asks about.
 //!
-//! ADR-0018's shape at the protocol layer. The default source used to open a
+//! ADR-0018's host shape. The original ACP source used to open a
 //! whole workspace per
 //! session, minting one run from it and dropping it — so
 //! a server holding N editor sessions held N mentra runtimes, N provider
@@ -14,12 +14,9 @@
 //! # Built late, and once
 //!
 //! Both are built on the first session that needs them, not at
-//! [`ServeConfig::new`](super::ServeConfig::new). A missing credential is the
-//! one setup failure ACP has a remedy for, and it has to arrive as
-//! `auth_required` on `session/new` — as it always has — rather than as a
-//! server that refused to start. Neither cell remembers a failure either: a
-//! `session/new` that failed for want of a credential must fail the same way
-//! next time rather than be answered out of a poisoned cache.
+//! a server is constructed. Neither cell remembers a failure: a request that
+//! failed for want of a credential must fail the same way next time rather
+//! than be answered out of a poisoned cache.
 //!
 //! # What a cached workspace holds open
 //!
@@ -46,10 +43,10 @@ use basis::{
 };
 use tokio::sync::OnceCell;
 
-use super::config::{SessionSource, SessionTemplate};
+use crate::{SessionSource, SessionTemplate};
 
 /// The default source: sessions basis builds itself, on the process's runtime.
-pub(super) struct ConfiguredSource {
+pub struct ConfiguredSource {
     /// What the operator said and a client cannot: which model and endpoint,
     /// whether commands are granted, the product's voice. No workspace lives
     /// here — every session brings its own `cwd`.
@@ -67,7 +64,7 @@ pub(super) struct ConfiguredSource {
 }
 
 impl ConfiguredSource {
-    pub(super) fn new(template: Option<SessionTemplate>) -> Self {
+    pub fn new(template: Option<SessionTemplate>) -> Self {
         Self {
             template: template.unwrap_or_default(),
             runtime: OnceCell::new(),
@@ -81,11 +78,10 @@ impl ConfiguredSource {
     /// exactly what an offline test cannot do and exactly what
     /// [`RuntimeBuilder::with_api_key`](basis::RuntimeBuilder::with_api_key)
     /// answers — and it is not on [`SessionTemplate`], which is the only thing
-    /// [`ServeConfig`](super::ServeConfig) takes. A host that wants to supply
-    /// its own runtime supplies its own
-    /// [`SessionSource`](super::SessionSource), which is what that seam is for.
+    /// a configured source takes. A host that wants to supply its own runtime
+    /// supplies its own [`SessionSource`], which is what that seam is for.
     #[cfg(test)]
-    pub(super) fn on_runtime(runtime: Arc<Runtime>, template: Option<SessionTemplate>) -> Self {
+    pub fn on_runtime(runtime: Arc<Runtime>, template: Option<SessionTemplate>) -> Self {
         let source = Self::new(template);
         source
             .runtime
@@ -101,12 +97,8 @@ impl ConfiguredSource {
     /// fixed for its life, so basis installs one that surfaces every
     /// consequential call and answers none of them; which of those the client
     /// actually sees is the session's mode, which can still change (see
-    /// [`mode`](crate::mode)).
-    pub(super) fn parts_for(
-        &self,
-        cwd: PathBuf,
-        mcp: Vec<McpServer>,
-    ) -> (WorkspaceBuilder, RunSpec) {
+    /// [`SessionApproval`](crate::SessionApproval)).
+    fn parts_for(&self, cwd: PathBuf, mcp: Vec<McpServer>) -> (WorkspaceBuilder, RunSpec) {
         let template = &self.template;
 
         let mut builder = Workspace::builder(cwd).with_shell(template.shell);
@@ -145,7 +137,7 @@ impl ConfiguredSource {
     /// One session's MCP config: where discovery starts, with the client's
     /// servers landing on top — they outrank the workspace's own, because the
     /// client is answering for this session in particular.
-    pub(super) fn session_mcp(&self, mcp: Vec<McpServer>) -> McpConfig {
+    fn session_mcp(&self, mcp: Vec<McpServer>) -> McpConfig {
         self.template.discovery.mcp.clone().with_supplied(mcp)
     }
 
@@ -231,7 +223,7 @@ impl ConfiguredSource {
     /// The workspaces this source has open, for the acceptance test that one
     /// directory is one workspace however many sessions were minted on it.
     #[cfg(test)]
-    pub(super) fn opened(&self) -> Vec<Arc<Workspace>> {
+    pub fn opened(&self) -> Vec<Arc<Workspace>> {
         self.lock()
             .values()
             .filter_map(|cell| cell.get().map(Arc::clone))
@@ -307,23 +299,22 @@ impl SessionSource for ConfiguredSource {
 /// answering for *this session in particular*, so two sessions on one
 /// repository need not answer alike. Keying on the directory alone would hand
 /// the second session the first one's servers and silently drop its own —
-/// which is the failure [`from_acp`](crate::from_acp) refuses to make, because
-/// a session that came up without its servers looks exactly like one whose
-/// servers had nothing to offer.
+/// because a session that came up without its servers looks exactly like one
+/// whose servers had nothing to offer.
 ///
 /// Two workspaces on one directory is the cost, and it is bounded: they differ
 /// only in their supplied servers, so they discover the same hooks and carry
 /// the same command posture, and basis's dispatcher — which keys on the
 /// directory — is consulting equivalent guards whichever of them it finds.
 #[derive(Debug, PartialEq, Eq, Hash)]
-pub(super) struct WorkspaceKey {
+struct WorkspaceKey {
     workspace: PathBuf,
     /// A digest, so a `{:?}` of this key repeats nothing a client configured.
     supplied: u64,
 }
 
 impl WorkspaceKey {
-    pub(super) fn new(cwd: &Path, supplied: &[McpServer]) -> Self {
+    fn new(cwd: &Path, supplied: &[McpServer]) -> Self {
         Self {
             // Canonicalized so a symlinked spelling and its target are one
             // workspace rather than two, and used as written when it does not
@@ -502,10 +493,21 @@ fn hash_remote(
 
 #[cfg(test)]
 mod tests {
-    use basis::McpServer;
-    use mentra::{McpSseServerConfig, McpStreamableHttpServerConfig};
+    use std::{
+        path::{Path, PathBuf},
+        sync::Arc,
+    };
 
-    use super::digest;
+    use basis::{
+        ContextConfig, McpConfig, McpServer, Runtime, ToolsConfig, hooks::HooksConfig,
+        skills::SkillsConfig, templates::TemplatesConfig,
+    };
+    use mentra::{
+        McpServerConfig, McpSseServerConfig, McpStreamableHttpServerConfig, ModelSelector,
+    };
+
+    use super::{ConfiguredSource, WorkspaceKey, digest};
+    use crate::{Discovery, SessionSource, SessionTemplate};
 
     #[test]
     fn two_servers_differing_only_in_transport_hash_apart() {
@@ -530,6 +532,145 @@ mod tests {
         assert_ne!(
             digest(&[McpServer::Http(base())]),
             digest(&[McpServer::Http(base().allowing_plaintext_credentials())]),
+        );
+    }
+
+    #[test]
+    fn the_clients_mcp_servers_reach_the_config() {
+        let source = ConfiguredSource::new(None);
+
+        let built = source.session_mcp(vec![McpServer::Stdio(McpServerConfig {
+            name: "fs".to_string(),
+            command: "/bin/mcp-fs".to_string(),
+            args: Vec::new(),
+            env: Default::default(),
+            cwd: None,
+        })]);
+
+        let supplied: Vec<&str> = built.supplied.iter().map(McpServer::name).collect();
+        assert_eq!(
+            supplied,
+            vec!["fs"],
+            "the session request is where a client says which servers it wants"
+        );
+    }
+
+    fn offline_runtime() -> Arc<Runtime> {
+        Arc::new(
+            Runtime::builder()
+                .with_base_url("http://127.0.0.1:1/v1")
+                .with_api_key("test-key")
+                .with_ephemeral_history()
+                .build()
+                .expect("a runtime builds without touching the network"),
+        )
+    }
+
+    fn offline_template() -> SessionTemplate {
+        SessionTemplate::new().with_model(ModelSelector::Id("test-model".to_string()))
+    }
+
+    fn offline_discovery() -> Discovery {
+        Discovery {
+            context: ContextConfig {
+                file_name: "AGENTS.md".to_string(),
+                global_dir: None,
+                walk_parents: false,
+            },
+            skills: SkillsConfig {
+                workspace_subdir: Some(PathBuf::from(".basis/skills")),
+                shared_workspace_dir: true,
+                global_dir: None,
+                shared_home_dir: false,
+            },
+            templates: TemplatesConfig {
+                workspace_subdir: PathBuf::from(".basis/templates"),
+                global_dir: None,
+            },
+            hooks: HooksConfig {
+                workspace_file: PathBuf::from(".basis/hooks.json"),
+                global_dir: None,
+            },
+            tools: ToolsConfig {
+                workspace_file: PathBuf::from(".basis/tools.json"),
+                global_dir: None,
+            },
+            mcp: McpConfig {
+                workspace_file: PathBuf::from(".mcp.json"),
+                global_dir: None,
+                supplied: Vec::new(),
+            },
+        }
+    }
+
+    #[tokio::test]
+    async fn two_sessions_on_one_workspace_share_one_runtime() {
+        let repository = tempfile::tempdir().expect("tempdir");
+        let runtime = offline_runtime();
+        let source = ConfiguredSource::on_runtime(
+            Arc::clone(&runtime),
+            Some(offline_template().with_discovery(offline_discovery())),
+        );
+
+        let first = source
+            .create(repository.path().to_path_buf(), Vec::new())
+            .await
+            .expect("the first session opens");
+        let second = source
+            .create(repository.path().to_path_buf(), Vec::new())
+            .await
+            .expect("the second session opens");
+
+        assert_ne!(
+            first.agent_id(),
+            second.agent_id(),
+            "two sessions, not one conversation handed out twice"
+        );
+
+        let opened = source.opened();
+        assert_eq!(
+            opened.len(),
+            1,
+            "one directory is one workspace, however many sessions were minted on it"
+        );
+        assert!(
+            std::ptr::eq(opened[0].mentra_runtime(), runtime.mentra_runtime()),
+            "and both were minted on the one runtime this process built"
+        );
+    }
+
+    #[test]
+    fn a_session_that_asked_for_different_servers_is_a_different_workspace() {
+        let server = |command: &str| {
+            vec![McpServer::Stdio(McpServerConfig {
+                name: "fs".to_string(),
+                command: command.to_string(),
+                args: Vec::new(),
+                env: Default::default(),
+                cwd: None,
+            })]
+        };
+        let key = |mcp: Vec<McpServer>| WorkspaceKey::new(Path::new("/repo"), &mcp);
+
+        assert_eq!(
+            key(Vec::new()),
+            key(Vec::new()),
+            "the same directory asked about the same way is one workspace"
+        );
+        assert_ne!(
+            key(Vec::new()),
+            key(server("/bin/mcp-fs")),
+            "a supplied server is not none"
+        );
+        assert_ne!(
+            key(server("/bin/mcp-fs")),
+            key(server("/bin/other-fs")),
+            "one name, two commands: a client that named a different program must get it"
+        );
+        assert_ne!(
+            key(Vec::new()),
+            WorkspaceKey::new(Path::new("/other-repo"), &[]),
+            "and a directory is a key"
         );
     }
 }

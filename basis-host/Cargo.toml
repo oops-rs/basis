@@ -14,7 +14,7 @@ categories = ["development-tools"]
 [dependencies]
 # The host kit is the layer above the SDK and below any protocol or terminal
 # surface.
-basis.workspace = true
+basis = { workspace = true, features = ["mcp"] }
 
 async-trait.workspace = true
 serde = { workspace = true }

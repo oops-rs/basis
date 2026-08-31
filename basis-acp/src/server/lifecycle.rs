@@ -99,7 +99,7 @@ pub(super) async fn list_sessions(
 pub(super) fn session_info(session: PersistedSession, cwd: &Path) -> SessionInfo {
     SessionInfo::new(session.agent_id, cwd.to_path_buf())
         .title(session.name)
-        .updated_at(session.updated_at.map(crate::timestamp::rfc3339))
+        .updated_at(session.updated_at.map(basis_host::rfc3339))
 }
 
 /// A session that has just been opened, and what to tell the client about it
