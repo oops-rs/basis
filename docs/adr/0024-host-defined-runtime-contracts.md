@@ -134,6 +134,11 @@ omit those routes from its exact roster and await every bound-tool effect.
 owns completeness and correspondence with that roster. Because binding
 consumes the workspace, failure returns no reusable entry.
 
+Retired in Basis 0.12 by
+[`0026-the-rebuild-half-of-reuse-is-deferred.md`](0026-the-rebuild-half-of-reuse-is-deferred.md),
+which is the separate decision the last alternative below defers to. Gate 1a —
+`fresh_only` and its one-attempt claim — is unaffected.
+
 ## Alternatives considered
 
 - **Expose the entire mentra runtime/configuration surface.** Rejected: that

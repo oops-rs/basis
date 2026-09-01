@@ -353,35 +353,11 @@ flowchart LR
   first to close must not take it from the second. Skills are the one thing that *does* travel
   between workspaces on a shared runtime — a run can `load_skill` a sibling's skill while the
   sibling is open, and cannot once it is not.
-- **A reusable private runtime is consumed, never reset in place** (ADR-0024). Basis 0.11 uses
-  Mentra 0.25.0 for the underlying observer, fresh provider-session, and bounded process
-  primitives.
-  `RuntimeBuilder::with_reusable_registered_provider(provider_id, make, warm)` records the host's
-  provider factory and the async warm step for its ordinary clone;
-  `into_reusable_recipe` accepts it only with explicit ephemeral history and without one-shot
-  providers or host tools. `WorkspaceBuilder::with_runtime_recipe` then requires discovery off,
-  fresh-only, a resolved model whose provider matches the recipe, and an exact
-  `ToolRoster::only` roster. Each opened or rebuilt generation starts unbound, and the consuming
-  `Workspace::bind_host_tools` supplies the set the host declares complete before that checkout's
-  one independent mint. Basis validates supplied names and collisions, not completeness or roster
-  correspondence; a failed consuming bind returns no entry. The async consuming
-  `Workspace::rebuild_for_reuse` seals the generation, drops workspace registrations and the
-  uniquely owned old runtime before invoking the provider factory and host warm step, and returns
-  that replacement unbound. Basis enforces provider identity and call order. A Responses host must
-  return `fresh_session_scope()` from every factory call and make `warm` prewarm its
-  session-sharing clone. A live run, opaque `AgentEventTapGuard`, or detached Basis event forwarder
-  refuses rebuild and consumes the entry; failed ownership, provider construction, runtime build,
-  or warm likewise returns no entry. Raw access through `mentra_runtime` or a prepared run's
-  session accessors permanently disables reuse for that generation. The proof does not cover
-  Mentra team/background/`spawn` execution or a custom tool that returns before detached work
-  finishes. Basis does not reject those routes automatically; a reusable host excludes them from
-  the exact roster and awaits every bound-tool effect.
 - **Lossless observation is a separate in-process seam.**
   `PreparedRun::register_agent_event_tap` forwards Mentra's complete provider-neutral
   `AgentEvent` values synchronously, unchanged, and in occurrence order before the bounded event
   stream. Its Basis-owned `AgentEventTapGuard` is opaque and unregisters on drop. Because the
-  callback runs inline it must be prompt and non-panicking; because the guard holds a reusable
-  lifecycle lease, a rebuild cannot race an observer that is still registered. Complete tool
+  callback runs inline it must be prompt and non-panicking. Complete tool
   bodies stay out of the versioned JSONL surface.
 - **A run answers with a value when asked.** `PreparedRun::output::<T>()` runs a turn that
   must answer through a generated terminal tool whose input *is* the answer, which is what
@@ -677,6 +653,35 @@ else, exactly as before. That is a migration path with no deadline on it; the de
 `Split` because the roster is the model's API and the split names are the ones models are
 trained on — and because `glob`, and `grep`'s `ignore_case`/`literal`/`context`/`multiline`
 knobs, exist only there.
+
+### Reuse: the consume/rebuild retirement
+
+Unlike the two hook migrations above, this one is loud: it stops compiling.
+[ADR-0026](adr/0026-the-rebuild-half-of-reuse-is-deferred.md) retires the rebuild half of
+ADR-0024 in 0.12, so six public items are gone — `basis::RuntimeRecipe`,
+`RuntimeBuilder::with_reusable_registered_provider`, `RuntimeBuilder::into_reusable_recipe`,
+`WorkspaceBuilder::with_runtime_recipe`, `Workspace::bind_host_tools`, and the async
+`Workspace::rebuild_for_reuse` — along with the 17 `RunError` variants only they raised
+(`NonReusableRuntimeComponent`, `ReusableProviderRequiresRuntimeRecipe`, the three
+`RuntimeRecipeProvider*`, the four `ReusableWorkspaceRequires*`, `ReusableWorkspaceToolsUnbound`,
+`ReusableWorkspaceAlreadyBound`, `ReusableWorkspaceRawAccess`, `ReusableWorkspaceSealed`,
+`ReusableWorkspaceOutstanding`, `WorkspaceNotReusable`, `ReusableRuntimeNotUnique`, and
+`ReusableHostToolName`). `RunError` is `#[non_exhaustive]`, which does not help: a `match` or
+`matches!` arm naming one of those variants fails to compile too.
+
+Nothing else moves. `fresh_only`, `without_discovery`, `with_resolved_model`,
+`ToolRoster::only`, `RunProfile`, `TurnOptions`, `ToolResultPolicy`, and
+`PreparedRun::register_agent_event_tap` are untouched, as are `AgentEventTapGuard`'s name,
+its `#[must_use]`, and its drop semantics. Three documented promises are withdrawn without a
+signature changing: `Workspace::mentra_runtime` and `PreparedRun::session` / `session_mut` /
+`into_session` no longer poison a reuse generation, because there is no generation to poison.
+
+A pooling host opens a fresh workspace per checkout — `with_runtime_builder` +
+`without_discovery` + `fresh_only` + `with_resolved_model` + an exact roster, which is the
+posture the strict-host section above describes and the one every real caller already used.
+Reuse returns when Mentra can mint a fresh provider session scope from an existing provider
+([oops-rs/mentra#46](https://github.com/oops-rs/mentra/issues/46)); until then Basis makes no
+reuse claim it cannot prove.
 
 ### Command targets
 
