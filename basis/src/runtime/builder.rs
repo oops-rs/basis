@@ -44,7 +44,6 @@ use super::{
     Wire,
     dispatch::{DispatchHook, HookDispatch},
     executor::{CommandTargets, TargetedExecutor},
-    reuse::{ReusableProvider, RuntimeRecipe},
 };
 
 /// The persist tag a shared runtime's own conversations carry until mentra can
@@ -153,14 +152,6 @@ pub struct RuntimeBuilder {
     /// runs, the environment is never read, and [`build`](Self::build) refuses
     /// the knobs resolution would have read beside it.
     host_provider: Option<HostProvider>,
-    /// A repeatable registered-provider generator, mutually exclusive with
-    /// [`host_provider`](Self::host_provider).
-    ///
-    /// Kept separate because a one-shot build consumes a concrete instance,
-    /// while a reusable recipe must retain a callable generator and cannot
-    /// synchronously honor its async warm step. Every host-provider setter
-    /// clears the sibling field, making the final call the whole answer.
-    reusable_host_provider: Option<ReusableProvider>,
 }
 
 /// Hand-written so a supplied credential cannot reach a log through a
@@ -175,16 +166,6 @@ impl std::fmt::Debug for RuntimeBuilder {
             .field(
                 "provider_instance",
                 &self.host_provider.as_ref().map(|host| host.id.as_str()),
-            )
-            // Calling a factory merely to print a builder would create a
-            // provider and could touch a credential source. Presence is the
-            // only safe fact to expose before a recipe build.
-            .field(
-                "reusable_provider",
-                &self
-                    .reusable_host_provider
-                    .as_ref()
-                    .map(|_| "<provider factory>"),
             )
             .field("model", &self.model)
             .field("history", &self.history)
@@ -245,7 +226,6 @@ impl Default for RuntimeBuilder {
             child_policy: None,
             tool_result_policy: None,
             host_provider: None,
-            reusable_host_provider: None,
         }
     }
 }
@@ -459,88 +439,6 @@ impl RuntimeBuilder {
         }
     }
 
-    /// Converts this one-use builder into a repeatable private-runtime recipe.
-    ///
-    /// Conversion is deliberately fallible. A concrete host provider and a
-    /// host tool are values Mentra consumes; Basis cannot synthesize a second
-    /// instance without changing their public APIs or guessing that a clone is
-    /// safe. Durable or implicit history also survives a runtime drop, which
-    /// defeats the fresh-state promise. A reusable recipe therefore requires
-    /// [`with_reusable_registered_provider`](Self::with_reusable_registered_provider),
-    /// no [`with_tool`](Self::with_tool) calls, and an explicit
-    /// [`with_ephemeral_history`](Self::with_ephemeral_history) posture.
-    ///
-    /// All other builder values are immutable scalars or Arc-backed host
-    /// policy and can be replayed without cloning request-local state. Provider
-    /// creation and warming do not happen during conversion; each later build
-    /// performs them once.
-    pub fn into_reusable_recipe(mut self) -> Result<RuntimeRecipe, RunError> {
-        if !self.host_tools.is_empty() {
-            return Err(RunError::NonReusableRuntimeComponent {
-                component: "host tools",
-            });
-        }
-        if self.host_provider.is_some() || self.reusable_host_provider.is_none() {
-            return Err(RunError::NonReusableRuntimeComponent {
-                component: "provider",
-            });
-        }
-        if !matches!(self.history, Some(History::Ephemeral)) {
-            return Err(RunError::NonReusableRuntimeComponent {
-                component: "history",
-            });
-        }
-
-        provider_settlement::validate_host_provider_source(
-            self.provider.as_ref(),
-            self.base_url.as_deref(),
-            self.api_key.as_deref(),
-        )?;
-
-        let provider =
-            self.reusable_host_provider
-                .take()
-                .ok_or(RunError::NonReusableRuntimeComponent {
-                    component: "provider",
-                })?;
-        Ok(RuntimeRecipe::new(self, provider))
-    }
-
-    /// Replays the validated values and installs one provider generation.
-    ///
-    /// Only [`RuntimeRecipe`] calls this, after conversion proved the fields
-    /// excluded below are absent. Written out rather than implementing
-    /// `Clone` for the public builder: ordinary builders intentionally hold
-    /// one-shot tools and providers, and making the whole type cloneable would
-    /// turn that ownership fact into caller discipline.
-    pub(in crate::runtime) fn replay_with_host_provider(
-        &self,
-        host_provider: HostProvider,
-    ) -> Self {
-        Self {
-            command_timeout: self.command_timeout,
-            provider: self.provider,
-            base_url: self.base_url.clone(),
-            api_key: self.api_key.clone(),
-            model: self.model.clone(),
-            history: self.history.clone(),
-            interceptors: self.interceptors.clone(),
-            command_environment: self.command_environment.clone(),
-            provider_retry: self.provider_retry,
-            provider_retry_budget: self.provider_retry_budget,
-            responses_transport: self.responses_transport,
-            wire: self.wire,
-            file_tools: self.file_tools,
-            command_targets: self.command_targets.clone(),
-            host_tools: Vec::new(),
-            delegation_depth: self.delegation_depth,
-            child_policy: self.child_policy.clone(),
-            tool_result_policy: self.tool_result_policy,
-            host_provider: Some(host_provider),
-            reusable_host_provider: None,
-        }
-    }
-
     /// Builds the workspace-agnostic runtime: the substrate an N-repository
     /// host hands to every [`WorkspaceBuilder::with_runtime`](crate::WorkspaceBuilder::with_runtime).
     ///
@@ -582,10 +480,6 @@ impl RuntimeBuilder {
     }
 
     fn build_with(self, identifier: String, policy: RuntimePolicy) -> Result<Runtime, RunError> {
-        if self.reusable_host_provider.is_some() {
-            return Err(RunError::ReusableProviderRequiresRuntimeRecipe);
-        }
-
         let policy = match self.tool_result_policy {
             Some(tool_result_policy) => tool_result_policy.apply_to(policy),
             None => policy,

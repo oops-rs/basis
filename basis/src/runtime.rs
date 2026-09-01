@@ -36,7 +36,6 @@ pub(crate) mod builder;
 mod credential;
 pub(crate) mod dispatch;
 mod executor;
-mod reuse;
 mod tool_results;
 
 use std::collections::HashMap;
@@ -48,7 +47,6 @@ use mentra::{ModelSelector, Session, agent::AgentConfig, runtime::SessionOptions
 use crate::tools::declared::DeclaredToolSpec;
 
 pub use builder::RuntimeBuilder;
-pub use reuse::RuntimeRecipe;
 pub use tool_results::ToolResultPolicy;
 
 /// The types a **command target's executor** is written against.
