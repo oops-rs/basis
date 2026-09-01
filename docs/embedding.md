@@ -367,7 +367,6 @@ let tools = basis::ToolsConfig::default().with_supplied(vec![
 let workspace = basis::Workspace::builder("/repo")
     .with_hooks(hooks)
     .with_tools(tools)
-    .with_host_tool(ReleaseClientTool::new(client))
     .open()
     .await?;
 ```
@@ -385,18 +384,9 @@ counts rather than arguments or environment values.
 lists, just as it retains supplied MCP servers. This is the strict-host path for typed inputs, not a
 different precedence ladder.
 
-`WorkspaceBuilder::with_host_tool` is the native counterpart to a supplied declared subprocess.
-It takes the existing `ExecutableTool` contract directly, claims the public name for this canonical
-workspace on the runtime's shared ledger, and unregisters/releases it when the workspace drops.
-The owner is offered the tool; sibling workspaces borrowing the same runtime have it hidden from
-their model roster and from delegated child rosters. A same-name runtime, declared, or sibling tool
-is refused, never suffixed. `RuntimeBuilder::with_tool` remains the process-wide form for a native
-tool every workspace should see.
-
-Reusable private-runtime recipes deliberately keep their complete-set protocol: use consuming
-`Workspace::bind_host_tools`, not incremental `with_host_tool`. Both routes use the same private
-validate-all → claim-all → register-all holder, and any failure rolls back every claim and
-registration before returning.
+Reusable private-runtime recipes keep their complete-set protocol: checkout-specific native tools
+enter through the consuming `Workspace::bind_host_tools`, which validates the complete set before
+registration and returns no reusable entry on failure.
 
 ## What the host says on top of the workspace
 

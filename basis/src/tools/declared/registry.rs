@@ -119,7 +119,10 @@ impl DeclaredTools {
         &self.names
     }
 
-    #[cfg(test)]
+    /// The root these names are claimed under, which is the one a mint has to
+    /// ask [`Runtime::foreign_declared_tools`] with — claiming under one
+    /// spelling of a directory and asking under another would have a workspace
+    /// hiding its own tools.
     pub(crate) fn root(&self) -> &Path {
         &self.root
     }
@@ -154,7 +157,7 @@ fn wrapped(runtime: &Runtime, spec: DeclaredToolSpec, root: &Path) -> DeclaredTo
 impl Drop for DeclaredTools {
     fn drop(&mut self) {
         for name in self.names.drain(..) {
-            self.runtime.release_workspace_tool(&name, &self.root);
+            self.runtime.release_declared_tool(&name, &self.root);
         }
     }
 }
@@ -367,7 +370,7 @@ mod tests {
         );
         assert!(
             runtime
-                .foreign_workspace_tools(Path::new("/elsewhere"))
+                .foreign_declared_tools(Path::new("/elsewhere"))
                 .is_empty(),
             "and nothing is left to hide from anyone"
         );
@@ -513,13 +516,13 @@ mod tests {
         .expect("registers");
 
         assert_eq!(
-            runtime.foreign_workspace_tools(Path::new("/repo/two")),
+            runtime.foreign_declared_tools(Path::new("/repo/two")),
             vec!["deploy".to_string()],
             "a program one repository declared is not the other's to run"
         );
         assert!(
             runtime
-                .foreign_workspace_tools(Path::new("/repo/one"))
+                .foreign_declared_tools(Path::new("/repo/one"))
                 .is_empty()
         );
     }
