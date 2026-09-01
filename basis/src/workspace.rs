@@ -46,7 +46,7 @@
 //! resolution path, and this is it.
 
 mod builder;
-pub(crate) mod lifecycle;
+mod lifecycle;
 mod profile;
 mod roster;
 mod spec;
