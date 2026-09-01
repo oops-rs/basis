@@ -177,7 +177,7 @@ Rust binary. Equivalent coverage, Rust-native:
 
 | pi extension capability | basis mechanism |
 |---|---|
-| Custom tools for the LLM | **One contract, three bindings** (ADR-0012): a native Rust tool (process-wide on `RuntimeBuilder`, or scoped on `WorkspaceBuilder`), a command declared by typed input or `.basis/tools.json`, and an **MCP server** (`rmcp`) — all arriving as the same `ExecutableTool`; any language, process-isolated |
+| Custom tools for the LLM | **One contract, three bindings** (ADR-0012): a native Rust tool registered process-wide on `RuntimeBuilder`, a command declared by typed input or `.basis/tools.json`, and an **MCP server** (`rmcp`) — all arriving as the same `ExecutableTool`; any language, process-isolated |
 | Event interception (block/modify tool calls) | **One contract, two bindings** (ADR-0012): an in-process `Interceptor` a host implements, and subprocess hooks a workspace declares — same request, same allow/deny/modify vocabulary, one chain |
 | Custom commands | Prompt templates, surfaced as ACP commands |
 | Custom UI | ACP client's job (permission requests, input prompts are protocol messages) |
