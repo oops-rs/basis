@@ -14,10 +14,10 @@ use std::{
 };
 
 use basis::{
-    CollectingSink, Config, ContextConfig, ContextScope, HookOutcome, HookRequest, HooksConfig,
-    Interceptor, InterceptorError, MemoryConfig, ModelInfo, Provider, RunError, RunOutcome,
-    Runtime, RuntimeBuilder, Setting, SystemPrompt, ToolRoster, Workspace, WorkspaceBuilder,
-    WorkspaceMemoryRoot, async_trait,
+    CollectingSink, Config, ContextConfig, ContextScope, HookOutcome, HookRequest, HookSpec,
+    HooksConfig, Interceptor, InterceptorError, MemoryConfig, ModelInfo, Provider, RunError,
+    RunOutcome, Runtime, RuntimeBuilder, Setting, SystemPrompt, ToolRoster, Workspace,
+    WorkspaceBuilder, WorkspaceMemoryRoot, async_trait,
     event::ContextFile,
     runtime::{
         ContentBlock, ProviderCapabilities, ProviderDescriptor, ProviderError, ProviderEventStream,
@@ -309,10 +309,12 @@ fn configured_builder(
         .with_hooks(HooksConfig {
             workspace_file: PathBuf::from(".basis/hooks.json"),
             global_dir: Some(home.to_path_buf()),
+            supplied: Vec::new(),
         })
         .with_tools(ToolsConfig {
             workspace_file: PathBuf::from(".basis/tools.json"),
             global_dir: Some(home.to_path_buf()),
+            supplied: Vec::new(),
         });
 
     #[cfg(feature = "mcp")]
@@ -454,6 +456,60 @@ async fn absent_explicit_config_means_no_config_discovery() {
     assert_eq!(provider.streams.load(Ordering::SeqCst), 0);
     assert_eq!(tool_calls.load(Ordering::SeqCst), 0);
     assert_eq!(interceptions.load(Ordering::SeqCst), 0);
+}
+
+#[cfg(unix)]
+#[tokio::test]
+async fn discovery_off_still_runs_supplied_hooks() {
+    let workspace = tempfile::tempdir().expect("workspace");
+    write(
+        workspace.path().join(".basis/hooks.json").as_path(),
+        "{malformed discovery must stay unread",
+    );
+    let marker = workspace.path().join("supplied-hook-ran");
+    let hook = HookSpec::new(
+        "supplied-guard",
+        vec![
+            "/bin/sh".to_string(),
+            "-c".to_string(),
+            format!(
+                "printf supplied-hook > '{}'; printf '{{\"decision\":\"allow\"}}'",
+                marker.display()
+            ),
+        ],
+    );
+    let provider = HostProvider::default();
+    let tool_calls = Arc::new(AtomicUsize::new(0));
+    let interceptions = Arc::new(AtomicUsize::new(0));
+
+    let opened = Workspace::builder(workspace.path())
+        .with_runtime_builder(runtime_builder(
+            provider,
+            Arc::clone(&tool_calls),
+            Arc::clone(&interceptions),
+        ))
+        .with_resolved_model(resolved_model())
+        .with_tool_roster(ToolRoster::only([HOST_TOOL]))
+        .without_discovery()
+        .with_hooks(HooksConfig {
+            workspace_file: PathBuf::from(".basis/hooks.json"),
+            global_dir: None,
+            supplied: vec![hook],
+        })
+        .open()
+        .await
+        .expect("the malformed file remains inert while the supplied hook loads");
+
+    opened
+        .prepare("run the host tool")
+        .expect("the run mints")
+        .execute(CollectingSink::default())
+        .await
+        .expect("the supplied hook allows the call");
+
+    assert!(marker.is_file(), "the supplied hook must have executed");
+    assert_eq!(tool_calls.load(Ordering::SeqCst), 1);
+    assert_eq!(interceptions.load(Ordering::SeqCst), 1);
 }
 
 #[cfg(feature = "mcp")]

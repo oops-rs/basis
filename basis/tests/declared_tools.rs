@@ -28,7 +28,7 @@ use basis::{
     hooks::HooksConfig,
     skills::SkillsConfig,
     templates::TemplatesConfig,
-    tools::declared::{self, DeclaredTool, ToolsConfig},
+    tools::declared::{self, DeclaredTool, DeclaredToolSpec, SideEffect, ToolsConfig},
 };
 use mentra::{
     ContentBlock, ModelSelector, Session,
@@ -102,6 +102,7 @@ impl Fixture {
         ToolsConfig {
             workspace_file: PathBuf::from(".basis/tools.json"),
             global_dir: None,
+            supplied: Vec::new(),
         }
     }
 
@@ -144,10 +145,12 @@ fn offline(workspace: &Path) -> basis::WorkspaceBuilder {
         .with_hooks(HooksConfig {
             workspace_file: PathBuf::from(".basis/hooks.json"),
             global_dir: None,
+            supplied: Vec::new(),
         })
         .with_tools(ToolsConfig {
             workspace_file: PathBuf::from(".basis/tools.json"),
             global_dir: None,
+            supplied: Vec::new(),
         })
         // A malformed file in the developer's own ~/.config/basis/memory must
         // never be able to fail this suite (G1); this test is not about
@@ -374,6 +377,41 @@ async fn opening_a_workspace_registers_what_its_manifest_declared() {
             .iter()
             .any(|tool| tool.provider.name == "jenkins_job"),
         "and the tool is on the runtime before any session spawns"
+    );
+}
+
+#[tokio::test]
+async fn discovery_off_still_registers_supplied_declared_tools() {
+    let fixture = Fixture::new();
+    fixture.manifest("{malformed discovery must stay unread");
+    let program = fixture.program("supplied", r#"printf ok"#);
+    let supplied = DeclaredToolSpec {
+        name: "supplied_tool".to_string(),
+        description: "A host-supplied tool.".to_string(),
+        input_schema: json!({"type": "object"}),
+        command: vec![program],
+        cwd: None,
+        env: Vec::new(),
+        timeout_ms: None,
+        side_effect: SideEffect::Process,
+    };
+
+    let workspace = offline(fixture.path())
+        .without_discovery()
+        .with_tools(ToolsConfig::default().with_supplied(vec![supplied]))
+        .open()
+        .await
+        .expect("the malformed file stays inert and the supplied tool registers");
+
+    assert_eq!(workspace.declared_tools(), ["supplied_tool"]);
+    assert!(workspace.declared_tool_files().is_empty());
+    assert!(
+        workspace
+            .mentra_runtime()
+            .tools()
+            .iter()
+            .any(|tool| tool.provider.name == "supplied_tool"),
+        "the typed tool must be registered before any session mints"
     );
 }
 

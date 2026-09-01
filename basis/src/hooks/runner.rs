@@ -17,15 +17,16 @@
 //!
 //! # The order participants speak in
 //!
-//! In-process interceptors first, in registration order; then hooks, global
-//! before workspace. One rule underneath: **the further a participant is from
-//! the workspace's own data, the earlier it speaks.** An interceptor is
-//! compiled into the embedding program, a global hook belongs to the person at
-//! the machine, and `.basis/hooks.json` arrived with a repository that may have
-//! been cloned five minutes ago. Since the first refusal short-circuits, that
-//! ordering is what lets the host's own guard stop a repository-supplied
-//! program from being spawned at all — the same argument that already puts
-//! global hooks before workspace ones (see [`crate::hooks`]).
+//! In-process interceptors first, in registration order; then host-supplied
+//! subprocess hooks; then discovered hooks, global before workspace. One rule
+//! underneath: **the further a participant is from the workspace's own data,
+//! the earlier it speaks.** An interceptor is compiled into the embedding
+//! program, a supplied hook is explicitly installed by it, a global hook
+//! belongs to the person at the machine, and `.basis/hooks.json` arrived with a
+//! repository that may have been cloned five minutes ago. Since the first
+//! refusal short-circuits, that ordering is what lets the host's own guard stop
+//! a repository-supplied program from being spawned at all — the same argument
+//! that already puts global hooks before workspace ones (see [`crate::hooks`]).
 //!
 //! It is not a claim that a later participant is powerless. A hook still sees,
 //! and can still refuse, whatever an interceptor rewrote.

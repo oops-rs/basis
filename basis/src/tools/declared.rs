@@ -33,10 +33,13 @@
 //!
 //! # The manifest
 //!
-//! `.basis/tools.json` in the workspace, and `tools.json` in the global config
-//! directory — hooks' locations, for hooks' reasons: JSON because the wire
-//! contract is already JSON, `.basis/` because that is where basis's other
-//! workspace data lives.
+//! Tools may be supplied directly as typed [`DeclaredToolSpec`] values on
+//! [`ToolsConfig`], or discovered from `.basis/tools.json` in the workspace and
+//! `tools.json` in the global config directory. The typed list is already
+//! final — basis does not expand `${VAR}` inside it — and outranks workspace,
+//! then global declarations of the same name. The file locations are hooks'
+//! locations, for hooks' reasons: JSON because the wire contract is already
+//! JSON, `.basis/` because that is where basis's other workspace data lives.
 //!
 //! ```json
 //! {
@@ -159,4 +162,5 @@ pub use manifest::{
 };
 pub use tool::DeclaredTool;
 
+pub(crate) use manifest::load_supplied;
 pub(crate) use registry::DeclaredTools;

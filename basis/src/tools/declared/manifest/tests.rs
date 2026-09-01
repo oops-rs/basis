@@ -4,11 +4,13 @@
 //! [`super::super::tool`]'s tests and in `basis/tests/declared_tools.rs`.
 
 use super::*;
+use serde_json::json;
 
 fn config(global: Option<PathBuf>) -> ToolsConfig {
     ToolsConfig {
         workspace_file: PathBuf::from(DEFAULT_WORKSPACE_TOOLS_FILE),
         global_dir: global,
+        supplied: Vec::new(),
     }
 }
 
@@ -27,6 +29,19 @@ fn one_tool(name: &str, program: &str) -> String {
             }}
         }}}}"#
     )
+}
+
+fn supplied(name: &str, program: &str) -> DeclaredToolSpec {
+    DeclaredToolSpec {
+        name: name.to_string(),
+        description: "does the thing".to_string(),
+        input_schema: json!({"type": "object"}),
+        command: vec![program.to_string()],
+        cwd: None,
+        env: Vec::new(),
+        timeout_ms: None,
+        side_effect: SideEffect::Process,
+    }
 }
 
 /// Parses `body` against an environment that holds nothing.
@@ -107,6 +122,47 @@ fn a_global_tool_survives_alongside_a_workspace_one() {
 }
 
 #[test]
+fn supplied_tools_shadow_files_and_preserve_source_order() {
+    let tmp = tempfile::tempdir().expect("tempdir");
+    let global = tmp.path().join("global");
+    write(
+        &tmp.path().join(DEFAULT_WORKSPACE_TOOLS_FILE),
+        r#"{"schema":1,"tools":{
+            "local_only":{"description":"d","input_schema":{"type":"object"},"command":["/local"]},
+            "shared":{"description":"d","input_schema":{"type":"object"},"command":["/workspace"]}
+        }}"#,
+    );
+    write(
+        &global.join(DEFAULT_GLOBAL_TOOLS_FILE),
+        r#"{"schema":1,"tools":{
+            "global_only":{"description":"d","input_schema":{"type":"object"},"command":["/global-only"]},
+            "shared":{"description":"d","input_schema":{"type":"object"},"command":["/global"]}
+        }}"#,
+    );
+    let config = config(Some(global)).with_supplied(vec![
+        supplied("host_first", "/first"),
+        supplied("shared", "/supplied"),
+        supplied("host_first", "/duplicate"),
+    ]);
+
+    let tools = load(tmp.path(), &config).expect("all sources are valid");
+
+    assert_eq!(
+        tools
+            .iter()
+            .map(|tool| (tool.name.as_str(), tool.command[0].as_str()))
+            .collect::<Vec<_>>(),
+        [
+            ("host_first", "/first"),
+            ("shared", "/supplied"),
+            ("local_only", "/local"),
+            ("global_only", "/global-only"),
+        ],
+        "first name wins while supplied, workspace, and global source order survives"
+    );
+}
+
+#[test]
 fn the_same_file_reached_twice_is_read_once() {
     let tmp = tempfile::tempdir().expect("tempdir");
     write(
@@ -119,6 +175,7 @@ fn the_same_file_reached_twice_is_read_once() {
         &ToolsConfig {
             workspace_file: PathBuf::from(DEFAULT_GLOBAL_TOOLS_FILE),
             global_dir: Some(tmp.path().to_path_buf()),
+            supplied: Vec::new(),
         },
     )
     .expect("parses");

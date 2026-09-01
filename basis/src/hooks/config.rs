@@ -155,12 +155,26 @@ pub struct HooksFile {
 }
 
 /// Where to look for hooks.
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Clone, PartialEq, Eq)]
 pub struct HooksConfig {
     /// Path relative to the workspace root.
     pub workspace_file: PathBuf,
     /// The global config directory, if any. `hooks.json` inside it is used.
     pub global_dir: Option<PathBuf>,
+    /// Hooks the host supplies as typed values. They run before hooks loaded
+    /// from disk, while runtime interceptors still run before every subprocess
+    /// hook.
+    pub supplied: Vec<HookSpec>,
+}
+
+impl std::fmt::Debug for HooksConfig {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("HooksConfig")
+            .field("workspace_file", &self.workspace_file)
+            .field("global_dir", &self.global_dir)
+            .field("supplied", &format_args!("{} hooks", self.supplied.len()))
+            .finish()
+    }
 }
 
 impl Default for HooksConfig {
@@ -168,7 +182,15 @@ impl Default for HooksConfig {
         Self {
             workspace_file: PathBuf::from(DEFAULT_WORKSPACE_HOOKS_FILE),
             global_dir: crate::context::ContextConfig::default().global_dir,
+            supplied: Vec::new(),
         }
+    }
+}
+
+impl HooksConfig {
+    /// Replaces the hooks supplied directly by the embedding host.
+    pub fn with_supplied(self, supplied: Vec<HookSpec>) -> Self {
+        Self { supplied, ..self }
     }
 }
 
@@ -209,6 +231,9 @@ pub enum HookConfigError {
 
     #[error("hook '{name}' in {path} has no command to run")]
     EmptyCommand { path: PathBuf, name: String },
+
+    #[error("supplied hook '{name}' {reason}")]
+    InvalidSupplied { name: String, reason: &'static str },
 }
 
 /// Every hooks file that exists, in the order its hooks are consulted.
@@ -244,10 +269,19 @@ pub fn discover(
 
 /// Every configured hook, flattened into consultation order.
 pub fn load(workspace: &Path, config: &HooksConfig) -> Result<Vec<HookSpec>, HookConfigError> {
-    Ok(discover(workspace, config)?
-        .into_iter()
-        .flat_map(|source| source.hooks)
-        .collect())
+    let mut hooks = load_supplied(config)?;
+    hooks.extend(
+        discover(workspace, config)?
+            .into_iter()
+            .flat_map(|source| source.hooks),
+    );
+    Ok(hooks)
+}
+
+/// The host-supplied hooks only, with no file discovery.
+pub(crate) fn load_supplied(config: &HooksConfig) -> Result<Vec<HookSpec>, HookConfigError> {
+    validate(&config.supplied, HookOrigin::Supplied)?;
+    Ok(config.supplied.clone())
 }
 
 fn read_source(path: &Path, scope: ContextScope) -> Result<HooksSource, HookConfigError> {
@@ -268,18 +302,35 @@ fn read_source(path: &Path, scope: ContextScope) -> Result<HooksSource, HookConf
         });
     }
 
-    if let Some(broken) = file.hooks.iter().find(|hook| hook.command.is_empty()) {
-        return Err(HookConfigError::EmptyCommand {
-            path: path.to_path_buf(),
-            name: broken.name.clone(),
-        });
-    }
+    validate(&file.hooks, HookOrigin::File(path))?;
 
     Ok(HooksSource {
         path: path.to_path_buf(),
         scope,
         hooks: file.hooks,
     })
+}
+
+enum HookOrigin<'a> {
+    File(&'a Path),
+    Supplied,
+}
+
+fn validate(hooks: &[HookSpec], origin: HookOrigin<'_>) -> Result<(), HookConfigError> {
+    let Some(broken) = hooks.iter().find(|hook| hook.command.is_empty()) else {
+        return Ok(());
+    };
+
+    match origin {
+        HookOrigin::File(path) => Err(HookConfigError::EmptyCommand {
+            path: path.to_path_buf(),
+            name: broken.name.clone(),
+        }),
+        HookOrigin::Supplied => Err(HookConfigError::InvalidSupplied {
+            name: broken.name.clone(),
+            reason: "has no command to run",
+        }),
+    }
 }
 
 fn same_file(left: &Path, right: &Path) -> bool {
@@ -297,6 +348,7 @@ mod tests {
         HooksConfig {
             workspace_file: PathBuf::from(DEFAULT_WORKSPACE_HOOKS_FILE),
             global_dir: global,
+            supplied: Vec::new(),
         }
     }
 
@@ -366,6 +418,7 @@ mod tests {
             &HooksConfig {
                 workspace_file: PathBuf::from(DEFAULT_GLOBAL_HOOKS_FILE),
                 global_dir: Some(tmp.path().to_path_buf()),
+                supplied: Vec::new(),
             },
         )
         .expect("parses");
@@ -417,6 +470,31 @@ mod tests {
         let error = load(tmp.path(), &config(None)).expect_err("rejected");
 
         assert!(matches!(error, HookConfigError::EmptyCommand { .. }));
+    }
+
+    #[test]
+    fn supplied_hooks_run_before_files_without_name_shadowing() {
+        let tmp = tempfile::tempdir().expect("tempdir");
+        let global = tmp.path().join("global");
+        write_hooks(tmp.path(), DEFAULT_WORKSPACE_HOOKS_FILE, ONE_HOOK);
+        write_hooks(
+            &global,
+            DEFAULT_GLOBAL_HOOKS_FILE,
+            r#"{"schema": 1, "hooks": [{"name": "guard", "command": ["/global"]}]}"#,
+        );
+        let config = config(Some(global))
+            .with_supplied(vec![HookSpec::new("guard", vec!["/supplied".to_string()])]);
+
+        let hooks = load(tmp.path(), &config).expect("all three sources are valid");
+
+        assert_eq!(
+            hooks
+                .iter()
+                .map(|hook| hook.command[0].as_str())
+                .collect::<Vec<_>>(),
+            ["/supplied", "/global", "/bin/true"],
+            "same-name hooks remain cumulative in supplied, global, workspace order"
+        );
     }
 
     #[test]

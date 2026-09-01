@@ -42,7 +42,10 @@ use crate::{
     skills::{self, SkillRoots, SkillsConfig},
     store,
     templates::{self, Template, TemplatesConfig},
-    tools::declared::{self, DeclaredTools, ToolsConfig},
+    tools::{
+        declared::{self, DeclaredTools, ToolsConfig},
+        host::{HostToolBinding, WorkspaceHostTools},
+    },
 };
 
 use super::{Workspace, WorkspaceReuse, lifecycle::MintPosture, roster::ToolRoster};
@@ -83,6 +86,8 @@ pub struct WorkspaceBuilder {
     templates: TemplatesConfig,
     hooks: HooksConfig,
     tools: ToolsConfig,
+    /// Native tools owned by this workspace rather than by its runtime.
+    host_tools: Vec<Box<dyn crate::tools::ExecutableTool>>,
     shell: ShellAccess,
     compaction: Compaction,
 }
@@ -138,6 +143,10 @@ impl std::fmt::Debug for WorkspaceBuilder {
             .field("templates", &self.templates)
             .field("hooks", &self.hooks)
             .field("tools", &self.tools)
+            .field(
+                "host_tools",
+                &format_args!("{} tools", self.host_tools.len()),
+            )
             .field("shell", &self.shell)
             .field("compaction", &self.compaction)
             .finish_non_exhaustive()
@@ -173,6 +182,7 @@ impl WorkspaceBuilder {
             templates: TemplatesConfig::default(),
             hooks: HooksConfig::default(),
             tools: ToolsConfig::default(),
+            host_tools: Vec::new(),
             // Granted, per ADR-0013, and from the enum's own default rather
             // than from anything ambient: what a run may do is stated here, in
             // configuration, not read out of the environment behind the caller.
@@ -421,26 +431,60 @@ impl WorkspaceBuilder {
         Self { templates, ..self }
     }
 
-    /// Sets where subprocess hooks are discovered.
+    /// Sets the host-supplied subprocess hooks and where file hooks are
+    /// discovered.
     ///
     /// A hook is an external command that gets a say over each tool call; see
     /// [`crate::hooks`] for the wire contract and for what happens when one
     /// breaks. [`RuntimeBuilder::with_interceptor`](crate::RuntimeBuilder::with_interceptor)
     /// is the same say, in the host's process — host scope is runtime scope.
+    /// Typed [`HooksConfig::supplied`](crate::hooks::HooksConfig::supplied)
+    /// hooks run before global and workspace file hooks; disabling discovery
+    /// retains only that typed list.
     pub fn with_hooks(self, hooks: HooksConfig) -> Self {
         Self { hooks, ..self }
     }
 
-    /// Sets where declared subprocess tools are discovered.
+    /// Sets the host-supplied declared tools and where file declarations are
+    /// discovered.
     ///
     /// A declared tool is a command the workspace offers the *model* as a tool,
     /// with a JSON schema for its input; see [`crate::tools::declared`] for the
     /// manifest and for what a failing one tells the model. The tools are
     /// registered on the runtime this workspace borrows and deregistered — as
     /// far as mentra's registry allows — when the workspace drops, so a
-    /// repository's tools never reach another repository's runs.
+    /// repository's tools never reach another repository's runs. Typed
+    /// [`ToolsConfig::supplied`](crate::tools::declared::ToolsConfig::supplied)
+    /// entries outrank workspace and global files and remain active when file
+    /// discovery is disabled.
     pub fn with_tools(self, tools: ToolsConfig) -> Self {
         Self { tools, ..self }
+    }
+
+    /// Registers a native tool for this workspace only.
+    ///
+    /// Unlike [`RuntimeBuilder::with_tool`](crate::RuntimeBuilder::with_tool),
+    /// this tool is owned by the workspace: it is offered to this workspace's
+    /// runs and hidden from siblings borrowing the same runtime. The public
+    /// name is claimed without suffixing and is released, with the Mentra
+    /// registration, when the workspace drops.
+    ///
+    /// Reusable runtime recipes bind their complete per-checkout set through
+    /// [`Workspace::bind_host_tools`](crate::Workspace::bind_host_tools)
+    /// instead; mixing the incremental builder form with that complete binding
+    /// is refused at open.
+    pub fn with_host_tool<T>(self, tool: T) -> Self
+    where
+        T: crate::tools::ExecutableTool + 'static,
+    {
+        Self {
+            host_tools: {
+                let mut tools = self.host_tools;
+                tools.push(Box::new(tool));
+                tools
+            },
+            ..self
+        }
     }
 
     /// Grants or denies command execution, for every run this workspace mints.
@@ -530,6 +574,9 @@ impl WorkspaceBuilder {
     /// the `mcp__*` tools of servers this workspace does not own.
     pub async fn open(self) -> Result<Workspace, RunError> {
         if let RuntimeSource::Reusable(recipe) = &self.runtime {
+            if !self.host_tools.is_empty() {
+                return Err(RunError::ReusableWorkspaceRequiresHostToolBinding);
+            }
             if self.discovery_enabled {
                 return Err(RunError::ReusableWorkspaceRequiresDiscoveryOff);
             }
@@ -611,13 +658,15 @@ impl WorkspaceBuilder {
         let loaded_hooks = if self.discovery_enabled {
             hooks::load(&path, &self.hooks)?
         } else {
-            Vec::new()
+            hooks::load_supplied(&self.hooks)?
         };
 
-        // Read here for the same reason, and one of its own: a manifest that
-        // does not parse is a tool the model's instructions assume and will not
-        // find. Registering it needs the runtime, so that waits until there is
-        // one.
+        // Validate supplied values and read files here for the same reason, and
+        // one of their own: an invalid declaration is a tool the model's
+        // instructions assume and will not find. Registering needs the runtime,
+        // so that waits until there is one. Discovery-off keeps the typed list
+        // and touches no manifest path.
+        let supplied_tools = declared::load_supplied(&self.tools)?;
         let declared_sources = if self.discovery_enabled {
             declared::discover(&path, &self.tools)?
         } else {
@@ -760,9 +809,19 @@ impl WorkspaceBuilder {
         // without. Registration and lookup still meet on one key, because the
         // lookup side canonicalizes the *call's* directory, which is the side
         // that has not been resolved yet.
-        let declared_tools =
-            DeclaredTools::register(Arc::clone(&runtime), &path, &declared_sources)?;
+        let declared_tools = DeclaredTools::register_with_supplied(
+            Arc::clone(&runtime),
+            &path,
+            &declared_sources,
+            &supplied_tools,
+        )?;
         let declared_tool_names = declared_tools.names().to_vec();
+        let host_tools = WorkspaceHostTools::register(
+            Arc::clone(&runtime),
+            &path,
+            self.host_tools,
+            HostToolBinding::Workspace,
+        )?;
 
         // Templates need no runtime registration — they are basis-side convention
         // data, rendered into a prompt by whatever surface offers them.
@@ -774,8 +833,9 @@ impl WorkspaceBuilder {
 
         // One runner for both interception bindings, host interceptors folded
         // first: the chain order host interceptors → global hooks → workspace
-        // hooks predates the runtime split and survives it — only the
-        // registration point moved, onto the runtime's dispatcher.
+        // hooks predates the runtime split and survives it — supplied hooks
+        // sit before file hooks, while only the registration point moved onto
+        // the runtime's dispatcher.
         let runner = runtime.interceptors().iter().cloned().fold(
             HookRunner::new(&path, loaded_hooks),
             |runner, interceptor| runner.with_interceptor(interceptor),
@@ -862,6 +922,7 @@ impl WorkspaceBuilder {
             declared_tool_files: sourced(&declared_sources),
             declared_tools: declared_tool_names,
             declared_registration: declared_tools,
+            host_tools,
             hook_registration,
             foreign_tools,
             #[cfg(feature = "mcp")]

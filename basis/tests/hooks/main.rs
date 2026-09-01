@@ -79,6 +79,7 @@ impl Workspace {
         HooksConfig {
             workspace_file: PathBuf::from(DEFAULT_WORKSPACE_HOOKS_FILE),
             global_dir: None,
+            supplied: Vec::new(),
         }
     }
 
@@ -357,6 +358,7 @@ async fn a_global_denial_stops_a_workspace_hook_from_ever_running() {
         &HooksConfig {
             workspace_file: PathBuf::from(DEFAULT_WORKSPACE_HOOKS_FILE),
             global_dir: Some(global),
+            supplied: Vec::new(),
         },
     )
     .expect("both files parse");
