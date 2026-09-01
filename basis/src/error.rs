@@ -224,6 +224,11 @@ pub enum RunError {
     #[error("reusable workspaces require an exact ToolRoster::only allow-list")]
     ReusableWorkspaceRequiresExactRoster,
 
+    /// Workspace host tools on a reusable recipe must arrive through the
+    /// generation's explicit, complete binding step.
+    #[error("reusable workspaces require host tools to use Workspace::bind_host_tools")]
+    ReusableWorkspaceRequiresHostToolBinding,
+
     /// Checkout tools have not yet been explicitly bound to this generation.
     #[error("this reusable workspace generation has not bound its host tools")]
     ReusableWorkspaceToolsUnbound,
@@ -266,6 +271,16 @@ pub enum RunError {
         /// Which provider-safe name rule it violated.
         reason: &'static str,
     },
+
+    /// An ordinary workspace supplied a native tool name no provider wire can
+    /// carry safely.
+    #[error("`{name}` cannot be a workspace host tool name: {reason}")]
+    WorkspaceHostToolName { name: String, reason: &'static str },
+
+    /// A workspace-scoped native tool could not claim its public name on the
+    /// runtime's shared registry.
+    #[error("workspace host tool `{name}` cannot be registered because {reason}")]
+    WorkspaceHostToolNameTaken { name: String, reason: String },
 
     #[error(transparent)]
     Provider(#[from] ProviderError),

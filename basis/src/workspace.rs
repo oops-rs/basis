@@ -84,7 +84,10 @@ use crate::{
     shell::ShellAccess,
     skills::SkillRoots,
     templates::Template,
-    tools::declared::DeclaredTools,
+    tools::{
+        declared::DeclaredTools,
+        host::{HostToolBinding, WorkspaceHostTools},
+    },
 };
 
 /// One workspace, resolved: the runtime it borrows, the model, and everything
@@ -151,6 +154,8 @@ pub struct Workspace {
     /// Keeps this workspace's declared tools claimed on the runtime's single
     /// registry; releases the claims on drop.
     declared_registration: DeclaredTools,
+    /// Keeps native tools scoped to this workspace claimed and registered.
+    host_tools: WorkspaceHostTools,
     /// Keeps this workspace's hooks and guards registered on the runtime's
     /// dispatcher; deregisters on drop.
     #[allow(dead_code, reason = "held for its Drop")]
@@ -199,6 +204,7 @@ impl std::fmt::Debug for Workspace {
             .field("templates", &self.templates.len())
             .field("mcp_servers", &self.mcp_servers)
             .field("declared_tools", &self.declared_tools)
+            .field("workspace_host_tools", &self.host_tools.len())
             .finish_non_exhaustive()
     }
 }
@@ -476,19 +482,25 @@ impl Workspace {
     /// A bound tool must finish all work before its call returns; detached work
     /// owned only by the tool is outside the tracked reuse guarantee.
     pub fn bind_host_tools(
-        self,
+        mut self,
         tools: Vec<Box<dyn crate::tools::ExecutableTool>>,
     ) -> Result<Self, RunError> {
-        let reuse = self.reuse.as_ref().ok_or(RunError::WorkspaceNotReusable)?;
-        reuse.lifecycle.require_unbound()?;
-        validate_reusable_host_tools(self.runtime.mentra_runtime_internal(), &tools)?;
-
-        for tool in tools {
-            self.runtime
-                .mentra_runtime_internal()
-                .try_register_tool(tool)?;
+        {
+            let reuse = self.reuse.as_ref().ok_or(RunError::WorkspaceNotReusable)?;
+            reuse.lifecycle.require_unbound()?;
         }
-        reuse.lifecycle.mark_bound()?;
+        let host_tools = WorkspaceHostTools::register(
+            Arc::clone(&self.runtime),
+            &self.root,
+            tools,
+            HostToolBinding::Reusable,
+        )?;
+        self.reuse
+            .as_ref()
+            .expect("the reusable posture was checked above")
+            .lifecycle
+            .mark_bound()?;
+        self.host_tools = host_tools;
         Ok(self)
     }
 
@@ -513,6 +525,7 @@ impl Workspace {
 
         #[cfg(feature = "mcp")]
         drop(self.mcp_connections);
+        drop(self.host_tools);
         drop(self.declared_registration);
         drop(self.hook_registration);
         // Beside the other two, and load-bearing for the `try_unwrap` below:
@@ -540,6 +553,7 @@ impl Workspace {
         validate_model_provider(&self.model, runtime.provider())?;
 
         let declared_registration = DeclaredTools::register(Arc::clone(&runtime), &self.root, &[])?;
+        let host_tools = WorkspaceHostTools::empty(Arc::clone(&runtime), &self.root);
         let foreign_tools = Arc::new(RwLock::new(BTreeSet::new()));
         let runner = runtime.interceptors().iter().cloned().fold(
             HookRunner::new(&self.root, Vec::new()),
@@ -588,6 +602,7 @@ impl Workspace {
             declared_tool_files: Vec::new(),
             declared_tools: Vec::new(),
             declared_registration,
+            host_tools,
             hook_registration,
             foreign_tools,
             #[cfg(feature = "mcp")]
@@ -617,8 +632,8 @@ impl Workspace {
 
     /// The agent config this mint offers the model: the one built at open, with
     /// every tool on the shared registry that belongs to another workspace
-    /// hidden — bridged `mcp__*` tools, and tools a sibling's
-    /// `.basis/tools.json` declared.
+    /// hidden — bridged `mcp__*` tools, tools a sibling's
+    /// `.basis/tools.json` declared, and native tools its builder supplied.
     ///
     /// Per mint rather than per open, because the shared registry moves as
     /// sibling workspaces come and go, and a roster is honest only about the
@@ -643,10 +658,7 @@ impl Workspace {
         let mut agent = profile.apply_to(self.agent.clone());
         let mut foreign = BTreeSet::new();
 
-        for name in self
-            .runtime
-            .foreign_declared_tools(self.declared_registration.root())
-        {
+        for name in self.runtime.foreign_workspace_tools(&self.root) {
             agent.tool_profile.hidden_tools.insert(name.clone());
             foreign.insert(name);
         }
@@ -717,51 +729,6 @@ impl Workspace {
             .as_ref()
             .map(|reuse| reuse.lifecycle.lease_run())
             .transpose()
-    }
-}
-
-fn validate_reusable_host_tools(
-    runtime: &mentra::Runtime,
-    tools: &[Box<dyn crate::tools::ExecutableTool>],
-) -> Result<(), RunError> {
-    let mut names = runtime
-        .tools()
-        .into_iter()
-        .map(|descriptor| descriptor.provider.name)
-        .collect::<BTreeSet<_>>();
-
-    for tool in tools {
-        let name = tool.descriptor().provider.name;
-        validate_reusable_host_tool_name(&name)?;
-        if !names.insert(name.clone()) {
-            return Err(RunError::HostTool(mentra::tool::ToolNameCollision { name }));
-        }
-    }
-    Ok(())
-}
-
-fn validate_reusable_host_tool_name(name: &str) -> Result<(), RunError> {
-    let reason = if name.is_empty() {
-        Some("a name cannot be empty")
-    } else if name.len() > 64 {
-        Some("a name cannot exceed 64 bytes")
-    } else if name.starts_with("mcp__") {
-        Some("the `mcp__` prefix is reserved for MCP bridges")
-    } else if !name
-        .bytes()
-        .all(|byte| byte.is_ascii_alphanumeric() || matches!(byte, b'_' | b'-'))
-    {
-        Some("a name may contain only ASCII letters, digits, `_`, and `-`")
-    } else {
-        None
-    };
-
-    match reason {
-        Some(reason) => Err(RunError::ReusableHostToolName {
-            name: name.to_string(),
-            reason,
-        }),
-        None => Ok(()),
     }
 }
 

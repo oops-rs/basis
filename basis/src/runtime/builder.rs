@@ -362,9 +362,9 @@ impl RuntimeBuilder {
     ///
     /// Registered on the runtime (ADR-0018's host scope), so — like `spawn` —
     /// it is visible to every workspace and every subagent this runtime opens,
-    /// not to one session. A host that wants a tool visible to only *some*
-    /// workspaces still needs one runtime per audience; there is no per-
-    /// workspace host-tool registration yet.
+    /// not to one session. A tool belonging to one workspace goes through
+    /// [`WorkspaceBuilder::with_host_tool`](crate::WorkspaceBuilder::with_host_tool)
+    /// instead and is hidden from siblings borrowing this runtime.
     ///
     /// **A name basis or an earlier host tool already answers to is refused,
     /// not replaced** (decision D5d). [`build`](Self::build) claims host
@@ -722,8 +722,8 @@ impl RuntimeBuilder {
         // `try_register_tool` refuses instead, and does it against the live
         // registry, so the second host tool sharing an earlier one's name
         // collides too — the same claim posture
-        // `Runtime::claim_declared_tool` holds for a declared tool naming
-        // one basis or a workspace already answers to.
+        // `Runtime`'s workspace-tool claim ledger holds for a declared or
+        // workspace-native tool naming one basis already answers to.
         for tool in host_tools {
             mentra.try_register_tool(tool)?;
         }
@@ -742,7 +742,7 @@ impl RuntimeBuilder {
             dispatch,
             #[cfg(feature = "mcp")]
             mcp_claims: Mutex::new(HashMap::new()),
-            declared_claims: Mutex::new(HashMap::new()),
+            workspace_tool_claims: Mutex::new(HashMap::new()),
             skill_root_holders: Mutex::new(HashMap::new()),
         })
     }

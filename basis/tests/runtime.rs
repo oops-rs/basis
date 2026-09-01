@@ -6,9 +6,10 @@
 //!    on the same mentra runtime, write one store file, and mint runs that can
 //!    be driven concurrently.
 //! 2. **Sharing does not leak.** A tool one workspace put on the shared
-//!    registry — a `mcp__*` bridged one, or one its `.basis/tools.json`
-//!    declared — never reaches another workspace's roster, asserted on the
-//!    wire, in the `tools` array of the request the model actually receives.
+//!    registry — a `mcp__*` bridged one, one its `.basis/tools.json` declared,
+//!    or one its builder supplied as a native host tool — never reaches another
+//!    workspace's roster, asserted on the wire, in the `tools` array of the
+//!    request the model actually receives.
 //! 3. **The dispatcher's key holds.** The `working_directory` mentra hands a
 //!    pre-hook is the agent's `base_dir` — the assumption basis's per-workspace
 //!    hook routing dispatches on — and a workspace's own hooks therefore still
@@ -90,6 +91,26 @@ fn workspace_dir() -> tempfile::TempDir {
     let dir = tempfile::tempdir().expect("tempdir");
     std::fs::write(dir.path().join("AGENTS.md"), "house rules").expect("write");
     dir
+}
+
+/// The tool names in the nth request's `tools` array — the roster the model
+/// was actually offered, which is the only honest observable.
+fn offered_tools(endpoint: &ScriptedEndpoint, index: usize) -> Vec<String> {
+    let requests = endpoint.requests();
+    let body: serde_json::Value = serde_json::from_str(
+        requests[index]
+            .split("\r\n\r\n")
+            .nth(1)
+            .expect("a request body"),
+    )
+    .expect("a JSON request");
+
+    body["tools"]
+        .as_array()
+        .expect("a tools array")
+        .iter()
+        .filter_map(|tool| tool["function"]["name"].as_str().map(str::to_string))
+        .collect()
 }
 
 #[tokio::test]
@@ -285,28 +306,6 @@ mod declared_roster {
         "jenkins_job"
     }
 
-    /// The tool names in the nth request's `tools` array — the roster the model
-    /// was actually offered, which is the only honest observable.
-    fn roster(endpoint: &ScriptedEndpoint, index: usize) -> Vec<String> {
-        let requests = endpoint.requests();
-        let body: serde_json::Value = serde_json::from_str(
-            requests[index]
-                .split("\r\n\r\n")
-                .nth(1)
-                .expect("a request body"),
-        )
-        .expect("a JSON request");
-
-        // `chat/completions` nests the name under `function`, unlike the
-        // Responses wire, which puts it flat on the tool.
-        body["tools"]
-            .as_array()
-            .expect("a tools array")
-            .iter()
-            .filter_map(|tool| tool["function"]["name"].as_str().map(str::to_string))
-            .collect()
-    }
-
     #[tokio::test]
     async fn a_declared_tool_is_offered_to_its_own_workspace_and_to_no_other() {
         // A declared tool carries no `mcp__` prefix, so nothing about its *name*
@@ -340,7 +339,7 @@ mod declared_roster {
             assert!(matches!(report.outcome, RunOutcome::Ok));
         }
 
-        let (owners, bystanders) = (roster(&endpoint, 0), roster(&endpoint, 1));
+        let (owners, bystanders) = (offered_tools(&endpoint, 0), offered_tools(&endpoint, 1));
 
         assert!(
             owners.iter().any(|tool| tool == "spawn"),
@@ -353,6 +352,110 @@ mod declared_roster {
         assert!(
             !bystanders.iter().any(|tool| tool == declared),
             "a program another repository declared must not be offered here: {bystanders:?}"
+        );
+    }
+}
+
+mod host_tool_roster {
+    use super::*;
+
+    use basis::{RunError, tools::*};
+
+    struct ScopedTool(&'static str);
+
+    impl ToolDefinition for ScopedTool {
+        fn descriptor(&self) -> RuntimeToolDescriptor {
+            RuntimeToolDescriptor::builder(self.0)
+                .description("a workspace-owned native tool")
+                .input_schema(json!({"type": "object"}))
+                .build()
+        }
+    }
+
+    #[basis::async_trait]
+    impl ToolExecutor for ScopedTool {
+        async fn execute(
+            &self,
+            _ctx: ParallelToolContext,
+            _input: serde_json::Value,
+        ) -> ToolResult {
+            Ok(self.0.to_string())
+        }
+    }
+
+    #[tokio::test]
+    async fn a_workspace_host_tool_is_offered_only_to_its_owner() {
+        let endpoint = ScriptedEndpoint::start(Vec::new());
+        let runtime = shared_runtime(&endpoint);
+        let owner_dir = workspace_dir();
+        let owner = pinned(owner_dir.path(), Arc::clone(&runtime))
+            .with_host_tool(ScopedTool("workspace_fact"))
+            .open()
+            .await
+            .expect("the owner opens");
+        let bystander_dir = workspace_dir();
+        let bystander = pinned(bystander_dir.path(), runtime)
+            .open()
+            .await
+            .expect("the sibling opens");
+
+        for workspace in [&owner, &bystander] {
+            workspace
+                .prepare("go")
+                .expect("mints")
+                .execute(CollectingSink::default())
+                .await
+                .expect("completes");
+        }
+
+        let owners = offered_tools(&endpoint, 0);
+        let bystanders = offered_tools(&endpoint, 1);
+        assert!(
+            owners.iter().any(|tool| tool == "workspace_fact"),
+            "the owner must be offered its native tool: {owners:?}"
+        );
+        assert!(
+            !bystanders.iter().any(|tool| tool == "workspace_fact"),
+            "the sibling must not be offered another workspace's native tool: {bystanders:?}"
+        );
+    }
+
+    #[tokio::test]
+    async fn a_partial_workspace_host_tool_failure_releases_every_claim() {
+        let endpoint = ScriptedEndpoint::start(Vec::new());
+        let runtime = shared_runtime(&endpoint);
+        let failed_dir = workspace_dir();
+        let error = pinned(failed_dir.path(), Arc::clone(&runtime))
+            .with_host_tool(ScopedTool("recoverable"))
+            .with_host_tool(ScopedTool("spawn"))
+            .open()
+            .await
+            .expect_err("spawn is already registered");
+        assert!(
+            matches!(error, RunError::WorkspaceHostToolNameTaken { .. }),
+            "{error}"
+        );
+        assert!(
+            runtime
+                .mentra_runtime()
+                .tools()
+                .iter()
+                .all(|tool| tool.provider.name != "recoverable"),
+            "no tool is registered before the full claim pass succeeds"
+        );
+
+        let recovered_dir = workspace_dir();
+        let recovered = pinned(recovered_dir.path(), runtime)
+            .with_host_tool(ScopedTool("recoverable"))
+            .open()
+            .await
+            .expect("the first failed open released its earlier claim");
+        assert!(
+            recovered
+                .mentra_runtime()
+                .tools()
+                .iter()
+                .any(|tool| tool.provider.name == "recoverable")
         );
     }
 }
