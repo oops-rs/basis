@@ -554,7 +554,7 @@ async fn a_shared_runtime_is_the_one_the_workspace_borrows() {
             Arc::ptr_eq(held, &runtime),
             "borrowing must not clone the substrate"
         ),
-        RuntimeSource::Private(_) | RuntimeSource::Reusable(_) => {
+        RuntimeSource::Private(_) => {
             panic!("with_runtime must switch the source")
         }
     }

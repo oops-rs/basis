@@ -40,6 +40,7 @@ pub(crate) struct DeclaredTools {
 }
 
 impl DeclaredTools {
+    #[cfg(test)]
     pub(crate) fn register(
         runtime: Arc<Runtime>,
         root: &Path,

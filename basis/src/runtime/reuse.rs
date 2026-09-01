@@ -123,6 +123,7 @@ impl RuntimeRecipe {
         Self { template, provider }
     }
 
+    #[allow(dead_code)]
     pub(crate) fn provider(&self) -> &mentra::ProviderId {
         self.provider.id()
     }

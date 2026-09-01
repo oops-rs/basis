@@ -64,7 +64,7 @@ pub(crate) use spec::DEFAULT_SESSION_NAME;
 pub use spec::RunSpec;
 
 pub(crate) use builder::load_templates;
-use lifecycle::{MintPosture, ReuseLease, ReuseLifecycle};
+use lifecycle::MintPosture;
 
 #[cfg(feature = "mcp")]
 use crate::mcp::connections::McpConnections;
@@ -74,14 +74,9 @@ use crate::{
     error::RunError,
     event::ContextFile,
     fingerprint::{self, Snapshot},
-    hooks::HookRunner,
     memory::Memory,
     run::{Effort, LoadedSkill, PreparedRun, RunContext},
-    runtime::{
-        Runtime, RuntimeRecipe,
-        dispatch::{self, HookRegistration},
-    },
-    shell::ShellAccess,
+    runtime::{Runtime, dispatch::HookRegistration},
     skills::SkillRoots,
     templates::Template,
     tools::declared::DeclaredTools,
@@ -112,8 +107,6 @@ pub struct Workspace {
     /// to name different directories.
     root: PathBuf,
     runtime: Arc<Runtime>,
-    /// Present only for a generation opened from a reusable runtime recipe.
-    reuse: Option<WorkspaceReuse>,
     /// Whether supported Basis APIs may mint more than one independent
     /// session from this workspace.
     mint_posture: MintPosture,
@@ -162,24 +155,6 @@ pub struct Workspace {
     #[cfg(feature = "mcp")]
     #[allow(dead_code, reason = "held for its Drop")]
     mcp_connections: McpConnections,
-}
-
-/// Everything a consumed discovery-off workspace needs to assemble its next
-/// generation without consulting repository or home state again.
-struct WorkspaceReuse {
-    recipe: Box<RuntimeRecipe>,
-    lifecycle: ReuseLifecycle,
-    shell: ShellAccess,
-}
-
-impl WorkspaceReuse {
-    fn new(recipe: Box<RuntimeRecipe>, shell: ShellAccess) -> Self {
-        Self {
-            recipe,
-            lifecycle: ReuseLifecycle::unbound(),
-            shell,
-        }
-    }
 }
 
 /// Hand-written because neither the runtime nor the registration is `Debug`
@@ -235,7 +210,6 @@ impl Workspace {
     /// wants to hear about it before a session exists.)
     pub fn prepare(&self, spec: impl Into<RunSpec>) -> Result<PreparedRun, RunError> {
         let spec = spec.into();
-        let reuse_lease = self.reuse_lease()?;
         self.mint_posture.claim()?;
         if let Some(model) = spec.profile.resolved_model() {
             validate_model_provider(model, &self.provider)?;
@@ -258,7 +232,7 @@ impl Workspace {
             apply_effort(&mut session, spec.effort.or(self.effort))?;
         }
 
-        Ok(self.minted(session, spec, model_id, context_snapshot, reuse_lease))
+        Ok(self.minted(session, spec, model_id, context_snapshot))
     }
 
     /// Picks up a conversation a previous process left behind.
@@ -292,7 +266,6 @@ impl Workspace {
         spec: impl Into<RunSpec>,
     ) -> Result<PreparedRun, RunError> {
         let spec = spec.into();
-        let reuse_lease = self.reuse_lease()?;
         self.mint_posture.claim()?;
         if let Some(model) = spec.profile.resolved_model() {
             validate_model_provider(model, &self.provider)?;
@@ -327,7 +300,7 @@ impl Workspace {
         // agent may carry a per-run system override that differs from this
         // workspace's current default, so substituting `self.agent.system`
         // would turn an unknown estimate into a confidently wrong one.
-        Ok(self.minted(session, spec, model, None, reuse_lease))
+        Ok(self.minted(session, spec, model, None))
     }
 
     /// A cheap stand-in for everything in this workspace a run could see.
@@ -464,139 +437,6 @@ impl Workspace {
     pub fn declared_tool_files(&self) -> &[ContextFile] {
         &self.declared_tool_files
     }
-
-    /// Binds this reusable generation's complete checkout-specific host-tool
-    /// set before its one independent mint.
-    ///
-    /// Consuming makes every failure atomic to the caller: all names are
-    /// validated against each other and the fresh runtime before the first
-    /// registration; an unexpected late collision drops the entire generation
-    /// rather than returning a partially bound workspace. An empty vector is
-    /// meaningful and marks an explicitly tool-free checkout as bound.
-    /// A bound tool must finish all work before its call returns; detached work
-    /// owned only by the tool is outside the tracked reuse guarantee.
-    pub fn bind_host_tools(
-        self,
-        tools: Vec<Box<dyn crate::tools::ExecutableTool>>,
-    ) -> Result<Self, RunError> {
-        let reuse = self.reuse.as_ref().ok_or(RunError::WorkspaceNotReusable)?;
-        reuse.lifecycle.require_unbound()?;
-        validate_reusable_host_tools(self.runtime.mentra_runtime_internal(), &tools)?;
-
-        for tool in tools {
-            self.runtime
-                .mentra_runtime_internal()
-                .try_register_tool(tool)?;
-        }
-        reuse.lifecycle.mark_bound()?;
-        Ok(self)
-    }
-
-    /// Consumes a clean reusable generation and returns a newly built,
-    /// prewarmed, unbound replacement.
-    ///
-    /// Rebuild first seals the generation. Any live run, observer guard,
-    /// detached event forwarder, or prior raw Mentra escape refuses reuse and
-    /// consumes this entry. Workspace registrations are dropped before Basis
-    /// demands unique ownership of the old runtime; that runtime is dropped
-    /// before the provider factory for the replacement is called. Drop alone
-    /// never invokes this method or the recipe.
-    ///
-    /// This proves the lifecycle Basis owns: attached runs, observers, event
-    /// forwarders, runtime registrations, and raw-access escapes. It does not
-    /// claim to scrub Mentra team/background/spawn execution or host tools that
-    /// detach their own work; strict reusable hosts exclude those names from
-    /// their exact roster and await every custom-tool effect before returning.
-    pub async fn rebuild_for_reuse(mut self) -> Result<Self, RunError> {
-        let reuse = self.reuse.take().ok_or(RunError::WorkspaceNotReusable)?;
-        reuse.lifecycle.seal_for_rebuild()?;
-
-        #[cfg(feature = "mcp")]
-        drop(self.mcp_connections);
-        drop(self.declared_registration);
-        drop(self.hook_registration);
-        // Beside the other two, and load-bearing for the `try_unwrap` below:
-        // the hold owns an `Arc` on the runtime it registered against, so a
-        // rebuild that did not drop it would find the old runtime shared and
-        // refuse itself.
-        drop(self.skills_registration);
-
-        let old_runtime = match Arc::try_unwrap(self.runtime) {
-            Ok(runtime) => runtime,
-            Err(runtime) => {
-                drop(runtime);
-                return Err(RunError::ReusableRuntimeNotUnique);
-            }
-        };
-        drop(old_runtime);
-
-        let WorkspaceReuse {
-            recipe,
-            shell,
-            lifecycle: _,
-        } = reuse;
-
-        let runtime = Arc::new(recipe.build_for(&self.root, shell, &[]).await?);
-        validate_model_provider(&self.model, runtime.provider())?;
-
-        let declared_registration = DeclaredTools::register(Arc::clone(&runtime), &self.root, &[])?;
-        let foreign_tools = Arc::new(RwLock::new(BTreeSet::new()));
-        let runner = runtime.interceptors().iter().cloned().fold(
-            HookRunner::new(&self.root, Vec::new()),
-            |runner, interceptor| runner.with_interceptor(interceptor),
-        );
-        let hook_registration = runtime.register_workspace(dispatch::WorkspaceGuardEntry {
-            runner: Arc::new(runner),
-            hooks: Vec::new(),
-            shell,
-            root: self.root.clone(),
-            shared: false,
-            foreign_tools: Arc::clone(&foreign_tools),
-        })?;
-        let foreign_tools = hook_registration.foreign_tools();
-
-        #[cfg(feature = "mcp")]
-        let mcp_connections = McpConnections::empty(Arc::clone(&runtime), &self.root);
-
-        let mut agent = self.agent;
-        agent.compaction.transcript_dir = runtime.transcripts_dir().to_path_buf();
-        let provider = runtime.provider().to_string();
-        let reuse = Some(WorkspaceReuse::new(recipe, shell));
-        // A reusable generation runs with discovery off, so it registered no
-        // root and the replacement holds none either — stated against the new
-        // runtime rather than carried over, since the old hold belonged to a
-        // runtime that no longer exists.
-        let skills_registration = SkillRoots::none(Arc::clone(&runtime));
-
-        Ok(Self {
-            root: self.root,
-            runtime,
-            reuse,
-            mint_posture: MintPosture::new(true),
-            model: self.model,
-            effort: self.effort,
-            config: self.config,
-            provider,
-            identifier: self.identifier,
-            context: self.context,
-            memories: self.memories,
-            agent,
-            skills_registration,
-            skills: self.skills,
-            templates_dirs: self.templates_dirs,
-            templates: self.templates,
-            mcp_files: Vec::new(),
-            mcp_servers: Vec::new(),
-            declared_tool_files: Vec::new(),
-            declared_tools: Vec::new(),
-            declared_registration,
-            hook_registration,
-            foreign_tools,
-            #[cfg(feature = "mcp")]
-            mcp_connections,
-        })
-    }
-
     /// The mentra runtime the runs are minted on, for a host that wants
     /// mentra's own surface — the task board, teams, the store — alongside
     /// basis's.
@@ -605,15 +445,7 @@ impl Workspace {
     /// and reaching past basis's surface is a supported thing to do rather than
     /// a workaround. Renamed from `runtime()` when ADR-0018 gave basis a
     /// `Runtime` of its own, so the name says whose surface comes back.
-    ///
-    /// On a reusable workspace, calling this method permanently prevents the
-    /// current generation from being rebuilt. The returned runtime can mint or
-    /// retain state through handles Basis cannot count, so raw access and safe
-    /// reuse are deliberately mutually exclusive for that generation.
     pub fn mentra_runtime(&self) -> &mentra::Runtime {
-        if let Some(reuse) = &self.reuse {
-            reuse.lifecycle.poison();
-        }
         self.runtime.mentra_runtime_internal()
     }
 
@@ -683,7 +515,6 @@ impl Workspace {
         spec: RunSpec,
         model: String,
         context_snapshot: Option<String>,
-        reuse_lease: Option<ReuseLease>,
     ) -> PreparedRun {
         let bounds = spec.turn_options();
 
@@ -711,59 +542,6 @@ impl Workspace {
         // a per-run option.
         .with_provider_retry(self.runtime.provider_retry())
         .with_context_snapshot(context_snapshot)
-        .with_reuse_lease(reuse_lease)
-    }
-
-    fn reuse_lease(&self) -> Result<Option<ReuseLease>, RunError> {
-        self.reuse
-            .as_ref()
-            .map(|reuse| reuse.lifecycle.lease_run())
-            .transpose()
-    }
-}
-
-fn validate_reusable_host_tools(
-    runtime: &mentra::Runtime,
-    tools: &[Box<dyn crate::tools::ExecutableTool>],
-) -> Result<(), RunError> {
-    let mut names = runtime
-        .tools()
-        .into_iter()
-        .map(|descriptor| descriptor.provider.name)
-        .collect::<BTreeSet<_>>();
-
-    for tool in tools {
-        let name = tool.descriptor().provider.name;
-        validate_reusable_host_tool_name(&name)?;
-        if !names.insert(name.clone()) {
-            return Err(RunError::HostTool(mentra::tool::ToolNameCollision { name }));
-        }
-    }
-    Ok(())
-}
-
-fn validate_reusable_host_tool_name(name: &str) -> Result<(), RunError> {
-    let reason = if name.is_empty() {
-        Some("a name cannot be empty")
-    } else if name.len() > 64 {
-        Some("a name cannot exceed 64 bytes")
-    } else if name.starts_with("mcp__") {
-        Some("the `mcp__` prefix is reserved for MCP bridges")
-    } else if !name
-        .bytes()
-        .all(|byte| byte.is_ascii_alphanumeric() || matches!(byte, b'_' | b'-'))
-    {
-        Some("a name may contain only ASCII letters, digits, `_`, and `-`")
-    } else {
-        None
-    };
-
-    match reason {
-        Some(reason) => Err(RunError::ReusableHostToolName {
-            name: name.to_string(),
-            reason,
-        }),
-        None => Ok(()),
     }
 }
 
