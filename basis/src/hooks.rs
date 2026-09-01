@@ -121,7 +121,8 @@
 //!
 //! # Who speaks first
 //!
-//! Interceptors, in registration order; then global hooks; then workspace ones.
+//! Interceptors, in registration order; then supplied hooks; then global hooks;
+//! then workspace ones.
 //! The rule is that the further a participant is from the workspace's own data,
 //! the earlier it speaks — so the host's own guard, and then the operator's,
 //! can refuse before a program a repository chose is ever spawned. Since any

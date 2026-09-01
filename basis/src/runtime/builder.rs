@@ -323,8 +323,9 @@ impl RuntimeBuilder {
     /// of a tool's input is the worked example.
     ///
     /// Runtime-scoped because host scope *is* runtime scope (ADR-0018): the
-    /// chain has always run host interceptors → global hooks → workspace
-    /// hooks, and this is the registration point that matches the first slot.
+    /// chain runs host interceptors → supplied hooks → global hooks →
+    /// workspace hooks, and this is the registration point that matches the
+    /// first slot.
     /// Appends, so a host may register several; they are consulted in the
     /// order registered, and **before** any subprocess hook. The rule is that
     /// the further a participant is from the workspace's own data, the earlier

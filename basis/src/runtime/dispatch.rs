@@ -28,8 +28,8 @@
 //! cannot carry either per workspace; a private runtime's policy already does,
 //! so its denials keep mentra's wording — then the workspace's [`HookRunner`],
 //! which already folds the runtime's host interceptors ahead of the
-//! workspace's hooks, so the chain order host interceptors → global hooks →
-//! workspace hooks survives the move unchanged.
+//! workspace's hooks, so the chain order host interceptors → supplied hooks →
+//! global hooks → workspace hooks survives the move unchanged.
 //!
 //! Then the guards again, if the chain came back with a rewrite. A
 //! [`HookDecision::Modify`] is what the tool runs on — mentra 0.24 re-checks

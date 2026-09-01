@@ -787,10 +787,9 @@ impl WorkspaceBuilder {
         };
 
         // One runner for both interception bindings, host interceptors folded
-        // first: the chain order host interceptors → global hooks → workspace
-        // hooks predates the runtime split and survives it — supplied hooks
-        // sit before file hooks, while only the registration point moved onto
-        // the runtime's dispatcher.
+        // first: the chain order host interceptors → supplied hooks → global
+        // hooks → workspace hooks survives the runtime split — only the
+        // registration point moved onto the runtime's dispatcher.
         let runner = runtime.interceptors().iter().cloned().fold(
             HookRunner::new(&path, loaded_hooks.clone()),
             |runner, interceptor| runner.with_interceptor(interceptor),
