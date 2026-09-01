@@ -8,15 +8,11 @@
 //!   registered on every runtime [`RuntimeBuilder`](crate::RuntimeBuilder)
 //!   builds, and the two doors it replaces — mentra's `shell` and `task` —
 //!   leave the model's roster at the same time.
-//! - [`declared`] — the **subprocess** binding: `.basis/tools.json` or a typed
-//!   [`DeclaredToolSpec`](declared::DeclaredToolSpec) declares a
+//! - [`declared`] — the **subprocess** binding: `.basis/tools.json` declares a
 //!   name, a description, a JSON schema and a command, and basis wraps that
 //!   command as a tool speaking JSON over stdio. Registered per workspace, at
 //!   [`WorkspaceBuilder::open`](crate::WorkspaceBuilder::open), since a
 //!   manifest is a repository's data rather than a process's.
-//! - [`WorkspaceBuilder::with_host_tool`](crate::WorkspaceBuilder::with_host_tool)
-//!   — the **workspace-native** binding: a host-owned Rust value registered for
-//!   one workspace and hidden from siblings on the same runtime.
 //!
 //! The third is MCP (`crate::mcp`), which is mentra's client behind a cargo
 //! feature and registers nothing of basis's own.
@@ -41,10 +37,7 @@
 //! present a host's tool to the approver as its static descriptor.
 //!
 //! Registered on the runtime, like `spawn` (ADR-0018's host scope): visible to
-//! every workspace and subagent that runtime opens, not to one session. When
-//! the same native contract belongs to only one repository, the workspace
-//! builder registers it through the shared claim ledger instead and removes it
-//! with that workspace.
+//! every workspace and subagent that runtime opens, not to one session.
 //!
 //! Building one needs mentra's own tool-authoring types, re-exported below
 //! rather than left for a host to reach through basis to a `mentra`
@@ -54,7 +47,6 @@
 //! one might need.
 
 pub mod declared;
-pub(crate) mod host;
 pub mod spawn;
 
 pub use mentra::tool::{

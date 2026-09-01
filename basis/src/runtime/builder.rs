@@ -323,8 +323,9 @@ impl RuntimeBuilder {
     /// of a tool's input is the worked example.
     ///
     /// Runtime-scoped because host scope *is* runtime scope (ADR-0018): the
-    /// chain has always run host interceptors → global hooks → workspace
-    /// hooks, and this is the registration point that matches the first slot.
+    /// chain runs host interceptors → supplied hooks → global hooks →
+    /// workspace hooks, and this is the registration point that matches the
+    /// first slot.
     /// Appends, so a host may register several; they are consulted in the
     /// order registered, and **before** any subprocess hook. The rule is that
     /// the further a participant is from the workspace's own data, the earlier
@@ -362,9 +363,9 @@ impl RuntimeBuilder {
     ///
     /// Registered on the runtime (ADR-0018's host scope), so — like `spawn` —
     /// it is visible to every workspace and every subagent this runtime opens,
-    /// not to one session. A tool belonging to one workspace goes through
-    /// [`WorkspaceBuilder::with_host_tool`](crate::WorkspaceBuilder::with_host_tool)
-    /// instead and is hidden from siblings borrowing this runtime.
+    /// not to one session. A host that wants a tool visible to only *some*
+    /// workspaces still needs one runtime per audience; there is no per-
+    /// workspace host-tool registration yet.
     ///
     /// **A name basis or an earlier host tool already answers to is refused,
     /// not replaced** (decision D5d). [`build`](Self::build) claims host
@@ -722,8 +723,8 @@ impl RuntimeBuilder {
         // `try_register_tool` refuses instead, and does it against the live
         // registry, so the second host tool sharing an earlier one's name
         // collides too — the same claim posture
-        // `Runtime`'s workspace-tool claim ledger holds for a declared or
-        // workspace-native tool naming one basis already answers to.
+        // `Runtime::claim_declared_tool` holds for a declared tool naming
+        // one basis or a workspace already answers to.
         for tool in host_tools {
             mentra.try_register_tool(tool)?;
         }
@@ -742,7 +743,7 @@ impl RuntimeBuilder {
             dispatch,
             #[cfg(feature = "mcp")]
             mcp_claims: Mutex::new(HashMap::new()),
-            workspace_tool_claims: Mutex::new(HashMap::new()),
+            declared_claims: Mutex::new(HashMap::new()),
             skill_root_holders: Mutex::new(HashMap::new()),
         })
     }

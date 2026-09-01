@@ -163,6 +163,105 @@ fn supplied_tools_shadow_files_and_preserve_source_order() {
 }
 
 #[test]
+fn supplied_command_cwd_and_environment_are_literal_typed_values() {
+    let tmp = tempfile::tempdir().expect("tempdir");
+    let literal = DeclaredToolSpec {
+        name: "literal_tool".to_string(),
+        description: "keeps typed values final".to_string(),
+        input_schema: json!({"type": "object"}),
+        command: vec!["${TOOL_BIN}".to_string(), "${TOOL_ARG}".to_string()],
+        cwd: Some(PathBuf::from("${TOOL_CWD}")),
+        env: vec![("TOKEN".to_string(), "${TOOL_TOKEN}".to_string())],
+        timeout_ms: None,
+        side_effect: SideEffect::Process,
+    };
+
+    let loaded = load(
+        tmp.path(),
+        &config(None).with_supplied(vec![literal.clone()]),
+    )
+    .expect("literal placeholders are already-final values, not file syntax");
+
+    assert_eq!(loaded, [literal]);
+}
+
+#[test]
+fn supplied_validation_errors_are_pathless_and_value_free() {
+    let tmp = tempfile::tempdir().expect("tempdir");
+    let valid = DeclaredToolSpec {
+        name: "supplied_contract".to_string(),
+        description: "valid description".to_string(),
+        input_schema: json!({"type": "object"}),
+        command: vec!["./run".to_string(), "secret-value".to_string()],
+        cwd: None,
+        env: vec![("TOKEN".to_string(), "secret-value".to_string())],
+        timeout_ms: None,
+        side_effect: SideEffect::Process,
+    };
+    let cases = [
+        (
+            DeclaredToolSpec {
+                name: "bad name".to_string(),
+                ..valid.clone()
+            },
+            "outside",
+        ),
+        (
+            DeclaredToolSpec {
+                description: "  ".to_string(),
+                ..valid.clone()
+            },
+            "description",
+        ),
+        (
+            DeclaredToolSpec {
+                input_schema: json!([]),
+                ..valid.clone()
+            },
+            "input_schema",
+        ),
+        (
+            DeclaredToolSpec {
+                command: Vec::new(),
+                ..valid.clone()
+            },
+            "command",
+        ),
+        (
+            DeclaredToolSpec {
+                command: vec![" ".to_string(), "secret-value".to_string()],
+                ..valid.clone()
+            },
+            "empty program",
+        ),
+        (
+            DeclaredToolSpec {
+                timeout_ms: Some(0),
+                ..valid
+            },
+            "deadline",
+        ),
+    ];
+
+    for (candidate, reason) in cases {
+        let expected_name = candidate.name.clone();
+        let error = load(tmp.path(), &config(None).with_supplied(vec![candidate]))
+            .expect_err("each invalid supplied contract is refused");
+
+        assert!(matches!(&error, DeclaredToolError::InvalidSupplied { .. }));
+        let message = error.to_string();
+        assert!(message.contains(&expected_name), "{message}");
+        assert!(message.contains(reason), "{reason}: {message}");
+        assert!(!message.contains("secret-value"), "{message}");
+        assert!(
+            !message.contains(&tmp.path().display().to_string()),
+            "{message}"
+        );
+        assert!(!message.contains(DEFAULT_WORKSPACE_TOOLS_FILE), "{message}");
+    }
+}
+
+#[test]
 fn the_same_file_reached_twice_is_read_once() {
     let tmp = tempfile::tempdir().expect("tempdir");
     write(

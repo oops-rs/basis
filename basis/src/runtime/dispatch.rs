@@ -28,8 +28,8 @@
 //! cannot carry either per workspace; a private runtime's policy already does,
 //! so its denials keep mentra's wording — then the workspace's [`HookRunner`],
 //! which already folds the runtime's host interceptors ahead of the
-//! workspace's hooks, so the chain order host interceptors → global hooks →
-//! workspace hooks survives the move unchanged.
+//! workspace's hooks, so the chain order host interceptors → supplied hooks →
+//! global hooks → workspace hooks survives the move unchanged.
 //!
 //! Then the guards again, if the chain came back with a rewrite. A
 //! [`HookDecision::Modify`] is what the tool runs on — mentra 0.24 re-checks
@@ -61,10 +61,7 @@
 use std::{
     collections::{BTreeSet, HashMap},
     path::{Component, Path, PathBuf},
-    sync::{
-        Arc, RwLock,
-        atomic::{AtomicU64, Ordering},
-    },
+    sync::{Arc, RwLock},
 };
 
 use mentra::{
@@ -76,7 +73,8 @@ use mentra::{
 };
 
 use crate::{
-    hooks::HookRunner,
+    RunError,
+    hooks::{HookRunner, HookSpec},
     shell::ShellAccess,
     tools::{
         SPAWN,
@@ -89,6 +87,10 @@ use crate::{
 pub(crate) struct WorkspaceGuardEntry {
     /// The workspace's chain, host interceptors already folded first.
     pub(crate) runner: Arc<HookRunner>,
+    /// The subprocess half of `runner`, in effective consultation order.
+    /// Runtime interceptors are fixed on the dispatcher itself, so these plus
+    /// `shell` and `shared` are the complete per-workspace guard identity.
+    pub(crate) hooks: Vec<HookSpec>,
     /// Enforced here when [`shared`](Self::shared); baked into policy on the
     /// private path, where the runtime belongs to this workspace alone.
     pub(crate) shell: ShellAccess,
@@ -119,13 +121,13 @@ pub(crate) struct WorkspaceGuardEntry {
 /// Removes its workspace's entry when dropped.
 ///
 /// Held by the [`Workspace`](crate::Workspace), so a dropped workspace stops
-/// being consulted without anyone remembering to say so. When two live
-/// workspaces share one canonical root the later registration wins while both
-/// live, and each drop removes only its own entry.
+/// being consulted without anyone remembering to say so. Identical live opens
+/// of one canonical root share one entry and holder count; a differing guard
+/// configuration is refused before it can weaken the first.
 pub(crate) struct HookRegistration {
     dispatch: Arc<HookDispatch>,
     key: PathBuf,
-    id: u64,
+    foreign_tools: Arc<RwLock<BTreeSet<String>>>,
 }
 
 impl HookRegistration {
@@ -142,17 +144,22 @@ impl HookRegistration {
     pub(crate) fn key(&self) -> &Path {
         &self.key
     }
+
+    /// The one cell every identical holder under this key publishes into.
+    pub(crate) fn foreign_tools(&self) -> Arc<RwLock<BTreeSet<String>>> {
+        Arc::clone(&self.foreign_tools)
+    }
 }
 
 impl Drop for HookRegistration {
     fn drop(&mut self) {
-        self.dispatch.deregister(&self.key, self.id);
+        self.dispatch.deregister(&self.key);
     }
 }
 
 struct Registered {
-    id: u64,
     entry: WorkspaceGuardEntry,
+    holders: usize,
 }
 
 /// The one hook a basis runtime registers, on each of mentra's two seams.
@@ -162,7 +169,6 @@ pub(crate) struct HookDispatch {
     /// the miss path.
     interceptors: Vec<Arc<dyn crate::hooks::Interceptor>>,
     workspaces: RwLock<HashMap<PathBuf, Registered>>,
-    next_id: AtomicU64,
 }
 
 impl HookDispatch {
@@ -170,7 +176,6 @@ impl HookDispatch {
         Self {
             interceptors,
             workspaces: RwLock::new(HashMap::new()),
-            next_id: AtomicU64::new(0),
         }
     }
 
@@ -178,19 +183,38 @@ impl HookDispatch {
         &self.interceptors
     }
 
-    pub(crate) fn register(self: &Arc<Self>, entry: WorkspaceGuardEntry) -> HookRegistration {
+    pub(crate) fn register(
+        self: &Arc<Self>,
+        entry: WorkspaceGuardEntry,
+    ) -> Result<HookRegistration, RunError> {
         let key = canonical(&entry.root);
-        let id = self.next_id.fetch_add(1, Ordering::Relaxed);
-        self.workspaces
+        let mut workspaces = self
+            .workspaces
             .write()
-            .expect("workspace registry poisoned")
-            .insert(key.clone(), Registered { id, entry });
+            .expect("workspace registry poisoned");
+        let foreign_tools = match workspaces.get_mut(&key) {
+            Some(held)
+                if held.entry.shell == entry.shell
+                    && held.entry.shared == entry.shared
+                    && held.entry.hooks == entry.hooks =>
+            {
+                held.holders += 1;
+                Arc::clone(&held.entry.foreign_tools)
+            }
+            Some(_) => return Err(RunError::WorkspaceGuardConflict { root: key }),
+            None => {
+                let foreign_tools = Arc::clone(&entry.foreign_tools);
+                workspaces.insert(key.clone(), Registered { entry, holders: 1 });
+                foreign_tools
+            }
+        };
+        drop(workspaces);
 
-        HookRegistration {
+        Ok(HookRegistration {
             dispatch: Arc::clone(self),
             key,
-            id,
-        }
+            foreign_tools,
+        })
     }
 
     /// What the workspace claiming `working_directory` hid from its own model
@@ -218,12 +242,16 @@ impl HookDispatch {
             .unwrap_or_default()
     }
 
-    fn deregister(&self, key: &Path, id: u64) {
+    fn deregister(&self, key: &Path) {
         let mut workspaces = self
             .workspaces
             .write()
             .expect("workspace registry poisoned");
-        if workspaces.get(key).is_some_and(|held| held.id == id) {
+        let Some(held) = workspaces.get_mut(key) else {
+            return;
+        };
+        held.holders = held.holders.saturating_sub(1);
+        if held.holders == 0 {
             workspaces.remove(key);
         }
     }

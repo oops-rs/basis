@@ -42,10 +42,7 @@ use crate::{
     skills::{self, SkillRoots, SkillsConfig},
     store,
     templates::{self, Template, TemplatesConfig},
-    tools::{
-        declared::{self, DeclaredTools, ToolsConfig},
-        host::{HostToolBinding, WorkspaceHostTools},
-    },
+    tools::declared::{self, DeclaredTools, ToolsConfig},
 };
 
 use super::{Workspace, WorkspaceReuse, lifecycle::MintPosture, roster::ToolRoster};
@@ -86,8 +83,6 @@ pub struct WorkspaceBuilder {
     templates: TemplatesConfig,
     hooks: HooksConfig,
     tools: ToolsConfig,
-    /// Native tools owned by this workspace rather than by its runtime.
-    host_tools: Vec<Box<dyn crate::tools::ExecutableTool>>,
     shell: ShellAccess,
     compaction: Compaction,
 }
@@ -143,10 +138,6 @@ impl std::fmt::Debug for WorkspaceBuilder {
             .field("templates", &self.templates)
             .field("hooks", &self.hooks)
             .field("tools", &self.tools)
-            .field(
-                "host_tools",
-                &format_args!("{} tools", self.host_tools.len()),
-            )
             .field("shell", &self.shell)
             .field("compaction", &self.compaction)
             .finish_non_exhaustive()
@@ -182,7 +173,6 @@ impl WorkspaceBuilder {
             templates: TemplatesConfig::default(),
             hooks: HooksConfig::default(),
             tools: ToolsConfig::default(),
-            host_tools: Vec::new(),
             // Granted, per ADR-0013, and from the enum's own default rather
             // than from anything ambient: what a run may do is stated here, in
             // configuration, not read out of the environment behind the caller.
@@ -461,32 +451,6 @@ impl WorkspaceBuilder {
         Self { tools, ..self }
     }
 
-    /// Registers a native tool for this workspace only.
-    ///
-    /// Unlike [`RuntimeBuilder::with_tool`](crate::RuntimeBuilder::with_tool),
-    /// this tool is owned by the workspace: it is offered to this workspace's
-    /// runs and hidden from siblings borrowing the same runtime. The public
-    /// name is claimed without suffixing and is released, with the Mentra
-    /// registration, when the workspace drops.
-    ///
-    /// Reusable runtime recipes bind their complete per-checkout set through
-    /// [`Workspace::bind_host_tools`](crate::Workspace::bind_host_tools)
-    /// instead; mixing the incremental builder form with that complete binding
-    /// is refused at open.
-    pub fn with_host_tool<T>(self, tool: T) -> Self
-    where
-        T: crate::tools::ExecutableTool + 'static,
-    {
-        Self {
-            host_tools: {
-                let mut tools = self.host_tools;
-                tools.push(Box::new(tool));
-                tools
-            },
-            ..self
-        }
-    }
-
     /// Grants or denies command execution, for every run this workspace mints.
     ///
     /// Granted by default (ADR-0013). Denying is the read-only posture: it
@@ -574,9 +538,6 @@ impl WorkspaceBuilder {
     /// the `mcp__*` tools of servers this workspace does not own.
     pub async fn open(self) -> Result<Workspace, RunError> {
         if let RuntimeSource::Reusable(recipe) = &self.runtime {
-            if !self.host_tools.is_empty() {
-                return Err(RunError::ReusableWorkspaceRequiresHostToolBinding);
-            }
             if self.discovery_enabled {
                 return Err(RunError::ReusableWorkspaceRequiresDiscoveryOff);
             }
@@ -816,12 +777,6 @@ impl WorkspaceBuilder {
             &supplied_tools,
         )?;
         let declared_tool_names = declared_tools.names().to_vec();
-        let host_tools = WorkspaceHostTools::register(
-            Arc::clone(&runtime),
-            &path,
-            self.host_tools,
-            HostToolBinding::Workspace,
-        )?;
 
         // Templates need no runtime registration — they are basis-side convention
         // data, rendered into a prompt by whatever surface offers them.
@@ -832,12 +787,11 @@ impl WorkspaceBuilder {
         };
 
         // One runner for both interception bindings, host interceptors folded
-        // first: the chain order host interceptors → global hooks → workspace
-        // hooks predates the runtime split and survives it — supplied hooks
-        // sit before file hooks, while only the registration point moved onto
-        // the runtime's dispatcher.
+        // first: the chain order host interceptors → supplied hooks → global
+        // hooks → workspace hooks survives the runtime split — only the
+        // registration point moved onto the runtime's dispatcher.
         let runner = runtime.interceptors().iter().cloned().fold(
-            HookRunner::new(&path, loaded_hooks),
+            HookRunner::new(&path, loaded_hooks.clone()),
             |runner, interceptor| runner.with_interceptor(interceptor),
         );
         // Written by every mint, read by `spawn` when a child policy narrows a
@@ -847,6 +801,7 @@ impl WorkspaceBuilder {
         let foreign_tools = Arc::new(std::sync::RwLock::new(std::collections::BTreeSet::new()));
         let hook_registration = runtime.register_workspace(dispatch::WorkspaceGuardEntry {
             runner: Arc::new(runner),
+            hooks: loaded_hooks,
             shell: self.shell,
             root: path.clone(),
             // On a private runtime the shell posture and the `.git` carve-out
@@ -854,7 +809,8 @@ impl WorkspaceBuilder {
             // would change whose words a denial arrives in.
             shared,
             foreign_tools: Arc::clone(&foreign_tools),
-        });
+        })?;
+        let foreign_tools = hook_registration.foreign_tools();
 
         // Both lists reach the header whether or not this build has MCP in it:
         // what a run reports is a schema clients parse, and a field that
@@ -922,7 +878,6 @@ impl WorkspaceBuilder {
             declared_tool_files: sourced(&declared_sources),
             declared_tools: declared_tool_names,
             declared_registration: declared_tools,
-            host_tools,
             hook_registration,
             foreign_tools,
             #[cfg(feature = "mcp")]

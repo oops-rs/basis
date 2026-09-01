@@ -195,11 +195,12 @@ control the operator believes is in place, so prefer the failure that announces
 itself.
 
 A hook receives JSON on stdin and answers on stdout. Any language. The chain is
-host interceptors → global hooks → workspace hooks, and the first refusal
-short-circuits. `tools` matches the exact tool name, so an entry naming a tool
-that was renamed stops matching silently — `shell` became `spawn`, and `files`
-became the split `read`/`write`/`edit`/`ls`/`grep`/`glob`. One entry is asked at
-one event; a guard that wants a say on both sides of a call writes two.
+host interceptors → supplied hooks → global hooks → workspace hooks, and the
+first refusal short-circuits. `tools` matches the exact tool name, so an entry
+naming a tool that was renamed stops matching silently — `shell` became
+`spawn`, and `files` became the split `read`/`write`/`edit`/`ls`/`grep`/`glob`.
+One entry is asked at one event; a guard that wants a say on both sides of a
+call writes two.
 
 **`pre_tool_use`** — asked before the call. The request carries `hook_schema`,
 `event`, `workspace`, `agent_id`, `tool_call_id`, `tool_name` and `input`

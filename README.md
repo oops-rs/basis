@@ -59,8 +59,8 @@ exported — is spoken to with no `Authorization` header at all; one that wanted
 
 **A workspace opens once and mints runs.** Opening settles everything that belongs to the repository
 rather than to the prompt — context documents, the resolved model, skills, templates, hooks,
-declared and workspace-native tools, MCP connections — so `prepare` is *synchronous*, and a
-twenty-way fan-out reads `AGENTS.md` once
+declared tools, MCP connections — so `prepare` is *synchronous*, and a twenty-way fan-out reads
+`AGENTS.md` once
 ([ADR-0010](docs/adr/0010-the-crate-is-the-workflow-surface.md)). `Workspace` is `Send + Sync`, so
 those runs can be spawned tasks.
 
@@ -75,10 +75,7 @@ workspace an `Arc` of it, so N repositories cost one provider resolution and one
 `ToolsConfig::with_supplied` put typed values above the global/workspace files without inventing a
 path or re-expanding their contents. They remain active under `without_discovery`, which skips the
 files entirely. Hooks compose in host-supplied → global → workspace order (after runtime
-interceptors); tools shadow by name in supplied → workspace → global order. A native Rust tool that
-belongs to one repository goes on `WorkspaceBuilder::with_host_tool`; its name is claimed on the
-shared runtime, hidden from sibling workspaces and unregistered when its owner drops. Process-wide
-tools still belong on `RuntimeBuilder::with_tool`.
+interceptors); tools shadow by name in supplied → workspace → global order.
 
 **A strict host can rebuild a private runtime between checkouts.** Basis 0.11 uses Mentra 0.25.0
 for the consume/rebuild path from ADR-0024. The provider is a repeatable factory plus an async warm
@@ -497,8 +494,8 @@ proper — and since 0.7, conversations as plain files, a child a delegating par
 `basis-tasks` for a Rust host that wants durable handles; since 0.8, a lossless in-process event tap
 and strict private-runtime consume/rebuild for host-defined checkouts; and now `basis-host`, with
 the shared approval policy, served-session source, workspace pool, and turn/cancellation discipline
-that a third frontend otherwise had to recover from ACP, plus typed supplied hook/tool lists and
-workspace-scoped native tools for programmatic hosts. Named honestly, still open:
+that a third frontend otherwise had to recover from ACP, plus typed supplied hook/tool lists for
+programmatic hosts. Named honestly, still open:
 the packages convention and provider OAuth; surfacing `team_*`, which stays hidden until a concrete
 use case asks for it; and **nobody has driven this from Zed or JetBrains yet** — it is verified against the
 protocol and its official client library, not against the ecosystem. The five workspace crates

@@ -45,6 +45,8 @@ use std::sync::{Arc, Mutex};
 
 use mentra::{ModelSelector, Session, agent::AgentConfig, runtime::SessionOptions};
 
+use crate::tools::declared::DeclaredToolSpec;
+
 pub use builder::RuntimeBuilder;
 pub use reuse::RuntimeRecipe;
 pub use tool_results::ToolResultPolicy;
@@ -227,10 +229,9 @@ pub struct Runtime {
     /// configuring one name must be told apart here.
     #[cfg(feature = "mcp")]
     mcp_claims: Mutex<HashMap<String, PathBuf>>,
-    /// Which workspace owns each workspace-scoped tool name on the same single
-    /// registry. Declared subprocess tools and native workspace host tools
-    /// share it so neither can overwrite or leak past the other.
-    workspace_tool_claims: Mutex<HashMap<String, WorkspaceToolClaim>>,
+    /// Which workspace owns each declared tool name on the same single
+    /// registry. See [`Runtime::claim_declared_tool`] for why this exists.
+    declared_claims: Mutex<HashMap<String, DeclaredClaim>>,
     /// How many open workspaces hold each skills root on this runtime's single
     /// skill registry. See [`Runtime::register_skill_roots`].
     skill_root_holders: Mutex<HashMap<PathBuf, usize>>,
@@ -248,32 +249,26 @@ fn skill_root_key(path: &Path) -> PathBuf {
     std::fs::canonicalize(path).unwrap_or_else(|_| path.to_path_buf())
 }
 
-/// A workspace-scoped tool name registered on this runtime by a workspace
-/// still open.
+/// A declared tool name registered on this runtime by a workspace still open.
 ///
 /// `holders` rather than a bare owner because one root may be open twice — a
 /// host that opens the same repository for two concurrent callers — and the
 /// first of those to drop must not free a name the second is still serving.
 /// The entry goes when the count reaches zero, together with the tool itself.
 #[derive(Debug)]
-struct WorkspaceToolClaim {
+struct DeclaredClaim {
     root: PathBuf,
     holders: usize,
-    /// Only declared tools may join an existing same-root registration. Native
-    /// tools are opaque values, so Basis cannot prove two implementations are
-    /// the same merely because their public names match.
-    share_same_root: bool,
+    supplied_holders: usize,
+    /// The complete resolved declaration the live registration executes.
+    /// Supplied same-root holders compare against it before joining.
+    spec: DeclaredToolSpec,
 }
 
-#[derive(Clone, Copy)]
-enum WorkspaceToolClaimPosture {
-    ShareSameRoot,
-    Exclusive,
-}
-
-enum WorkspaceToolRelease {
-    Registered,
-    ClaimOnly,
+#[derive(Debug, Clone, Copy)]
+pub(crate) enum DeclaredToolOrigin {
+    File,
+    Supplied,
 }
 
 /// Hand-written because mentra's runtime is not `Debug`. No credential lives
@@ -413,7 +408,10 @@ impl Runtime {
     /// Joins a workspace to this runtime's hook dispatcher. The registration
     /// deregisters on drop, which is how a dropped workspace stops being
     /// consulted.
-    pub(crate) fn register_workspace(&self, entry: WorkspaceGuardEntry) -> HookRegistration {
+    pub(crate) fn register_workspace(
+        &self,
+        entry: WorkspaceGuardEntry,
+    ) -> Result<HookRegistration, RunError> {
         self.dispatch.register(entry)
     }
 
@@ -479,57 +477,55 @@ impl Runtime {
     /// open is serving. One name is one program, so the second open of a
     /// repository joins the registration rather than replacing it under the
     /// first open's running agents.
-    pub(crate) fn claim_declared_tool(&self, name: &str, root: &Path) -> Result<bool, String> {
-        self.claim_workspace_tool(name, root, WorkspaceToolClaimPosture::ShareSameRoot)
-    }
-
-    /// Exclusively claims a native host tool for one workspace.
-    pub(crate) fn claim_host_tool(&self, name: &str, root: &Path) -> Result<(), String> {
-        let fresh = self.claim_workspace_tool(name, root, WorkspaceToolClaimPosture::Exclusive)?;
-        debug_assert!(fresh);
-        Ok(())
-    }
-
-    fn claim_workspace_tool(
+    pub(crate) fn claim_declared_tool(
         &self,
-        name: &str,
         root: &Path,
-        posture: WorkspaceToolClaimPosture,
+        spec: &DeclaredToolSpec,
+        origin: DeclaredToolOrigin,
     ) -> Result<bool, String> {
+        let name = &spec.name;
         let mut claims = self
-            .workspace_tool_claims
+            .declared_claims
             .lock()
-            .expect("workspace tool claim map poisoned");
+            .expect("declared tool claim map poisoned");
 
         match claims.get_mut(name) {
             Some(claim) if claim.root != root => Err(format!(
-                "the workspace at {} is open on this runtime and owns a tool by that name",
+                "the workspace at {} is open on this runtime and declares a tool by that name",
                 claim.root.display()
             )),
             Some(claim)
-                if matches!(posture, WorkspaceToolClaimPosture::ShareSameRoot)
-                    && claim.share_same_root =>
+                if claim.spec != *spec
+                    && (claim.supplied_holders > 0
+                        || matches!(origin, DeclaredToolOrigin::Supplied)) =>
             {
+                Err(
+                    "another live open of this workspace supplied different configuration under \
+                     that name"
+                        .to_string(),
+                )
+            }
+            Some(claim) => {
                 claim.holders += 1;
+                if matches!(origin, DeclaredToolOrigin::Supplied) {
+                    claim.supplied_holders += 1;
+                }
                 Ok(false)
             }
-            Some(_) => Err(format!(
-                "the workspace at {} already owns a different tool by that name",
-                root.display()
-            )),
             None if self.registers_tool(name) => {
                 Err("this runtime already offers a tool by that name".to_string())
             }
             None => {
                 claims.insert(
                     name.to_string(),
-                    WorkspaceToolClaim {
+                    DeclaredClaim {
                         root: root.to_path_buf(),
                         holders: 1,
-                        share_same_root: matches!(
-                            posture,
-                            WorkspaceToolClaimPosture::ShareSameRoot
-                        ),
+                        supplied_holders: usize::from(matches!(
+                            origin,
+                            DeclaredToolOrigin::Supplied
+                        )),
+                        spec: spec.clone(),
                     },
                 );
                 Ok(true)
@@ -537,8 +533,8 @@ impl Runtime {
         }
     }
 
-    /// Releases a declared or native workspace-tool claim, taking the tool off
-    /// the runtime when the last holder goes.
+    /// Releases a claim [`claim_declared_tool`](Self::claim_declared_tool)
+    /// granted, taking the tool off the runtime when the last holder goes.
     ///
     /// Only the owning root can release, so one workspace's drop cannot free a
     /// name another still serves. The unregister is what makes the claim map
@@ -547,20 +543,16 @@ impl Runtime {
     /// entry-behind-it. Before mentra's unregister was public a claim had to be
     /// remembered with `holders: 0` forever, and every dropped workspace left a
     /// tool on a registry a host keeps for its whole process.
-    pub(crate) fn release_workspace_tool(&self, name: &str, root: &Path) {
-        self.release_workspace_tool_claim(name, root, WorkspaceToolRelease::Registered);
-    }
-
-    /// Releases a claim that never reached Mentra's registry.
-    pub(crate) fn abandon_workspace_tool_claim(&self, name: &str, root: &Path) {
-        self.release_workspace_tool_claim(name, root, WorkspaceToolRelease::ClaimOnly);
-    }
-
-    fn release_workspace_tool_claim(&self, name: &str, root: &Path, release: WorkspaceToolRelease) {
+    pub(crate) fn release_declared_tool(
+        &self,
+        name: &str,
+        root: &Path,
+        origin: DeclaredToolOrigin,
+    ) {
         let mut claims = self
-            .workspace_tool_claims
+            .declared_claims
             .lock()
-            .expect("workspace tool claim map poisoned");
+            .expect("declared tool claim map poisoned");
 
         let Some(claim) = claims.get_mut(name) else {
             return;
@@ -570,13 +562,14 @@ impl Runtime {
         }
 
         claim.holders = claim.holders.saturating_sub(1);
+        if matches!(origin, DeclaredToolOrigin::Supplied) {
+            claim.supplied_holders = claim.supplied_holders.saturating_sub(1);
+        }
         if claim.holders == 0 {
             claims.remove(name);
-            if matches!(release, WorkspaceToolRelease::Registered) {
-                // Under the claim lock, so no other claimant can see the name
-                // free while the tool is still registered.
-                self.mentra.unregister_tool(name);
-            }
+            // Under the claim lock, so no other claimant can see the name free
+            // while the tool is still registered.
+            self.mentra.unregister_tool(name);
         }
     }
 
@@ -643,17 +636,17 @@ impl Runtime {
         }
     }
 
-    /// Every workspace-scoped tool name on this runtime that belongs to some
-    /// *other* workspace still open.
+    /// Every declared tool name on this runtime that belongs to some *other*
+    /// workspace still open.
     ///
     /// What a mint hides, for the reason it hides another workspace's `mcp__*`
     /// tools: the registry is the runtime's and single, but a tool declared by
     /// a repository is that repository's, and offering it to a run in a
-    /// different one would run a capability that workspace never asked for.
-    pub(crate) fn foreign_workspace_tools(&self, root: &Path) -> Vec<String> {
-        self.workspace_tool_claims
+    /// different one would run a program that workspace never asked for.
+    pub(crate) fn foreign_declared_tools(&self, root: &Path) -> Vec<String> {
+        self.declared_claims
             .lock()
-            .expect("workspace tool claim map poisoned")
+            .expect("declared tool claim map poisoned")
             .iter()
             .filter(|(_, claim)| claim.root != root)
             .map(|(name, _)| name.clone())
