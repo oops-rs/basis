@@ -152,8 +152,9 @@ workspace in hand.
 
 A strict embedding host can turn Basis's conventions into explicit inputs instead of
 depending on ambient repository or home files
-([ADR-0024](adr/0024-host-defined-runtime-contracts.md)). Basis 0.8 uses Mentra 0.23.3. For an
-ordinary one-shot private runtime, the builder accepts a provider-core implementation directly;
+([ADR-0024](adr/0024-host-defined-runtime-contracts.md)). The contract introduced in Basis 0.8;
+the current 0.11 workspace uses Mentra 0.25. For an ordinary one-shot private runtime, the builder
+accepts a provider-core implementation directly;
 a retained concrete Responses provider clone shares the registered session used for connection
 prewarm. `ToolResultPolicy::unlimited()` separately pins unlimited bytes and physical lines with no
 spill:
@@ -338,6 +339,64 @@ and `Workspace::config_files()` report what took effect and which file said so.
 There is no `api_key` key and there will not be one: a credential belongs to
 the environment, which is the same ruling the rest of the surface makes.
 [conventions.md](conventions.md) has the keys.
+
+## Programmatic hooks and workspace tools
+
+Hooks and declared subprocess tools can arrive as final typed values rather than through a file.
+The two configs retain the file locations too, so a host can combine or replace sources without a
+second discovery mechanism:
+
+```rust
+let hooks = basis::HooksConfig::default().with_supplied(vec![
+    basis::HookSpec::new("host-guard", vec!["/opt/acme/guard".to_string()]),
+]);
+
+let tools = basis::ToolsConfig::default().with_supplied(vec![
+    basis::tools::declared::DeclaredToolSpec {
+        name: "release_status".to_string(),
+        description: "Read the release service's current status.".to_string(),
+        input_schema: serde_json::json!({"type": "object"}),
+        command: vec!["/opt/acme/release-status".to_string()],
+        cwd: None,
+        env: vec![("SERVICE_TOKEN".to_string(), service_token)],
+        timeout_ms: None,
+        side_effect: basis::tools::declared::SideEffect::External,
+    },
+]);
+
+let workspace = basis::Workspace::builder("/repo")
+    .with_hooks(hooks)
+    .with_tools(tools)
+    .with_host_tool(ReleaseClientTool::new(client))
+    .open()
+    .await?;
+```
+
+The precedence rules differ because the contracts differ. A hook is a participant, so all
+same-name entries survive: runtime interceptors speak first, then supplied `HookSpec`s, global-file
+hooks, and workspace-file hooks. A declared name is an identity, so the first occurrence wins:
+supplied `DeclaredToolSpec`s, then the workspace manifest, then the global manifest, preserving
+source order. Supplied values are already final. Basis validates the same name/schema/command rules
+as file declarations but does not invent a path, label them as context files, or apply `${VAR}`
+expansion to their command, cwd, or environment. Config and builder `Debug` outputs report supplied
+counts rather than arguments or environment values.
+
+`without_discovery()` skips all hook/tool file probes and parsing while retaining both supplied
+lists, just as it retains supplied MCP servers. This is the strict-host path for typed inputs, not a
+different precedence ladder.
+
+`WorkspaceBuilder::with_host_tool` is the native counterpart to a supplied declared subprocess.
+It takes the existing `ExecutableTool` contract directly, claims the public name for this canonical
+workspace on the runtime's shared ledger, and unregisters/releases it when the workspace drops.
+The owner is offered the tool; sibling workspaces borrowing the same runtime have it hidden from
+their model roster and from delegated child rosters. A same-name runtime, declared, or sibling tool
+is refused, never suffixed. `RuntimeBuilder::with_tool` remains the process-wide form for a native
+tool every workspace should see.
+
+Reusable private-runtime recipes deliberately keep their complete-set protocol: use consuming
+`Workspace::bind_host_tools`, not incremental `with_host_tool`. Both routes use the same private
+validate-all → claim-all → register-all holder, and any failure rolls back every claim and
+registration before returning.
 
 ## What the host says on top of the workspace
 
@@ -706,8 +765,8 @@ let workspace = basis::Workspace::builder("/repo")
 
 Both bindings speak the same vocabulary and are folded by the same chain, so allow, deny,
 and modify mean one thing whichever side said it. They are consulted interceptors first in
-registration order, then global hooks, then workspace hooks — the further a participant is
-from the workspace's own data, the earlier it speaks — and since the first refusal
+registration order, then supplied hooks, global hooks, and workspace hooks — the further a
+participant is from the workspace's own data, the earlier it speaks — and since the first refusal
 short-circuits, that is what lets your own guard refuse before a repository's program is
 spawned at all. A participant that errors or panics **denies**. The trait is `async`, and
 `basis::async_trait` is the attribute to spell it with — re-exported, so implementing a

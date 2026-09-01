@@ -58,8 +58,9 @@ exported — is spoken to with no `Authorization` header at all; one that wanted
 ## The SDK
 
 **A workspace opens once and mints runs.** Opening settles everything that belongs to the repository
-rather than to the prompt — context documents, the resolved model, skills, templates, hooks, MCP
-connections — so `prepare` is *synchronous*, and a twenty-way fan-out reads `AGENTS.md` once
+rather than to the prompt — context documents, the resolved model, skills, templates, hooks,
+declared and workspace-native tools, MCP connections — so `prepare` is *synchronous*, and a
+twenty-way fan-out reads `AGENTS.md` once
 ([ADR-0010](docs/adr/0010-the-crate-is-the-workflow-surface.md)). `Workspace` is `Send + Sync`, so
 those runs can be spawned tasks.
 
@@ -69,6 +70,15 @@ run's `Approver` — is a `Runtime` ([ADR-0018](docs/adr/0018-the-runtime-owns-t
 `Workspace::open("/repo")` builds a private one bound to that repository and is unchanged by
 the split; a host opening N of them builds `Runtime::builder().build()?` once and hands each
 workspace an `Arc` of it, so N repositories cost one provider resolution and one history store.
+
+**Programmatic inputs stay programmatic.** `HooksConfig::with_supplied` and
+`ToolsConfig::with_supplied` put typed values above the global/workspace files without inventing a
+path or re-expanding their contents. They remain active under `without_discovery`, which skips the
+files entirely. Hooks compose in host-supplied → global → workspace order (after runtime
+interceptors); tools shadow by name in supplied → workspace → global order. A native Rust tool that
+belongs to one repository goes on `WorkspaceBuilder::with_host_tool`; its name is claimed on the
+shared runtime, hidden from sibling workspaces and unregistered when its owner drops. Process-wide
+tools still belong on `RuntimeBuilder::with_tool`.
 
 **A strict host can rebuild a private runtime between checkouts.** Basis 0.11 uses Mentra 0.25.0
 for the consume/rebuild path from ADR-0024. The provider is a repeatable factory plus an async warm
@@ -223,10 +233,10 @@ you just minted, or a regex that lives in a config struct. `intercept(&HookReque
 impl costs your manifest nothing.
 
 Both bindings speak the same allow/deny/modify vocabulary and are folded by one chain: interceptors
-first (registration order), then global hooks, then workspace hooks — the further a participant is
-from the workspace's own data, the earlier it speaks. First refusal wins, so your compiled guard can
-refuse before a repository's program is spawned at all, and a participant that errors or panics
-**denies**.
+first (registration order), then supplied hooks, global hooks, and workspace hooks — the further a
+participant is from the workspace's own data, the earlier it speaks. First refusal wins, so your
+compiled guard can refuse before a repository's program is spawned at all, and a participant that
+errors or panics **denies**.
 
 Both are asked again *after* a call — `review(&HookRequest)` in process, `"event":
 "post_tool_use"` in the file — because whether a command printed a credential is not knowable
@@ -265,17 +275,17 @@ config — never through code in `basis`:
   chose. A flag still wins; the file still beats the environment. `base_url` is honored only from
   your own global file, and a workspace file that sets it is refused by name: a file a repository
   ships must not be able to point the model's traffic — and the key on it — somewhere you did not.
-- **Declared tools** — `.basis/tools.json`: a name, a description, a JSON schema and an argv array,
-  and the model gets a tool that pipes its input to that program's stdin and reads stdout back. No
-  shell anywhere on the path, so nothing has to be quoted or encoded around quoting. Every one is
-  consequential — the format cannot say "read-only" — and the approver is shown the command, not
-  just the name.
+- **Declared tools** — a typed `DeclaredToolSpec` or `.basis/tools.json`: a name, a description, a
+  JSON schema and an argv array, and the model gets a tool that pipes its input to that program's
+  stdin and reads stdout back. No shell anywhere on the path, so nothing has to be quoted or encoded
+  around quoting. Every one is consequential — the format cannot say "read-only" — and the approver
+  is shown the command, not just the name.
 - **MCP servers** — `.mcp.json`, the same shape other agents read, with `${VAR}` expansion. An ACP
   client can send servers on `session/new`; both sets are honored.
-- **Hooks** — `.basis/hooks.json`: commands that take JSON on stdin and answer `allow`, `deny` with a
-  reason the model sees, or `modify` with a replacement input. An entry that says `"event":
-  "post_tool_use"` is asked after the call instead, is shown what the tool returned, and may
-  `replace` it. Any language; one that breaks denies.
+- **Hooks** — typed `HookSpec`s or `.basis/hooks.json`: commands that take JSON on stdin and answer
+  `allow`, `deny` with a reason the model sees, or `modify` with a replacement input. An entry that
+  says `"event": "post_tool_use"` is asked after the call instead, is shown what the tool returned,
+  and may `replace` it. Any language; one that breaks denies.
 - **Memories** — `.md` files with `name`/`description`/`type` frontmatter, indexed into the system
   prompt at open: name, one line, path — the body stays on disk for the model to `read` when the
   description warrants it. Two roots: `memory/` in the global config directory, and `memory/` beside
@@ -487,7 +497,8 @@ proper — and since 0.7, conversations as plain files, a child a delegating par
 `basis-tasks` for a Rust host that wants durable handles; since 0.8, a lossless in-process event tap
 and strict private-runtime consume/rebuild for host-defined checkouts; and now `basis-host`, with
 the shared approval policy, served-session source, workspace pool, and turn/cancellation discipline
-that a third frontend otherwise had to recover from ACP. Named honestly, still open:
+that a third frontend otherwise had to recover from ACP, plus typed supplied hook/tool lists and
+workspace-scoped native tools for programmatic hosts. Named honestly, still open:
 the packages convention and provider OAuth; surfacing `team_*`, which stays hidden until a concrete
 use case asks for it; and **nobody has driven this from Zed or JetBrains yet** — it is verified against the
 protocol and its official client library, not against the ecosystem. The five workspace crates

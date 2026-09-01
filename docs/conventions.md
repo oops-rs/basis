@@ -24,8 +24,8 @@ configuration would be hiding it from the person who put it there.
 | Model choice | `.basis/config.json` | `config.json` | workspace over global, key by key |
 | Skills | `.basis/skills/`, `.agents/skills/` | `<config dir>/skills/`, `$HOME/.agents/skills/` | all four layer, most specific first; a nearer root shadows a *name*; each disables independently on `SkillsConfig` |
 | Prompt templates | `.basis/templates/*.md` | `<config dir>/templates/*.md` | workspace shadows global by name |
-| Declared tools | `.basis/tools.json` | `tools.json` | workspace shadows global by tool name |
-| Subprocess hooks | `.basis/hooks.json` | `hooks.json` | both run, global first; the first refusal wins; each entry names its event |
+| Declared tools | `.basis/tools.json` | `tools.json` | host-supplied → workspace → global by tool name |
+| Subprocess hooks | `.basis/hooks.json` | `hooks.json` | runtime interceptors → host-supplied → global → workspace; all matching entries run until the first refusal |
 | MCP servers | `.mcp.json` | `mcp.json` | client-supplied → workspace → global, by server name |
 | Memories | `memory/` beside the runtime's store dir | `<config dir>/memory/` | workspace shadows global by memory name |
 
@@ -156,6 +156,12 @@ The program is exec'd directly — no shell — with the tool's JSON input on
 stdin. `side_effect` is `process` (default) or `external`; there is no
 read-only value, so every declared tool reaches the approver.
 
+An embedding host may put final typed declarations in
+`ToolsConfig::with_supplied`. They outrank file declarations by name and are
+validated by the same rules, but are not `${VAR}`-expanded and are not reported
+as files. `without_discovery()` retains this list while reading neither tool
+manifest.
+
 `input_schema` is checked against each call before the approver is asked and
 before the program starts: a missing `required` field, a wrong scalar type, a
 value outside an `enum`, or a property the schema never named when it sets
@@ -177,6 +183,10 @@ stdin.
   ]
 }
 ```
+
+An embedding host may put typed entries in `HooksConfig::with_supplied`. They
+run before global and workspace file hooks; same-name entries do not shadow,
+because hooks compose. Runtime interceptors still speak first.
 
 `name` and `command` are required; `tools` absent means every tool, `event` is
 `pre_tool_use` (the default) or `post_tool_use`, `timeout_ms` defaults to five

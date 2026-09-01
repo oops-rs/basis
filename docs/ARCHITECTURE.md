@@ -29,7 +29,9 @@
 > deleted, and a delegated run's spend is finally in its parent's tally. The
 > adapter-neutral approval policy, served-session source, runtime/workspace
 > pool, and turn discipline have since moved out of ACP into `basis-host`, with
-> ACP retaining only protocol translation (ADR-0025). The ledger and phases are
+> ACP retaining only protocol translation (ADR-0025). Programmatic hosts can
+> now supply typed hooks and declared tools without file discovery, and can
+> scope native tools to one workspace on a shared runtime. The ledger and phases are
 > in [`REDESIGN.md`](REDESIGN.md).
 > Reference bar: [pi](https://github.com/earendil-works/pi) (earendil-works) — minimal core, complete harness.
 > General-purpose: no domain assumptions. Periodic bug-checking is one use case, never a design input.
@@ -67,7 +69,7 @@ hot-reloadable extensions. Two pi decisions independently validate ours:
 | Context files (AGENTS.md) | Loader: workspace + global, parent-dir walk; `CLAUDE.md` per directory where there is no `AGENTS.md` | build |
 | Skills (on-demand) | SKILL.md discovery, description-first loading, four roots — `.basis/skills` and `.agents/skills` in the workspace, `skills/` in the global config dir and `~/.agents/skills`; each root registered at open and handed back when the workspace drops, so a shared runtime holds only the skills of the repositories still open ✅ | build |
 | Prompt templates (/commands) | Markdown templates with args, exposed over ACP as commands ✅ | built |
-| Extensions (custom tools, event interception) | MCP servers + declared subprocess tools + interception with two bindings — in-process `Interceptor`, subprocess hooks — before a call (allow/deny/modify) and after it (keep/replace) (§3) ✅ | built |
+| Extensions (custom tools, event interception) | MCP servers + typed/file-declared subprocess tools + runtime- or workspace-scoped native tools + interception with two bindings — in-process `Interceptor`, subprocess hooks — before a call (allow/deny/modify) and after it (keep/replace) (§3) ✅ | built |
 | Packages (shareable bundles) | Directory convention over skills/templates/hooks/MCP — defer | later |
 | RPC / headless mode | `spawn --json` event stream (`run` is a compatibility alias) + **ACP** (standard, not bespoke) ✅; durable task control over a global data directory, with no resident process of any kind ✅; the model and the reasoning effort are per-session config options a client sets over the protocol, where pi spends six RPC commands ✅ | built |
 | SDK | `basis`: a `Workspace` opened once, runs minted from it with typed output, bounds, cancellation ✅ — other languages use ACP | built |
@@ -176,18 +178,18 @@ Rust binary. Equivalent coverage, Rust-native:
 
 | pi extension capability | basis mechanism |
 |---|---|
-| Custom tools for the LLM | **One contract, three bindings** (ADR-0012): a tool a host registers in Rust, a command a workspace declares in `.basis/tools.json`, and an **MCP server** (`rmcp`) — all arriving as the same `ExecutableTool`; any language, process-isolated |
+| Custom tools for the LLM | **One contract, three bindings** (ADR-0012): a native Rust tool (process-wide on `RuntimeBuilder`, or scoped on `WorkspaceBuilder`), a command declared by typed input or `.basis/tools.json`, and an **MCP server** (`rmcp`) — all arriving as the same `ExecutableTool`; any language, process-isolated |
 | Event interception (block/modify tool calls) | **One contract, two bindings** (ADR-0012): an in-process `Interceptor` a host implements, and subprocess hooks a workspace declares — same request, same allow/deny/modify vocabulary, one chain |
 | Custom commands | Prompt templates, surfaced as ACP commands |
 | Custom UI | ACP client's job (permission requests, input prompts are protocol messages) |
 | In-process extension with full API access | The `basis` crate: the harness is a library first, binary second |
 
-Tools are not a subsystem parallel to MCP either. A **declared tool** is an entry in
-`.basis/tools.json` — a name, a description, an input JSON schema, and an argv array — that
+Tools are not a subsystem parallel to MCP either. A **declared tool** is a typed
+`DeclaredToolSpec` or an entry in `.basis/tools.json` — a name, a description, an input JSON schema,
+and an argv array — that
 basis wraps as an `ExecutableTool`: the model fills in the schema, basis writes that object
-to the program's stdin, and stdout comes back as the tool's result. The manifest layers the
-way the other conventions do (the workspace's file, then the global one, most specific
-winning) and expands `${VAR}` the way `.mcp.json` does, so a credential rides in `env`
+to the program's stdin, and stdout comes back as the tool's result. Typed host values are final;
+file declarations expand `${VAR}` the way `.mcp.json` does, so a credential rides in `env`
 rather than in a committed file. The program's environment is three layers, each
 overriding the last: basis's baseline (the program is spawned through mentra 0.24's
 `BoundedCommand`, which clears the environment, and basis passes back only what makes a
@@ -196,6 +198,15 @@ reason in `basis/src/subprocess.rs`), the runtime's fixed command environment fr
 `with_command_environment`, and the manifest's own `env`, which wins because it is the
 tool's own statement. Nothing else the basis process holds reaches the program. Not behind
 the `mcp` feature: custom tools were never MCP's to own.
+
+Declared names layer supplied → workspace file → global file, first occurrence winning and source
+order preserved. `without_discovery` skips both files while retaining the typed supplied list. A
+native `WorkspaceBuilder::with_host_tool` uses the same runtime ownership ledger as declared tools:
+the owner sees it, sibling and delegated-child rosters hide it, and drop unregisters it. The
+process-wide native form remains `RuntimeBuilder::with_tool`. Native values cannot be compared for
+implementation equality, so a live same-name claim is refused even under the same root; the older
+declared-tool same-root holder rule remains because repeated opens of one manifest share one
+registration.
 
 Three things about it are deliberate, and each answers a way the binding could have been
 unsafe rather than merely inconvenient. **The format cannot say "read-only"** — the only
@@ -216,8 +227,8 @@ hook basis registers with mentra dispatches each call to the calling workspace's
 `HookRunner`, keyed by the agent's base directory, since a shared runtime is built before
 any workspace opens (ADR-0018). The ordering and the short-circuit are therefore basis's
 rather than the runtime's. Participants speak in-process interceptors first (registration
-order), then global hooks, then workspace hooks, on the rule that **the further a
-participant is from the workspace's own data, the earlier it speaks**: a host's compiled
+order), then typed supplied hooks, global hooks, then workspace hooks, on the rule that **the
+further a participant is from the workspace's own data, the earlier it speaks**: a host's compiled
 guard can then refuse before a program that arrived with a five-minute-old clone is spawned
 at all. Anything that cannot answer denies.
 
@@ -324,7 +335,8 @@ flowchart LR
   becoming a server (ADR-0017).
 - **A workspace is opened once and mints runs** (ADR-0010). Everything that belongs to a
   repository rather than to a prompt — context documents, the resolved model, skills,
-  templates, hooks, declared tools, MCP connections — is settled by `Workspace::open`, and `prepare` mints
+  templates, hooks, declared and workspace-native tools, MCP connections — is settled by
+  `Workspace::open`, and `prepare` mints
   a run from it *synchronously*, because nothing is left to await. A twenty-way fan-out
   therefore reads `AGENTS.md` once. What a run carries of its own is the honestly per-run
   half: the prompt, the session name, the effort, and the bounds. The free functions
@@ -340,10 +352,12 @@ flowchart LR
   meets the noun. What stays per workspace is what a repository says: hooks, `ShellAccess`,
   the `.git` carve-out — enforced on a shared runtime by the single dispatch hook basis
   registers, since mentra fixes hooks at build time and workspaces arrive later — its
-  declared tools, its skills roots, and its MCP connections. The last three are minted from
-  its own config and die with it while the registries underneath are the runtime's, so each is
-  claimed at open and released at drop. Declared tools and bridged MCP tools are claimed by
-  name and hidden from every other workspace's roster; skills roots are counted rather than
+  declared tools, workspace-native host tools, skills roots, and MCP connections. These
+  workspace-owned registrations are minted from its own config and die with it while the registries
+  underneath are the runtime's, so each is claimed at open and released at drop. Declared and
+  native workspace tools share one public-name ledger and are hidden from every other workspace's
+  model and delegated-child roster; bridged MCP tools are hidden by their server ownership; skills
+  roots are counted rather than
   owned, because two repositories legitimately register the same user-scoped root and the
   first to close must not take it from the second. Skills are the one thing that *does* travel
   between workspaces on a shared runtime — a run can `load_skill` a sibling's skill while the
@@ -358,8 +372,10 @@ flowchart LR
   fresh-only, a resolved model whose provider matches the recipe, and an exact
   `ToolRoster::only` roster. Each opened or rebuilt generation starts unbound, and the consuming
   `Workspace::bind_host_tools` supplies the set the host declares complete before that checkout's
-  one independent mint. Basis validates supplied names and collisions, not completeness or roster
-  correspondence; a failed consuming bind returns no entry. The async consuming
+  one independent mint. The same private holder as ordinary workspace-native tools validates all,
+  claims all, then registers all; a failed consuming bind rolls back both registries and returns no
+  entry. Basis validates supplied names and collisions, not completeness or roster correspondence.
+  The async consuming
   `Workspace::rebuild_for_reuse` seals the generation, drops workspace registrations and the
   uniquely owned old runtime before invoking the provider factory and host warm step, and returns
   that replacement unbound. Basis enforces provider identity and call order. A Responses host must
@@ -451,8 +467,9 @@ flowchart LR
   not a general posture: `.mcp.json`'s `${VAR}` expansion does hand the named variables to
   a program the repository declared, which is what that key is for. An operator opening a
   repository they have not read has two honest moves. Build the workspace with
-  `WorkspaceBuilder::without_discovery()` — which probes none of these files, and is an
-  embedding host's knob; the CLI carries no flag for it — or run the whole process under
+  `WorkspaceBuilder::without_discovery()` — which probes none of these files while still applying
+  typed supplied hooks, tools, and MCP servers, and is an embedding host's knob; the CLI carries no
+  flag for it — or run the whole process under
   one of the OS patterns in [`containerization.md`](containerization.md).
 
 ## 5. Research notes (2026-08-08)
