@@ -37,6 +37,7 @@ fn denying_entry(root: &Path, reason: &'static str) -> WorkspaceGuardEntry {
             HookRunner::new(root, Vec::new())
                 .with_interceptor(Answers("workspace", HookOutcome::Deny(reason.to_string()))),
         ),
+        hooks: Vec::new(),
         shell: ShellAccess::Granted,
         root: canonical(root),
         foreign_tools: Default::default(),
@@ -47,6 +48,7 @@ fn denying_entry(root: &Path, reason: &'static str) -> WorkspaceGuardEntry {
 fn permissive_entry(root: &Path, shell: ShellAccess) -> WorkspaceGuardEntry {
     WorkspaceGuardEntry {
         runner: Arc::new(HookRunner::new(root, Vec::new())),
+        hooks: Vec::new(),
         shell,
         root: canonical(root),
         foreign_tools: Default::default(),
@@ -59,6 +61,10 @@ async fn decide(dispatch: &HookDispatch, context: &PreExecutionContext) -> HookD
         .pre_tool_execution(context)
         .await
         .expect("the dispatcher never errors")
+}
+
+fn registered(dispatch: &Arc<HookDispatch>, entry: WorkspaceGuardEntry) -> HookRegistration {
+    dispatch.register(entry).expect("the guard registers")
 }
 
 /// An interceptor that says nothing about a call and rewrites every result.
@@ -86,6 +92,7 @@ impl Interceptor for Rewrites {
 fn rewriting_entry(root: &Path, name: &'static str) -> WorkspaceGuardEntry {
     WorkspaceGuardEntry {
         runner: Arc::new(HookRunner::new(root, Vec::new()).with_interceptor(Rewrites(name))),
+        hooks: Vec::new(),
         shell: ShellAccess::Granted,
         root: canonical(root),
         foreign_tools: Default::default(),
@@ -124,8 +131,8 @@ async fn a_result_is_routed_by_the_same_key_the_call_was() {
     let mine = tempfile::tempdir().expect("tempdir");
     let theirs = tempfile::tempdir().expect("tempdir");
     let dispatch = Arc::new(HookDispatch::new(Vec::new()));
-    let _mine = dispatch.register(rewriting_entry(mine.path(), "mine"));
-    let _theirs = dispatch.register(rewriting_entry(theirs.path(), "theirs"));
+    let _mine = registered(&dispatch, rewriting_entry(mine.path(), "mine"));
+    let _theirs = registered(&dispatch, rewriting_entry(theirs.path(), "theirs"));
 
     assert_eq!(
         replaced(review(&dispatch, &finished(mine.path(), "secret")).await),
@@ -160,7 +167,10 @@ async fn an_unknown_directorys_result_still_reaches_the_host() {
 async fn a_workspace_with_nobody_to_ask_keeps_its_results() {
     let dir = tempfile::tempdir().expect("tempdir");
     let dispatch = Arc::new(HookDispatch::new(Vec::new()));
-    let _registration = dispatch.register(permissive_entry(dir.path(), ShellAccess::Granted));
+    let _registration = registered(
+        &dispatch,
+        permissive_entry(dir.path(), ShellAccess::Granted),
+    );
 
     assert_eq!(
         review(&dispatch, &finished(dir.path(), "untouched")).await,
@@ -175,7 +185,7 @@ async fn basis_own_guards_have_nothing_to_say_about_a_result() {
     // one is a bug in the other seam, not something to re-litigate here.
     let dir = tempfile::tempdir().expect("tempdir");
     let dispatch = Arc::new(HookDispatch::new(Vec::new()));
-    let _registration = dispatch.register(permissive_entry(dir.path(), ShellAccess::Denied));
+    let _registration = registered(&dispatch, permissive_entry(dir.path(), ShellAccess::Denied));
 
     assert_eq!(
         review(&dispatch, &finished(dir.path(), "output of a command")).await,
@@ -187,7 +197,7 @@ async fn basis_own_guards_have_nothing_to_say_about_a_result() {
 async fn a_registered_workspace_is_the_one_consulted() {
     let dir = tempfile::tempdir().expect("tempdir");
     let dispatch = Arc::new(HookDispatch::new(Vec::new()));
-    let _registration = dispatch.register(denying_entry(dir.path(), "mine"));
+    let _registration = registered(&dispatch, denying_entry(dir.path(), "mine"));
 
     let decision = decide(
         &dispatch,
@@ -233,7 +243,7 @@ async fn a_dropped_workspace_stops_being_consulted() {
     let dir = tempfile::tempdir().expect("tempdir");
     let dispatch = Arc::new(HookDispatch::new(Vec::new()));
 
-    let registration = dispatch.register(denying_entry(dir.path(), "mine"));
+    let registration = registered(&dispatch, denying_entry(dir.path(), "mine"));
     drop(registration);
 
     assert!(matches!(
@@ -243,21 +253,39 @@ async fn a_dropped_workspace_stops_being_consulted() {
 }
 
 #[tokio::test]
-async fn an_earlier_registrations_drop_does_not_evict_a_later_one() {
-    // Two live workspaces on one canonical root: the later registration wins
-    // while both live, and the earlier one's drop must remove only itself.
+async fn identical_same_root_holders_share_state_until_the_last_drop() {
     let dir = tempfile::tempdir().expect("tempdir");
     let dispatch = Arc::new(HookDispatch::new(Vec::new()));
 
-    let first = dispatch.register(denying_entry(dir.path(), "first"));
-    let _second = dispatch.register(denying_entry(dir.path(), "second"));
-    drop(first);
-
-    let decision = decide(&dispatch, &context(dir.path(), "files", json!({}))).await;
-    assert!(
-        matches!(&decision, HookDecision::Deny(reason) if reason.contains("second")),
-        "{decision:?}"
+    let first = registered(
+        &dispatch,
+        permissive_entry(dir.path(), ShellAccess::Granted),
     );
+    let second = registered(
+        &dispatch,
+        permissive_entry(dir.path(), ShellAccess::Granted),
+    );
+    let first_foreign = first.foreign_tools();
+    let second_foreign = second.foreign_tools();
+    assert!(Arc::ptr_eq(&first_foreign, &second_foreign));
+    first_foreign
+        .write()
+        .expect("foreign set")
+        .insert("sibling_tool".to_string());
+    assert_eq!(
+        dispatch.foreign_tools(dir.path()),
+        BTreeSet::from(["sibling_tool".to_string()])
+    );
+
+    drop(first);
+    assert_eq!(
+        dispatch.foreign_tools(dir.path()),
+        BTreeSet::from(["sibling_tool".to_string()]),
+        "one identical holder remains"
+    );
+
+    drop(second);
+    assert!(dispatch.foreign_tools(dir.path()).is_empty());
 }
 
 #[cfg(unix)]
@@ -272,7 +300,7 @@ async fn a_symlinked_spelling_reaches_the_same_workspace() {
     let dispatch = Arc::new(HookDispatch::new(Vec::new()));
     // Registered under one spelling, dispatched under the other: both
     // canonicalize to the target, so the workspace still answers.
-    let _registration = dispatch.register(denying_entry(&link, "mine"));
+    let _registration = registered(&dispatch, denying_entry(&link, "mine"));
 
     let decision = decide(&dispatch, &context(&real, "files", json!({}))).await;
     assert!(
@@ -285,7 +313,7 @@ async fn a_symlinked_spelling_reaches_the_same_workspace() {
 async fn a_shell_denied_workspace_loses_spawns_command_mode_and_keeps_the_rest() {
     let dir = tempfile::tempdir().expect("tempdir");
     let dispatch = Arc::new(HookDispatch::new(Vec::new()));
-    let _registration = dispatch.register(permissive_entry(dir.path(), ShellAccess::Denied));
+    let _registration = registered(&dispatch, permissive_entry(dir.path(), ShellAccess::Denied));
 
     let command = decide(
         &dispatch,
@@ -316,7 +344,10 @@ async fn a_shell_denied_workspace_loses_spawns_command_mode_and_keeps_the_rest()
     // Granted workspaces keep command mode: the guard is the posture's, not
     // the tool's.
     let granted = tempfile::tempdir().expect("tempdir");
-    let _second = dispatch.register(permissive_entry(granted.path(), ShellAccess::Granted));
+    let _second = registered(
+        &dispatch,
+        permissive_entry(granted.path(), ShellAccess::Granted),
+    );
     assert!(matches!(
         decide(
             &dispatch,
@@ -337,7 +368,7 @@ async fn a_shell_denied_workspace_refuses_a_targeted_command_too() {
     // that says so, because "no change needed" is a claim and not a fact.
     let dir = tempfile::tempdir().expect("tempdir");
     let dispatch = Arc::new(HookDispatch::new(Vec::new()));
-    let _registration = dispatch.register(permissive_entry(dir.path(), ShellAccess::Denied));
+    let _registration = registered(&dispatch, permissive_entry(dir.path(), ShellAccess::Denied));
 
     for input in [
         json!({"input": "!@mac ls"}),
@@ -353,7 +384,10 @@ async fn a_shell_denied_workspace_refuses_a_targeted_command_too() {
     // And a workspace that allows commands still allows a targeted one: the
     // guard is the posture's, not the routing's.
     let granted = tempfile::tempdir().expect("tempdir");
-    let _second = dispatch.register(permissive_entry(granted.path(), ShellAccess::Granted));
+    let _second = registered(
+        &dispatch,
+        permissive_entry(granted.path(), ShellAccess::Granted),
+    );
     assert!(matches!(
         decide(
             &dispatch,
@@ -369,7 +403,10 @@ async fn writes_into_the_protected_git_paths_are_refused() {
     let dir = tempfile::tempdir().expect("tempdir");
     std::fs::create_dir_all(dir.path().join(".git/hooks")).expect("hooks dir");
     let dispatch = Arc::new(HookDispatch::new(Vec::new()));
-    let _registration = dispatch.register(permissive_entry(dir.path(), ShellAccess::Granted));
+    let _registration = registered(
+        &dispatch,
+        permissive_entry(dir.path(), ShellAccess::Granted),
+    );
 
     // Every spelling of the same place, including the traversal that a naive
     // prefix check would miss — the policy version's own test cases, ported.
@@ -423,17 +460,21 @@ async fn a_broken_workspace_guard_fails_closed_through_the_dispatcher() {
 
     let dir = tempfile::tempdir().expect("tempdir");
     let dispatch = Arc::new(HookDispatch::new(Vec::new()));
-    let _registration = dispatch.register(WorkspaceGuardEntry {
-        runner: Arc::new(
-            HookRunner::new(dir.path(), Vec::new())
-                .with_reporter(|_| {})
-                .with_interceptor(Broken),
-        ),
-        shell: ShellAccess::Granted,
-        root: canonical(dir.path()),
-        foreign_tools: Default::default(),
-        shared: true,
-    });
+    let _registration = registered(
+        &dispatch,
+        WorkspaceGuardEntry {
+            runner: Arc::new(
+                HookRunner::new(dir.path(), Vec::new())
+                    .with_reporter(|_| {})
+                    .with_interceptor(Broken),
+            ),
+            hooks: Vec::new(),
+            shell: ShellAccess::Granted,
+            root: canonical(dir.path()),
+            foreign_tools: Default::default(),
+            shared: true,
+        },
+    );
 
     let decision = decide(&dispatch, &context(dir.path(), "files", json!({}))).await;
     assert!(
@@ -451,13 +492,17 @@ async fn a_private_runtimes_workspace_leaves_the_guards_to_its_policy() {
     let dir = tempfile::tempdir().expect("tempdir");
     std::fs::create_dir_all(dir.path().join(".git/hooks")).expect("hooks dir");
     let dispatch = Arc::new(HookDispatch::new(Vec::new()));
-    let _registration = dispatch.register(WorkspaceGuardEntry {
-        runner: Arc::new(HookRunner::new(dir.path(), Vec::new())),
-        shell: ShellAccess::Denied,
-        root: canonical(dir.path()),
-        foreign_tools: Default::default(),
-        shared: false,
-    });
+    let _registration = registered(
+        &dispatch,
+        WorkspaceGuardEntry {
+            runner: Arc::new(HookRunner::new(dir.path(), Vec::new())),
+            hooks: Vec::new(),
+            shell: ShellAccess::Denied,
+            root: canonical(dir.path()),
+            foreign_tools: Default::default(),
+            shared: false,
+        },
+    );
 
     for (tool, input) in [
         (SPAWN, json!({"input": "!ls"})),
@@ -501,7 +546,10 @@ async fn the_split_writers_reach_the_same_protected_git_paths() {
     let dir = tempfile::tempdir().expect("tempdir");
     std::fs::create_dir_all(dir.path().join(".git/hooks")).expect("hooks dir");
     let dispatch = Arc::new(HookDispatch::new(Vec::new()));
-    let _registration = dispatch.register(permissive_entry(dir.path(), ShellAccess::Granted));
+    let _registration = registered(
+        &dispatch,
+        permissive_entry(dir.path(), ShellAccess::Granted),
+    );
 
     let denied = [
         (
@@ -593,6 +641,7 @@ fn rewriting_input_entry(
         runner: Arc::new(
             HookRunner::new(root, Vec::new()).with_interceptor(RewritesInput("rewrite", input)),
         ),
+        hooks: Vec::new(),
         shell,
         root: canonical(root),
         foreign_tools: Default::default(),
@@ -605,11 +654,14 @@ async fn a_rewrite_into_the_protected_git_paths_is_refused() {
     let dir = tempfile::tempdir().expect("tempdir");
     std::fs::create_dir_all(dir.path().join(".git")).expect("git dir");
     let dispatch = Arc::new(HookDispatch::new(Vec::new()));
-    let _registration = dispatch.register(rewriting_input_entry(
-        dir.path(),
-        ShellAccess::Granted,
-        json!({"operations": [{"op": "set", "path": ".git/config", "content": "x"}]}),
-    ));
+    let _registration = registered(
+        &dispatch,
+        rewriting_input_entry(
+            dir.path(),
+            ShellAccess::Granted,
+            json!({"operations": [{"op": "set", "path": ".git/config", "content": "x"}]}),
+        ),
+    );
 
     // The model asked for something the guard has no quarrel with. Only the
     // input the tool would run on is protected, so only judging that catches it.
@@ -639,11 +691,14 @@ async fn a_rewrite_into_the_protected_git_paths_is_refused() {
 async fn a_rewrite_into_a_command_is_refused_when_commands_are_off() {
     let dir = tempfile::tempdir().expect("tempdir");
     let dispatch = Arc::new(HookDispatch::new(Vec::new()));
-    let _registration = dispatch.register(rewriting_input_entry(
-        dir.path(),
-        ShellAccess::Denied,
-        json!({"input": "!rm -rf /"}),
-    ));
+    let _registration = registered(
+        &dispatch,
+        rewriting_input_entry(
+            dir.path(),
+            ShellAccess::Denied,
+            json!({"input": "!rm -rf /"}),
+        ),
+    );
 
     let decision = decide(
         &dispatch,
@@ -662,11 +717,14 @@ async fn an_innocent_rewrite_still_reaches_the_tool() {
     // The guard judges the rewrite; it does not distrust rewriting.
     let dir = tempfile::tempdir().expect("tempdir");
     let dispatch = Arc::new(HookDispatch::new(Vec::new()));
-    let _registration = dispatch.register(rewriting_input_entry(
-        dir.path(),
-        ShellAccess::Denied,
-        json!({"operations": [{"op": "create", "path": "approved.txt", "content": "x"}]}),
-    ));
+    let _registration = registered(
+        &dispatch,
+        rewriting_input_entry(
+            dir.path(),
+            ShellAccess::Denied,
+            json!({"operations": [{"op": "create", "path": "approved.txt", "content": "x"}]}),
+        ),
+    );
 
     let decision = decide(
         &dispatch,

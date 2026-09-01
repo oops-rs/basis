@@ -396,7 +396,10 @@ impl Runtime {
     /// Joins a workspace to this runtime's hook dispatcher. The registration
     /// deregisters on drop, which is how a dropped workspace stops being
     /// consulted.
-    pub(crate) fn register_workspace(&self, entry: WorkspaceGuardEntry) -> HookRegistration {
+    pub(crate) fn register_workspace(
+        &self,
+        entry: WorkspaceGuardEntry,
+    ) -> Result<HookRegistration, RunError> {
         self.dispatch.register(entry)
     }
 

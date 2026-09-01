@@ -547,11 +547,13 @@ impl Workspace {
         );
         let hook_registration = runtime.register_workspace(dispatch::WorkspaceGuardEntry {
             runner: Arc::new(runner),
+            hooks: Vec::new(),
             shell,
             root: self.root.clone(),
             shared: false,
             foreign_tools: Arc::clone(&foreign_tools),
-        });
+        })?;
+        let foreign_tools = hook_registration.foreign_tools();
 
         #[cfg(feature = "mcp")]
         let mcp_connections = McpConnections::empty(Arc::clone(&runtime), &self.root);

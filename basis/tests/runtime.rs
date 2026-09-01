@@ -30,9 +30,9 @@ use std::{
 };
 
 use basis::{
-    CollectingSink, ContextConfig, MemoryConfig, RunOutcome, Runtime, Workspace, WorkspaceBuilder,
-    hooks::HooksConfig, skills::SkillsConfig, store, templates::TemplatesConfig,
-    tools::declared::ToolsConfig,
+    CollectingSink, ContextConfig, HookSpec, MemoryConfig, RunError, RunOutcome, Runtime,
+    Workspace, WorkspaceBuilder, hooks::HooksConfig, skills::SkillsConfig, store,
+    templates::TemplatesConfig, tools::declared::ToolsConfig,
 };
 use mentra::ModelSelector;
 use serde_json::json;
@@ -492,6 +492,65 @@ async fn a_workspaces_hooks_guard_its_runs_on_a_shared_runtime() {
     assert!(
         second.path().join("made.txt").exists(),
         "a sibling with no hooks must be untouched by the guarded one's"
+    );
+}
+
+#[cfg(unix)]
+#[tokio::test]
+async fn same_root_hooks_must_match_and_survive_until_the_last_holder() {
+    use std::os::unix::fs::PermissionsExt;
+
+    let endpoint = ScriptedEndpoint::start(vec![Reply::write_file("same-root.txt"), Reply::Text]);
+    let runtime = shared_runtime(&endpoint);
+    let root = workspace_dir();
+    let script = root.path().join("deny-same-root.sh");
+    std::fs::write(
+        &script,
+        "#!/bin/sh\necho '{\"decision\":\"deny\",\"reason\":\"first guard stays\"}'\n",
+    )
+    .expect("script");
+    std::fs::set_permissions(&script, std::fs::Permissions::from_mode(0o755)).expect("chmod");
+    let deny = HookSpec::new(
+        "same-root-guard",
+        vec![script.to_string_lossy().into_owned()],
+    );
+    let config = |supplied| HooksConfig {
+        workspace_file: PathBuf::from(".basis/hooks.json"),
+        global_dir: None,
+        supplied,
+    };
+
+    let first = pinned(root.path(), Arc::clone(&runtime))
+        .with_hooks(config(vec![deny.clone()]))
+        .open()
+        .await
+        .expect("the first guard registers");
+    let error = pinned(root.path(), Arc::clone(&runtime))
+        .with_hooks(config(vec![HookSpec::new(
+            "same-root-guard",
+            vec!["/bin/true".to_string()],
+        )]))
+        .open()
+        .await
+        .expect_err("a differing live guard cannot replace the first");
+    assert!(matches!(error, RunError::WorkspaceGuardConflict { .. }));
+
+    let identical = pinned(root.path(), runtime)
+        .with_hooks(config(vec![deny]))
+        .open()
+        .await
+        .expect("an identical same-root guard joins the existing registration");
+    drop(first);
+
+    identical
+        .prepare("write a file")
+        .expect("mints")
+        .execute(CollectingSink::default())
+        .await
+        .expect("a hook denial is an answer, not a run failure");
+    assert!(
+        !root.path().join("same-root.txt").exists(),
+        "the identical holder must keep the first supplied denial after one holder drops"
     );
 }
 

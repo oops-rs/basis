@@ -792,7 +792,7 @@ impl WorkspaceBuilder {
         // sit before file hooks, while only the registration point moved onto
         // the runtime's dispatcher.
         let runner = runtime.interceptors().iter().cloned().fold(
-            HookRunner::new(&path, loaded_hooks),
+            HookRunner::new(&path, loaded_hooks.clone()),
             |runner, interceptor| runner.with_interceptor(interceptor),
         );
         // Written by every mint, read by `spawn` when a child policy narrows a
@@ -802,6 +802,7 @@ impl WorkspaceBuilder {
         let foreign_tools = Arc::new(std::sync::RwLock::new(std::collections::BTreeSet::new()));
         let hook_registration = runtime.register_workspace(dispatch::WorkspaceGuardEntry {
             runner: Arc::new(runner),
+            hooks: loaded_hooks,
             shell: self.shell,
             root: path.clone(),
             // On a private runtime the shell posture and the `.git` carve-out
@@ -809,7 +810,8 @@ impl WorkspaceBuilder {
             // would change whose words a denial arrives in.
             shared,
             foreign_tools: Arc::clone(&foreign_tools),
-        });
+        })?;
+        let foreign_tools = hook_registration.foreign_tools();
 
         // Both lists reach the header whether or not this build has MCP in it:
         // what a run reports is a schema clients parse, and a field that
