@@ -80,10 +80,11 @@ impl DeclaredTools {
         for (path, spec) in &declared {
             // On failure `claimed` drops, releasing whatever it had taken, so a
             // refused open leaves the runtime as it found it.
-            let fresh = claimed
-                .runtime
-                .claim_declared_tool(&spec.name, root)
-                .map_err(|reason| name_taken(path.as_deref(), &spec.name, reason))?;
+            let fresh = match path {
+                Some(_) => claimed.runtime.claim_declared_tool(root, spec),
+                None => claimed.runtime.claim_supplied_declared_tool(root, spec),
+            }
+            .map_err(|reason| name_taken(path.as_deref(), &spec.name, reason))?;
             claimed.names.push(spec.name.clone());
             first_holder.push(fresh);
         }
@@ -525,5 +526,49 @@ mod tests {
                 .foreign_declared_tools(Path::new("/repo/one"))
                 .is_empty()
         );
+    }
+
+    #[test]
+    fn supplied_same_root_holders_must_match_command_and_environment() {
+        let first = DeclaredToolSpec {
+            command: vec!["./first".to_string()],
+            env: vec![("TOKEN".to_string(), "first-secret".to_string())],
+            ..spec("deploy")
+        };
+        for differing in [
+            DeclaredToolSpec {
+                command: vec!["./second".to_string()],
+                ..first.clone()
+            },
+            DeclaredToolSpec {
+                env: vec![("TOKEN".to_string(), "second-secret".to_string())],
+                ..first.clone()
+            },
+        ] {
+            let runtime = runtime();
+            let _held = DeclaredTools::register_with_supplied(
+                Arc::clone(&runtime),
+                Path::new("/repo"),
+                &[],
+                &[first.clone()],
+            )
+            .expect("the first supplied declaration registers");
+
+            let error = DeclaredTools::register_with_supplied(
+                runtime,
+                Path::new("/repo"),
+                &[],
+                &[differing],
+            )
+            .expect_err("a different supplied implementation cannot join the live name");
+
+            assert!(matches!(error, DeclaredToolError::SuppliedNameTaken { .. }));
+            let message = error.to_string();
+            assert!(message.contains("deploy"), "{message}");
+            assert!(message.contains("different configuration"), "{message}");
+            assert!(!message.contains("first-secret"), "{message}");
+            assert!(!message.contains("second-secret"), "{message}");
+            assert!(!message.contains(".basis/tools.json"), "{message}");
+        }
     }
 }

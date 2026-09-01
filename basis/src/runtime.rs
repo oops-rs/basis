@@ -45,6 +45,8 @@ use std::sync::{Arc, Mutex};
 
 use mentra::{ModelSelector, Session, agent::AgentConfig, runtime::SessionOptions};
 
+use crate::tools::declared::DeclaredToolSpec;
+
 pub use builder::RuntimeBuilder;
 pub use reuse::RuntimeRecipe;
 pub use tool_results::ToolResultPolicy;
@@ -257,6 +259,14 @@ fn skill_root_key(path: &Path) -> PathBuf {
 struct DeclaredClaim {
     root: PathBuf,
     holders: usize,
+    /// The complete resolved declaration the live registration executes.
+    /// Supplied same-root holders compare against it before joining.
+    spec: DeclaredToolSpec,
+}
+
+enum DeclaredClaimPosture {
+    File,
+    Supplied,
 }
 
 /// Hand-written because mentra's runtime is not `Debug`. No credential lives
@@ -465,7 +475,31 @@ impl Runtime {
     /// open is serving. One name is one program, so the second open of a
     /// repository joins the registration rather than replacing it under the
     /// first open's running agents.
-    pub(crate) fn claim_declared_tool(&self, name: &str, root: &Path) -> Result<bool, String> {
+    pub(crate) fn claim_declared_tool(
+        &self,
+        root: &Path,
+        spec: &DeclaredToolSpec,
+    ) -> Result<bool, String> {
+        self.claim_declared_tool_with(root, spec, DeclaredClaimPosture::File)
+    }
+
+    /// Claims a host-supplied declaration, refusing a same-root holder whose
+    /// complete resolved values differ from the live registration.
+    pub(crate) fn claim_supplied_declared_tool(
+        &self,
+        root: &Path,
+        spec: &DeclaredToolSpec,
+    ) -> Result<bool, String> {
+        self.claim_declared_tool_with(root, spec, DeclaredClaimPosture::Supplied)
+    }
+
+    fn claim_declared_tool_with(
+        &self,
+        root: &Path,
+        spec: &DeclaredToolSpec,
+        posture: DeclaredClaimPosture,
+    ) -> Result<bool, String> {
+        let name = &spec.name;
         let mut claims = self
             .declared_claims
             .lock()
@@ -476,6 +510,15 @@ impl Runtime {
                 "the workspace at {} is open on this runtime and declares a tool by that name",
                 claim.root.display()
             )),
+            Some(claim)
+                if matches!(posture, DeclaredClaimPosture::Supplied) && claim.spec != *spec =>
+            {
+                Err(
+                    "another live open of this workspace supplied different configuration under \
+                     that name"
+                        .to_string(),
+                )
+            }
             Some(claim) => {
                 claim.holders += 1;
                 Ok(false)
@@ -489,6 +532,7 @@ impl Runtime {
                     DeclaredClaim {
                         root: root.to_path_buf(),
                         holders: 1,
+                        spec: spec.clone(),
                     },
                 );
                 Ok(true)
