@@ -259,12 +259,14 @@ fn skill_root_key(path: &Path) -> PathBuf {
 struct DeclaredClaim {
     root: PathBuf,
     holders: usize,
+    supplied_holders: usize,
     /// The complete resolved declaration the live registration executes.
     /// Supplied same-root holders compare against it before joining.
     spec: DeclaredToolSpec,
 }
 
-enum DeclaredClaimPosture {
+#[derive(Debug, Clone, Copy)]
+pub(crate) enum DeclaredToolOrigin {
     File,
     Supplied,
 }
@@ -479,25 +481,7 @@ impl Runtime {
         &self,
         root: &Path,
         spec: &DeclaredToolSpec,
-    ) -> Result<bool, String> {
-        self.claim_declared_tool_with(root, spec, DeclaredClaimPosture::File)
-    }
-
-    /// Claims a host-supplied declaration, refusing a same-root holder whose
-    /// complete resolved values differ from the live registration.
-    pub(crate) fn claim_supplied_declared_tool(
-        &self,
-        root: &Path,
-        spec: &DeclaredToolSpec,
-    ) -> Result<bool, String> {
-        self.claim_declared_tool_with(root, spec, DeclaredClaimPosture::Supplied)
-    }
-
-    fn claim_declared_tool_with(
-        &self,
-        root: &Path,
-        spec: &DeclaredToolSpec,
-        posture: DeclaredClaimPosture,
+        origin: DeclaredToolOrigin,
     ) -> Result<bool, String> {
         let name = &spec.name;
         let mut claims = self
@@ -511,7 +495,9 @@ impl Runtime {
                 claim.root.display()
             )),
             Some(claim)
-                if matches!(posture, DeclaredClaimPosture::Supplied) && claim.spec != *spec =>
+                if claim.spec != *spec
+                    && (claim.supplied_holders > 0
+                        || matches!(origin, DeclaredToolOrigin::Supplied)) =>
             {
                 Err(
                     "another live open of this workspace supplied different configuration under \
@@ -521,6 +507,9 @@ impl Runtime {
             }
             Some(claim) => {
                 claim.holders += 1;
+                if matches!(origin, DeclaredToolOrigin::Supplied) {
+                    claim.supplied_holders += 1;
+                }
                 Ok(false)
             }
             None if self.registers_tool(name) => {
@@ -532,6 +521,10 @@ impl Runtime {
                     DeclaredClaim {
                         root: root.to_path_buf(),
                         holders: 1,
+                        supplied_holders: usize::from(matches!(
+                            origin,
+                            DeclaredToolOrigin::Supplied
+                        )),
                         spec: spec.clone(),
                     },
                 );
@@ -550,7 +543,12 @@ impl Runtime {
     /// entry-behind-it. Before mentra's unregister was public a claim had to be
     /// remembered with `holders: 0` forever, and every dropped workspace left a
     /// tool on a registry a host keeps for its whole process.
-    pub(crate) fn release_declared_tool(&self, name: &str, root: &Path) {
+    pub(crate) fn release_declared_tool(
+        &self,
+        name: &str,
+        root: &Path,
+        origin: DeclaredToolOrigin,
+    ) {
         let mut claims = self
             .declared_claims
             .lock()
@@ -564,6 +562,9 @@ impl Runtime {
         }
 
         claim.holders = claim.holders.saturating_sub(1);
+        if matches!(origin, DeclaredToolOrigin::Supplied) {
+            claim.supplied_holders = claim.supplied_holders.saturating_sub(1);
+        }
         if claim.holders == 0 {
             claims.remove(name);
             // Under the claim lock, so no other claimant can see the name free

@@ -17,7 +17,7 @@ use std::{
     sync::Arc,
 };
 
-use crate::runtime::Runtime;
+use crate::runtime::{DeclaredToolOrigin, Runtime};
 
 use super::{
     manifest::{DeclaredToolError, DeclaredToolSpec, ToolsSource, layer},
@@ -35,6 +35,8 @@ pub(crate) struct DeclaredTools {
     root: PathBuf,
     /// Claimed names, released on drop.
     names: Vec<String>,
+    /// The origin each claim must release beside its name.
+    origins: Vec<DeclaredToolOrigin>,
 }
 
 impl DeclaredTools {
@@ -74,18 +76,23 @@ impl DeclaredTools {
             runtime,
             root: root.to_path_buf(),
             names: Vec::new(),
+            origins: Vec::new(),
         };
         let mut first_holder = Vec::new();
 
         for (path, spec) in &declared {
             // On failure `claimed` drops, releasing whatever it had taken, so a
             // refused open leaves the runtime as it found it.
-            let fresh = match path {
-                Some(_) => claimed.runtime.claim_declared_tool(root, spec),
-                None => claimed.runtime.claim_supplied_declared_tool(root, spec),
-            }
-            .map_err(|reason| name_taken(path.as_deref(), &spec.name, reason))?;
+            let origin = match path {
+                Some(_) => DeclaredToolOrigin::File,
+                None => DeclaredToolOrigin::Supplied,
+            };
+            let fresh = claimed
+                .runtime
+                .claim_declared_tool(root, spec, origin)
+                .map_err(|reason| name_taken(path.as_deref(), &spec.name, reason))?;
             claimed.names.push(spec.name.clone());
+            claimed.origins.push(origin);
             first_holder.push(fresh);
         }
 
@@ -157,8 +164,9 @@ fn wrapped(runtime: &Runtime, spec: DeclaredToolSpec, root: &Path) -> DeclaredTo
 
 impl Drop for DeclaredTools {
     fn drop(&mut self) {
-        for name in self.names.drain(..) {
-            self.runtime.release_declared_tool(&name, &self.root);
+        for (name, origin) in self.names.drain(..).zip(self.origins.drain(..)) {
+            self.runtime
+                .release_declared_tool(&name, &self.root, origin);
         }
     }
 }
@@ -203,6 +211,14 @@ mod tests {
             path: PathBuf::from(path),
             scope: ContextScope::Workspace,
             tools: names.iter().map(|name| spec(name)).collect(),
+        }
+    }
+
+    fn source_with(path: &str, spec: DeclaredToolSpec) -> ToolsSource {
+        ToolsSource {
+            path: PathBuf::from(path),
+            scope: ContextScope::Workspace,
+            tools: vec![spec],
         }
     }
 
@@ -562,13 +578,74 @@ mod tests {
             )
             .expect_err("a different supplied implementation cannot join the live name");
 
-            assert!(matches!(error, DeclaredToolError::SuppliedNameTaken { .. }));
+            assert!(matches!(
+                &error,
+                DeclaredToolError::SuppliedNameTaken { .. }
+            ));
             let message = error.to_string();
             assert!(message.contains("deploy"), "{message}");
             assert!(message.contains("different configuration"), "{message}");
             assert!(!message.contains("first-secret"), "{message}");
             assert!(!message.contains("second-secret"), "{message}");
             assert!(!message.contains(".basis/tools.json"), "{message}");
+        }
+    }
+
+    #[test]
+    fn mixed_same_root_origins_refuse_mismatches_in_both_orders() {
+        let file = DeclaredToolSpec {
+            command: vec!["./from-file".to_string()],
+            env: vec![("TOKEN".to_string(), "file-secret".to_string())],
+            ..spec("deploy")
+        };
+        let supplied = DeclaredToolSpec {
+            command: vec!["./from-supplied".to_string()],
+            env: vec![("TOKEN".to_string(), "supplied-secret".to_string())],
+            ..spec("deploy")
+        };
+        let path = "/repo/.basis/tools.json";
+
+        {
+            let runtime = runtime();
+            let _file = DeclaredTools::register(
+                Arc::clone(&runtime),
+                Path::new("/repo"),
+                &[source_with(path, file.clone())],
+            )
+            .expect("the file declaration registers first");
+            let error = DeclaredTools::register_with_supplied(
+                runtime,
+                Path::new("/repo"),
+                &[],
+                std::slice::from_ref(&supplied),
+            )
+            .expect_err("a differing supplied declaration cannot join a live file claim");
+
+            assert!(matches!(error, DeclaredToolError::SuppliedNameTaken { .. }));
+            let message = error.to_string();
+            assert!(!message.contains(path), "{message}");
+            assert!(!message.contains("file-secret"), "{message}");
+            assert!(!message.contains("supplied-secret"), "{message}");
+        }
+
+        {
+            let runtime = runtime();
+            let _supplied = DeclaredTools::register_with_supplied(
+                Arc::clone(&runtime),
+                Path::new("/repo"),
+                &[],
+                std::slice::from_ref(&supplied),
+            )
+            .expect("the supplied declaration registers first");
+            let error =
+                DeclaredTools::register(runtime, Path::new("/repo"), &[source_with(path, file)])
+                    .expect_err("a differing file declaration cannot join a live supplied claim");
+
+            assert!(matches!(&error, DeclaredToolError::NameTaken { .. }));
+            let message = error.to_string();
+            assert!(message.contains(path), "{message}");
+            assert!(!message.contains("file-secret"), "{message}");
+            assert!(!message.contains("supplied-secret"), "{message}");
         }
     }
 }
