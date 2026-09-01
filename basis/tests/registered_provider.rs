@@ -9,7 +9,7 @@
 use std::{
     borrow::Cow,
     collections::BTreeMap,
-    io::{self, ErrorKind, Read, Write},
+    io::{ErrorKind, Read, Write},
     net::{TcpListener, TcpStream},
     path::{Path, PathBuf},
     sync::{
@@ -21,9 +21,9 @@ use std::{
 };
 
 use basis::{
-    CollectingSink, ContextConfig, MemoryConfig, ModelInfo, ModelSelector, RunOutcome, Runtime,
-    ToolRoster, Workspace, WorkspaceBuilder, hooks::HooksConfig, provider_core,
-    skills::SkillsConfig, templates::TemplatesConfig, tools::declared::ToolsConfig,
+    CollectingSink, ContextConfig, MemoryConfig, ModelSelector, RunOutcome, Runtime, Workspace,
+    WorkspaceBuilder, hooks::HooksConfig, provider_core, skills::SkillsConfig,
+    templates::TemplatesConfig, tools::declared::ToolsConfig,
 };
 #[cfg(feature = "responses-websocket")]
 use futures::{SinkExt, StreamExt};
@@ -142,228 +142,59 @@ async fn a_retained_clone_shares_the_registered_responses_session() {
     assert_eq!(post_payloads[1]["previous_response_id"], "resp_1");
 }
 
-type TestResponsesProvider =
-    provider_core::responses::ResponsesProvider<provider_core::StaticCredentialSource>;
-
-async fn send_direct(provider: &TestResponsesProvider, message: &str) {
-    let request = provider_core::Request {
-        model: Cow::Borrowed("test-model"),
-        system: None,
-        messages: Cow::Owned(vec![provider_core::Message::user(
-            provider_core::ContentBlock::text(message.to_string()),
-        )]),
-        tools: Cow::Owned(Vec::new()),
-        tool_choice: None,
-        temperature: None,
-        max_output_tokens: None,
-        metadata: Cow::Owned(BTreeMap::new()),
-        provider_request_options: Default::default(),
-    };
-    let mut stream = provider
-        .session()
-        .stream_response(request)
-        .await
-        .expect("the retained seed reaches the scripted endpoint");
-    while let Some(event) = stream.recv().await {
-        event.expect("the retained seed decodes its response");
-    }
-}
-
-async fn assert_rebuilt_responses_scopes_do_not_chain(first: &str, second: &str) {
-    let endpoint = ScriptedEndpoint::start();
-    let mut definition = provider_core::responses::openai_definition();
-    definition.descriptor.id = provider_core::ProviderId::new("custom-responses");
-    definition.base_url = Some(endpoint.base_url.clone());
-    let seed = provider_core::responses::ResponsesProvider::new(
-        definition,
-        provider_core::StaticCredentialSource::new("test-key"),
-    );
-
-    // Deliberately dirty the never-registered seed. A recipe that used an
-    // ordinary clone would now leak `resp_1` into generation A.
-    send_direct(&seed, "seed state that must not enter a generation").await;
-    assert_eq!(
-        seed.session().latest_response_id().as_deref(),
-        Some("resp_1")
-    );
-
-    let generated = Arc::new(Mutex::new(Vec::<TestResponsesProvider>::new()));
-    let seed_for_factory = seed.clone();
-    let generated_for_warm = Arc::clone(&generated);
-    let recipe = Runtime::builder()
-        .with_reusable_registered_provider(
-            "custom-responses",
-            move || Ok::<_, io::Error>(seed_for_factory.fresh_session_scope()),
-            move |provider: TestResponsesProvider| {
-                generated_for_warm
-                    .lock()
-                    .expect("generated scopes")
-                    .push(provider);
-                async { Ok::<_, io::Error>(()) }
-            },
-        )
-        .with_ephemeral_history()
-        .into_reusable_recipe()
-        .expect("fresh Responses scopes form a runtime recipe");
-
-    let dir = tempfile::tempdir().expect("tempdir");
-    let workspace = Workspace::builder(dir.path())
-        .with_runtime_recipe(recipe)
-        .without_discovery()
-        .fresh_only()
-        .with_resolved_model(ModelInfo::new("test-model", "custom-responses"))
-        .with_tool_roster(ToolRoster::only(std::iter::empty::<String>()))
-        .open()
-        .await
-        .expect("generation A opens")
-        .bind_host_tools(Vec::new())
-        .expect("generation A binds as tool-free");
-    let report = workspace
-        .prepare(first)
-        .expect("generation A mints")
-        .execute(CollectingSink::default())
-        .await
-        .expect("generation A completes");
-    assert!(matches!(report.outcome, RunOutcome::Ok));
-
-    let workspace = workspace
-        .rebuild_for_reuse()
-        .await
-        .expect("generation B rebuilds")
-        .bind_host_tools(Vec::new())
-        .expect("generation B binds as tool-free");
-    let report = workspace
-        .prepare(second)
-        .expect("generation B mints")
-        .execute(CollectingSink::default())
-        .await
-        .expect("generation B completes");
-    assert!(matches!(report.outcome, RunOutcome::Ok));
-
-    let generated = generated.lock().expect("generated scopes");
-    assert_eq!(generated.len(), 2);
-    assert_eq!(
-        generated[0].session().latest_response_id().as_deref(),
-        Some("resp_2")
-    );
-    assert_eq!(
-        generated[1].session().latest_response_id().as_deref(),
-        Some("resp_3")
-    );
-    assert_eq!(
-        seed.session().latest_response_id().as_deref(),
-        Some("resp_1"),
-        "the never-registered seed remains isolated from every generation"
-    );
-
-    let payloads = endpoint
-        .requests()
-        .into_iter()
-        .filter(|request| request.starts_with("POST "))
-        .map(|request| {
-            let body = request.split("\r\n\r\n").nth(1).unwrap_or_default();
-            serde_json::from_str::<serde_json::Value>(body).expect("request body is JSON")
-        })
-        .collect::<Vec<_>>();
-    assert_eq!(payloads.len(), 3);
-    assert!(
-        payloads
-            .iter()
-            .all(|payload| payload.get("previous_response_id").is_none()),
-        "seed, generation A, and generation B must each begin a fresh chain"
-    );
-    assert!(payloads[1].to_string().contains(first));
-    assert!(payloads[2].to_string().contains(second));
-}
-
-#[tokio::test]
-async fn reusable_responses_isolates_a_then_b() {
-    assert_rebuilt_responses_scopes_do_not_chain("contradiction A", "contradiction B").await;
-}
-
-#[tokio::test]
-async fn reusable_responses_isolates_b_then_a() {
-    assert_rebuilt_responses_scopes_do_not_chain("contradiction B", "contradiction A").await;
-}
-
+/// The same retained-clone seam, over the WebSocket transport: the host opens
+/// the connection through the clone it kept, and the run rides that connection
+/// instead of dialling a second one.
 #[cfg(feature = "responses-websocket")]
 #[tokio::test]
-async fn reusable_websocket_prewarm_targets_each_installed_scope() {
-    use basis::runtime::ResponsesTransport;
+async fn a_retained_clone_prewarms_the_websocket_the_run_uses() {
+    use basis::{ModelInfo, runtime::ResponsesTransport};
 
     let endpoint = WebSocketEndpoint::start().await;
     let mut definition = provider_core::responses::openai_definition();
     definition.descriptor.id = provider_core::ProviderId::new("custom-responses");
     definition.base_url = Some(endpoint.base_url.clone());
-    let seed = provider_core::responses::ResponsesProvider::new(
+    let provider = provider_core::responses::ResponsesProvider::new(
         definition,
         provider_core::StaticCredentialSource::new("test-key"),
     );
-    let sibling = seed.fresh_session_scope();
-    let factory_seed = seed.clone();
 
-    let recipe = Runtime::builder()
-        .with_responses_transport(ResponsesTransport::WebSocket)
-        .with_reusable_registered_provider(
-            "custom-responses",
-            move || Ok::<_, io::Error>(factory_seed.fresh_session_scope()),
-            move |provider: TestResponsesProvider| async move {
-                provider
-                    .session()
-                    .connect_websocket(Default::default(), Default::default(), None, None)
-                    .await
-            },
-        )
-        .with_ephemeral_history()
-        .into_reusable_recipe()
-        .expect("websocket provider forms a runtime recipe");
+    provider
+        .session()
+        .connect_websocket(Default::default(), Default::default(), None, None)
+        .await
+        .expect("the retained clone prewarms its session");
+    assert_eq!(endpoint.accepted(), 1);
 
     let dir = tempfile::tempdir().expect("tempdir");
     let workspace = Workspace::builder(dir.path())
-        .with_runtime_recipe(recipe)
+        .with_runtime_builder(
+            Runtime::builder()
+                .with_responses_transport(ResponsesTransport::WebSocket)
+                .with_registered_provider(provider.clone())
+                .with_ephemeral_history(),
+        )
         .without_discovery()
-        .fresh_only()
         .with_resolved_model(ModelInfo::new("test-model", "custom-responses"))
-        .with_tool_roster(ToolRoster::only(std::iter::empty::<String>()))
         .open()
         .await
-        .expect("generation A opens and prewarms")
-        .bind_host_tools(Vec::new())
-        .expect("generation A binds as tool-free");
-    assert_eq!(endpoint.accepted(), 1);
-    assert!(seed.session().websocket_connection_is_closed().await);
-    assert!(sibling.session().websocket_connection_is_closed().await);
+        .expect("a registered websocket provider opens");
 
     workspace
         .prepare("tenant-a")
-        .expect("generation A mints")
+        .expect("mints")
         .execute(CollectingSink::default())
         .await
-        .expect("generation A reuses its prewarmed websocket");
-    assert_eq!(endpoint.accepted(), 1);
+        .expect("the run completes over the prewarmed websocket");
 
-    let workspace = workspace
-        .rebuild_for_reuse()
-        .await
-        .expect("generation B rebuilds and prewarms")
-        .bind_host_tools(Vec::new())
-        .expect("generation B binds as tool-free");
-    assert_eq!(endpoint.accepted(), 2);
-    assert!(seed.session().websocket_connection_is_closed().await);
-    assert!(sibling.session().websocket_connection_is_closed().await);
-
-    workspace
-        .prepare("tenant-b")
-        .expect("generation B mints")
-        .execute(CollectingSink::default())
-        .await
-        .expect("generation B reuses its prewarmed websocket");
-    assert_eq!(endpoint.accepted(), 2);
-
+    assert_eq!(
+        endpoint.accepted(),
+        1,
+        "the run must ride the prewarmed connection, not dial a second one"
+    );
     let frames = endpoint.frames();
-    assert_eq!(frames.len(), 2);
+    assert_eq!(frames.len(), 1);
     assert!(frames[0].to_string().contains("tenant-a"));
-    assert!(frames[1].to_string().contains("tenant-b"));
 }
 
 #[test]

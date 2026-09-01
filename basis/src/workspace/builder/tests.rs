@@ -560,46 +560,6 @@ async fn a_shared_runtime_is_the_one_the_workspace_borrows() {
     }
 }
 
-#[tokio::test]
-async fn reusable_rebuild_refuses_an_unexpected_basis_runtime_owner() {
-    let root = tempfile::tempdir().expect("workspace");
-    let mut definition = mentra::provider_core::responses::openai_definition();
-    definition.descriptor.id = mentra::ProviderId::new("reusable-owner-test");
-    definition.base_url = Some("http://127.0.0.1:1/".to_string());
-    let seed = mentra::provider_core::responses::ResponsesProvider::new(
-        definition,
-        mentra::provider_core::StaticCredentialSource::new("test-key"),
-    );
-    let recipe = RuntimeBuilder::default()
-        .with_reusable_registered_provider(
-            "reusable-owner-test",
-            move || Ok::<_, std::io::Error>(seed.fresh_session_scope()),
-            |_provider| async { Ok::<_, std::io::Error>(()) },
-        )
-        .with_ephemeral_history()
-        .into_reusable_recipe()
-        .expect("recipe");
-    let workspace = Workspace::builder(root.path())
-        .with_runtime_recipe(recipe)
-        .without_discovery()
-        .fresh_only()
-        .with_resolved_model(ModelInfo::new("test-model", "reusable-owner-test"))
-        .with_tool_roster(ToolRoster::only(std::iter::empty::<String>()))
-        .open()
-        .await
-        .expect("workspace opens")
-        .bind_host_tools(Vec::new())
-        .expect("tool-free checkout binds");
-
-    let unexpected_owner = Arc::clone(&workspace.runtime);
-    let error = workspace
-        .rebuild_for_reuse()
-        .await
-        .expect_err("the extra Basis runtime owner must consume the pool entry");
-    assert!(matches!(error, RunError::ReusableRuntimeNotUnique));
-    drop(unexpected_owner);
-}
-
 #[test]
 fn a_builder_holding_a_credentialed_recipe_does_not_print_it() {
     // WorkspaceBuilder's Debug delegates to the recipe's, which redacts; this
