@@ -550,7 +550,7 @@ mod tests {
                 Arc::clone(&runtime),
                 Path::new("/repo"),
                 &[],
-                &[first.clone()],
+                std::slice::from_ref(&first),
             )
             .expect("the first supplied declaration registers");
 
