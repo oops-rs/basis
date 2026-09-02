@@ -395,6 +395,8 @@ impl Runtime {
     ) -> Result<Session, RunError> {
         let options = SessionOptions {
             config,
+            policy: None,
+            tool_audience: None,
             project_id: None,
             runtime_identifier: Some(Arc::from(persist_identifier)),
         };
