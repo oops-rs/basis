@@ -53,12 +53,14 @@ pub use tool_results::ToolResultPolicy;
 ///
 /// Re-exported for the reason [`CancellationToken`](crate::CancellationToken)
 /// is, and under the same rule: every mentra type basis's surface makes a
-/// caller *name*, basis re-exports. [`RuntimeBuilder::with_command_target`]
-/// asks for an `impl RuntimeExecutor`, so without these a host could not write
-/// one without adding mentra to its own manifest and pinning the same version —
-/// a skew there fails to compile with no hint that two crates disagree about
-/// one trait. The sibling of [`crate::tools`]'s tool-authoring re-exports, in
-/// the module that owns this seam.
+/// caller *name*, basis re-exports — so a host implementing
+/// [`RuntimeExecutor`] never adds mentra to its own manifest and pins the
+/// same version, a skew that would otherwise fail to compile with no hint
+/// two crates disagree about one trait. There is currently no public way to
+/// register an executor a command routes to (`docs/targets.md` has the
+/// dateline note); the trait and the types below it are unaffected. The
+/// sibling of [`crate::tools`]'s tool-authoring re-exports, in the module
+/// that owns this seam.
 ///
 /// The set is what an executor's `run` signature and body actually touch:
 /// [`RuntimeExecutor`] to implement, [`CommandRequest`] to read,

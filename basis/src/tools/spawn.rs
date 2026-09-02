@@ -15,10 +15,9 @@
 //! after that dispatches on the typed mode — which is why the sugar costs no
 //! type confusion between the approver, the rule store and the audit trail.
 //!
-//! A command may also say *where*: `!@<target> <command>` runs it on an
-//! executor the host registered by that name
-//! ([`RuntimeBuilder::with_command_target`](crate::RuntimeBuilder::with_command_target),
-//! ADR-0021). One more fact on the same act rather than a second tool, because
+//! A command may also say *where*: `!@<target> <command>` names an executor to
+//! run it on (ADR-0021) — though nothing currently registers one; see
+//! `docs/targets.md`. One more fact on the same act rather than a second tool, because
 //! a second tool would be a second name at the gate and a second rule
 //! namespace — the two doors ADR-0016 closed, rebuilt by hand. The prefix is
 //! read by the same parser, in the same pass, and the target it leaves behind

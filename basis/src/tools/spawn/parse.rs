@@ -26,11 +26,10 @@ pub const INPUT_FIELD: &str = "input";
 /// take (ADR-0021).
 ///
 /// One constant for two rules that would otherwise drift: the preview writes
-/// it when no target was named, and
-/// [`RuntimeBuilder::with_command_target`](crate::RuntimeBuilder::with_command_target)
-/// refuses it as a registration. Rejecting it *here* as well is what makes the
-/// wire spelling unambiguous by construction rather than by convention — a
-/// parsed [`Spawn`] can never carry it, so `"target":"local"` in a serialized
+/// it when no target was named, and target-name validation refuses it as a
+/// registration. Rejecting it *here* as well is what makes the wire spelling
+/// unambiguous by construction rather than by convention — a parsed
+/// [`Spawn`] can never carry it, so `"target":"local"` in a serialized
 /// preview means exactly one thing and a rule written against it cannot be
 /// fooled by a model that spelled the reserved word out.
 pub(crate) const LOCAL_TARGET: &str = "local";
