@@ -764,17 +764,19 @@ impl WorkspaceBuilder {
             HookRunner::new(&path, loaded_hooks),
             |runner, interceptor| runner.with_interceptor(interceptor),
         );
-        // Two registrations because mentra's two seams are two registries, and
-        // both are taken unconditionally: whether this workspace will ever
-        // answer about a *result* is knowable here, but a runner with nothing
-        // to say costs one map walk and the alternative is a workspace that
-        // silently could not be given a post hook.
-        let pre_hook = runtime
+        // One registration, both seams: mentra 0.26 takes a chain as
+        // `ExecutionHookParticipant`s and answers with a single guard whose
+        // participant snapshot is retained across a whole call. Two guards, one
+        // per seam, could not promise that — a drop between the tool and its
+        // result would leave the call half-guarded — and only the mixed chain
+        // carries a rewrite's attribution into the refusal a rejected rewrite
+        // earns. Taken unconditionally: whether this workspace will ever answer
+        // about a *result* is knowable here, but a runner with nothing to say
+        // costs one map walk and the alternative is a workspace that silently
+        // could not be given a post hook.
+        let hooks = runtime
             .mentra_runtime()
-            .register_pre_hook_for_audience(audience.clone(), runner.clone());
-        let post_hook = runtime
-            .mentra_runtime()
-            .register_post_hook_for_audience(audience.clone(), runner);
+            .register_execution_hook_for_audience(audience.clone(), runner);
 
         // Both lists reach the header whether or not this build has MCP in it:
         // what a run reports is a schema clients parse, and a field that
@@ -831,8 +833,7 @@ impl WorkspaceBuilder {
             declared_tool_files: sourced(&declared_sources),
             declared_tools: declared_tool_names,
             declared_registration: declared_tools,
-            pre_hook,
-            post_hook,
+            hooks,
             #[cfg(feature = "mcp")]
             mcp_connections,
         })

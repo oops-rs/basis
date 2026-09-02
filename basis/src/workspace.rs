@@ -55,10 +55,8 @@ use std::path::{Path, PathBuf};
 use std::sync::Arc;
 
 use mentra::{
-    ModelInfo, Session,
-    agent::AgentConfig,
-    provider::ReasoningOptions,
-    runtime::{PostExecutionHookRegistration, PreExecutionHookRegistration},
+    ModelInfo, Session, agent::AgentConfig, provider::ReasoningOptions,
+    runtime::ExecutionHookRegistration,
 };
 
 pub use builder::WorkspaceBuilder;
@@ -155,13 +153,16 @@ pub struct Workspace {
     /// registry and registered for its own audience; releases both on drop.
     #[allow(dead_code, reason = "held for its Drop")]
     declared_registration: DeclaredTools,
-    /// mentra's holds on this workspace's own interception chain, one per
-    /// seam, registered for this workspace's tool audience. Dropping them is
-    /// what stops a dropped workspace being consulted.
+    /// mentra's hold on this workspace's own interception chain, registered for
+    /// this workspace's tool audience. Dropping it is what stops a dropped
+    /// workspace being consulted.
+    ///
+    /// One hold for both seams: mentra 0.26 takes a chain as
+    /// `ExecutionHookParticipant`s and hands back one registration whose
+    /// snapshot is retained across a whole call, so a workspace cannot be
+    /// consulted before a tool and gone after it.
     #[allow(dead_code, reason = "held for its Drop")]
-    pre_hook: PreExecutionHookRegistration,
-    #[allow(dead_code, reason = "held for its Drop")]
-    post_hook: PostExecutionHookRegistration,
+    hooks: ExecutionHookRegistration,
     #[cfg(feature = "mcp")]
     #[allow(dead_code, reason = "held for its Drop")]
     mcp_connections: McpConnections,
