@@ -61,7 +61,7 @@ hot-reloadable extensions. Two pi decisions independently validate ours:
 | Multi-provider LLM API | mentra-provider: OpenAI, Anthropic, Gemini, OpenRouter, Ollama, LM Studio — and any `chat/completions` endpoint by base URL, keyed or not (§8) ✅ | mentra |
 | Session persistence + resume | File-backed sessions (plain files under the store dir since 0.7, ADR-0023 — basis links no database), snapshots | mentra |
 | Compaction | mentra's compaction, configured by basis (`Compaction`) ✅ — every tool result the model was shown is kept, elision is opt-in by number, the trigger is a share of the model's window when the provider reports one — clearing the absolute token threshold leaves that share as the whole trigger rather than turning the feature off — and snapshots follow the store; `PreparedRun::compact` and ACP `/compact` run a pass on demand, bounded by the run's cancel and deadline (`compact_with_options`) | built |
-| Session branching / tree | mentra's transcript tree, exposed on `PreparedRun` ✅ | built |
+| Session branching / tree | mentra's transcript tree — retired unadopted, zero hosts used it (§ Migration) | mentra |
 | Lossless host observation | `PreparedRun::register_agent_event_tap` forwards complete Mentra `AgentEvent`s in occurrence order behind an opaque Basis guard; JSONL remains summary-only ✅ | mentra + built |
 | Strict private-runtime reuse | Repeatable registered-provider recipe, discovery-off/fresh-only/resolved-model/exact-roster workspace, explicit per-generation host-tool bind, consuming async rebuild ✅ | built |
 | Builtin tools (files, shell, background exec, tasks) | Mentra builtins, with the roster basis's: `read`, `ls`, `grep`, `glob`, `write`, `edit` (mentra's split file tools, `RuntimeBuilder::with_file_tools`), `compact`, `load_skill`, and `spawn` for commands and delegation. `shell`, `background_run`, `check_background`, `task`, `task_*`, `team_*`, `idle` and — since D2 switched mentra's memory engine off — `memory_pin`/`memory_forget`/`memory_search` are registered but not offered ✅ | mentra + built |
@@ -269,7 +269,7 @@ flowchart LR
     ctx["context: AGENTS.md · skills · templates"]
     ext["declared tools · interception (2 bindings) · MCP client (mcp feature)"]
     runs["runs — minted cheaply: typed output · bounds · cancel · fan-in"]
-    sess["sessions · branching · compaction"]
+    sess["sessions · compaction"]
     rt["Mentra runtime"]
   end
   subgraph box["host OS — isolation, if any, is the operator's"]

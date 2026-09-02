@@ -58,7 +58,6 @@
 //!   `.basis/tools.json` works in a build that has never heard of MCP.
 
 pub mod approval;
-pub mod branch;
 pub mod budget;
 pub mod compaction;
 pub mod config;
@@ -94,7 +93,6 @@ pub use approval::{
     AllowAll, ApprovalAnswer, ApprovalDecision, ApprovalGate, ApprovalRequest, Approver, DenyAll,
     ToolSideEffectLevel,
 };
-pub use branch::{BranchError, EntryKind, TranscriptEntry};
 pub use budget::BudgetPool;
 // Beside the other things a workspace is built *with*: what a run's history
 // keeps is set on `WorkspaceBuilder`, so the type naming it belongs where a

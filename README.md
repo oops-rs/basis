@@ -460,7 +460,7 @@ This README describes only what is built, and all of the above is: P0–P4 and t
 through Phase E — the ACP server with modes, session listing and history replay; conversation and
 resume; durable `spawn`/`send`/`ask`/`wait`/`cancel`/`watch`/`inbox` over the filesystem; MCP from
 `.mcp.json` and from the client; templates as commands; hooks and interceptors; the websocket
-bridge; branching; compaction, whose defaults are basis's own — every tool result the model was
+bridge; compaction, whose defaults are basis's own — every tool result the model was
 shown stays in front of it — and whose knobs are `WorkspaceBuilder::with_compaction`; and the SDK
 proper — and since 0.7, conversations as plain files, a child a delegating parent can shape, and
 `basis-tasks` for a Rust host that wants durable handles; since 0.8, a lossless in-process event tap —
