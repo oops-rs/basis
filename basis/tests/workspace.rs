@@ -632,6 +632,13 @@ async fn one_workspace_does_not_list_anothers_conversations() {
 /// whole into the record on every save), so using an old conversation is what
 /// files it. Since listing never worked, no client has ever seen these
 /// records to miss them in the meantime.
+///
+/// The record below carries the workspace as its agent's `base_dir`, because
+/// that is what every basis that ever wrote one carried: the agent config has
+/// been scoped to the opened workspace since the first `run`, long before the
+/// tag existed. It is also what makes the conversation *this* workspace's for
+/// `Workspace::resume`'s binding check — the tag never gated resuming, and the
+/// base directory always did name the repository.
 #[tokio::test]
 async fn a_conversation_tagged_before_workspaces_were_is_resumable_and_files_itself() {
     let dir = tempfile::tempdir().expect("tempdir");
@@ -649,7 +656,17 @@ async fn a_conversation_tagged_before_workspaces_were_is_resumable_and_files_its
             .expect("the mock runtime builds");
         let mut session = mock
             .runtime()
-            .create_session_with_config("old", mock.model(), AgentConfig::default())
+            .create_session_with_config(
+                "old",
+                mock.model(),
+                AgentConfig {
+                    workspace: mentra::agent::WorkspaceConfig {
+                        base_dir: dir.path().to_path_buf(),
+                        ..Default::default()
+                    },
+                    ..Default::default()
+                },
+            )
             .expect("session");
         session
             .append_turn(vec![ContentBlock::text("hello")])

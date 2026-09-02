@@ -191,6 +191,54 @@ async fn a_shared_runtimes_conversations_list_under_their_own_workspaces() {
     );
 }
 
+#[tokio::test]
+async fn a_conversation_cannot_be_resumed_under_a_workspace_it_did_not_run_in() {
+    // The pairing a shared runtime makes possible and an agent id cannot
+    // refuse: a host that picks the workspace from a client's `cwd` and the
+    // conversation from an id it was handed can bring the two together wrongly
+    // — ACP's `session/load` is exactly that shape. A resume states this
+    // workspace's policy and tool audience onto whatever it picks up, so under
+    // the wrong one a conversation would run with another repository's `.git`
+    // carve-out and shell posture while its agent stayed based in its own
+    // directory, which mentra's file tools always allow writes under.
+    let endpoint = ScriptedEndpoint::start(Vec::new());
+    let runtime = shared_runtime(&endpoint);
+    let (dir_a, dir_b) = (workspace_dir(), workspace_dir());
+    let a = pinned(dir_a.path(), Arc::clone(&runtime))
+        .open()
+        .await
+        .expect("opens");
+    let b = pinned(dir_b.path(), runtime).open().await.expect("opens");
+
+    let run = a.prepare("go").expect("mints");
+    let agent_id = run.agent_id().to_string();
+    // The live run holds the agent's lease; a resume is what a later attach
+    // does, and here it needs the first to have let go.
+    drop(run);
+
+    let refused = b
+        .resume(&agent_id, "again")
+        .expect_err("a sibling workspace must not adopt this conversation");
+    assert!(
+        matches!(refused, basis::RunError::WorkspaceMismatch { .. }),
+        "the refusal has to be the typed one a host can react to: {refused}"
+    );
+    let message = refused.to_string();
+    assert!(
+        message.contains(&dir_a.path().to_string_lossy().to_string())
+            && message.contains(&dir_b.path().to_string_lossy().to_string()),
+        "and it has to name both directories: {message}"
+    );
+
+    assert_eq!(
+        a.resume(&agent_id, "again")
+            .expect("its own workspace still resumes it")
+            .agent_id(),
+        agent_id,
+        "the check must refuse the mismatch and nothing else"
+    );
+}
+
 #[cfg(feature = "mcp")]
 mod roster {
     use super::*;

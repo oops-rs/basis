@@ -524,9 +524,26 @@ impl Runtime {
     /// is the posture of no workspace at all, and one handed no audience would
     /// resolve only global names — losing this workspace's own bridged and
     /// declared tools between one process and the next.
+    ///
+    /// **And restating them is exactly why the binding is checked first.** An
+    /// agent id says nothing about where its conversation ran — mentra's store
+    /// is keyed by agent, not by path — so a caller that picked the workspace
+    /// by a client's `cwd` and the conversation by an id it was handed can
+    /// bring the two together wrongly. Everything this method then states is
+    /// `workspace`'s: the policy carrying its `.git` carve-out, shell posture
+    /// and memory roots; the audience deciding which of the shared registry's
+    /// tools the model sees. The agent's own `base_dir` does not move with any
+    /// of it, and mentra's file tools always allow writes under an agent's
+    /// base directory — so a repository whose workspace denies commands and
+    /// carves out `.git` would find both true of *another* repository's posture
+    /// and neither of its own. The persisted agent's base directory is checked
+    /// against this workspace's identity before anything is stated onto it, and
+    /// before the session-scope clear below mutates a conversation that is not
+    /// this workspace's to mutate.
     pub(crate) fn resume_minted(
         &self,
         agent_id: &str,
+        workspace: &Path,
         scope: &SessionScope,
     ) -> Result<Session, RunError> {
         let session = self.mentra.resume_session_with_options(
@@ -537,6 +554,19 @@ impl Runtime {
                 tool_audience: Some(scope.audience()),
             },
         )?;
+
+        // Compared as identities rather than as paths, through the one
+        // function that decides what "the same workspace" means for the store
+        // — so a symlinked or relative spelling on either side is the same
+        // answer here as it is in a session listing.
+        let based_in = session.config().workspace.base_dir.clone();
+        if crate::store::runtime_identifier(&based_in) != scope.identifier {
+            return Err(RunError::WorkspaceMismatch {
+                agent_id: agent_id.to_owned(),
+                workspace: workspace.to_path_buf(),
+                agent_workspace: based_in,
+            });
+        }
 
         // basis's documented duration for a "…for this session" answer is the
         // live session: it survives further runs in the process that holds it
@@ -1063,7 +1093,9 @@ mod tests {
             "the open that configured no servers must not be offered the other's"
         );
         assert!(
-            runtime.foreign_mcp_tools(&[server.clone()]).is_empty(),
+            runtime
+                .foreign_mcp_tools(std::slice::from_ref(&server))
+                .is_empty(),
             "and the open that configured it keeps it"
         );
 

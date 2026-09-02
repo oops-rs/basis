@@ -239,6 +239,14 @@ impl SessionSource for ConfiguredSource {
         workspace.prepare(spec)
     }
 
+    /// The workspace comes from the client's `cwd` and the conversation from
+    /// an id the client kept, and nothing here pairs them: a client is free to
+    /// send a `cwd` that has nothing to do with the session it names.
+    /// `Workspace::resume` is what refuses that pairing — it compares the
+    /// persisted agent's own base directory against the workspace's identity
+    /// and answers `RunError::WorkspaceMismatch` — which is where the check
+    /// belongs, since a resume states *that* workspace's policy and tool
+    /// audience onto whatever it picks up.
     async fn resume(
         &self,
         agent_id: &str,

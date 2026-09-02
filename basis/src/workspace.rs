@@ -262,10 +262,18 @@ impl Workspace {
     /// to repair or delete; fresh conversations keep working, and deleting
     /// the file costs only remembered approval answers, never history.
     ///
-    /// The workspace has to be the one the conversation belongs to. Nothing
-    /// here checks that — mentra's store is keyed by agent, not by path — so
-    /// resuming an agent under a workspace it never ran in gives it that
-    /// workspace's context and tools alongside its own history.
+    /// The workspace has to be the one the conversation belongs to, and this
+    /// checks it: mentra's store is keyed by agent rather than by path, so an
+    /// id alone cannot say where its conversation ran, and a resume restates
+    /// *this* workspace's policy, tool audience and persisted-row tag onto
+    /// whatever it is given. Under another repository's conversation those are
+    /// the wrong `.git` carve-out, the wrong shell posture and the wrong
+    /// roster, while the agent stays based in its own directory — which
+    /// mentra's file tools always allow writes under. So an agent based
+    /// somewhere other than [`root`](Self::root) is refused with
+    /// [`RunError::WorkspaceMismatch`](crate::RunError), before the resume
+    /// touches it at all. A caller that means "one of mine" takes the id from
+    /// [`store::list`](crate::store::list) for this workspace.
     ///
     /// mentra does not persist a model's context window
     /// (`Agent::from_loaded` always resumes at `None` — `set_model` is the
@@ -299,7 +307,9 @@ impl Workspace {
             return Err(RunError::NonAtomicResumeProfile);
         }
 
-        let mut session = self.runtime.resume_minted(agent_id, &self.scope)?;
+        let mut session = self
+            .runtime
+            .resume_minted(agent_id, &self.root, &self.scope)?;
         let model = if let Some(model) = spec.profile.resolved_model() {
             session.set_model(model.clone())?;
             model.id.clone()

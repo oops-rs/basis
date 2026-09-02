@@ -250,10 +250,12 @@ fn by_recency(sessions: &mut [PersistedSession]) {
 /// same store, and "it is gone" is the outcome both of them asked for.
 ///
 /// Keyed by the conversation, not by a workspace: mentra's store is indexed by
-/// agent id, so this does not check that the id belongs anywhere in
-/// particular — the same ruling [`Workspace::resume`](crate::Workspace::resume)
-/// makes for the same reason. A caller that means "one of mine" takes the id
-/// from [`list`] for its own workspace, which is where a client got it anyway.
+/// agent id, so this does not check that the id belongs anywhere in particular.
+/// [`Workspace::resume`](crate::Workspace::resume) *does* check, and the two
+/// differ for a reason — a resume states a workspace's policy and tool audience
+/// onto the conversation it picks up, and a deletion states nothing. A caller
+/// that means "one of mine" takes the id from [`list`] for its own workspace,
+/// which is where a client got it anyway.
 ///
 /// **A live conversation is not stopped by this.** mentra deletes rows; an
 /// agent still in memory keeps running and writes its row back on its next

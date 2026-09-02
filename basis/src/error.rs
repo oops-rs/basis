@@ -90,6 +90,38 @@ pub enum RunError {
         error: mentra::error::RuntimeError,
     },
 
+    /// [`Workspace::resume`](crate::Workspace::resume) was handed a
+    /// conversation that belongs to a different workspace.
+    ///
+    /// mentra's store is keyed by agent, not by path, so an id alone says
+    /// nothing about where its conversation ran — and everything a resume
+    /// restates is *this* workspace's: the policy carrying its `.git`
+    /// carve-out and shell posture, the tool audience deciding which of the
+    /// registry's tools it can see, the persisted-row tag. Stamping those onto
+    /// another repository's conversation would run it under a posture nobody
+    /// chose for it while its agent stayed based in its own directory — which
+    /// mentra's file tools always allow writes under. So the binding is
+    /// checked against the persisted agent's own base directory, and a
+    /// mismatch is refused before the session is handed out.
+    ///
+    /// A host that means "resume one of mine" takes the id from
+    /// [`store::list`](crate::store::list) for its own workspace, which is
+    /// where a client got it anyway.
+    #[error(
+        "conversation `{agent_id}` belongs to the workspace at {} and cannot be resumed \
+         under the one at {}",
+        agent_workspace.display(),
+        workspace.display()
+    )]
+    WorkspaceMismatch {
+        /// The conversation whose resume was refused.
+        agent_id: String,
+        /// The workspace that tried to resume it.
+        workspace: std::path::PathBuf,
+        /// The directory the persisted agent is actually based in.
+        agent_workspace: std::path::PathBuf,
+    },
+
     #[error(transparent)]
     Config(#[from] crate::config::ConfigError),
 

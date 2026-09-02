@@ -849,6 +849,17 @@ server names (`Runtime::foreign_mcp_tools`). Host tools registered with
 `RuntimeBuilder::with_tool` stay global otherwise: they are the runtime's, and a global is
 visible to every audience. `ToolRoster` is unchanged in shape and in effect.
 
+**A resume now refuses the wrong workspace.** Because a resume is where a workspace's policy
+and tool audience are *restated* — Mentra persists neither — picking up another repository's
+conversation would run it under this repository's `.git` carve-out and shell posture while its
+agent stayed based in its own directory, which Mentra's file tools always allow writes under. A
+shared runtime is what makes the pairing reachable: a host that picks the workspace from a
+client's `cwd` and the conversation from an id it was handed (ACP's `session/load`) can bring
+the two together wrongly. `Workspace::resume` compares the persisted agent's base directory
+against its own identity and refuses with `RunError::WorkspaceMismatch` before anything is
+stated onto the conversation. `store::forget` still keys on the id alone, and deliberately: a
+deletion states nothing.
+
 **One gap this does not close, and it is upstream's.** A *resumed* session carries no runtime
 identifier — Mentra's resume options have no field for one — so a resumed conversation
 re-files under the runtime's own tag when it next persists, which on a shared runtime takes it
