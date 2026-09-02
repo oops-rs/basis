@@ -459,11 +459,12 @@ impl WorkspaceBuilder {
     /// shuts the command tools and nothing else, so it is a narrowing of what
     /// these runs do, never a claim about what the process could do.
     ///
-    /// Workspace-level because it is a statement about this repository's runs.
-    /// On a private runtime it is baked into the runtime's policy; on a shared
-    /// one — whose policy cannot vary per workspace — it is enforced by the
-    /// runtime's hook dispatcher, which denies `spawn`'s command mode for this
-    /// workspace's agents (see [`crate::runtime`]).
+    /// Workspace-level because it is a statement about this repository's runs,
+    /// and carried as such: it goes into the policy every session this
+    /// workspace mints ([`crate::Runtime`]), so a shared runtime holds this
+    /// posture for these runs and a sibling repository's for its own. A
+    /// private runtime bakes it as well, for anything reached through
+    /// [`Runtime::mentra_runtime`](crate::Runtime::mentra_runtime).
     pub fn with_shell(self, shell: ShellAccess) -> Self {
         Self { shell, ..self }
     }
@@ -658,7 +659,6 @@ impl WorkspaceBuilder {
             .map(|source| source.path.clone())
             .collect();
 
-        let shared = matches!(self.runtime, RuntimeSource::Shared(_));
         let runtime = match self.runtime {
             // A shared runtime's provider, credential and endpoint are the
             // host's process facts and were settled before this workspace
@@ -674,6 +674,14 @@ impl WorkspaceBuilder {
                 &memory_roots,
             )?),
         };
+
+        // What every session minted here runs under. Derived once, from the
+        // same recipe the private path just baked into the runtime, so the two
+        // runtime shapes differ in nothing a run can observe: a shared
+        // runtime's session carries this workspace's shell posture, `.git`
+        // carve-out and memory roots because it is handed them, and a private
+        // runtime's carries them twice over.
+        let policy = runtime.session_policy(&path, self.shell, &memory_roots);
 
         // The workspace's own override first, then the file, then the runtime's
         // policy — which on the private path is already the file's answer, so
@@ -750,17 +758,14 @@ impl WorkspaceBuilder {
         // until the first mint, which is correct: nothing has been offered a
         // roster yet, so nothing has been denied one either.
         let foreign_tools = Arc::new(std::sync::RwLock::new(std::collections::BTreeSet::new()));
-        let hook_registration = runtime.register_workspace(dispatch::WorkspaceGuardEntry {
-            runner: Arc::new(runner),
-            hooks: loaded_hooks,
-            shell: self.shell,
-            root: path.clone(),
-            // On a private runtime the shell posture and the `.git` carve-out
-            // are already in policy; enforcing them in the dispatcher too
-            // would change whose words a denial arrives in.
-            shared,
-            foreign_tools: Arc::clone(&foreign_tools),
-        })?;
+        let hook_registration = runtime.register_workspace(
+            &path,
+            dispatch::WorkspaceGuardEntry {
+                runner: Arc::new(runner),
+                hooks: loaded_hooks,
+                foreign_tools: Arc::clone(&foreign_tools),
+            },
+        )?;
         let foreign_tools = hook_registration.foreign_tools();
 
         // Both lists reach the header whether or not this build has MCP in it:
@@ -799,6 +804,7 @@ impl WorkspaceBuilder {
             root: path,
             provider: runtime.provider().to_string(),
             runtime,
+            policy,
             mint_posture: MintPosture::new(fresh_only),
             model,
             // The last thing the file still has to say, and the one this
@@ -930,10 +936,9 @@ pub(crate) fn load_templates(
 /// hides stays registered on the runtime, which is precisely why `spawn` can
 /// still reach the command executor underneath even though
 /// [`ToolRoster::default`] hides it by name. What a caller said about
-/// commands is still decided by [`ShellAccess`] — baked into policy on a
-/// private runtime, enforced by the hook dispatcher on a shared one — on the
-/// path `spawn` uses: `--no-shell` shuts commands off for `spawn` exactly as
-/// it did for `shell`.
+/// commands is still decided by [`ShellAccess`], in the policy every session
+/// carries, on the path `spawn` uses: `--no-shell` shuts commands off for
+/// `spawn` exactly as it did for `shell`.
 ///
 /// The roster travels: `DisposableSubagentTemplate::from_agent` clones this
 /// whole config, so a subagent of a subagent is offered the same roster.

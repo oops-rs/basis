@@ -55,7 +55,7 @@ use std::collections::BTreeSet;
 use std::path::{Path, PathBuf};
 use std::sync::{Arc, RwLock};
 
-use mentra::{ModelInfo, Session, agent::AgentConfig, provider::ReasoningOptions};
+use mentra::{ModelInfo, RuntimePolicy, Session, agent::AgentConfig, provider::ReasoningOptions};
 
 pub use builder::WorkspaceBuilder;
 pub use profile::RunProfile;
@@ -107,6 +107,16 @@ pub struct Workspace {
     /// to name different directories.
     root: PathBuf,
     runtime: Arc<Runtime>,
+    /// The complete policy every session minted here runs under: this
+    /// workspace's `.git` carve-out, shell posture and memory roots, shaped by
+    /// what the runtime's builder was told
+    /// ([`Runtime::session_policy`](crate::Runtime)).
+    ///
+    /// Held rather than re-derived per mint because none of its inputs vary
+    /// after an open, and stated on every mint and resume because mentra does
+    /// not persist a session's policy — a resume that said nothing would
+    /// inherit the runtime's, which on a shared runtime is nobody's.
+    policy: RuntimePolicy,
     /// Whether supported Basis APIs may mint more than one independent
     /// session from this workspace.
     mint_posture: MintPosture,
@@ -225,9 +235,13 @@ impl Workspace {
         let model_id = model.id.clone();
         let agent = self.minted_agent(&spec.profile);
         let context_snapshot = agent.system.clone();
-        let mut session =
-            self.runtime
-                .mint(spec.session_name.clone(), model, agent, &self.identifier)?;
+        let mut session = self.runtime.mint(
+            spec.session_name.clone(),
+            model,
+            agent,
+            &self.identifier,
+            self.policy.clone(),
+        )?;
         if !spec.profile.decides_reasoning() {
             apply_effort(&mut session, spec.effort.or(self.effort))?;
         }
@@ -289,7 +303,7 @@ impl Workspace {
             return Err(RunError::NonAtomicResumeProfile);
         }
 
-        let mut session = self.runtime.resume_minted(agent_id)?;
+        let mut session = self.runtime.resume_minted(agent_id, self.policy.clone())?;
         let model = if let Some(model) = spec.profile.resolved_model() {
             session.set_model(model.clone())?;
             model.id.clone()

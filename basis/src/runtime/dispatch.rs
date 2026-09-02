@@ -23,44 +23,24 @@
 //!
 //! # What runs, in what order
 //!
-//! On a hit: basis's own guards first — the shell posture and the `.git`
-//! carve-out, and only for a workspace on a *shared* runtime, whose policy
-//! cannot carry either per workspace; a private runtime's policy already does,
-//! so its denials keep mentra's wording — then the workspace's [`HookRunner`],
-//! which already folds the runtime's host interceptors ahead of the
-//! workspace's hooks, so the chain order host interceptors → supplied hooks →
-//! global hooks → workspace hooks survives the move unchanged.
-//!
-//! Then the guards again, if the chain came back with a rewrite. A
-//! [`HookDecision::Modify`] is what the tool runs on — mentra 0.24 re-checks
-//! the tool's schema against it and asks the `ToolAuthorizer` about it rather
-//! than about the model's original — so a guard that only ever saw the
-//! original would be answering about a call that never happens, and a
-//! workspace hook could turn an allowed `write` into one under `.git/config`
-//! or a delegation into a command on a workspace opened with commands off.
-//! The pre-chain check stays: a plainly bad original is refused without
-//! spawning anything a repository chose. Both readings go through one
-//! [`guard`], so the two cannot come to disagree.
-//!
-//! One check covers both bindings, because there is one chain: a host's
-//! [`Interceptor`](crate::hooks::Interceptor) and a workspace's subprocess
-//! hook are folded into the same [`HookRunner`] and answer with the same
-//! [`HookDecision`], so whichever of them produced the rewrite, this is where
-//! the rewrite is judged.
+//! On a hit: the workspace's [`HookRunner`], which already folds the runtime's
+//! host interceptors ahead of the workspace's hooks, so the chain order host
+//! interceptors → supplied hooks → global hooks → workspace hooks survives the
+//! move unchanged. basis adds no guards of its own here: what a workspace
+//! allows is its [`RuntimePolicy`](mentra::RuntimePolicy), handed to every
+//! session it mints, so a denial arrives in mentra's words on a shared runtime
+//! exactly as it always did on a private one.
 //!
 //! On a miss — an agent whose working directory no live workspace claims — the
 //! host interceptors still run, alone. Workspace hooks cannot: they belong to a
 //! workspace, and there is none. A key mismatch therefore fails open for
-//! *workspace hooks only*, never for the host's own guards, and the guards
-//! basis adds here were policy-level hygiene rather than a boundary to begin
-//! with (ADR-0004, ADR-0013).
+//! *workspace hooks only*, never for the host's own interceptors.
 //!
-//! After the call it is the same routing without the guards: they answer
-//! whether a call happens, and by then it has.
+//! After the call it is the same routing.
 
 use std::{
     collections::{BTreeSet, HashMap},
-    path::{Component, Path, PathBuf},
+    path::{Path, PathBuf},
     sync::{Arc, RwLock},
 };
 
@@ -75,33 +55,17 @@ use mentra::{
 use crate::{
     RunError,
     hooks::{HookRunner, HookSpec},
-    shell::ShellAccess,
-    tools::{
-        SPAWN,
-        spawn::{SpawnMode, parse_spawn},
-    },
 };
 
-/// One workspace's stake in the shared hook: its runner, its command posture,
-/// and the root its guards measure paths against.
+/// One workspace's stake in the shared hook: its runner, and the participants
+/// that identify it.
 pub(crate) struct WorkspaceGuardEntry {
     /// The workspace's chain, host interceptors already folded first.
     pub(crate) runner: Arc<HookRunner>,
     /// The subprocess half of `runner`, in effective consultation order.
-    /// Runtime interceptors are fixed on the dispatcher itself, so these plus
-    /// `shell` and `shared` are the complete per-workspace guard identity.
+    /// Runtime interceptors are fixed on the dispatcher itself, so these are
+    /// the complete per-workspace participant identity.
     pub(crate) hooks: Vec<HookSpec>,
-    /// Enforced here when [`shared`](Self::shared); baked into policy on the
-    /// private path, where the runtime belongs to this workspace alone.
-    pub(crate) shell: ShellAccess,
-    /// Canonicalized. What the `.git` guard resolves candidate paths against.
-    pub(crate) root: PathBuf,
-    /// Whether the runtime's policy is shared across workspaces and therefore
-    /// cannot carry this workspace's shell posture or `.git` carve-out. When
-    /// true the guards run here; when false they do not, so the private path's
-    /// denials keep coming from mentra's policy, word for word, exactly as
-    /// before the split.
-    pub(crate) shared: bool,
     /// The names [`Workspace::minted_agent`](crate::Workspace) hid from this
     /// workspace's model at its most recent mint: a sibling workspace's
     /// bridged `mcp__*` tools and a sibling's declared tools.
@@ -122,8 +86,8 @@ pub(crate) struct WorkspaceGuardEntry {
 ///
 /// Held by the [`Workspace`](crate::Workspace), so a dropped workspace stops
 /// being consulted without anyone remembering to say so. Identical live opens
-/// of one canonical root share one entry and holder count; a differing guard
-/// configuration is refused before it can weaken the first.
+/// of one canonical root share one entry and holder count; a differing set of
+/// participants is refused before it can weaken the first.
 pub(crate) struct HookRegistration {
     dispatch: Arc<HookDispatch>,
     key: PathBuf,
@@ -204,19 +168,16 @@ impl HookDispatch {
 
     pub(crate) fn register(
         self: &Arc<Self>,
+        root: &Path,
         entry: WorkspaceGuardEntry,
     ) -> Result<HookRegistration, RunError> {
-        let key = canonical(&entry.root);
+        let key = canonical(root);
         let mut workspaces = self
             .workspaces
             .write()
             .expect("workspace registry poisoned");
         let foreign_tools = match workspaces.get_mut(&key) {
-            Some(held)
-                if held.entry.shell == entry.shell
-                    && held.entry.shared == entry.shared
-                    && held.entry.hooks == entry.hooks =>
-            {
+            Some(held) if held.entry.hooks == entry.hooks => {
                 held.holders += 1;
                 Arc::clone(&held.entry.foreign_tools)
             }
@@ -275,25 +236,15 @@ impl HookDispatch {
         }
     }
 
-    /// The registered entry for a working directory, cloned out so no lock is
+    /// The runner registered for a working directory, cloned out so no lock is
     /// held across the await that follows.
-    fn entry_for(
-        &self,
-        working_directory: &Path,
-    ) -> Option<(Arc<HookRunner>, ShellAccess, PathBuf, bool)> {
+    fn entry_for(&self, working_directory: &Path) -> Option<Arc<HookRunner>> {
         let key = canonical(working_directory);
         self.workspaces
             .read()
             .expect("workspace registry poisoned")
             .get(&key)
-            .map(|held| {
-                (
-                    Arc::clone(&held.entry.runner),
-                    held.entry.shell,
-                    held.entry.root.clone(),
-                    held.entry.shared,
-                )
-            })
+            .map(|held| Arc::clone(&held.entry.runner))
     }
 }
 
@@ -303,51 +254,16 @@ impl PreExecutionHook for HookDispatch {
         &self,
         context: &PreExecutionContext,
     ) -> Result<HookDecision, RuntimeError> {
-        let Some((runner, shell, root, shared)) = self.entry_for(&context.working_directory) else {
+        let Some(runner) = self.entry_for(&context.working_directory) else {
             // No workspace claims this directory, so there are no workspace
-            // hooks to consult — the host's own guards still speak.
+            // hooks to consult — the host's own interceptors still speak.
             let Some(runner) = self.interceptors_only(&context.working_directory) else {
                 return Ok(HookDecision::Allow);
             };
             return runner.pre_tool_execution(context).await;
         };
 
-        if shared && let Some(reason) = guard(&context.tool_name, &context.input_json, shell, &root)
-        {
-            return Ok(HookDecision::Deny(reason));
-        }
-
-        let decision = runner.pre_tool_execution(context).await?;
-
-        // The chain may have rewritten the call, and a rewrite is what the
-        // tool runs on: mentra 0.24 re-checks the tool's schema and asks the
-        // authorizer about exactly this input, so a guard still holding the
-        // model's original would be judging a call that never happens.
-        //
-        // The rewrite's own reason survives into the refusal. Without it the
-        // model reads a denial of an input it never wrote and is sent to
-        // correct someone else's path — the mistake mentra avoids on the same
-        // seam when a rewrite fails the schema check (its `schema_violation`
-        // branch blames the hook, not the model) and the "every hand that
-        // touched the call is named" property `hooks::chain` states.
-        if shared
-            && let HookDecision::Modify {
-                input_json,
-                reason: rewrite,
-            } = &decision
-            && let Some(reason) = guard(&context.tool_name, input_json, shell, &root)
-        {
-            return Ok(HookDecision::Deny(match rewrite {
-                Some(rewrite) => {
-                    format!(
-                        "a hook rewrote this call ({rewrite}), and the rewrite is denied: {reason}"
-                    )
-                }
-                None => format!("a hook rewrote this call, and the rewrite is denied: {reason}"),
-            }));
-        }
-
-        Ok(decision)
+        runner.pre_tool_execution(context).await
     }
 }
 
@@ -359,16 +275,11 @@ impl PostExecutionHook for HookDispatch {
     /// [`PreExecutionContext::working_directory`] was, so a result is judged
     /// by the workspace whose participants judged the call — the alternative
     /// being a rewrite from a workspace that never saw what it was rewriting.
-    ///
-    /// basis's own guards do not run here. They decide whether a call happens,
-    /// and this one has; a shell posture cannot un-run a command, and the
-    /// `.git` carve-out has nothing to say about the output of a write it
-    /// already refused.
     async fn post_tool_execution(
         &self,
         context: &PostExecutionContext,
     ) -> Result<ResultDecision, RuntimeError> {
-        let Some((runner, ..)) = self.entry_for(&context.working_directory) else {
+        let Some(runner) = self.entry_for(&context.working_directory) else {
             let Some(runner) = self.interceptors_only(&context.working_directory) else {
                 return Ok(ResultDecision::Keep);
             };
@@ -403,102 +314,6 @@ impl PostExecutionHook for DispatchHook {
     }
 }
 
-/// basis's own guards, over one reading of one call.
-///
-/// These carry rules that lived in the private runtime's `RuntimePolicy` —
-/// which a shared runtime cannot hold per-workspace — into the one seam that
-/// knows which workspace a call belongs to. Hygiene, not a boundary, exactly
-/// as the policy versions were: a shell redirect still reaches any path,
-/// because nothing here parses shell (ADR-0004, ADR-0013).
-///
-/// Takes the tool name and the input as text rather than the whole
-/// [`PreExecutionContext`], because it is asked twice about one call — once
-/// about what the model produced, once about what the hook chain left — and
-/// the second reading has no context of its own to be given.
-fn guard(tool_name: &str, input_json: &str, shell: ShellAccess, root: &Path) -> Option<String> {
-    if tool_name == SPAWN && !shell.is_granted() {
-        // The `!` prefix is read by the same parser `spawn` itself uses, so
-        // this guard and the tool can never disagree about which calls are
-        // commands (the "one reader" rule on `tools::spawn::parse`).
-        let input: serde_json::Value = serde_json::from_str(input_json).ok()?;
-        if parse_spawn(&input).is_ok_and(|spawn| spawn.mode() == SpawnMode::Command) {
-            return Some(
-                "command execution is denied: this workspace was opened with commands off"
-                    .to_string(),
-            );
-        }
-        return None;
-    }
-
-    // The builtin file tools are the route this guard closes, mirroring the
-    // `with_denied_write_root` entries the private path bakes into policy (see
-    // `git_protected` in `runtime::builder`). *Both* rosters, because the
-    // policy this stands in for binds at the workspace engine — mentra's
-    // `WorkspaceEditor::authorize_write`, which the batched ops and the split
-    // `write`/`edit` both call — so a guard that knew one profile's names
-    // would be narrower on a shared runtime than the policy it mirrors.
-    let input: serde_json::Value = serde_json::from_str(input_json).ok()?;
-    let targets = write_targets(tool_name, &input);
-    if targets.is_empty() {
-        return None;
-    }
-
-    let denied = [root.join(".git/hooks"), root.join(".git/config")].map(|p| resolved(root, &p));
-    for raw in targets {
-        let candidate = resolved(root, Path::new(raw));
-        if denied.iter().any(|root| candidate.starts_with(root)) {
-            return Some(format!(
-                "path '{}' is under this workspace's protected git paths \
-                 (.git/hooks, .git/config decide what runs)",
-                candidate.display()
-            ));
-        }
-    }
-
-    None
-}
-
-/// The paths one file-tool call writes, whichever profile the runtime offers.
-///
-/// A tool that writes nothing is absent by name rather than by inspection: the
-/// readers (`read`, `ls`, `grep`, `glob`, and the batched read ops) never reach
-/// `authorize_write`, so answering for them would refuse what the policy this
-/// mirrors allows.
-fn write_targets<'a>(tool_name: &str, input: &'a serde_json::Value) -> Vec<&'a str> {
-    match tool_name {
-        "files" => input
-            .get("operations")
-            .and_then(serde_json::Value::as_array)
-            .map(|operations| operations.iter().flat_map(batched_targets).collect())
-            .unwrap_or_default(),
-        // mentra's split writers take one path each, under any of three
-        // spellings: `path`, `file_path` and `filePath` are serde aliases for
-        // one field (`tool/coding/input.rs`). Reading only the first would be
-        // a guard bypassed by asking for the second.
-        "write" | "edit" => ["path", "file_path", "filePath"]
-            .iter()
-            .filter_map(|name| input.get(*name).and_then(serde_json::Value::as_str))
-            .collect(),
-        _ => Vec::new(),
-    }
-}
-
-/// The paths a batched `files` operation writes, by the ops mentra's tool defines.
-///
-/// `move` touches both ends: writing into a protected path plants a program,
-/// and moving one out from under git's feet changes what runs just as surely.
-fn batched_targets(operation: &serde_json::Value) -> Vec<&str> {
-    let field = |name: &str| operation.get(name).and_then(serde_json::Value::as_str);
-
-    match field("op") {
-        Some("create" | "set" | "replace" | "insert" | "delete") => {
-            field("path").into_iter().collect()
-        }
-        Some("move") => field("from").into_iter().chain(field("to")).collect(),
-        _ => Vec::new(),
-    }
-}
-
 /// One canonicalization for the registration key and the lookup key.
 ///
 /// A path that does not resolve is used as written rather than rejected — the
@@ -517,56 +332,6 @@ pub(crate) fn canonical(path: &Path) -> PathBuf {
     std::fs::canonicalize(path)
         .map(|resolved| dunce::simplified(&resolved).to_path_buf())
         .unwrap_or_else(|_| path.to_path_buf())
-}
-
-/// A candidate path as the guard measures it: absolute against the workspace
-/// root, `.` and `..` folded, and the deepest existing prefix resolved so a
-/// symlinked spelling of a protected place answers the same as the plain one.
-///
-/// The mirror of mentra's `normalize_policy_root`, ported rather than shared
-/// because mentra keeps its own private.
-fn resolved(root: &Path, path: &Path) -> PathBuf {
-    let joined = if path.is_absolute() {
-        path.to_path_buf()
-    } else {
-        root.join(path)
-    };
-    let normalized = lexically_normalized(&joined);
-
-    let mut existing = normalized.clone();
-    let mut tail = Vec::new();
-    while !existing.exists() {
-        match (existing.parent(), existing.file_name()) {
-            (Some(parent), Some(name)) => {
-                tail.push(name.to_os_string());
-                existing = parent.to_path_buf();
-            }
-            _ => return normalized,
-        }
-    }
-
-    let mut resolved = std::fs::canonicalize(&existing).unwrap_or(existing);
-    for part in tail.iter().rev() {
-        resolved.push(part);
-    }
-    resolved
-}
-
-/// Folds `.` and `..` without touching the filesystem. `..` at a root is
-/// clamped rather than an error: the guard prefers a conservative spelling to
-/// letting a strange path through unjudged.
-fn lexically_normalized(path: &Path) -> PathBuf {
-    let mut out = PathBuf::new();
-    for component in path.components() {
-        match component {
-            Component::CurDir => {}
-            Component::ParentDir => {
-                out.pop();
-            }
-            other => out.push(other.as_os_str()),
-        }
-    }
-    out
 }
 
 #[cfg(test)]

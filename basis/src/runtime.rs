@@ -43,11 +43,13 @@ use std::path::{Path, PathBuf};
 use std::sync::{Arc, Mutex};
 
 use mentra::{
-    ModelSelector, Session, agent::AgentConfig, runtime::SessionOptions,
+    ModelSelector, RuntimePolicy, Session,
+    agent::AgentConfig,
+    runtime::{SessionOptions, SessionResumeOptions},
     session::PermissionRuleScope,
 };
 
-use crate::tools::declared::DeclaredToolSpec;
+use crate::{shell::ShellAccess, tools::declared::DeclaredToolSpec};
 
 pub use builder::RuntimeBuilder;
 pub use tool_results::ToolResultPolicy;
@@ -199,6 +201,7 @@ pub enum Wire {
 
 use crate::error::RunError;
 
+use builder::execution::{PolicyShaping, workspace_policy};
 use dispatch::{HookDispatch, HookRegistration, WorkspaceGuardEntry};
 
 /// One process's substrate: mentra's runtime plus the resolution policy and
@@ -258,6 +261,10 @@ pub struct Runtime {
     /// beside it in that config are the workspace's
     /// ([`Compaction`](crate::Compaction)), the directory is this.
     transcripts: PathBuf,
+    /// What this runtime's builder said about every policy it hands out, kept
+    /// so a workspace's own policy gets the same shaping the runtime's did.
+    /// See [`session_policy`](Self::session_policy).
+    policy_shaping: PolicyShaping,
     /// The one pre-hook basis registered, and the registry workspaces join.
     dispatch: Arc<HookDispatch>,
     /// Which workspace owns each MCP server name on this runtime's single tool
@@ -380,6 +387,29 @@ impl Runtime {
             .await?)
     }
 
+    /// The complete policy one workspace's sessions run under.
+    ///
+    /// Derived here rather than on the workspace because half of it is the
+    /// runtime's: [`workspace_policy`] states what the repository asked for,
+    /// and [`PolicyShaping`] re-applies what the *builder* was told, which a
+    /// per-session policy would otherwise drop — mentra replaces the runtime's
+    /// policy wholesale for a session rather than merging with it.
+    ///
+    /// On a private runtime this is byte-identical to the policy
+    /// [`RuntimeBuilder::build_for`] baked, and handing it over again costs
+    /// nothing. On a shared one it is the whole point: it is what makes a
+    /// `ShellAccess::Denied` workspace, its `.git` carve-out and its memory
+    /// roots hold for its own sessions and for nobody else's.
+    pub(crate) fn session_policy(
+        &self,
+        workspace: &Path,
+        shell: ShellAccess,
+        memory_roots: &[PathBuf],
+    ) -> RuntimePolicy {
+        self.policy_shaping
+            .apply_to(workspace_policy(workspace, shell, memory_roots))
+    }
+
     /// The one place a workspace's sessions are created.
     ///
     /// `persist_identifier` is the workspace tag the session's rows carry
@@ -389,16 +419,23 @@ impl Runtime {
     /// identifier fixed at build, and a per-workspace listing could not tell
     /// them apart. The private path is unaffected — its runtime-wide
     /// identifier already is this value, so the override is a no-op there.
+    ///
+    /// `policy` is the workspace's own ([`session_policy`](Self::session_policy)),
+    /// and is stated for the same reason: it replaces the runtime's for this
+    /// session and its descendants, so the workspace that opened with commands
+    /// off gets a session with commands off however many siblings share the
+    /// runtime.
     pub(crate) fn mint(
         &self,
         name: impl Into<String>,
         model: ModelInfo,
         config: AgentConfig,
         persist_identifier: &str,
+        policy: RuntimePolicy,
     ) -> Result<Session, RunError> {
         let options = SessionOptions {
             config,
-            policy: None,
+            policy: Some(policy),
             tool_audience: None,
             project_id: None,
             runtime_identifier: Some(Arc::from(persist_identifier)),
@@ -411,8 +448,24 @@ impl Runtime {
 
     /// The one place a workspace's sessions are resumed; see
     /// [`mint`](Self::mint) for why it is a place at all.
-    pub(crate) fn resume_minted(&self, agent_id: &str) -> Result<Session, RunError> {
-        let session = self.mentra.resume_session(agent_id)?;
+    ///
+    /// The policy is restated here because mentra deliberately does not
+    /// persist it in `AgentConfig`: a resumed session that was handed none
+    /// would inherit the runtime's, which on a shared runtime is the posture
+    /// of no workspace at all.
+    pub(crate) fn resume_minted(
+        &self,
+        agent_id: &str,
+        policy: RuntimePolicy,
+    ) -> Result<Session, RunError> {
+        let session = self.mentra.resume_session_with_options(
+            agent_id,
+            SessionResumeOptions {
+                project_id: None,
+                policy: Some(policy),
+                tool_audience: None,
+            },
+        )?;
 
         // basis's documented duration for a "…for this session" answer is the
         // live session: it survives further runs in the process that holds it
@@ -470,9 +523,10 @@ impl Runtime {
     /// consulted.
     pub(crate) fn register_workspace(
         &self,
+        root: &Path,
         entry: WorkspaceGuardEntry,
     ) -> Result<HookRegistration, RunError> {
-        self.dispatch.register(entry)
+        self.dispatch.register(root, entry)
     }
 
     /// Claims an MCP server name on this runtime's tool registry for the

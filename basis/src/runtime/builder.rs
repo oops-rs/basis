@@ -13,7 +13,7 @@
 // and, beside the last, where the provider question is settled at build.
 // What stays here is the builder itself: its fields, its defaults, the
 // registration knobs with no better home, and `build`.
-mod execution;
+pub(super) mod execution;
 mod history;
 mod provider;
 mod provider_settlement;
@@ -35,7 +35,7 @@ use crate::{
     tools::{ChildContext, ChildSpec, SpawnTool, spawn::ChildPolicy},
 };
 
-use execution::{shared_policy, validate_target_names, with_command_patience, workspace_policy};
+use execution::{PolicyShaping, shared_policy, validate_target_names, workspace_policy};
 pub(crate) use history::History;
 pub(in crate::runtime) use provider_settlement::HostProvider;
 
@@ -441,42 +441,43 @@ impl RuntimeBuilder {
     /// concern and are connected by [`Workspace::open`](crate::Workspace::open),
     /// never here.
     ///
-    /// Per-workspace file confinement needs no policy roots: mentra's builtin
-    /// file tools always allow paths under the calling agent's own `base_dir`,
-    /// which basis sets per workspace. What this policy grants is command
-    /// execution — shell and background on, workspace-bounded's timeouts — and
-    /// a workspace that says [`ShellAccess::Denied`] is enforced per-workspace
-    /// by the runtime's hook dispatcher instead of by this shared policy.
+    /// The policy this installs is only what runs on the runtime *outside* any
+    /// workspace: every session a [`Workspace`](crate::Workspace) mints carries
+    /// its own complete policy instead
+    /// ([`Runtime::session_policy`](Runtime)), which is what lets one shared
+    /// runtime hold one workspace's `.git` carve-out, memory roots and
+    /// [`ShellAccess::Denied`] posture without imposing them on the next.
     pub fn build(self) -> Result<Runtime, RunError> {
-        let policy = with_command_patience(shared_policy(), self.command_timeout);
-        self.build_with(SHARED_IDENTIFIER.to_string(), policy)
+        self.build_with(SHARED_IDENTIFIER.to_string(), shared_policy())
     }
 
     /// The sugar path: the same build, bound to one workspace.
     ///
     /// What `Workspace::open(path)` has always done, byte for byte — the
-    /// per-path persist identifier, `git_protected(workspace_bounded(path))`,
-    /// the caller's shell posture baked into policy as a second belt beside
-    /// the dispatcher's guard.
+    /// per-path persist identifier and
+    /// `git_protected(workspace_bounded(path))` on the runtime itself. The
+    /// workspace hands its sessions the same policy either way; baking it here
+    /// as well is what keeps a private runtime's own agents bounded.
     pub(crate) fn build_for(
         self,
         workspace: &Path,
         shell: ShellAccess,
         memory_roots: &[PathBuf],
     ) -> Result<Runtime, RunError> {
-        let policy = with_command_patience(
+        self.build_with(
+            store::runtime_identifier(workspace),
             workspace_policy(workspace, shell, memory_roots),
-            self.command_timeout,
-        );
-
-        self.build_with(store::runtime_identifier(workspace), policy)
+        )
     }
 
     fn build_with(self, identifier: String, policy: RuntimePolicy) -> Result<Runtime, RunError> {
-        let policy = match self.tool_result_policy {
-            Some(tool_result_policy) => tool_result_policy.apply_to(policy),
-            None => policy,
-        };
+        // Held rather than consumed: a per-session policy replaces this one
+        // wholesale upstream, so every workspace's policy has to be shaped by
+        // the same two knobs or a host's `with_command_timeout` and
+        // `with_tool_result_policy` would hold for the runtime and silently
+        // not for the sessions actually running on it.
+        let policy_shaping = PolicyShaping::new(self.command_timeout, self.tool_result_policy);
+        let policy = policy_shaping.apply_to(policy);
 
         // First, before even the credential is looked up, because opening the
         // store is what refuses a directory still holding a basis ≤0.6
@@ -626,6 +627,7 @@ impl RuntimeBuilder {
             retry_policy: self.retry_policy,
             ephemeral_history,
             transcripts,
+            policy_shaping,
             dispatch,
             #[cfg(feature = "mcp")]
             mcp_claims: Mutex::new(HashMap::new()),

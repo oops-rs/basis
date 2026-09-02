@@ -76,15 +76,15 @@ use serde_json::{Value, json};
 use crate::runtime::dispatch::HookDispatch;
 use parse::{INPUT_FIELD, Mode, Spawn, parse};
 
-// The runtime's hook dispatcher must know whether a `spawn` call is a command
-// before denying it for a shell-off workspace, and the module docs above make
-// the rule: the `!` prefix is read exactly once, here. Re-exported crate-wide
-// so the dispatcher asks this parser rather than becoming a second reader.
+// A guard that has to know whether a `spawn` call is a command must not
+// become a second reader of the `!` prefix — the module docs above make the
+// rule: it is read exactly once, here. Exported so a host's interceptor asks
+// this parser rather than writing its own.
 pub use parse::{
     INPUT_FIELD as SPAWN_INPUT_FIELD, Mode as SpawnMode, Spawn as SpawnInput, classify_spawn_input,
     parse as parse_spawn_input,
 };
-pub(crate) use parse::{LOCAL_TARGET, is_target_name, parse as parse_spawn};
+pub(crate) use parse::{LOCAL_TARGET, is_target_name};
 
 pub use child::{ChildContext, ChildSpec};
 pub use depth::DEFAULT_DELEGATION_DEPTH;
