@@ -119,7 +119,7 @@ fn validate_file_name(name: &str) -> Result<(), ContextError> {
 ///
 /// `pub(crate)` because [`WorkspaceBuilder::open`] resolves the root through
 /// this same function before anything else reads it: the parent walk, the
-/// dispatcher key, the runtime's policy roots and the agent's base directory
+/// store identifier, the runtime's policy roots and the agent's base directory
 /// must all name one directory, and they do that by resolving *once* rather
 /// than each canonicalizing its own copy. Calling it again here is free —
 /// canonicalizing a canonical path returns it unchanged — and keeps

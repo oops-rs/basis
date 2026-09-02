@@ -31,8 +31,7 @@
 //!   reading the others' memory index into its own prompt. So
 //!   `WorkspaceBuilder::open` passes no store dir on the shared path at all,
 //!   and [`WorkspaceMemoryRoot::BesideStore`] resolves to nothing there,
-//!   exactly parallel to the dispatcher's existing shared-runtime posture: it
-//!   can deny a write, never grant a root policy never named. An explicit
+//!   An explicit
 //!   [`WorkspaceMemoryRoot::Dir`] is unaffected either way — naming a path is
 //!   the host taking responsibility for it.
 //!

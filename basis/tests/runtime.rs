@@ -9,10 +9,10 @@
 //!    registry — a `mcp__*` bridged one, or one its `.basis/tools.json`
 //!    declared — never reaches another workspace's roster, asserted on the
 //!    wire, in the `tools` array of the request the model actually receives.
-//! 3. **The dispatcher's key holds.** The `working_directory` mentra hands a
-//!    pre-hook is the agent's `base_dir` — the assumption basis's per-workspace
-//!    hook routing dispatches on — and a workspace's own hooks therefore still
-//!    guard its runs on a shared runtime.
+//! 3. **A workspace's hooks are its own.** Each open registers its folded
+//!    chain live, for its own tool audience, so a workspace's hooks guard its
+//!    runs on a shared runtime, a sibling is untouched by them, and a second
+//!    open of one root joins the first rather than replacing it.
 //!
 //! The endpoint is `tests/workspace.rs`'s, grown two abilities: it can script
 //! a tool call, and it keeps every request body so a test can read the roster
@@ -30,7 +30,7 @@ use std::{
 };
 
 use basis::{
-    AllowAll, CollectingSink, ContextConfig, HookSpec, MemoryConfig, RunError, RunOutcome, Runtime,
+    AllowAll, CollectingSink, ContextConfig, HookSpec, MemoryConfig, RunOutcome, Runtime,
     Workspace, WorkspaceBuilder, hooks::HooksConfig, skills::SkillsConfig, store,
     templates::TemplatesConfig, tools::declared::ToolsConfig,
 };
@@ -405,82 +405,9 @@ mod declared_roster {
     }
 }
 
-mod dispatch_key {
-    use super::*;
-
-    use mentra::{
-        ContentBlock,
-        error::RuntimeError,
-        runtime::{HookDecision, PreExecutionContext, PreExecutionHook},
-        test::{MockRuntime, MockToolCall},
-    };
-
-    struct Recording(Arc<Mutex<Vec<PathBuf>>>);
-
-    #[async_trait::async_trait]
-    impl PreExecutionHook for Recording {
-        async fn pre_tool_execution(
-            &self,
-            context: &PreExecutionContext,
-        ) -> Result<HookDecision, RuntimeError> {
-            self.0
-                .lock()
-                .expect("recorder")
-                .push(context.working_directory.clone());
-            Ok(HookDecision::Allow)
-        }
-    }
-
-    /// Pins the assumption basis's hook dispatcher is built on: what mentra
-    /// hands a pre-hook as `working_directory` is the agent's `base_dir` —
-    /// the same path basis keys its workspace registry with. If this ever moves
-    /// upstream, dispatch would miss and workspace hooks would silently stop
-    /// running; this test is the tripwire.
-    #[tokio::test]
-    async fn the_working_directory_a_hook_sees_is_the_agents_base_dir() {
-        let seen = Arc::new(Mutex::new(Vec::new()));
-        let workspace = tempfile::tempdir().expect("tempdir");
-
-        let mock = MockRuntime::builder()
-            .model("test-model", "openai")
-            .with_pre_hook(Recording(Arc::clone(&seen)))
-            .tool_calls(vec![MockToolCall::new(
-                "files",
-                json!({"operations": [{"op": "list", "path": "."}]}),
-            )])
-            .text("done")
-            .build()
-            .expect("the mock runtime builds");
-        let mut session = mock
-            .runtime()
-            .create_session_with_config(
-                "test",
-                mock.model(),
-                mentra::agent::AgentConfig {
-                    workspace: mentra::agent::WorkspaceConfig {
-                        base_dir: workspace.path().to_path_buf(),
-                        ..Default::default()
-                    },
-                    ..Default::default()
-                },
-            )
-            .expect("session");
-        session
-            .append_turn(vec![ContentBlock::text("go")])
-            .await
-            .expect("a scripted turn completes");
-
-        assert_eq!(
-            seen.lock().expect("recorder").as_slice(),
-            &[workspace.path().to_path_buf()],
-            "dispatching on working_directory only works if it is base_dir"
-        );
-    }
-}
-
 /// A workspace's own hooks still guard its runs when the runtime is shared —
-/// the registration moved onto the dispatcher, the effect did not — and a
-/// sibling workspace without hooks is untouched by them.
+/// the registration is a live, audience-scoped one now, the effect is unchanged
+/// — and a sibling workspace without hooks is untouched by them.
 #[cfg(unix)]
 #[tokio::test]
 async fn a_workspaces_hooks_guard_its_runs_on_a_shared_runtime() {
@@ -545,23 +472,36 @@ async fn a_workspaces_hooks_guard_its_runs_on_a_shared_runtime() {
 
 #[cfg(unix)]
 #[tokio::test]
-async fn same_root_hooks_must_match_and_survive_until_the_last_holder() {
+async fn a_second_open_of_one_root_cannot_weaken_the_first_ones_hooks() {
+    // Two live opens of one repository share a tool audience, so both their
+    // chains are consulted for either one's runs. That is the shape that
+    // matters: a later open with a permissive guard joins the first rather
+    // than replacing it, and the first refusal still wins — the property the
+    // old same-root registry enforced by refusing the second open outright.
+    // When the first goes, its registration goes with it, and what is left is
+    // the second's own answer.
     use std::os::unix::fs::PermissionsExt;
 
-    let endpoint = ScriptedEndpoint::start(vec![Reply::write_file("same-root.txt"), Reply::Text]);
+    let endpoint = ScriptedEndpoint::start(vec![
+        Reply::write_file("same-root.txt"),
+        Reply::Text,
+        Reply::write_file("same-root.txt"),
+        Reply::Text,
+    ]);
     let runtime = shared_runtime(&endpoint);
     let root = workspace_dir();
-    let script = root.path().join("deny-same-root.sh");
-    std::fs::write(
-        &script,
-        "#!/bin/sh\necho '{\"decision\":\"deny\",\"reason\":\"first guard stays\"}'\n",
-    )
-    .expect("script");
-    std::fs::set_permissions(&script, std::fs::Permissions::from_mode(0o755)).expect("chmod");
-    let deny = HookSpec::new(
-        "same-root-guard",
-        vec![script.to_string_lossy().into_owned()],
+
+    let script = |name: &str, body: &str| {
+        let path = root.path().join(name);
+        std::fs::write(&path, format!("#!/bin/sh\n{body}\n")).expect("script");
+        std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o755)).expect("chmod");
+        HookSpec::new(name, vec![path.to_string_lossy().into_owned()])
+    };
+    let deny = script(
+        "deny-same-root.sh",
+        r#"echo '{"decision":"deny","reason":"first guard stays"}'"#,
     );
+    let allow = script("allow-same-root.sh", r#"echo '{"decision":"allow"}'"#);
     let config = |supplied| HooksConfig {
         workspace_file: PathBuf::from(".basis/hooks.json"),
         global_dir: None,
@@ -569,28 +509,17 @@ async fn same_root_hooks_must_match_and_survive_until_the_last_holder() {
     };
 
     let first = pinned(root.path(), Arc::clone(&runtime))
-        .with_hooks(config(vec![deny.clone()]))
-        .open()
-        .await
-        .expect("the first guard registers");
-    let error = pinned(root.path(), Arc::clone(&runtime))
-        .with_hooks(config(vec![HookSpec::new(
-            "same-root-guard",
-            vec!["/bin/true".to_string()],
-        )]))
-        .open()
-        .await
-        .expect_err("a differing live guard cannot replace the first");
-    assert!(matches!(error, RunError::WorkspaceGuardConflict { .. }));
-
-    let identical = pinned(root.path(), runtime)
         .with_hooks(config(vec![deny]))
         .open()
         .await
-        .expect("an identical same-root guard joins the existing registration");
-    drop(first);
+        .expect("the first guard registers");
+    let permissive = pinned(root.path(), runtime)
+        .with_hooks(config(vec![allow]))
+        .open()
+        .await
+        .expect("a second open of one root is not a conflict");
 
-    identical
+    permissive
         .prepare("write a file")
         .expect("mints")
         .execute_with_approver(CollectingSink::default(), AllowAll)
@@ -598,7 +527,20 @@ async fn same_root_hooks_must_match_and_survive_until_the_last_holder() {
         .expect("a hook denial is an answer, not a run failure");
     assert!(
         !root.path().join("same-root.txt").exists(),
-        "the identical holder must keep the first supplied denial after one holder drops"
+        "the second open must not be able to lift the first open's refusal"
+    );
+
+    drop(first);
+
+    permissive
+        .prepare("write a file")
+        .expect("mints")
+        .execute_with_approver(CollectingSink::default(), AllowAll)
+        .await
+        .expect("completes");
+    assert!(
+        root.path().join("same-root.txt").exists(),
+        "and the refusal leaves with the open that declared it"
     );
 }
 

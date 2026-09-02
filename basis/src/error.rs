@@ -239,14 +239,6 @@ pub enum RunError {
     #[error("failed to load hooks: {0}")]
     Hooks(#[from] crate::hooks::HookConfigError),
 
-    /// Two live opens of one canonical workspace asked the shared hook
-    /// dispatcher to enforce different effective guard configurations.
-    #[error(
-        "workspace guard configuration for '{}' differs from another live open of that workspace",
-        root.display()
-    )]
-    WorkspaceGuardConflict { root: std::path::PathBuf },
-
     #[error("failed to load declared tools: {0}")]
     Tools(#[from] crate::tools::declared::DeclaredToolError),
 

@@ -746,20 +746,20 @@ fn resolved(path: &Path) -> PathBuf {
 /// Every name one opened workspace answers to for the directory it is scoped
 /// to. They must be one path, or two of them disagree about where the run is.
 ///
-/// Four of the five seams `open`'s doc comment promises. The fifth — the
-/// private runtime's policy roots — cannot be read back: mentra's
-/// `RuntimePolicy` keeps `allowed_working_roots`, `allowed_read_roots` and
-/// `allowed_write_roots` private and offers no reader for them (an upstream
-/// candidate), so nothing here can fail if a future edit hands
-/// `workspace_bounded` a second spelling. The memory root and the run header
-/// derive from `root()` rather than from `path` and are covered by it.
+/// Three of the seams `open`'s doc comment promises. The policy roots cannot
+/// be read back: mentra's `RuntimePolicy` keeps `allowed_working_roots`,
+/// `allowed_read_roots` and `allowed_write_roots` private and offers no reader
+/// for them (an upstream candidate), so nothing here can fail if a future edit
+/// hands `workspace_bounded` a second spelling. The tool audience and the store
+/// identifier are one string derived once (`Workspace::scope`), asserted below
+/// rather than here because they are not paths. The memory root and the run
+/// header derive from `root()` rather than from `path` and are covered by it.
 fn spellings(workspace: &Workspace) -> Vec<&Path> {
     vec![
         workspace.root(),
         workspace.path(),
         workspace.agent.workspace.base_dir.as_path(),
         workspace.declared_registration.root(),
-        workspace.hook_registration.key(),
     ]
 }
 
@@ -776,10 +776,10 @@ async fn a_relative_path_is_made_absolute_at_open() {
     }
 }
 
-// Unix only, like every other symlink test in this crate
-// (`runtime::dispatch::tests`, `fingerprint`): `std::os::unix` does not exist
-// on Windows, so an ungated call here is a build failure rather than a test
-// failure — and CI compiles this crate's tests on all three platforms.
+// Unix only, like every other symlink test in this crate (`fingerprint`):
+// `std::os::unix` does not exist on Windows, so an ungated call here is a build
+// failure rather than a test failure — and CI compiles this crate's tests on
+// all three platforms.
 #[cfg(unix)]
 #[tokio::test]
 async fn a_symlinked_spelling_opens_the_directory_it_names() {
@@ -798,6 +798,11 @@ async fn a_symlinked_spelling_opens_the_directory_it_names() {
             "a symlinked spelling must resolve once, at the open"
         );
     }
+    assert_eq!(
+        workspace.scope.identifier,
+        crate::store::runtime_identifier(&canonical),
+        "the store tag and the tool audience are that one resolved spelling too"
+    );
 }
 
 #[tokio::test]

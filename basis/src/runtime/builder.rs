@@ -41,7 +41,6 @@ pub(in crate::runtime) use provider_settlement::HostProvider;
 
 use super::{
     FileToolProfile, ResponsesTransport, RetryPolicy, Runtime, ToolResultPolicy, Wire,
-    dispatch::{DispatchHook, HookDispatch},
     executor::{CommandTargets, TargetedExecutor},
 };
 
@@ -510,8 +509,6 @@ impl RuntimeBuilder {
             self.api_key,
         )?;
 
-        let dispatch = Arc::new(HookDispatch::new(self.interceptors));
-
         let builder = mentra::Runtime::builder()
             // Which conversations belong where, which is the only question
             // `session/list` can honestly answer (see `crate::store`). Unset,
@@ -547,16 +544,12 @@ impl RuntimeBuilder {
                 target_names,
                 self.delegation_depth,
                 self.child_policy,
-            ))
-            // The one pre-hook basis registers, always: mentra takes hooks at
-            // build time only, and workspaces arrive later, through the
-            // dispatcher (see `runtime::dispatch`).
-            .with_pre_hook(DispatchHook(Arc::clone(&dispatch)))
-            // And the one post-hook, for the same reason and the same
-            // dispatcher — a second handle on it, because mentra's two seams
-            // are two registrations. Always, again: whether a workspace will
-            // declare a `post_tool_use` hook is not knowable from here.
-            .with_post_hook(DispatchHook(Arc::clone(&dispatch)));
+            ));
+        // No hooks are installed here. mentra 0.26 takes them live
+        // (`Runtime::register_pre_hook_for_audience`), so each workspace
+        // registers its own folded runner at open and holds the guard — which
+        // is what a runtime built before any workspace exists could not do
+        // when hooks were a build-time list.
 
         // Installed whenever either half has something to say. With both
         // empty, mentra keeps its own local executor and basis adds no layer
@@ -627,7 +620,7 @@ impl RuntimeBuilder {
             ephemeral_history,
             transcripts,
             policy_shaping,
-            dispatch,
+            interceptors: self.interceptors,
             #[cfg(feature = "mcp")]
             mcp_claims: Mutex::new(HashMap::new()),
             declared_claims: Mutex::new(HashMap::new()),

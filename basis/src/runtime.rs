@@ -34,7 +34,6 @@
 
 pub(crate) mod builder;
 mod credential;
-pub(crate) mod dispatch;
 mod executor;
 mod tool_results;
 
@@ -203,7 +202,6 @@ pub enum Wire {
 use crate::error::RunError;
 
 use builder::execution::{PolicyShaping, workspace_policy};
-use dispatch::{HookDispatch, HookRegistration, WorkspaceGuardEntry};
 
 /// One process's substrate: mentra's runtime plus the resolution policy and
 /// host guards that were fixed when it was built.
@@ -266,8 +264,19 @@ pub struct Runtime {
     /// so a workspace's own policy gets the same shaping the runtime's did.
     /// See [`session_policy`](Self::session_policy).
     policy_shaping: PolicyShaping,
-    /// The one pre-hook basis registered, and the registry workspaces join.
-    dispatch: Arc<HookDispatch>,
+    /// The host's own interception participants, fixed at build like
+    /// everything else on the runtime (ADR-0018).
+    ///
+    /// Kept here rather than registered on mentra's seams, because they are
+    /// not a chain of their own: each workspace folds them ahead of its own
+    /// hooks into one [`HookRunner`](crate::hooks::HookRunner), and that one
+    /// runner is what gets registered. Splitting them into a second
+    /// registration would run the same participants in a second chain, where
+    /// a rewrite's attribution could not survive into a later refusal — the
+    /// "every hand that touched the call is named" property `hooks::chain`
+    /// states, and the "same chain" `RuntimeBuilder::with_interceptor`
+    /// promises.
+    interceptors: Vec<Arc<dyn crate::hooks::Interceptor>>,
     /// Which workspace owns each MCP server name on this runtime's single tool
     /// registry — bridged tools are namespaced by server, so two workspaces
     /// configuring one name must be told apart here.
@@ -553,18 +562,7 @@ impl Runtime {
     /// The host interceptors this runtime was built with, for the workspace
     /// open that folds them ahead of its own hooks.
     pub(crate) fn interceptors(&self) -> &[Arc<dyn crate::hooks::Interceptor>] {
-        self.dispatch.interceptors()
-    }
-
-    /// Joins a workspace to this runtime's hook dispatcher. The registration
-    /// deregisters on drop, which is how a dropped workspace stops being
-    /// consulted.
-    pub(crate) fn register_workspace(
-        &self,
-        root: &Path,
-        entry: WorkspaceGuardEntry,
-    ) -> Result<HookRegistration, RunError> {
-        self.dispatch.register(root, entry)
+        &self.interceptors
     }
 
     /// Claims an MCP server name on this runtime's tool registry for the

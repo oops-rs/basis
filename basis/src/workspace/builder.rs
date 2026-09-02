@@ -37,7 +37,7 @@ use crate::{
     hooks::{self, HookRunner, HooksConfig},
     memory::{self, MemoryConfig},
     run::LoadedSkill,
-    runtime::{Runtime, RuntimeBuilder, SessionScope, dispatch},
+    runtime::{Runtime, RuntimeBuilder, SessionScope},
     shell::ShellAccess,
     skills::{self, SkillRoots, SkillsConfig},
     store,
@@ -503,8 +503,9 @@ impl WorkspaceBuilder {
     /// directory is [`Workspace::root`] — a workspace opened as `.`, through a
     /// symlink, or with a `..` in it reports the directory those spellings
     /// name, not the spelling. Everything downstream takes that one value: the
-    /// agent's base directory, the runtime's policy roots, the hook
-    /// dispatcher's key, the store identifier, and the run header's
+    /// agent's base directory, the runtime's policy roots, the hook runner's
+    /// directory, the store identifier — which also names this workspace's tool
+    /// audience — and the run header's
     /// `workspace`. Nothing resolves it again, so a process that changes its
     /// working directory afterwards changes nothing about a workspace already
     /// open. A path that does not exist, or is not a directory, fails the open
@@ -566,8 +567,8 @@ impl WorkspaceBuilder {
         }
 
         // **The one resolution.** Everything below this line names the
-        // workspace through `path` and nothing re-derives it: the dispatcher
-        // key, the private runtime's policy roots, the agent's base directory,
+        // workspace through `path` and nothing re-derives it: the private
+        // runtime's policy roots, the agent's base directory,
         // the hook runner's directory, the store identifier and the run
         // header all take this value. A relative spelling would otherwise
         // survive into all of them and be resolved again — against whatever
@@ -622,12 +623,9 @@ impl WorkspaceBuilder {
         // private path.** A shared runtime's store dir is one runtime-wide
         // fact, not this workspace's — every workspace borrowing it would
         // derive the identical sibling `memory/` directory, and each would
-        // read the others' memory index into its own prompt (worse than the
-        // write-is-refused gap this replaces: that let the index render
-        // anyway). `None` here is what makes `memory::roots` skip the
-        // workspace root entirely on a shared runtime, exactly parallel to
-        // the dispatcher's existing shared-runtime posture — it can deny, it
-        // cannot grant a root the policy never named. The global root is
+        // read the others' memory index into its own prompt. `None` here is
+        // what makes `memory::roots` skip the workspace root entirely on a
+        // shared runtime. The global root is
         // unaffected: every workspace's own memories are exactly that,
         // whichever runtime they borrow. An explicit
         // [`WorkspaceMemoryRoot::Dir`](crate::memory::WorkspaceMemoryRoot::Dir)
@@ -733,12 +731,8 @@ impl WorkspaceBuilder {
         // without it. The names are claimed first, so a manifest naming a tool
         // this runtime already answers to — `spawn`, a mentra builtin, another
         // workspace's declaration — refuses the open instead of replacing it.
-        // No `dispatch::canonical` around the root here or on the guard entry
-        // below: `path` already is what that helper would return, and calling
-        // it again would be the second resolution this open exists to do
-        // without. Registration and lookup still meet on one key, because the
-        // lookup side canonicalizes the *call's* directory, which is the side
-        // that has not been resolved yet.
+        // The root is `path` as resolved above and is not canonicalized again:
+        // that would be the second resolution this open exists to do without.
         let declared_tools = DeclaredTools::register_with_supplied(
             Arc::clone(&runtime),
             &audience,
@@ -754,19 +748,33 @@ impl WorkspaceBuilder {
 
         // One runner for both interception bindings, host interceptors folded
         // first: the chain order host interceptors → supplied hooks → global
-        // hooks → workspace hooks survives the runtime split — only the
-        // registration point moved onto the runtime's dispatcher.
+        // hooks → workspace hooks is basis's own, decided inside one
+        // `HookRunner`, and registering that one runner is what keeps it so —
+        // a second registration for the interceptors would be a second chain,
+        // and mentra keeps only the last rewrite's reason across two of them.
+        //
+        // Registered for this workspace's audience, not globally, because a
+        // runner does not filter: it answers for every call it is handed. The
+        // audience is what makes "this workspace's hooks judge this
+        // workspace's runs" true, and it is a better answer than the working
+        // directory basis used to route on — two agents can share a directory
+        // and belong to different repositories, and a call from a delegated
+        // child carries its parent's audience wherever it runs.
         let runner = runtime.interceptors().iter().cloned().fold(
-            HookRunner::new(&path, loaded_hooks.clone()),
+            HookRunner::new(&path, loaded_hooks),
             |runner, interceptor| runner.with_interceptor(interceptor),
         );
-        let hook_registration = runtime.register_workspace(
-            &path,
-            dispatch::WorkspaceGuardEntry {
-                runner: Arc::new(runner),
-                hooks: loaded_hooks,
-            },
-        )?;
+        // Two registrations because mentra's two seams are two registries, and
+        // both are taken unconditionally: whether this workspace will ever
+        // answer about a *result* is knowable here, but a runner with nothing
+        // to say costs one map walk and the alternative is a workspace that
+        // silently could not be given a post hook.
+        let pre_hook = runtime
+            .mentra_runtime()
+            .register_pre_hook_for_audience(audience.clone(), runner.clone());
+        let post_hook = runtime
+            .mentra_runtime()
+            .register_post_hook_for_audience(audience.clone(), runner);
 
         // Both lists reach the header whether or not this build has MCP in it:
         // what a run reports is a schema clients parse, and a field that
@@ -823,7 +831,8 @@ impl WorkspaceBuilder {
             declared_tool_files: sourced(&declared_sources),
             declared_tools: declared_tool_names,
             declared_registration: declared_tools,
-            hook_registration,
+            pre_hook,
+            post_hook,
             #[cfg(feature = "mcp")]
             mcp_connections,
         })

@@ -20,8 +20,8 @@
 //!
 //! # What a cached workspace holds open
 //!
-//! Its MCP connections and its registration on the runtime's hook dispatcher,
-//! both of which have to outlive every session minted from it — a workspace
+//! Its MCP connections and its hook registrations on the runtime, both of
+//! which have to outlive every session minted from it — a workspace
 //! dropped while a session still runs takes that session's servers and its
 //! `.basis/hooks.json` with it. Nothing here evicts, therefore: `session/close`
 //! reaches basis after the fact, and a turn still unwinding would be the one
@@ -304,8 +304,18 @@ impl SessionSource for ConfiguredSource {
 ///
 /// Two workspaces on one directory is the cost, and it is bounded: they differ
 /// only in their supplied servers, so they discover the same hooks and carry
-/// the same command posture, and basis's dispatcher — which keys on the
-/// directory — is consulting equivalent guards whichever of them it finds.
+/// the same command posture.
+///
+/// They now cost more than they used to, and it is worth stating. A workspace
+/// registers its hook chain live, for its own tool audience, and two opens of
+/// one directory share that audience — so both chains are consulted for either
+/// one's calls, where basis's old registry recognised the second open as
+/// identical to the first and counted a holder instead. Every guard still
+/// runs and the stricter answer still wins, so nothing is weakened; what a
+/// repository's `.basis/hooks.json` pays is one extra subprocess per call
+/// while two such sessions are live, and a hook whose rewrite is not
+/// idempotent sees its own output. Mentra's live registration has no way to
+/// say "this is the registration I already have" (an upstream candidate).
 #[derive(Debug, PartialEq, Eq, Hash)]
 struct WorkspaceKey {
     workspace: PathBuf,

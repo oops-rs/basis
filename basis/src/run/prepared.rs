@@ -196,11 +196,11 @@ impl PreparedRun {
     ///
     /// A `PreparedRun` owns its session but only *describes* its workspace,
     /// and two things live exactly as long as the workspace does: its hook
-    /// registration on the runtime's dispatcher, and its MCP connections. A
+    /// registrations on the runtime, and its MCP connections. A
     /// caller that drops the workspace at mint and drives the run afterwards
-    /// runs every turn with the workspace's hooks silently unenforced — the
-    /// dispatcher fails open for a directory no live workspace claims, which
-    /// is correct for a retired workspace and catastrophic for one that was
+    /// runs every turn with the workspace's hooks silently unenforced —
+    /// dropping a live registration is what deregisters it, which is correct
+    /// for a retired workspace and catastrophic for one that was
     /// merely dropped early — and with its MCP servers torn down while the
     /// minted roster still offers their tools. The free functions in
     /// [`run`](mod@crate::run) attach the workspace here for exactly that

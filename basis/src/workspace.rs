@@ -54,7 +54,12 @@ mod spec;
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
 
-use mentra::{ModelInfo, Session, agent::AgentConfig, provider::ReasoningOptions};
+use mentra::{
+    ModelInfo, Session,
+    agent::AgentConfig,
+    provider::ReasoningOptions,
+    runtime::{PostExecutionHookRegistration, PreExecutionHookRegistration},
+};
 
 pub use builder::WorkspaceBuilder;
 pub use profile::RunProfile;
@@ -75,7 +80,7 @@ use crate::{
     fingerprint::{self, Snapshot},
     memory::Memory,
     run::{Effort, LoadedSkill, PreparedRun, RunContext},
-    runtime::{Runtime, SessionScope, dispatch::HookRegistration},
+    runtime::{Runtime, SessionScope},
     skills::SkillRoots,
     templates::Template,
     tools::declared::DeclaredTools,
@@ -100,8 +105,8 @@ pub struct Workspace {
     ///
     /// One field rather than two — the requested spelling and the resolved
     /// one — because everything downstream has to agree: the agent's base
-    /// directory, the runtime's policy roots, the dispatcher's key, the store
-    /// identifier and the run header's `workspace` all take this value, and a
+    /// directory, the runtime's policy roots, the hook runner's directory, the
+    /// store identifier and the run header's `workspace` all take this value, and a
     /// second spelling kept beside it is only an opportunity for two of them
     /// to name different directories.
     root: PathBuf,
@@ -150,10 +155,13 @@ pub struct Workspace {
     /// registry and registered for its own audience; releases both on drop.
     #[allow(dead_code, reason = "held for its Drop")]
     declared_registration: DeclaredTools,
-    /// Keeps this workspace's hooks and guards registered on the runtime's
-    /// dispatcher; deregisters on drop.
+    /// mentra's holds on this workspace's own interception chain, one per
+    /// seam, registered for this workspace's tool audience. Dropping them is
+    /// what stops a dropped workspace being consulted.
     #[allow(dead_code, reason = "held for its Drop")]
-    hook_registration: HookRegistration,
+    pre_hook: PreExecutionHookRegistration,
+    #[allow(dead_code, reason = "held for its Drop")]
+    post_hook: PostExecutionHookRegistration,
     #[cfg(feature = "mcp")]
     #[allow(dead_code, reason = "held for its Drop")]
     mcp_connections: McpConnections,
