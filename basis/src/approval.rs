@@ -91,15 +91,33 @@ pub struct ApprovalRequest {
 }
 
 /// What an [`Approver`] decided.
+///
+/// # How long "for the session" lasts
+///
+/// A `…ForSession` answer is remembered against the conversation and answers
+/// every later call of that tool on the **live session**: further calls in the
+/// same turn, and further runs on the same [`PreparedRun`](crate::PreparedRun)
+/// in the same process. It dies at the next attach — resuming the
+/// conversation ([`Workspace::resume`](crate::Workspace)) clears it, so a
+/// later process that picks the conversation back up asks again rather than
+/// replaying an answer nobody in that process gave.
+///
+/// That boundary is basis's, enforced at resume. mentra 0.26 persists the
+/// remembered rule in the runtime store under the conversation's stable agent
+/// id and would replay it across every attach; basis clears the session scope
+/// on its one resume path instead, because "for the rest of this session"
+/// must not silently mean "forever, in every future process".
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
 pub enum ApprovalDecision {
     Allow,
     /// The default: when in doubt, do not.
     #[default]
     Deny,
-    /// Allow, and stop asking about this tool for the rest of the session.
+    /// Allow, and stop asking about this tool for the rest of the live
+    /// session — see the duration rule above.
     AllowForSession,
-    /// Deny, and stop asking about this tool for the rest of the session.
+    /// Deny, and stop asking about this tool for the rest of the live
+    /// session — see the duration rule above.
     DenyForSession,
 }
 

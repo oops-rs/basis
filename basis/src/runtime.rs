@@ -42,7 +42,10 @@ use std::collections::HashMap;
 use std::path::{Path, PathBuf};
 use std::sync::{Arc, Mutex};
 
-use mentra::{ModelSelector, Session, agent::AgentConfig, runtime::SessionOptions};
+use mentra::{
+    ModelSelector, Session, agent::AgentConfig, runtime::SessionOptions,
+    session::PermissionRuleScope,
+};
 
 use crate::tools::declared::DeclaredToolSpec;
 
@@ -409,7 +412,23 @@ impl Runtime {
     /// The one place a workspace's sessions are resumed; see
     /// [`mint`](Self::mint) for why it is a place at all.
     pub(crate) fn resume_minted(&self, agent_id: &str) -> Result<Session, RunError> {
-        Ok(self.mentra.resume_session(agent_id)?)
+        let session = self.mentra.resume_session(agent_id)?;
+
+        // basis's documented duration for a "…for this session" answer is the
+        // live session: it survives further runs in the process that holds it
+        // and dies at the next attach. mentra 0.26 disagrees — its session
+        // rule namespace is the stable agent id, persisted in the runtime
+        // store and replayed across every resume — so the attach is where
+        // basis restores its own contract: clear the session scope before the
+        // resumed session answers anything from it. A fresh mint has a fresh
+        // agent id and nothing to clear; project- and global-scope rules are
+        // durable by definition and stay. Failing the resume on a failed
+        // clear is deliberate — proceeding would leave stale grants live.
+        session
+            .permission_handle()
+            .clear_scope(PermissionRuleScope::Session)?;
+
+        Ok(session)
     }
 
     /// The fixed command environment, as the pairs a spawned program is given.

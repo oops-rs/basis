@@ -252,6 +252,71 @@ async fn a_conversation_is_found_again_only_through_the_directory_it_was_written
     );
 }
 
+/// basis's documented duration for a "…for this session" approval answer:
+/// it lives with the live session and dies at the next attach. mentra 0.26
+/// persists session-scope rules under the stable agent id and would replay
+/// them across every resume; basis clears the session scope on its one
+/// resume path, so a later process asks again rather than replaying an
+/// answer nobody in it gave.
+#[tokio::test]
+async fn a_resumed_conversation_forgets_its_for_this_session_answers() {
+    use mentra::session::{PermissionRuleScope, RememberedRule, RuleKey};
+
+    let dir = tempfile::tempdir().expect("tempdir");
+    write(&dir.path().join("AGENTS.md"), "house rules");
+    let store = tempfile::tempdir().expect("tempdir");
+
+    let opened = offline(dir.path())
+        .with_runtime_builder(offline_runtime().with_store_dir(store.path()))
+        .open()
+        .await
+        .expect("opens");
+    let prepared = opened.prepare("go").expect("mints");
+    let agent_id = prepared.agent_id().to_string();
+    prepared
+        .session()
+        .permission_handle()
+        .remember_rule(RememberedRule {
+            key: RuleKey {
+                tool_name: "spawn".to_string(),
+                pattern: None,
+            },
+            allow: false,
+            scope: PermissionRuleScope::Session,
+            reason: Some("refused for the rest of this session".to_string()),
+        })
+        .expect("remembers");
+    assert_eq!(
+        prepared
+            .session()
+            .permission_handle()
+            .remembered_rules()
+            .expect("reads the live store")
+            .len(),
+        1,
+        "the answer must hold for the live session that gave it"
+    );
+    drop(prepared);
+    drop(opened);
+
+    let reopened = offline(dir.path())
+        .with_runtime_builder(offline_runtime().with_store_dir(store.path()))
+        .open()
+        .await
+        .expect("opens");
+    let resumed = reopened.resume(&agent_id, "again").expect("resumes");
+
+    assert_eq!(
+        resumed
+            .session()
+            .permission_handle()
+            .remembered_rules()
+            .expect("reads the live store"),
+        Vec::new(),
+        "a for-this-session answer must die at the next attach, not replay forever"
+    );
+}
+
 /// `offline` resolves its model by explicit id, which mentra never asks a
 /// listing for (`Runtime::resolve_model`) — so this workspace's context
 /// window is unknown before *and* after a resume. What this pins is that

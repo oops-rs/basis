@@ -15,6 +15,15 @@
 //! - Every "for this session" answer is forgotten on any policy switch. A stale
 //!   remembered allow surviving a switch to a stricter mode would be a silent
 //!   override of the very policy switch the host just made.
+//!
+//! Both invariants live *here*, in process memory, which is what makes them
+//! enforceable: [`PolicyApprover`] keeps the "…for this session" answer in
+//! [`SessionApproval`] and hands basis a plain allow or deny, so nothing
+//! reaches mentra's persisted rule store and a policy switch can genuinely
+//! clear everything. A host that passes the raw `…ForSession` decisions
+//! through instead gets basis's own duration for them — remembered on the
+//! live session, cleared at the next attach — which is documented on
+//! `basis::ApprovalDecision`.
 
 use std::{
     collections::HashMap,
