@@ -14,11 +14,15 @@
 //!   back suffixed — the effective name is what tools are bridged under and
 //!   what [`Workspace::mcp_servers`](crate::Workspace::mcp_servers) reports;
 //! - a workspace's bridged tools come off the registry when it drops, together
-//!   with the claim. While `unregister_tool` was `pub(crate)` upstream they
-//!   could only be left where they were and hidden from every roster minted
-//!   afterwards; the hiding stays, because it is what keeps a *live* sibling's
-//!   tools out of this workspace's roster, but the registry no longer grows by
-//!   one server's worth of entries per open.
+//!   with the claim, so the registry no longer grows by one server's worth of
+//!   entries per open;
+//! - what each connection actually bridged is recorded beside the claim
+//!   ([`Runtime::record_bridged_tools`]). mentra's audience ladder keeps a
+//!   workspace in *another* directory from seeing these names, and cannot keep
+//!   a second live open of *this* directory from seeing them — one directory is
+//!   one audience — so the names are what
+//!   [`Workspace::minted_agent`](crate::Workspace) hides from a sibling that
+//!   configured a different set of servers.
 //!
 //! A server that fails to connect degrades exactly as mentra's `build_async`
 //! degraded: a warning names it, the open continues, and the name still
@@ -105,7 +109,15 @@ impl McpConnections {
             };
 
             match outcome {
-                Ok(tools) => bridged.extend(bridge(&runtime, audience, &effective, tools)),
+                Ok(tools) => {
+                    let registered = bridge(&runtime, audience, &effective, tools);
+                    // What took, not what was offered: a name the registry
+                    // already answered to was skipped, and a name this
+                    // workspace does not actually serve must not be hidden
+                    // from a sibling that legitimately does.
+                    runtime.record_bridged_tools(&effective, root, registered_names(&registered));
+                    bridged.extend(registered);
+                }
                 // Degraded mode, mentra's own wording: one unreachable server
                 // must not sink the open.
                 Err(error) => {
@@ -195,6 +207,17 @@ where
     }
 
     registered
+}
+
+/// The names a batch of registrations put on the registry, in order.
+///
+/// Read off basis's own holds rather than asked of mentra, which exposes no
+/// reader for one audience's registrations (upstream `mentra#55`).
+fn registered_names(registered: &[AudienceToolRegistration]) -> Vec<String> {
+    registered
+        .iter()
+        .map(|registration| registration.descriptor().provider.name.clone())
+        .collect()
 }
 
 impl Drop for McpConnections {

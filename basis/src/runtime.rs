@@ -285,7 +285,7 @@ pub struct Runtime {
     /// registry — bridged tools are namespaced by server, so two workspaces
     /// configuring one name must be told apart here.
     #[cfg(feature = "mcp")]
-    mcp_claims: Mutex<HashMap<String, PathBuf>>,
+    mcp_claims: Mutex<HashMap<String, McpClaim>>,
     /// Which workspace owns each declared tool name on the same single
     /// registry. See [`Runtime::claim_declared_tool`] for why this exists.
     declared_claims: Mutex<HashMap<String, DeclaredClaim>>,
@@ -327,6 +327,28 @@ impl SessionScope {
     }
 }
 
+/// One MCP server name held on this runtime's single tool registry, and what
+/// was bridged under it.
+///
+/// The names matter as much as the owner, and only for one question: *which
+/// `mcp__*` tools on this runtime belong to somebody else?* mentra's audience
+/// ladder answers it for a workspace in another audience, and cannot answer it
+/// for a sibling open of the **same directory** — two such opens share one
+/// audience by construction (`SessionScope::audience`), which is exactly the
+/// pair `basis-host` produces when one repository is opened twice with
+/// different client-supplied servers. So the tool names live beside the claim,
+/// and [`Runtime::foreign_mcp_tools`] is what a mint asks.
+#[cfg(feature = "mcp")]
+#[derive(Debug)]
+struct McpClaim {
+    /// The claiming workspace root; only it can release the name.
+    root: PathBuf,
+    /// The `mcp__<server>__<tool>` names bridged under this server, in the
+    /// order they took. Empty until the connection succeeds, and empty forever
+    /// for a server that never came up.
+    tools: Vec<String>,
+}
+
 /// A declared tool name registered on this runtime by a workspace still open.
 ///
 /// `holders` rather than a bare owner because one root may be open twice — a
@@ -348,6 +370,16 @@ struct DeclaredClaim {
     /// outlive the first of them to drop. `None` between the claim and the
     /// registration, and for every holder after the first.
     registration: Option<AudienceToolRegistration>,
+}
+
+#[cfg(feature = "mcp")]
+impl McpClaim {
+    fn new(root: &Path) -> Self {
+        Self {
+            root: root.to_path_buf(),
+            tools: Vec::new(),
+        }
+    }
 }
 
 #[derive(Debug, Clone, Copy)]
@@ -569,7 +601,7 @@ impl Runtime {
         let mut claims = self.mcp_claims.lock().expect("mcp claim map poisoned");
 
         if !claims.contains_key(name) {
-            claims.insert(name.to_string(), root.to_path_buf());
+            claims.insert(name.to_string(), McpClaim::new(root));
             return name.to_string();
         }
 
@@ -582,8 +614,78 @@ impl Runtime {
             attempt += 1;
         }
 
-        claims.insert(effective.clone(), root.to_path_buf());
+        claims.insert(effective.clone(), McpClaim::new(root));
         effective
+    }
+
+    /// Records what a connected server actually bridged under the name it
+    /// claimed, so a sibling open can be told which names are not its own.
+    ///
+    /// Separate from the claim because the two happen at different times: a
+    /// name is claimed before the connection is attempted — the manager
+    /// namespaces every tool by it — and what came back is only known after.
+    /// Only the owning root may write, for
+    /// [`release_mcp_claim`](Self::release_mcp_claim)'s reason.
+    #[cfg(feature = "mcp")]
+    pub(crate) fn record_bridged_tools(&self, name: &str, root: &Path, tools: Vec<String>) {
+        let mut claims = self.mcp_claims.lock().expect("mcp claim map poisoned");
+        if let Some(claim) = claims.get_mut(name)
+            && claim.root == root
+        {
+            claim.tools = tools;
+        }
+    }
+
+    /// Every `mcp__*` name on this runtime whose server is not one of `own`.
+    ///
+    /// What a mint hides from its model. Two sources, because two kinds of
+    /// `mcp__*` registration are reachable from a workspace's session and
+    /// neither is covered by mentra's audience ladder:
+    ///
+    /// - **A sibling open of the same directory.** Its bridged tools are
+    ///   registered for the audience this workspace also resolves in — one
+    ///   directory is one audience — so mentra reports them `Visible`. That is
+    ///   the pair `basis-host` deliberately produces when two ACP sessions open
+    ///   one repository with different `mcpServers`, and without this the
+    ///   session that supplied none could list *and call* the other's
+    ///   authenticated server.
+    /// - **A host tool registered globally under an `mcp__`-shaped name**
+    ///   ([`RuntimeBuilder::with_tool`]). A global is visible to every
+    ///   audience on purpose; a name shaped like a bridged tool of a server
+    ///   this workspace never configured is not what that rule is for.
+    ///
+    /// Hiding rather than refusing, and by name: these tools belong to
+    /// somebody still open and still serving them. A name in `hidden_tools` is
+    /// neither offered nor invokable (`Agent::name_is_allowed`), which is the
+    /// property that matters — a model that guessed the name gets the same
+    /// answer as one that was never shown it.
+    #[cfg(feature = "mcp")]
+    pub(crate) fn foreign_mcp_tools(&self, own: &[String]) -> std::collections::BTreeSet<String> {
+        let mine = |server: &str| own.iter().any(|owned| owned == server);
+        let mut foreign = std::collections::BTreeSet::new();
+
+        for (server, claim) in self
+            .mcp_claims
+            .lock()
+            .expect("mcp claim map poisoned")
+            .iter()
+        {
+            if mine(server) {
+                continue;
+            }
+            foreign.extend(claim.tools.iter().cloned());
+        }
+
+        for descriptor in self.mentra.tools() {
+            let name = &descriptor.provider.name;
+            if let Some((server, _)) = mentra::mcp::parse_mcp_tool_name(name)
+                && !mine(server)
+            {
+                foreign.insert(name.clone());
+            }
+        }
+
+        foreign
     }
 
     /// Releases a claim [`claim_mcp_server`](Self::claim_mcp_server) granted.
@@ -592,7 +694,7 @@ impl Runtime {
     #[cfg(feature = "mcp")]
     pub(crate) fn release_mcp_claim(&self, name: &str, root: &Path) {
         let mut claims = self.mcp_claims.lock().expect("mcp claim map poisoned");
-        if claims.get(name).is_some_and(|owner| owner == root) {
+        if claims.get(name).is_some_and(|claim| claim.root == root) {
             claims.remove(name);
         }
     }
@@ -926,6 +1028,95 @@ mod tests {
             runtime.claim_mcp_server("fs", Path::new("/repo/four")),
             "fs",
             "a released name is claimable plain again"
+        );
+    }
+
+    /// The case mentra's audience ladder cannot answer: two live opens of one
+    /// directory share one audience, so a sibling's bridged tools resolve
+    /// `Visible` for either of them. What tells them apart is which servers
+    /// each open actually configured, which is what this asks.
+    #[cfg(feature = "mcp")]
+    #[test]
+    fn a_bridged_tool_is_foreign_to_every_open_that_did_not_configure_its_server() {
+        use std::path::Path;
+
+        let runtime = Runtime::builder()
+            .with_base_url("http://127.0.0.1:1/v1")
+            .with_api_key("test-key")
+            .with_ephemeral_history()
+            .build()
+            .expect("builds");
+
+        // One repository, opened twice: the first client supplied an
+        // authenticated server, the second supplied none. Same root, so the
+        // same audience.
+        let root = Path::new("/repo");
+        let server = runtime.claim_mcp_server("prod-db", root);
+        runtime.record_bridged_tools(&server, root, vec!["mcp__prod-db__query".to_string()]);
+
+        assert_eq!(
+            runtime
+                .foreign_mcp_tools(&[])
+                .into_iter()
+                .collect::<Vec<_>>(),
+            ["mcp__prod-db__query"],
+            "the open that configured no servers must not be offered the other's"
+        );
+        assert!(
+            runtime.foreign_mcp_tools(&[server.clone()]).is_empty(),
+            "and the open that configured it keeps it"
+        );
+
+        // Released with its workspace: a name nothing serves is nobody's to
+        // hide.
+        runtime.release_mcp_claim(&server, root);
+        assert!(runtime.foreign_mcp_tools(&[]).is_empty());
+    }
+
+    /// A host tool registered globally under an `mcp__`-shaped name is visible
+    /// to every audience by the rule that makes globals global — which is not
+    /// the rule a name shaped like somebody's bridged server tool should get.
+    #[cfg(feature = "mcp")]
+    #[test]
+    fn a_global_tool_shaped_like_a_bridged_one_is_foreign_to_every_workspace() {
+        use mentra::tool::{
+            ParallelToolContext, RuntimeToolDescriptor, ToolDefinition, ToolExecutor, ToolResult,
+        };
+        use serde_json::{Value, json};
+
+        struct HostAdmin;
+
+        impl ToolDefinition for HostAdmin {
+            fn descriptor(&self) -> RuntimeToolDescriptor {
+                RuntimeToolDescriptor::builder("mcp__internal__admin")
+                    .description("the host's own tool")
+                    .input_schema(json!({"type": "object"}))
+                    .build()
+            }
+        }
+
+        #[async_trait::async_trait]
+        impl ToolExecutor for HostAdmin {
+            async fn execute(&self, _ctx: ParallelToolContext, _input: Value) -> ToolResult {
+                Ok("administered".to_string())
+            }
+        }
+
+        let runtime = Runtime::builder()
+            .with_base_url("http://127.0.0.1:1/v1")
+            .with_api_key("test-key")
+            .with_ephemeral_history()
+            .with_tool(HostAdmin)
+            .build()
+            .expect("builds");
+
+        assert_eq!(
+            runtime
+                .foreign_mcp_tools(&[])
+                .into_iter()
+                .collect::<Vec<_>>(),
+            ["mcp__internal__admin"],
+            "no workspace configured a server called `internal`"
         );
     }
 }

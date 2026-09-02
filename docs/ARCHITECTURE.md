@@ -830,16 +830,24 @@ runtime-wide one could never carry them; and `with_command_timeout` and
 `with_tool_result_policy` are re-applied to each workspace's policy, because Mentra replaces a
 runtime's policy wholesale for a session rather than merging with it.
 
-**Per-mint foreign-tool hiding is gone.** Every mint used to walk the shared registry and add
-a sibling workspace's bridged `mcp__*` and declared tools to `hidden_tools`, publish that set
-into a cell the `spawn` tool read, and re-apply it whenever a child policy replaced a
-delegated child's roster. A workspace's tools are registered for its own `ToolAudience` now,
-and Mentra resolves a name held only by a foreign audience as hidden rather than visible — so
-the invariant holds whether the model was offered the name or guessed it, and a delegated
-child inherits its parent's audience with the handle it is spawned from. Host tools registered
-with `RuntimeBuilder::with_tool` stay global on purpose: they are the runtime's, and a global
-is visible to every audience. `ToolRoster` is unchanged in shape and in effect; what changed
-is its documentation, which described the hiding as something a roster composes with.
+**Per-mint foreign-tool hiding is nearly gone, and what is left is exactly the part the
+audience cannot express.** Every mint used to walk the shared registry and add a sibling
+workspace's bridged `mcp__*` and declared tools to `hidden_tools`, publish that set into a cell
+the `spawn` tool read, and re-apply it whenever a child policy replaced a delegated child's
+roster. A workspace's tools are registered for its own `ToolAudience` now, and Mentra resolves
+a name held only by a foreign audience as hidden rather than visible — so for a workspace in
+**another directory** the invariant holds whether the model was offered the name or guessed
+it, the cell and the `spawn` threading are gone, and a delegated child inherits its parent's
+audience with the handle it is spawned from. Two `mcp__*` cases stay basis's own, because an
+audience is derived from the directory and cannot tell them apart: a **second live open of one
+directory** shares the first's audience by construction — which is the pair `basis-host`
+produces when one repository is opened twice with different client-supplied `mcpServers` — and
+a **host tool registered globally under an `mcp__`-shaped name**, since a global is visible to
+every audience on purpose. So a mint still hides every `mcp__<server>__<tool>` whose `<server>`
+this workspace did not configure, reading the bridged names off the claim ledger beside the
+server names (`Runtime::foreign_mcp_tools`). Host tools registered with
+`RuntimeBuilder::with_tool` stay global otherwise: they are the runtime's, and a global is
+visible to every audience. `ToolRoster` is unchanged in shape and in effect.
 
 **One gap this does not close, and it is upstream's.** A *resumed* session carries no runtime
 identifier — Mentra's resume options have no field for one — so a resumed conversation

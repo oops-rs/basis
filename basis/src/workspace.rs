@@ -470,19 +470,47 @@ impl Workspace {
     }
 
     /// The agent config this mint offers the model: the one built at open, with
-    /// the run profile applied.
+    /// the run profile applied, and with every `mcp__*` name whose server this
+    /// workspace does not own hidden.
     ///
-    /// A sibling workspace's tools need no hiding here. They are registered for
-    /// that workspace's own [`ToolAudience`](mentra::tool::ToolAudience) and
-    /// this session resolves in its own, so mentra's ladder — exact agent, then
-    /// matching audience, then global — reports a foreign name as hidden rather
-    /// than visible, whether the model was offered it or guessed it. That holds
-    /// for a delegated child too, which inherits its parent's audience with the
+    /// **A workspace in another directory needs no hiding here.** Its bridged
+    /// and declared tools are registered for its own
+    /// [`ToolAudience`](mentra::tool::ToolAudience) and this session resolves
+    /// in its own, so mentra's ladder — exact agent, then matching audience,
+    /// then global — reports a foreign name as hidden rather than visible,
+    /// whether the model was offered it or guessed it. That holds for a
+    /// delegated child too, which inherits its parent's audience with the
     /// runtime handle it is spawned from, and it is the reason a
     /// [`ChildSpec`](crate::ChildSpec) roster override can no longer reach a
     /// sibling's capability by replacing the profile.
+    ///
+    /// **Two `mcp__*` cases the ladder cannot express, and this can.** A second
+    /// live open of *this* directory shares this audience — one directory is
+    /// one identity — so its bridged tools resolve `Visible` here; and a host
+    /// tool registered globally under an `mcp__`-shaped name is visible to
+    /// every audience by the rule that makes globals global. Neither is a
+    /// server this workspace configured, so neither is offered, and neither is
+    /// reachable by a model that guesses the name.
+    /// [`Runtime::foreign_mcp_tools`](crate::runtime::Runtime::foreign_mcp_tools)
+    /// is the whole rule.
+    ///
+    /// Per mint rather than per open, because the shared registry moves as
+    /// siblings come and go, and a roster is honest only about the registry it
+    /// was minted against.
     fn minted_agent(&self, profile: &RunProfile) -> AgentConfig {
-        profile.apply_to(self.agent.clone())
+        let agent = profile.apply_to(self.agent.clone());
+
+        #[cfg(feature = "mcp")]
+        let agent = {
+            let mut agent = agent;
+            agent
+                .tool_profile
+                .hidden_tools
+                .extend(self.runtime.foreign_mcp_tools(&self.mcp_servers));
+            agent
+        };
+
+        agent
     }
 
     /// Wraps a freshly created or resumed session in the run context this

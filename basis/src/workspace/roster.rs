@@ -24,7 +24,12 @@
 //!   held only by a foreign audience as hidden rather than visible. So a
 //!   sibling's tool is out of reach whether or not a roster mentions it, and
 //!   whether the model was offered the name or guessed it. A roster is about
-//!   what *this* workspace offers of what it can reach.
+//!   what *this* workspace offers of what it can reach. The two `mcp__*` cases
+//!   an audience cannot express — a second live open of the *same* directory,
+//!   and a host global under an `mcp__`-shaped name — are hidden by name at
+//!   every mint instead, and that hiding composes with whatever roster is set
+//!   here rather than being part of it
+//!   ([`Workspace::minted_agent`](super::Workspace)).
 //! - **The rendered prompt.** Whatever a workspace's `AGENTS.md`, `CLAUDE.md`
 //!   or memory files ([`crate::memory`]) put in the system prompt is a
 //!   property of [`WorkspaceContext`](crate::context::WorkspaceContext) and

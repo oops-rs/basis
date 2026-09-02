@@ -272,6 +272,80 @@ mod roster {
             "a tool this workspace never configured must not be offered to its model: {offered:?}"
         );
     }
+
+    /// A host tool registered under an `mcp__`-shaped name.
+    struct HostShapedLikeBridged;
+
+    impl mentra::tool::ToolDefinition for HostShapedLikeBridged {
+        fn descriptor(&self) -> RuntimeToolDescriptor {
+            RuntimeToolDescriptor::builder("mcp__internal__admin")
+                .description("the host's own tool, under a bridged name")
+                .input_schema(json!({"type": "object"}))
+                .build()
+        }
+    }
+
+    #[async_trait::async_trait]
+    impl ToolExecutor for HostShapedLikeBridged {
+        async fn execute(
+            &self,
+            _ctx: mentra::tool::ParallelToolContext,
+            _input: serde_json::Value,
+        ) -> ToolResult {
+            Ok("administered".to_string())
+        }
+    }
+
+    #[tokio::test]
+    async fn a_global_mcp_shaped_host_tool_is_not_in_the_default_roster() {
+        // Globals are visible to every audience on purpose — that is what
+        // `RuntimeBuilder::with_tool` means. An `mcp__server__tool` name is the
+        // one shape where that rule reads wrong: it says a server this
+        // workspace never configured, and no `.mcp.json` here ever named
+        // `internal`. Asserted against the *default* roster, because an exact
+        // roster that names the tool by hand is a host saying otherwise.
+        let endpoint = ScriptedEndpoint::start(Vec::new());
+        let runtime = Arc::new(
+            Runtime::builder()
+                .with_base_url(&endpoint.base_url)
+                .with_api_key("test-key")
+                .with_ephemeral_history()
+                .with_tool(HostShapedLikeBridged)
+                .build()
+                .expect("a shared runtime builds without touching the network"),
+        );
+
+        let dir = workspace_dir();
+        let workspace = pinned(dir.path(), runtime).open().await.expect("opens");
+        let report = workspace
+            .prepare("go")
+            .expect("mints")
+            .execute_with_approver(CollectingSink::default(), AllowAll)
+            .await
+            .expect("completes");
+        assert!(matches!(report.outcome, RunOutcome::Ok));
+
+        let requests = endpoint.requests();
+        let body: serde_json::Value =
+            serde_json::from_str(requests[0].split("\r\n\r\n").nth(1).expect("a body"))
+                .expect("a JSON request");
+        let offered: Vec<&str> = body["tools"]
+            .as_array()
+            .expect("a tools array")
+            .iter()
+            .filter_map(|tool| tool["function"]["name"].as_str())
+            .collect();
+
+        assert!(
+            offered.contains(&"spawn"),
+            "the roster parsed: basis's own tool must be in it: {offered:?}"
+        );
+        assert!(
+            !offered.contains(&"mcp__internal__admin"),
+            "a host global shaped like a bridged tool must not ride into a \
+             workspace's default roster: {offered:?}"
+        );
+    }
 }
 
 /// The same claim for ADR-0012's other subprocess binding — and it needs its own
