@@ -765,6 +765,18 @@ impl WorkspaceBuilder {
         // express is the reverse: a session with *no* audience whose base
         // directory is inside this workspace. See `Workspace`'s own docs.
         let runner = HookRunner::new(&path, loaded_hooks);
+        // basis's own guard, ahead of whatever this repository declared,
+        // because a bridged tool this workspace does not own is not a call a
+        // repository's hook should have to be written to catch. It reads the
+        // runtime's agent ledger rather than this workspace, which is what
+        // makes it right for the *other* live open of this directory too: that
+        // open joins this chain rather than registering one of its own, so only
+        // one of the two guards is ever live and it has to answer for both.
+        // See `crate::runtime::agents::ForeignMcpGuard`.
+        #[cfg(feature = "mcp")]
+        let runner = runner.with_interceptor(crate::runtime::agents::ForeignMcpGuard::new(
+            Arc::clone(runtime.agents()),
+        ));
         // One registration, both seams: mentra 0.26 takes a chain as
         // `ExecutionHookParticipant`s and answers with a single guard whose
         // participant snapshot is retained across a whole call. Two guards, one

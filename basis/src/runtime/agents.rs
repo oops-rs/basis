@@ -9,15 +9,28 @@
 //! audience, so nothing mentra offers can tell those two apart. An agent id
 //! can.
 //!
-//! Its reader is `spawn` (`crate::tools::spawn::execute`), which reads
-//! [`AgentTools::hidden`] to answer *what may this delegated child be told
-//! about*. mentra's `DisposableSubagentTemplate::with_tool_profile` replaces a
-//! child's cloned profile outright, so a [`ChildSpec`](crate::ChildSpec) roster
-//! would otherwise drop every hide the parent was minted with — including the
-//! `mcp__*` names belonging to a sibling open of the parent's own directory,
-//! which is the one hide no audience can restate. mentra exposes no reader for
-//! an agent's or a template's effective profile (the neighbour of upstream
-//! `mentra#55`), so basis carries the set itself.
+//! Two readers, and they guard two different things:
+//!
+//! - **`spawn`** (`crate::tools::spawn::execute`) reads
+//!   [`AgentTools::hidden`] to answer *what may this delegated child be told
+//!   about*. mentra's `DisposableSubagentTemplate::with_tool_profile` replaces
+//!   a child's cloned profile outright, so a [`ChildSpec`](crate::ChildSpec)
+//!   roster would otherwise drop every hide the parent was minted with —
+//!   including the `mcp__*` names belonging to a sibling open of the parent's
+//!   own directory, which is the one hide no audience can restate. mentra
+//!   exposes no reader for an agent's or a template's effective profile (the
+//!   neighbour of upstream `mentra#55`), so basis carries the set itself.
+//! - **[`ForeignMcpGuard`]**, in every workspace's own interception chain,
+//!   answers *may this call run*. It reads [`AgentTools::mcp_servers`] — what
+//!   the calling agent's workspace actually configured — on every call, so it
+//!   is right however long ago the session was minted, whichever open of the
+//!   directory came first, and whether or not a sibling's bridge had finished
+//!   when the mint computed its roster.
+//!
+//! Neither substitutes for the other: `hidden_tools` decides what the model is
+//! *told exists*, the guard decides what *executes*. A name the model was
+//! never offered is still a name it can guess, and a roster is a snapshot
+//! while a call is not.
 //!
 //! # Who is in here
 //!
@@ -28,7 +41,8 @@
 //! deliberately absent: a session a host drives through
 //! [`Runtime::mentra_runtime`](super::Runtime::mentra_runtime) has no tool
 //! audience at all and none of a workspace's guards, which is the posture
-//! [`Workspace`](crate::Workspace)'s own docs describe.
+//! [`Workspace`](crate::Workspace)'s own docs describe. Absent means
+//! unjudged here, which is the same answer that posture already gives.
 //!
 //! Entries leave with what put them there: a workspace's on its drop, a
 //! delegated child's when the delegation returns.
@@ -38,7 +52,11 @@ use std::{
     sync::{Arc, Mutex, RwLock},
 };
 
-/// What one mint settled about the tools an agent may see.
+/// What one mint settled about the tools an agent may see and use.
+///
+/// A value rather than two maps because both facts are settled at the same
+/// instant, by the same code, about the same agent — and a child inherits them
+/// as one thing.
 #[derive(Debug, Default)]
 pub(crate) struct AgentTools {
     /// Every name this agent's config hides from its model: the workspace's
@@ -50,6 +68,14 @@ pub(crate) struct AgentTools {
     /// replaces the child's profile, so that a narrowed child is narrowed
     /// rather than widened.
     pub(crate) hidden: BTreeSet<String>,
+    /// The effective MCP server names this agent's workspace claimed — what
+    /// [`Workspace::mcp_servers`](crate::Workspace::mcp_servers) reports.
+    ///
+    /// [`ForeignMcpGuard`]'s whole input, and the reason it cannot go stale: a
+    /// workspace's server list is settled at its open, before any tool of any
+    /// sibling is bridged, and it does not change while the workspace lives.
+    #[cfg(feature = "mcp")]
+    pub(crate) mcp_servers: Vec<String>,
 }
 
 /// Which workspace each live agent on this runtime answers for.
@@ -176,6 +202,81 @@ impl Drop for AdoptedChild {
     }
 }
 
+/// Refuses a call to a bridged tool whose server the calling agent's workspace
+/// never configured.
+///
+/// Registered in **every** workspace's own interception chain
+/// ([`WorkspaceBuilder::open`](crate::WorkspaceBuilder::open)), which is what
+/// makes it live: the chain is consulted per call, and what it reads is the
+/// calling agent's own server list rather than a set some past mint computed.
+/// Three holes close at once, and none of them could be closed by hiding names
+/// at mint:
+///
+/// - **A sibling that opened later.** `Workspace::prepare` hides the `mcp__*`
+///   names a sibling open of this directory had bridged *by then*; a sibling
+///   that opens afterwards is not in that set, and mentra resolves its tools
+///   live on every round, for the audience both opens share.
+/// - **A session that was resumed.** mentra persists the tool profile and
+///   `SessionResumeOptions` restates none of it, so a resumed conversation
+///   carries the roster its *first* mint froze — from a process that may have
+///   ended long ago.
+/// - **The window inside a sibling's own open.** `claim_mcp_server` reserves a
+///   name before the connection is attempted and `record_bridged_tools` says
+///   what came back after, so between the two there is a claim with no tool
+///   names under it and a mint that finds nothing to hide. This asks the
+///   *caller's* own server list instead, which is settled at its open and
+///   never briefly empty by accident.
+///
+/// **Duplicate registrations are harmless, and that matters here.** Two opens
+/// of one directory join a single chain
+/// ([`Runtime::register_hook_chain`](super::Runtime::register_hook_chain)), so
+/// only the first open's guard is ever live — and it still answers correctly
+/// for the second open's sessions, because it decides from the ledger rather
+/// than from the workspace that happened to build it.
+#[cfg(feature = "mcp")]
+#[derive(Debug)]
+pub(crate) struct ForeignMcpGuard {
+    agents: Arc<AgentRegistry>,
+}
+
+#[cfg(feature = "mcp")]
+impl ForeignMcpGuard {
+    pub(crate) fn new(agents: Arc<AgentRegistry>) -> Self {
+        Self { agents }
+    }
+}
+
+#[cfg(feature = "mcp")]
+#[async_trait::async_trait]
+impl crate::hooks::Interceptor for ForeignMcpGuard {
+    fn name(&self) -> &str {
+        "basis mcp ownership"
+    }
+
+    async fn intercept(
+        &self,
+        call: &crate::hooks::HookRequest,
+    ) -> Result<crate::hooks::HookOutcome, crate::hooks::InterceptorError> {
+        // mentra's own parser, so a name a suffixed claim assembled
+        // (`claim_mcp_server` resolves a collision with `-<hash>`, which holds
+        // no `__`) splits here exactly as it was put together there.
+        let Some((server, _)) = mentra::mcp::parse_mcp_tool_name(&call.tool_name) else {
+            return Ok(crate::hooks::HookOutcome::Allow);
+        };
+        let Some(tools) = self.agents.of(&call.agent_id) else {
+            return Ok(crate::hooks::HookOutcome::Allow);
+        };
+        if tools.mcp_servers.iter().any(|own| own == server) {
+            return Ok(crate::hooks::HookOutcome::Allow);
+        }
+
+        Ok(crate::hooks::HookOutcome::Deny(format!(
+            "'{}' belongs to the MCP server '{server}', which this workspace did not configure",
+            call.tool_name
+        )))
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -183,7 +284,78 @@ mod tests {
     fn tools(hidden: &[&str]) -> AgentTools {
         AgentTools {
             hidden: hidden.iter().map(|name| (*name).to_string()).collect(),
+            #[cfg(feature = "mcp")]
+            mcp_servers: Vec::new(),
         }
+    }
+
+    /// Every question the guard asks, and the one it deliberately does not.
+    #[cfg(feature = "mcp")]
+    #[tokio::test]
+    async fn the_guard_judges_a_bridged_name_by_the_callers_own_servers() {
+        use crate::hooks::{HookEvent, HookOutcome, HookRequest, Interceptor};
+
+        let registry = Arc::new(AgentRegistry::default());
+        let workspace = WorkspaceAgents::new(Arc::clone(&registry));
+        workspace.record(
+            "owner",
+            AgentTools {
+                hidden: BTreeSet::new(),
+                mcp_servers: vec!["prod-db".to_string()],
+            },
+        );
+        workspace.record("stranger", tools(&[]));
+
+        let guard = ForeignMcpGuard::new(registry);
+        let call = |agent: &str, tool: &str| HookRequest {
+            hook_schema: 1,
+            event: HookEvent::PreToolUse,
+            workspace: std::path::PathBuf::from("/repo"),
+            agent_id: agent.to_string(),
+            tool_call_id: "call-0".to_string(),
+            tool_name: tool.to_string(),
+            input: serde_json::json!({}),
+            output: None,
+            is_error: None,
+        };
+
+        assert!(matches!(
+            guard
+                .intercept(&call("owner", "mcp__prod-db__query"))
+                .await
+                .expect("decides"),
+            HookOutcome::Allow
+        ));
+        assert!(
+            matches!(
+                guard
+                    .intercept(&call("stranger", "mcp__prod-db__query"))
+                    .await
+                    .expect("decides"),
+                HookOutcome::Deny(_)
+            ),
+            "the open that configured no servers must not reach the other's"
+        );
+        assert!(
+            matches!(
+                guard
+                    .intercept(&call("stranger", "read"))
+                    .await
+                    .expect("decides"),
+                HookOutcome::Allow
+            ),
+            "a name that is not a bridged tool's is none of this guard's business"
+        );
+        assert!(
+            matches!(
+                guard
+                    .intercept(&call("host-session", "mcp__prod-db__query"))
+                    .await
+                    .expect("decides"),
+                HookOutcome::Allow
+            ),
+            "a session basis never minted carries no workspace's guards at all"
+        );
     }
 
     #[test]

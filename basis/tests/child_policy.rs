@@ -54,11 +54,18 @@ struct Turn {
 
 impl Turn {
     fn calling(id: &str, input: &str) -> Self {
+        Self::calling_tool(id, SPAWN, json!({ "input": input }))
+    }
+
+    /// A call to something other than `spawn` — what a model that guessed a
+    /// name it was never offered produces, which is the only way to put a
+    /// guard rather than a roster in front of a tool.
+    fn calling_tool(id: &str, name: &str, input: serde_json::Value) -> Self {
         Self {
             content: vec![ContentBlock::ToolUse {
                 id: id.to_string(),
-                name: SPAWN.to_string(),
-                input: json!({ "input": input }),
+                name: name.to_string(),
+                input,
             }],
             tokens: 0,
         }
@@ -751,6 +758,122 @@ async fn a_narrowed_child_keeps_every_hide_its_parent_was_minted_with() {
         rosters[4].contains(&PROD_DB_QUERY.to_string()),
         "a narrowed child of the open that *did* configure `prod-db` still has it: {:?}",
         rosters[4]
+    );
+}
+
+/// The other half of the same directory's problem, and the one a roster
+/// structurally cannot answer: a sibling that bridges its server **after** this
+/// session has already minted.
+///
+/// `Workspace::minted_agent` hides what is foreign *at the mint*, and mentra
+/// resolves the registry live on every round — so a name registered afterwards
+/// is in neither the parent's `hidden_tools` nor the child's, and is offered to
+/// both (asserted below, because it is what makes the refusal load-bearing
+/// rather than incidental). What stops the call is the workspace's own
+/// interception chain, which every delegated child runs under too: it inherits
+/// its parent's tool audience, and `spawn` records it in the runtime's agent
+/// ledger under its parent's answer so the guard has one for it.
+#[cfg(feature = "mcp")]
+#[tokio::test]
+async fn a_delegated_child_cannot_call_a_later_siblings_bridged_tool_either() {
+    const PROD_DB_QUERY: &str = "mcp__prod-db__query";
+
+    struct ProdDbQuery(Arc<std::sync::atomic::AtomicBool>);
+
+    impl mentra::tool::ToolDefinition for ProdDbQuery {
+        fn descriptor(&self) -> mentra::tool::RuntimeToolDescriptor {
+            mentra::tool::RuntimeToolDescriptor::builder(PROD_DB_QUERY)
+                .description("query the production database")
+                .input_schema(json!({"type": "object"}))
+                .build()
+        }
+    }
+
+    #[async_trait]
+    impl mentra::tool::ToolExecutor for ProdDbQuery {
+        async fn execute(
+            &self,
+            _ctx: mentra::tool::ParallelToolContext,
+            _input: serde_json::Value,
+        ) -> mentra::tool::ToolResult {
+            self.0.store(true, std::sync::atomic::Ordering::SeqCst);
+            Ok("every row".to_string())
+        }
+    }
+
+    let root = tempfile::tempdir().expect("tempdir");
+    let (provider, asked) = ScriptedProvider::new(
+        BuiltinProvider::OpenAI,
+        vec![parent_model()],
+        vec![
+            Turn::calling("call-0", "triage: is this real?"),
+            Turn::calling_tool("call-1", PROD_DB_QUERY, json!({})),
+            Turn::saying("child done"),
+            Turn::saying("parent done"),
+        ],
+    );
+    let shared = Arc::new(
+        basis::Runtime::builder()
+            .with_provider_instance(provider)
+            .with_ephemeral_history()
+            .with_child_policy(|child: &ChildContext<'_>| {
+                if child.prompt().starts_with("triage:") {
+                    ChildSpec::inherit().with_roster(ToolRoster::hide(["write"]))
+                } else {
+                    ChildSpec::inherit()
+                }
+            })
+            .build()
+            .expect("builds offline"),
+    );
+
+    let stranger = offline_workspace(root.path(), shared)
+        .with_mcp(basis::McpConfig {
+            workspace_file: std::path::PathBuf::new(),
+            global_dir: None,
+            supplied: Vec::new(),
+        })
+        .open()
+        .await
+        .expect("opens");
+    let mut run = stranger
+        .prepare(basis::RunSpec::new("do the thing"))
+        .expect("mints");
+
+    // *After* the mint: the sibling open of this same directory that bridges
+    // its authenticated server while this session is already live. Registered
+    // for the audience the two share — the call `mcp::connections::bridge`
+    // makes — because an integration test has no MCP server to run.
+    let ran = Arc::new(std::sync::atomic::AtomicBool::new(false));
+    let _bridged = stranger
+        .mentra_runtime()
+        .try_register_tool_for_audience(
+            mentra::tool::ToolAudience::new(basis::store::runtime_identifier(root.path())),
+            ProdDbQuery(Arc::clone(&ran)),
+        )
+        .expect("nothing answers to that name yet");
+
+    run.execute_with_approver(CollectingSink::new(), AllowAll)
+        .await
+        .expect("the run completes — a denial is an answer, not an error");
+
+    assert!(
+        !ran.load(std::sync::atomic::Ordering::SeqCst),
+        "a narrowed child reached a server its workspace never configured"
+    );
+
+    let rosters: Vec<Vec<String>> = asked
+        .lock()
+        .expect("not poisoned")
+        .iter()
+        .map(|request| request.tools.clone())
+        .collect();
+    assert_eq!(rosters.len(), 4, "parent, child, child, parent");
+    assert!(
+        rosters[1].contains(&PROD_DB_QUERY.to_string()),
+        "a mint that happened first cannot hide a name registered after it — which is \
+         exactly why the refusal has to come from somewhere else: {:?}",
+        rosters[1]
     );
 }
 

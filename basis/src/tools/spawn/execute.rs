@@ -154,11 +154,16 @@ pub(super) async fn delegate(
         .map_err(|error| format!("spawn could not start a subagent: {error}"))?;
     let child_id = child.id().to_string();
 
-    // Held for the child's whole run, like the depth entry below. A child of
-    // this child asks the ledger the same question this delegation just did,
-    // and the honest answer is its grandparent's: the whole tree delegated
-    // from one session is one workspace's, and a roster narrowed at any depth
-    // must not widen at the next.
+    // Held for the child's whole run, like the depth entry below, and read by
+    // both of the ledger's readers. A child of this child asks it the same
+    // question this delegation just did, and the honest answer is its
+    // grandparent's: the whole tree delegated from one session is one
+    // workspace's, and a roster narrowed at any depth must not widen at the
+    // next. And the child inherits its parent's tool audience, so the
+    // workspace's own chain judges its calls — but by the child's own agent
+    // id, which nothing else would have put in here: without this a delegated
+    // child is the one agent in that audience the MCP ownership guard has no
+    // answer for.
     let _adopted = agents.and_then(|agents| agents.adopt(&ctx.agent_id, &child_id));
 
     // Held for the child's whole run: while this lives, a `spawn` call made

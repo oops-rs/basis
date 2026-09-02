@@ -321,6 +321,169 @@ mod roster {
         );
     }
 
+    /// The tool a client's authenticated server put on the shared registry,
+    /// remembering whether it was ever actually entered.
+    struct ProdDbQuery(Arc<std::sync::atomic::AtomicBool>);
+
+    impl mentra::tool::ToolDefinition for ProdDbQuery {
+        fn descriptor(&self) -> RuntimeToolDescriptor {
+            RuntimeToolDescriptor::builder(PROD_DB_QUERY)
+                .description("query the production database")
+                .input_schema(json!({"type": "object"}))
+                .build()
+        }
+    }
+
+    #[async_trait::async_trait]
+    impl ToolExecutor for ProdDbQuery {
+        async fn execute(
+            &self,
+            _ctx: mentra::tool::ParallelToolContext,
+            _input: serde_json::Value,
+        ) -> ToolResult {
+            self.0.store(true, std::sync::atomic::Ordering::SeqCst);
+            Ok("every row".to_string())
+        }
+    }
+
+    const PROD_DB_QUERY: &str = "mcp__prod-db__query";
+
+    /// A server named but never reachable, which is all this test needs of
+    /// one: claiming the name is what makes the workspace *own* it.
+    fn unreachable_server(name: &str) -> basis::McpServer {
+        basis::McpServer::Stdio(basis::McpServerConfig {
+            name: name.to_string(),
+            command: "basis-test-no-such-mcp-server".to_string(),
+            args: Vec::new(),
+            env: std::collections::HashMap::new(),
+            cwd: None,
+        })
+    }
+
+    fn no_mcp() -> basis::McpConfig {
+        basis::McpConfig {
+            workspace_file: PathBuf::new(),
+            global_dir: None,
+            supplied: Vec::new(),
+        }
+    }
+
+    /// **The case mentra's audience ladder cannot express.** Two live opens of
+    /// *one directory* resolve in one tool audience by construction, which is
+    /// the shape `basis-host` produces on purpose — one workspace per set of
+    /// client-supplied `mcpServers`. So the open that supplied none sees the
+    /// other's bridged tool as `Visible`, and nothing mentra scopes can tell
+    /// the two apart.
+    ///
+    /// Both directions are asserted, because a rule that simply refused every
+    /// `mcp__*` name would pass the first: the open that *did* configure
+    /// `prod-db` must still be served by it.
+    ///
+    /// Three details are deliberate. The owner opens **first**, so the
+    /// interception chain both share is the one *it* registered and the
+    /// stranger's own guard is the one that was dropped on joining — the guard
+    /// has to answer for an open that did not install it. Its server is
+    /// **unreachable**, which reproduces the window between `claim_mcp_server`
+    /// and `record_bridged_tools`: the claim carries no tool names, so the
+    /// mint-time hide has nothing to hide and the stranger really is offered
+    /// the name (asserted below). And the bridged tool is registered **by
+    /// hand, for the audience the two opens share** — the same call
+    /// `mcp::connections::bridge` makes — because an integration test has no
+    /// MCP server to run.
+    #[tokio::test]
+    async fn a_bridged_tool_is_refused_to_the_same_root_open_that_did_not_configure_it() {
+        let endpoint = ScriptedEndpoint::start(vec![
+            Reply::ToolCall {
+                name: PROD_DB_QUERY.to_string(),
+                arguments: "{}".to_string(),
+            },
+            Reply::Text,
+            Reply::ToolCall {
+                name: PROD_DB_QUERY.to_string(),
+                arguments: "{}".to_string(),
+            },
+            Reply::Text,
+        ]);
+        let runtime = shared_runtime(&endpoint);
+        let dir = workspace_dir();
+
+        let owner = pinned(dir.path(), Arc::clone(&runtime))
+            .with_mcp(no_mcp().with_supplied(vec![unreachable_server("prod-db")]))
+            .open()
+            .await
+            .expect("opens even though the server does not come up");
+        assert_eq!(
+            owner.mcp_servers(),
+            ["prod-db"],
+            "a configured server is the workspace's whether or not it connected"
+        );
+        let stranger = pinned(dir.path(), runtime)
+            .with_mcp(no_mcp())
+            .open()
+            .await
+            .expect("the same directory opens again");
+        assert!(stranger.mcp_servers().is_empty());
+
+        let ran = Arc::new(std::sync::atomic::AtomicBool::new(false));
+        let _bridged = stranger
+            .mentra_runtime()
+            .try_register_tool_for_audience(
+                ToolAudience::new(store::runtime_identifier(dir.path())),
+                ProdDbQuery(Arc::clone(&ran)),
+            )
+            .expect("nothing answers to that name yet");
+
+        stranger
+            .prepare("go")
+            .expect("mints")
+            .execute_with_approver(CollectingSink::default(), AllowAll)
+            .await
+            .expect("the run completes — a denial is an answer, not an error");
+        assert!(
+            !ran.load(std::sync::atomic::Ordering::SeqCst),
+            "the open that configured no servers must not reach the other's"
+        );
+
+        let requests = endpoint.requests();
+        let offered: Vec<String> = tool_names(&requests[0]);
+        assert!(
+            offered.iter().any(|name| name == PROD_DB_QUERY),
+            "the mint-time hide cannot cover a claim with no recorded tools — which is \
+             exactly why the refusal above has to come from somewhere else: {offered:?}"
+        );
+        assert!(
+            requests[1].contains("which this workspace did not configure"),
+            "the model is told why, in the guard's own words: {}",
+            requests[1]
+        );
+
+        owner
+            .prepare("go")
+            .expect("mints")
+            .execute_with_approver(CollectingSink::default(), AllowAll)
+            .await
+            .expect("completes");
+        assert!(
+            ran.load(std::sync::atomic::Ordering::SeqCst),
+            "the open that did configure `prod-db` must still be served by it"
+        );
+    }
+
+    /// The `tools` array of a recorded request: the roster the model was
+    /// actually offered, read off the wire.
+    fn tool_names(request: &str) -> Vec<String> {
+        let body: serde_json::Value =
+            serde_json::from_str(request.split("\r\n\r\n").nth(1).expect("a body"))
+                .expect("a JSON request");
+
+        body["tools"]
+            .as_array()
+            .expect("a tools array")
+            .iter()
+            .filter_map(|tool| tool["function"]["name"].as_str().map(str::to_string))
+            .collect()
+    }
+
     /// A host tool registered under an `mcp__`-shaped name.
     struct HostShapedLikeBridged;
 
@@ -900,7 +1063,7 @@ enum Reply {
     /// A finished assistant message, numbered by connection.
     Text,
     /// A single tool call; the next connection is expected to wrap up.
-    #[cfg(unix)]
+    #[cfg(any(unix, feature = "mcp"))]
     ToolCall { name: String, arguments: String },
 }
 
@@ -1024,7 +1187,7 @@ fn sse_body(index: usize, reply: &Reply) -> String {
                 "choices": [{"index": 0, "delta": {}, "finish_reason": "stop"}]
             }));
         }
-        #[cfg(unix)]
+        #[cfg(any(unix, feature = "mcp"))]
         Reply::ToolCall { name, arguments } => {
             events.push(json!({
                 "id": id, "model": "test-model",

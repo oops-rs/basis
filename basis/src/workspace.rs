@@ -193,13 +193,12 @@ pub struct Workspace {
     /// ([`Runtime::register_hook_chain`](crate::runtime::Runtime::register_hook_chain)).
     #[allow(dead_code, reason = "held for its Drop")]
     hooks: HookChainHold,
-    /// What every session this workspace mints or resumes was minted with,
-    /// recorded by agent id so that `spawn` — which cannot ask mentra for a
-    /// template's effective profile, and cannot ask an audience which of two
-    /// live opens of this directory it is delegating from — can put the
-    /// parent's hides back into a child whose roster replaced them. Released
-    /// on drop with everything else this open put on a runtime it may not own;
-    /// see [`crate::runtime::agents`].
+    /// What every session this workspace mints or resumes may see and use,
+    /// recorded by agent id so that the two readers an audience cannot serve —
+    /// `spawn`, and the MCP ownership guard in this workspace's own chain —
+    /// can tell a second live open of this same directory from this one.
+    /// Released on drop with everything else this open put on a runtime it may
+    /// not own; see [`crate::runtime::agents`].
     agents: WorkspaceAgents,
     #[cfg(feature = "mcp")]
     #[allow(dead_code, reason = "held for its Drop")]
@@ -361,9 +360,11 @@ impl Workspace {
         // and `SessionResumeOptions` carries no replacement — so this
         // conversation's own roster is still the one its first mint froze,
         // possibly in another process, before this workspace's siblings
-        // existed. The ledger is the half basis can bring up to date, so a
-        // child delegated from a resumed session inherits a hidden set
-        // computed now rather than then.
+        // existed. The ledger is the half basis can bring up to date, and both
+        // readers of it are the better for it: a child delegated from a
+        // resumed session inherits a hidden set computed now rather than then,
+        // and the MCP ownership guard judges this session against the servers
+        // *this* open configured rather than the ones its first mint saw.
         self.agents.record(agent_id, self.resumed_tools(&session));
         let model = if let Some(model) = spec.profile.resolved_model() {
             session.set_model(model.clone())?;
@@ -568,6 +569,18 @@ impl Workspace {
     /// roster override replaces the child's cloned `ToolProfile`, has to put
     /// these names back or hand a delegated child the sibling tools its own
     /// parent is denied.
+    ///
+    /// **What a roster cannot be, and what covers the rest.** It is a
+    /// snapshot: a sibling that opens *after* this mint is not in it, a resume
+    /// restates no profile at all (mentra persists the config and
+    /// `SessionResumeOptions` carries no replacement), and a sibling caught
+    /// between claiming its server name and recording what bridged under it
+    /// has no names to hide yet. So hiding decides what the model is *told*,
+    /// and what it may actually *run* is decided per call, live, by
+    /// [`ForeignMcpGuard`](crate::runtime::agents::ForeignMcpGuard) in this
+    /// workspace's own interception chain — which reads the server list this
+    /// open configured rather than any snapshot of the registry. A name that
+    /// slips into a roster is still a name that cannot be called.
     fn minted_agent(&self, profile: &RunProfile) -> AgentConfig {
         let agent = profile.apply_to(self.agent.clone());
 
@@ -595,6 +608,8 @@ impl Workspace {
     fn agent_tools(&self, agent: &AgentConfig) -> AgentTools {
         AgentTools {
             hidden: agent.tool_profile.hidden_tools.clone(),
+            #[cfg(feature = "mcp")]
+            mcp_servers: self.mcp_servers.clone(),
         }
     }
 
@@ -616,7 +631,11 @@ impl Workspace {
             hidden
         };
 
-        AgentTools { hidden }
+        AgentTools {
+            hidden,
+            #[cfg(feature = "mcp")]
+            mcp_servers: self.mcp_servers.clone(),
+        }
     }
 
     /// Wraps a freshly created or resumed session in the run context this
