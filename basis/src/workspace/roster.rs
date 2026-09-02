@@ -91,19 +91,24 @@ impl ToolRoster {
     ///
     /// Three honest caveats, each pinned by a test beside this one:
     ///
-    /// - **Cannot un-register the file tools.** mentra 0.20 has no
-    ///   `FileToolProfile::None`: whatever this workspace's runtime was built
-    ///   with — basis's own default of `Split`, or a host's `Batched` — stays
-    ///   on the runtime's registry no matter what `names` says. What `only`
-    ///   *can* do, and does, is stop *offering* them: a set that names none of
+    /// - **Cannot itself un-register the file tools — that is a runtime
+    ///   decision, not a roster one.** A roster is per-workspace; which file
+    ///   tools a runtime carries at all is fixed once, per-runtime, at
+    ///   [`RuntimeBuilder::with_file_tools`](crate::RuntimeBuilder::with_file_tools)
+    ///   — basis's own default of `Split`, or a host's `Batched`, `Both`, or
+    ///   `None`. `only` cannot reach across and change that from a workspace.
+    ///   What it *can* do, and does, is stop *offering* whatever the runtime
+    ///   carries: a set that names none of
     ///   `read`/`ls`/`grep`/`glob`/`write`/`edit` makes `ToolProfile::allows`
     ///   refuse every one of them for this workspace's agents, exactly as it
     ///   refuses any other name left out — see
-    ///   `only_stops_offering_the_file_tools_but_cannot_unregister_them`. What
-    ///   it does not buy is a runtime that never carried the capability: a
-    ///   sibling workspace sharing this runtime, or mentra's own APIs reached
-    ///   through [`Runtime::mentra_runtime`](crate::Runtime::mentra_runtime),
-    ///   still find the tool sitting on the registry.
+    ///   `only_hides_the_file_tools_but_cannot_reach_the_runtimes_profile`. A
+    ///   host that wants the tools gone from the registry too — so a sibling
+    ///   workspace sharing this runtime, or mentra's own APIs reached through
+    ///   [`Runtime::mentra_runtime`](crate::Runtime::mentra_runtime), cannot
+    ///   find them either — builds that runtime with
+    ///   `with_file_tools(FileToolProfile::None)` in the first place; there is
+    ///   no way to reach the same effect from a roster alone.
     /// - **Does not imply `spawn`.** A set that omits
     ///   [`crate::tools::SPAWN`] is a legitimate roster — a knowledge agent
     ///   with no delegation and no command door is a real shape — but it is
