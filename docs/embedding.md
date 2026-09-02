@@ -131,15 +131,21 @@ What sharing shares is the runtime's; the rest stays the workspace's. The model 
 `with_model`, and the resolved id is the workspace's fact either way. Skills land on the one
 tool registry, so a skill one workspace registered is loadable by another's runs, while
 `Workspace::skills` still reports only its own. MCP connections are workspace-owned — minted
-from that repository's config, shut down when it drops — and every roster hides the `mcp__*`
-tools of servers its workspace does not own, so a name two repositories both configure is
-claimed once and suffixed for the second. Hooks, `ShellAccess`, and the `.git` carve-out
-remain per workspace as well, enforced on a shared runtime by the one dispatch hook basis
-registers.
+from that repository's config, shut down when it drops — and their tools are registered for
+that workspace's own tool audience, so a sibling's `mcp__*` is out of reach rather than merely
+unlisted; a name two repositories both configure is still claimed once and suffixed for the
+second. Declared tools work the same way. Hooks stay per workspace too: each open registers
+its own chain live on the runtime and drops it when the workspace goes. `ShellAccess` and the
+`.git` carve-out ride in the complete `RuntimePolicy` every session receives, so a shared
+runtime enforces each repository's posture in mentra's own words — including its memory roots,
+which a runtime-wide policy could not carry.
 
-Conversations on a shared runtime are still tagged per minted session with the workspace's
+Conversations on a shared runtime are tagged per minted session with the workspace's
 identifier. `store::list` — and ACP's `session/list` over it — therefore returns only that
-workspace's conversations even though provider, store handle, and runtime are shared.
+workspace's conversations even though provider, store handle, and runtime are shared. One
+exception, and it is upstream's: mentra carries no identifier through a resume, so a resumed
+conversation re-files under the runtime's own tag when it next persists and leaves the
+workspace's list. It stays resumable by id.
 
 The knobs ADR-0018 moved are `RuntimeBuilder`'s now — `with_provider`, `with_base_url`,
 `with_api_key`, `with_store_dir`, `with_ephemeral_history`, `with_interceptor`,
