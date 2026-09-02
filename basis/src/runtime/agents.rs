@@ -44,12 +44,18 @@
 //! [`Workspace`](crate::Workspace)'s own docs describe. Absent means
 //! unjudged here, which is the same answer that posture already gives.
 //!
-//! Entries leave with what put them there: a workspace's on its drop, a
-//! delegated child's when the delegation returns.
+//! Entries leave with whatever *last* put them there: a workspace's on its
+//! drop, a delegated child's when the delegation returns. "Last" is the load
+//! bearing word and [`AgentOwner`] is how it is known — one agent id can be
+//! written by two different opens of one directory, and only one of them may
+//! take it away again.
 
 use std::{
     collections::{BTreeSet, HashMap},
-    sync::{Arc, Mutex, RwLock},
+    sync::{
+        Arc, Mutex, RwLock,
+        atomic::{AtomicU64, Ordering},
+    },
 };
 
 /// What one mint settled about the tools an agent may see and use.
@@ -78,10 +84,46 @@ pub(crate) struct AgentTools {
     pub(crate) mcp_servers: Vec<String>,
 }
 
+/// Which handle a registry row belongs to *now*.
+///
+/// The registry is keyed by agent id alone, and one agent id can be written by
+/// two different opens of one directory:
+/// [`Workspace::resume`](crate::Workspace::resume) checks the conversation's
+/// *root*, and two same-root opens have the identical root identifier by
+/// construction, so either may pick up an id the other minted. Last writer
+/// wins, which is the right answer for the *value* — mentra refuses a second
+/// live session on one agent id (`RuntimeError::LeaseUnavailable`), so the open
+/// running the live session and the open that recorded last are always the
+/// same one.
+///
+/// This stamp exists for the other end of that, where last-writer-wins is not
+/// self-correcting: **a handle that is no longer the row's owner must not erase
+/// it on its way out.** A workspace that resumed a sibling's conversation once
+/// still has the id in its `recorded` set long after the sibling took it back,
+/// and an absent row is not a safe default — [`ForeignMcpGuard`] reads it as
+/// "an agent basis did not make" and allows the call, `spawn` reads it as "no
+/// inherited hides" — so the erasure would reopen both holes for exactly as
+/// long as the victim's session stayed live.
+///
+/// Monotonic and never reused, so a stamp names one handle for the life of the
+/// runtime; a pointer identity would have to outlive the handle to stay unique,
+/// and a slot index would be reused by the next open.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+struct AgentOwner(u64);
+
+/// One agent's row: what it was recorded with, and by which handle.
+#[derive(Debug)]
+struct Entry {
+    owner: AgentOwner,
+    tools: Arc<AgentTools>,
+}
+
 /// Which workspace each live agent on this runtime answers for.
 #[derive(Debug, Default)]
 pub(crate) struct AgentRegistry {
-    agents: RwLock<HashMap<String, Arc<AgentTools>>>,
+    agents: RwLock<HashMap<String, Entry>>,
+    /// Hands out [`AgentOwner`]s, and the only thing outside the map's lock.
+    next_owner: AtomicU64,
 }
 
 impl AgentRegistry {
@@ -92,7 +134,16 @@ impl AgentRegistry {
             .read()
             .expect("agent registry poisoned")
             .get(agent_id)
-            .map(Arc::clone)
+            .map(|entry| Arc::clone(&entry.tools))
+    }
+
+    /// A stamp no other handle on this runtime will be given.
+    ///
+    /// `Relaxed` because uniqueness is all that is asked of it: the counter
+    /// orders nothing else, and every comparison of a stamp happens under the
+    /// map's own lock.
+    fn new_owner(&self) -> AgentOwner {
+        AgentOwner(self.next_owner.fetch_add(1, Ordering::Relaxed))
     }
 
     /// Records `child` as answering for whatever workspace `parent` does, for
@@ -106,29 +157,42 @@ impl AgentRegistry {
     /// for the parent anyway.
     pub(crate) fn adopt(self: &Arc<Self>, parent: &str, child: &str) -> Option<AdoptedChild> {
         let tools = self.of(parent)?;
+        let owner = self.new_owner();
         self.agents
             .write()
             .expect("agent registry poisoned")
-            .insert(child.to_string(), tools);
+            .insert(child.to_string(), Entry { owner, tools });
 
         Some(AdoptedChild {
             registry: Arc::clone(self),
+            owner,
             agent_id: child.to_string(),
         })
     }
 
-    fn record(&self, agent_id: &str, tools: Arc<AgentTools>) {
+    fn record(&self, owner: AgentOwner, agent_id: &str, tools: Arc<AgentTools>) {
         self.agents
             .write()
             .expect("agent registry poisoned")
-            .insert(agent_id.to_string(), tools);
+            .insert(agent_id.to_string(), Entry { owner, tools });
     }
 
-    fn forget(&self, agent_id: &str) {
-        self.agents
-            .write()
-            .expect("agent registry poisoned")
-            .remove(agent_id);
+    /// Takes `agent_id` off the registry, but only while `owner` is still the
+    /// handle whose write is standing there.
+    ///
+    /// The condition is the whole of it: a handle that recorded an id and was
+    /// then overwritten by another open of the same directory has nothing to
+    /// release, and removing the row anyway would take the *current* owner's
+    /// answer away from a session that is still running on it. See
+    /// [`AgentOwner`] for why an absent row is worse than a stale one.
+    fn forget_if_owned(&self, agent_id: &str, owner: AgentOwner) {
+        let mut agents = self.agents.write().expect("agent registry poisoned");
+        if agents
+            .get(agent_id)
+            .is_some_and(|entry| entry.owner == owner)
+        {
+            agents.remove(agent_id);
+        }
     }
 }
 
@@ -141,15 +205,25 @@ impl AgentRegistry {
 #[derive(Debug)]
 pub(crate) struct WorkspaceAgents {
     registry: Arc<AgentRegistry>,
+    /// This handle's stamp: what its writes carry and what its drop releases
+    /// against. Per *handle* rather than per root, because two opens of one
+    /// root are exactly the pair this has to tell apart.
+    owner: AgentOwner,
     /// Every agent id this workspace recorded. A set rather than a list
     /// because resuming one conversation twice records it twice.
+    ///
+    /// A superset of what this workspace still owns, deliberately: an id a
+    /// sibling open has since taken over stays in here, and the release is
+    /// what declines to act on it.
     recorded: Mutex<BTreeSet<String>>,
 }
 
 impl WorkspaceAgents {
     pub(crate) fn new(registry: Arc<AgentRegistry>) -> Self {
+        let owner = registry.new_owner();
         Self {
             registry,
+            owner,
             recorded: Mutex::new(BTreeSet::new()),
         }
     }
@@ -162,8 +236,13 @@ impl WorkspaceAgents {
     /// carries no tool profile, so a resumed session's *config* keeps the
     /// roster its first mint froze — and this is the one thing about it that
     /// can be brought up to date.
+    ///
+    /// Replacing includes taking the row back off a *sibling* open of this
+    /// same directory, which is allowed and is how a conversation moves
+    /// between two live opens of one root. This workspace becomes its owner
+    /// again by saying so.
     pub(crate) fn record(&self, agent_id: &str, tools: AgentTools) {
-        self.registry.record(agent_id, Arc::new(tools));
+        self.registry.record(self.owner, agent_id, Arc::new(tools));
         self.recorded
             .lock()
             .expect("recorded agent set poisoned")
@@ -179,7 +258,7 @@ impl Drop for WorkspaceAgents {
             .expect("recorded agent set poisoned")
             .iter()
         {
-            self.registry.forget(agent_id);
+            self.registry.forget_if_owned(agent_id, self.owner);
         }
     }
 }
@@ -193,12 +272,16 @@ impl Drop for WorkspaceAgents {
 #[derive(Debug)]
 pub(crate) struct AdoptedChild {
     registry: Arc<AgentRegistry>,
+    /// Stamped and released like a workspace's, for the same reason and with
+    /// no reliance on mentra minting a fresh id per delegation: whoever wrote
+    /// the row last is whoever may take it away.
+    owner: AgentOwner,
     agent_id: String,
 }
 
 impl Drop for AdoptedChild {
     fn drop(&mut self) {
-        self.registry.forget(&self.agent_id);
+        self.registry.forget_if_owned(&self.agent_id, self.owner);
     }
 }
 
@@ -372,6 +455,92 @@ mod tests {
         assert!(
             registry.of("agent-1").is_none() && registry.of("agent-2").is_none(),
             "an entry outliving its workspace would speak for a registry it no longer knows"
+        );
+    }
+
+    /// Every hide standing against `agent_id` right now.
+    fn hides(registry: &AgentRegistry, agent_id: &str) -> Vec<String> {
+        registry
+            .of(agent_id)
+            .expect("a recorded agent")
+            .hidden
+            .iter()
+            .cloned()
+            .collect()
+    }
+
+    /// **The erase half of last-writer-wins**, which is the half that does not
+    /// correct itself.
+    ///
+    /// Two opens of one directory, and a conversation that moves between them:
+    /// [`Workspace::resume`](crate::Workspace::resume) checks the persisted
+    /// agent's *root*, and two same-root opens have the identical root
+    /// identifier by construction, so either may pick up an id the other
+    /// minted. Overwriting is harmless — mentra refuses a second live session
+    /// on one agent id, so nothing can be running under a row it did not just
+    /// write. Dropping is where a handle that lost the row can still do damage:
+    /// it holds the id in `recorded` forever, and an absent row is *allowed* by
+    /// both readers of this ledger.
+    #[test]
+    fn a_workspace_only_releases_the_agents_it_still_owns() {
+        let registry = Arc::new(AgentRegistry::default());
+        let a = WorkspaceAgents::new(Arc::clone(&registry));
+        let b = WorkspaceAgents::new(Arc::clone(&registry));
+
+        a.record("moved", tools(&["mcp__a-only__query"]));
+        a.record("a's own", tools(&["mcp__a-only__query"]));
+        b.record("moved", tools(&["mcp__b-only__query"]));
+        // `a` resumes the conversation back, which re-records it. From here
+        // only `a` can hold its lease, so only `a`'s row may answer for it.
+        a.record("moved", tools(&["mcp__a-only__query"]));
+
+        drop(b);
+
+        assert_eq!(
+            hides(&registry, "moved"),
+            ["mcp__a-only__query"],
+            "the sibling that no longer owns this agent must not erase the row the live \
+             one re-recorded: a missing row is a guard that allows and a child that \
+             inherits no hides"
+        );
+
+        drop(a);
+
+        assert!(
+            registry.of("moved").is_none() && registry.of("a's own").is_none(),
+            "the owner's own drop still releases everything standing in its name"
+        );
+    }
+
+    /// The same rule read from the other side: what a sibling took over stays
+    /// when the workspace that minted it goes, and the rest still leaves.
+    #[test]
+    fn an_agent_a_sibling_took_over_outlives_the_workspace_that_minted_it() {
+        let registry = Arc::new(AgentRegistry::default());
+        let a = WorkspaceAgents::new(Arc::clone(&registry));
+        let b = WorkspaceAgents::new(Arc::clone(&registry));
+
+        a.record("moved", tools(&["mcp__a-only__query"]));
+        a.record("stayed", tools(&["mcp__a-only__query"]));
+        b.record("moved", tools(&["mcp__b-only__query"]));
+
+        drop(a);
+
+        assert_eq!(
+            hides(&registry, "moved"),
+            ["mcp__b-only__query"],
+            "the row belongs to whoever wrote it last, and that is who is running it"
+        );
+        assert!(
+            registry.of("stayed").is_none(),
+            "declining to release one agent must not hold back the others"
+        );
+
+        drop(b);
+
+        assert!(
+            registry.of("moved").is_none(),
+            "and the row still leaves with the handle that does own it"
         );
     }
 

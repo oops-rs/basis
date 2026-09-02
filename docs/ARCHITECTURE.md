@@ -913,16 +913,26 @@ the window inside a sibling's own open between `claim_mcp_server`, which reserve
 `record_bridged_tools`, which says what came back. So basis decides *execution* separately from
 *listing*: `runtime::agents::ForeignMcpGuard` joins every workspace's own interception chain and
 refuses any `mcp__<server>__<tool>` call whose `<server>` is not in the calling agent's
-workspace's own server list — settled at that workspace's open, so it cannot go stale whatever
-the mint or resume timing. It reads the runtime's agent ledger (`runtime::agents`) rather than
-the workspace that installed it, which is what makes it right for the *other* open of the same
-directory: that open joins the first's chain rather than registering one, so one guard answers
-for both, by agent id. The same ledger carries the parent's `hidden_tools` back into a delegated
-child whose `ChildSpec` roster replaced the profile — `with_tool_profile` replaces it wholesale
-and Mentra exposes no reader for a template's effective profile — and `spawn` adopts the child
-into the ledger for the length of the delegation, so the guard has an answer for it too. Hiding
-and refusing are not substitutes: one decides what the model is told exists, the other what
-runs.
+workspace's own server list — a list settled at that workspace's open and restated onto the
+ledger by every mint and every resume, so the guard never reads the roster a past mint froze. It
+reads the runtime's agent ledger (`runtime::agents`) rather than the workspace that installed
+it, which is what makes it right for the *other* open of the same directory: that open joins the
+first's chain rather than registering one, so one guard answers for both, by agent id.
+
+Keying the ledger on the agent id is also what it has to defend, because an agent id can move
+between two opens of one root: a resume checks the conversation's *root*, and same-root opens
+have the identical one by construction, so either may pick up an id the other minted. Whoever
+recorded last owns the row, which is right on its own terms — Mentra hands out one live session
+per agent id, so the open holding the lease is the open that wrote last. Each row therefore
+carries a stamp naming the handle that wrote it, and a workspace releases on drop only the rows
+it still owns. An unconditional release would have taken a live sibling's row away for as long
+as that session ran, and a missing row is *allowed*: this guard reads it as a session basis
+never minted, and `spawn` reads it as no inherited hides. The same ledger carries the parent's
+`hidden_tools` back into a delegated child whose `ChildSpec` roster replaced the profile —
+`with_tool_profile` replaces it wholesale and Mentra exposes no reader for a template's
+effective profile — and `spawn` adopts the child into the ledger for the length of the
+delegation, so the guard has an answer for it too. Hiding and refusing are not substitutes: one
+decides what the model is told exists, the other what runs.
 
 **A resume now refuses the wrong workspace.** Because a resume is where a workspace's policy
 and tool audience are *restated* — Mentra persists neither — picking up another repository's

@@ -484,6 +484,133 @@ mod roster {
             .collect()
     }
 
+    /// **A workspace's departure must not disarm a live sibling's guard.**
+    ///
+    /// The guard reads a ledger keyed by *agent id*, which is the one identity
+    /// that tells two opens of one directory apart — and an agent id can move
+    /// between them. `Workspace::resume` checks the persisted conversation's
+    /// *root*, and same-root opens have the identical root identifier by
+    /// construction, so either may pick up an id the other minted. Whoever
+    /// recorded last owns the row, which is right on its own terms: mentra
+    /// refuses a second live session on one agent id, so the open holding the
+    /// lease and the open that wrote last are the same one.
+    ///
+    /// What that leaves is the *release*. `b` here resumes `a`'s conversation,
+    /// hands it back, and then goes away still holding the id in its recorded
+    /// set — and a release that did not check who owns the row now would take
+    /// away the answer `a`'s running turn depends on. An absent row is not a
+    /// safe default: this guard reads it as "an agent basis did not make" and
+    /// allows the call, and `spawn` reads it as "no inherited hides", so one
+    /// unconditional removal reopens both holes for as long as the victim's
+    /// session lives.
+    ///
+    /// Three opens of one directory, because the case needs a server nobody in
+    /// the exchange configured: `owner` is the other client, `a` is the victim,
+    /// `b` is the sibling that borrows and leaves. The server is unreachable
+    /// and its tool is registered by hand for the audience all three share —
+    /// the same call `mcp::connections::bridge` makes — so no mint-time hide
+    /// can cover the name and the refusal has to come from the guard, which is
+    /// asserted on the wire below.
+    #[tokio::test]
+    async fn a_departing_sibling_does_not_release_the_agent_a_live_open_took_back() {
+        let endpoint = ScriptedEndpoint::start(vec![
+            // `a` mints the conversation and says something.
+            Reply::Text,
+            // `b` picks it up and says something.
+            Reply::Text,
+            // `a` has it back, and reaches for the other client's server.
+            Reply::ToolCall {
+                name: PROD_DB_QUERY.to_string(),
+                arguments: "{}".to_string(),
+            },
+            // …and wraps up on whatever it was told.
+            Reply::Text,
+        ]);
+        let runtime = shared_runtime(&endpoint);
+        let dir = workspace_dir();
+
+        let owner = pinned(dir.path(), Arc::clone(&runtime))
+            .with_mcp(no_mcp().with_supplied(vec![unreachable_server("prod-db")]))
+            .open()
+            .await
+            .expect("opens even though the server does not come up");
+        let a = pinned(dir.path(), Arc::clone(&runtime))
+            .with_mcp(no_mcp())
+            .open()
+            .await
+            .expect("the same directory opens again");
+        let b = pinned(dir.path(), runtime)
+            .with_mcp(no_mcp())
+            .open()
+            .await
+            .expect("and again");
+        assert!(a.mcp_servers().is_empty() && b.mcp_servers().is_empty());
+
+        let ran = Arc::new(std::sync::atomic::AtomicBool::new(false));
+        let _bridged = owner
+            .mentra_runtime()
+            .try_register_tool_for_audience(
+                ToolAudience::new(store::runtime_identifier(dir.path())),
+                ProdDbQuery(Arc::clone(&ran)),
+            )
+            .expect("nothing answers to that name yet");
+
+        // `a` mints the conversation, runs a turn, and lets the lease go — the
+        // shape a host produces between two client prompts.
+        let mut minted = a.prepare("go").expect("mints");
+        let agent_id = minted.agent_id().to_string();
+        minted
+            .execute_with_approver(CollectingSink::default(), AllowAll)
+            .await
+            .expect("completes");
+        drop(minted);
+
+        // `b` borrows it. This is the cross-contamination write: the ledger row
+        // for `agent_id` is `b`'s from here.
+        let mut borrowed = b
+            .resume(&agent_id, "again")
+            .expect("a same-root sibling may resume it — the root check passes by construction");
+        borrowed
+            .execute_with_approver(CollectingSink::default(), AllowAll)
+            .await
+            .expect("completes");
+        drop(borrowed);
+
+        // `a` takes it back and holds the run live. Only `a` can be running it
+        // now, because mentra hands out one session per agent id.
+        let mut live = a
+            .resume(&agent_id, "again")
+            .expect("its own workspace resumes it");
+
+        // And `b` goes, releasing what it recorded — which no longer includes
+        // this conversation.
+        drop(b);
+
+        live.execute_with_approver(CollectingSink::default(), AllowAll)
+            .await
+            .expect("the run completes — a denial is an answer, not an error");
+
+        assert!(
+            !ran.load(std::sync::atomic::Ordering::SeqCst),
+            "a sibling's drop must not hand this open the other client's authenticated server"
+        );
+
+        let requests = endpoint.requests();
+        let offered = tool_names(&requests[2]);
+        assert!(
+            offered.iter().any(|name| name == PROD_DB_QUERY),
+            "the resumed roster still carries the name, which is why the refusal has to \
+             come from the guard rather than from a hide: {offered:?}"
+        );
+        assert!(
+            requests[3].contains("which this workspace did not configure"),
+            "and the model is told why, in the guard's own words: {}",
+            requests[3]
+        );
+
+        drop(owner);
+    }
+
     /// A host tool registered under an `mcp__`-shaped name.
     struct HostShapedLikeBridged;
 
