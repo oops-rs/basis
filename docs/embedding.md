@@ -136,11 +136,11 @@ workspace's conversations even though provider, store handle, and runtime are sh
 The knobs ADR-0018 moved are `RuntimeBuilder`'s now — `with_provider`, `with_base_url`,
 `with_api_key`, `with_store_dir`, `with_ephemeral_history`, `with_interceptor`,
 `with_command_environment` (whose pairs reach *every* process the runtime spawns — commands
-through `spawn` and declared tools' programs alike) — joined by `with_command_target`, which
-registers an executor a
-command can name with `!@<target> <command>`
-([ADR-0021](adr/0021-a-command-names-where-it-runs.md), [targets.md](targets.md)), and by the
-three below that describe the provider connection itself. A
+through `spawn` and declared tools' programs alike) — and by the
+three below that describe the provider connection itself. A command can still name
+`!@<target> <command>` ([ADR-0021](adr/0021-a-command-names-where-it-runs.md),
+[targets.md](targets.md)), though nothing registers a target to route it to today — see
+targets.md's dateline note. A
 single-workspace host that wants one of them hands the recipe
 to `WorkspaceBuilder::with_runtime_builder`, which configures the private runtime
 `Workspace::open` would have built rather than switching to a shared one. Mentra's own

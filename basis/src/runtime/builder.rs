@@ -40,8 +40,7 @@ pub(crate) use history::History;
 pub(in crate::runtime) use provider_settlement::HostProvider;
 
 use super::{
-    FileToolProfile, ProviderRetry, ResponsesTransport, Runtime, RuntimeExecutor, ToolResultPolicy,
-    Wire,
+    FileToolProfile, ProviderRetry, ResponsesTransport, Runtime, ToolResultPolicy, Wire,
     dispatch::{DispatchHook, HookDispatch},
     executor::{CommandTargets, TargetedExecutor},
 };

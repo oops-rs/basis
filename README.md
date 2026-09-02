@@ -265,10 +265,11 @@ config — never through code in `basis`:
 [docs/conventions.md](docs/conventions.md) is the one-page reference: every file, every directory,
 every `BASIS_*` variable, and which wins when two say the same thing.
 
-- **Command targets** — a host can register executors by name, and a command can say which one
-  it wants: `!@mac xcodebuild -list` where `!cargo test` runs where basis is running. For the
-  container-on-a-Mac case. basis routes; the host writes the executor; nothing about it is
-  confinement ([ADR-0021](docs/adr/0021-a-command-names-where-it-runs.md),
+- **Command targets** — a command can say which named executor it wants: `!@mac xcodebuild -list`
+  where `!cargo test` runs where basis is running. For the container-on-a-Mac case. basis routes;
+  the host writes the executor; nothing about it is confinement. The builder method that
+  registered one is withdrawn as of 0.12, unadopted — the parsing and routing it fed remain
+  ([ADR-0021](docs/adr/0021-a-command-names-where-it-runs.md),
   [docs/targets.md](docs/targets.md)).
 
 Details of each, and of the one `spawn` tool carrying both commands and delegation

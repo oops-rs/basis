@@ -685,15 +685,17 @@ reuse claim it cannot prove.
 
 ### Command targets
 
-`!@<target> <command>` runs a command on an executor the host registered by name, rather
-than where basis is running — the container-on-a-Mac case, where `cargo test` belongs in the
-container and `xcodebuild` is not in it at all. `spawn` stays the one door: *where* became a
-dimension of the call, because a second tool would have been a second name at the approval
-gate and a second namespace of remembered rules for one question. Targets are registered on
-the runtime (`RuntimeBuilder::with_command_target`), a name nothing registered is refused
-before the approver is asked, and the parsed call an approver reads gains a fourth key —
-`{mode, body, cwd, target}`, reading `"local"` when no target was named, so every rule
-already written keeps matching. **basis ships no executors**: what a target reaches is
+`!@<target> <command>` names an executor to run a command on by name, rather than where basis
+is running — the container-on-a-Mac case, where `cargo test` belongs in the container and
+`xcodebuild` is not in it at all. `spawn` stays the one door: *where* became a dimension of the
+call, because a second tool would have been a second name at the approval gate and a second
+namespace of remembered rules for one question. The parser, `RuntimeExecutor`, and the routing
+table stay; `RuntimeBuilder::with_command_target`, the only builder method that ever populated
+that table, is gone as of 0.12 — zero hosts had registered one — so today no
+name is ever registered and every `!@<target>` call is refused before the approver is asked, the
+same as a name nothing registered always was. The parsed call an approver reads still gains a
+fourth key — `{mode, body, cwd, target}`, reading `"local"` when no target was named, so every
+rule already written keeps matching. **basis ships no executors**: what a target would reach is
 whatever the host's own code reaches, and none of it is confinement
 ([ADR-0013](adr/0013-the-host-owns-the-boundary.md)). [docs/targets.md](targets.md) has the
 worked SSH forced-command pattern, what the executor receives, and what the arrangement does
