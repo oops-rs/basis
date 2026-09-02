@@ -12,7 +12,7 @@ use std::sync::{
 use basis::{
     AllowAll, CollectingSink, ContentBlock, Effort, Event, ModelInfo, Provider,
     ProviderRequestOptions, ReasoningOptions, ReasoningSummary, RunError, RunProfile, RunSpec,
-    Runtime, Workspace, async_trait,
+    Runtime, TurnOptions, Workspace, async_trait,
     runtime::{
         ProviderCapabilities, ProviderDescriptor, ProviderError, ProviderEventStream, Request,
         Response, Role, provider_event_stream_from_response,
@@ -216,7 +216,7 @@ async fn one_attached_run_switches_full_model_and_reasoning_without_losing_gathe
     let agent_id = run.agent_id().to_string();
 
     let gather = run
-        .execute(CollectingSink::default())
+        .execute_with_approver(CollectingSink::default(), AllowAll)
         .await
         .expect("the gather tool exchange completes");
     assert_eq!(gather.model, MODEL_A);
@@ -289,10 +289,11 @@ async fn one_attached_run_switches_full_model_and_reasoning_without_losing_gathe
     ));
 
     let synthesis = run
-        .send(
+        .send_with_options(
             "synthesize from the gathered evidence",
             CollectingSink::default(),
             AllowAll,
+            TurnOptions::default(),
         )
         .await
         .expect("synthesis completes on the same attached run");
@@ -377,7 +378,7 @@ async fn legacy_switch_wrappers_are_lossy_only_for_model_metadata_and_reasoning_
     ));
 
     let report = run
-        .execute(CollectingSink::default())
+        .execute_with_approver(CollectingSink::default(), AllowAll)
         .await
         .expect("the wrapper-model gather completes");
     assert_eq!(report.model, WRAPPER_MODEL);

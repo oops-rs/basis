@@ -157,7 +157,8 @@ pub struct HooksFile {
 /// Where to look for hooks.
 #[derive(Clone, PartialEq, Eq)]
 pub struct HooksConfig {
-    /// Path relative to the workspace root.
+    /// Path relative to the workspace root. Empty names no file to look for;
+    /// [`HooksConfig::supplied_only`] writes it.
     pub workspace_file: PathBuf,
     /// The global config directory, if any. `hooks.json` inside it is used.
     pub global_dir: Option<PathBuf>,
@@ -181,7 +182,7 @@ impl Default for HooksConfig {
     fn default() -> Self {
         Self {
             workspace_file: PathBuf::from(DEFAULT_WORKSPACE_HOOKS_FILE),
-            global_dir: crate::context::ContextConfig::default().global_dir,
+            global_dir: crate::context::default_global_dir(),
             supplied: Vec::new(),
         }
     }
@@ -191,6 +192,20 @@ impl HooksConfig {
     /// Replaces the hooks supplied directly by the embedding host.
     pub fn with_supplied(self, supplied: Vec<HookSpec>) -> Self {
         Self { supplied, ..self }
+    }
+
+    /// The host's own hooks, and no file discovery at all: neither
+    /// `.basis/hooks.json` nor the global one is read.
+    ///
+    /// What `WorkspaceBuilder::without_discovery` leaves of this config.
+    /// Supplied hooks survive, because a host handing basis a typed hook has
+    /// stated it rather than left it on disk to be found.
+    pub fn supplied_only(self) -> Self {
+        Self {
+            workspace_file: PathBuf::new(),
+            global_dir: None,
+            ..self
+        }
     }
 }
 
@@ -253,10 +268,10 @@ pub fn discover(
         }
     }
 
-    let workspace_path = workspace.join(&config.workspace_file);
     // A global directory pointed at the workspace would otherwise run every
     // hook twice, which for a guard means two denials for one call.
-    if workspace_path.is_file()
+    if let Some(workspace_path) = crate::paths::candidate(workspace, &config.workspace_file)
+        && workspace_path.is_file()
         && !sources
             .iter()
             .any(|source| same_file(&source.path, &workspace_path))
@@ -279,7 +294,7 @@ pub fn load(workspace: &Path, config: &HooksConfig) -> Result<Vec<HookSpec>, Hoo
 }
 
 /// The host-supplied hooks only, with no file discovery.
-pub(crate) fn load_supplied(config: &HooksConfig) -> Result<Vec<HookSpec>, HookConfigError> {
+fn load_supplied(config: &HooksConfig) -> Result<Vec<HookSpec>, HookConfigError> {
     validate(&config.supplied, HookOrigin::Supplied)?;
     Ok(config.supplied.clone())
 }

@@ -24,7 +24,7 @@
 //!
 //! ```no_run
 //! # async fn example() -> Result<(), basis::RunError> {
-//! use basis::{CollectingSink, Workspace};
+//! use basis::{AllowAll, CollectingSink, Workspace};
 //!
 //! let workspace = Workspace::open("/repo").await?;
 //!
@@ -32,8 +32,8 @@
 //! let mut first = workspace.prepare("what does this repo do?")?;
 //! let mut second = workspace.prepare("what is not tested?")?;
 //! let (a, b) = tokio::join!(
-//!     first.execute(CollectingSink::default()),
-//!     second.execute(CollectingSink::default()),
+//!     first.execute_with_approver(CollectingSink::default(), AllowAll),
+//!     second.execute_with_approver(CollectingSink::default(), AllowAll),
 //! );
 //! # let _ = (a?, b?);
 //! # Ok(())
@@ -204,8 +204,8 @@ impl Workspace {
     /// The spec's prompt may be empty. Once a session outlives a turn, a
     /// conversation with nothing said yet is a real state — it is what ACP's
     /// `session/new` opens — so the emptiness check belongs where a prompt is
-    /// actually sent, which is [`PreparedRun::execute`] and
-    /// [`PreparedRun::send`]. (The free [`run`](crate::run()) keeps
+    /// actually sent, which is [`PreparedRun::execute_with_approver`] and
+    /// [`PreparedRun::send_with_options`]. (The free [`run`](crate::run()) keeps
     /// its own up-front check, because a one-shot caller that passed nothing
     /// wants to hear about it before a session exists.)
     pub fn prepare(&self, spec: impl Into<RunSpec>) -> Result<PreparedRun, RunError> {
@@ -273,8 +273,8 @@ impl Workspace {
         if let Some(field) = spec.profile.unsupported_on_resume() {
             return Err(RunError::UnsupportedResumeProfile { field });
         }
-        let legacy_effort = spec.effort.or(self.effort);
-        let changes_reasoning = spec.profile.reasoning().is_some() || legacy_effort.is_some();
+        let effort = spec.effort.or(self.effort);
+        let changes_reasoning = effort.is_some();
         if spec.profile.resolved_model().is_some() && changes_reasoning {
             return Err(RunError::NonAtomicResumeProfile);
         }
@@ -290,11 +290,7 @@ impl Workspace {
             session.metadata().model.clone()
         };
 
-        if let Some(reasoning) = spec.profile.reasoning() {
-            session.set_reasoning(reasoning.clone())?;
-        } else {
-            apply_effort(&mut session, legacy_effort)?;
-        }
+        apply_effort(&mut session, effort)?;
 
         // Mentra 0.23 exposes no resumed AgentConfig reader. The persisted
         // agent may carry a per-run system override that differs from this
@@ -540,7 +536,7 @@ impl Workspace {
         // provider connection this workspace borrows (ADR-0018), and mentra
         // takes it per run, so the mint is where a runtime-scoped knob becomes
         // a per-run option.
-        .with_provider_retry(self.runtime.provider_retry())
+        .with_retry_policy(self.runtime.retry_policy())
         .with_context_snapshot(context_snapshot)
     }
 }

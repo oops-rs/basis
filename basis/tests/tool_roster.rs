@@ -17,9 +17,9 @@ use std::{
 #[cfg(feature = "mcp")]
 use basis::McpConfig;
 use basis::{
-    CollectingSink, Config, ContentBlock, ContextConfig, HookOutcome, HookRequest, HooksConfig,
-    Interceptor, InterceptorError, MemoryConfig, ModelInfo, Provider, RunOutcome, RunProfile,
-    RunSpec, Runtime, ToolResultPagingConfig, ToolRoster, Workspace, async_trait,
+    AllowAll, CollectingSink, Config, ContentBlock, ContextConfig, HookOutcome, HookRequest,
+    HooksConfig, Interceptor, InterceptorError, MemoryConfig, ModelInfo, Provider, RunOutcome,
+    RunProfile, RunSpec, Runtime, ToolResultPagingConfig, ToolRoster, Workspace, async_trait,
     runtime::{
         ProviderCapabilities, ProviderDescriptor, ProviderError, ProviderEventStream, Request,
         Response, Role, provider_event_stream_from_response,
@@ -369,7 +369,7 @@ async fn paging_registers_its_scoped_reader_before_the_first_request() {
             ),
         )
         .expect("pager run mints")
-        .execute(CollectingSink::default())
+        .execute_with_approver(CollectingSink::default(), AllowAll)
         .await
         .expect("pager probe completes");
 
@@ -434,7 +434,7 @@ async fn exact_profile_roster_refuses_every_hallucinated_registered_omission() {
     let mut run = run.expect("profile mints without provider activity");
     let report = tokio::time::timeout(
         Duration::from_secs(10),
-        run.execute(CollectingSink::default()),
+        run.execute_with_approver(CollectingSink::default(), AllowAll),
     )
     .await
     .expect("roster run must not hang")

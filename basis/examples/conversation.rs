@@ -5,7 +5,7 @@
 //! `tests/conversation.rs` proves against a mock: the second turn sees the
 //! first, because the session survives.
 
-use basis::{AllowAll, CollectingSink, NullSink, Runtime, Workspace};
+use basis::{AllowAll, CollectingSink, NullSink, Runtime, TurnOptions, Workspace};
 use mentra::ModelSelector;
 
 #[tokio::main]
@@ -24,17 +24,18 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     println!("session: {}", run.session_id());
     println!("agent:   {}", run.agent_id());
 
-    let first = run.execute(NullSink).await?;
+    let first = run.execute_with_approver(NullSink, AllowAll).await?;
     println!(
         "\nturn 1: {}",
         first.final_message.unwrap_or_default().trim()
     );
 
     let second = run
-        .send(
+        .send_with_options(
             "What number did I ask you to remember? Reply with digits only.",
             CollectingSink::new(),
             AllowAll,
+            TurnOptions::default(),
         )
         .await?;
     let answer = second.final_message.unwrap_or_default();

@@ -20,7 +20,9 @@
 
 use std::{env, time::Duration};
 
-use basis::{ModelSelector, NullSink, RunOutcome, RunReport, RunSpec, Snapshot, Workspace};
+use basis::{
+    AllowAll, ModelSelector, NullSink, RunOutcome, RunReport, RunSpec, Snapshot, Workspace,
+};
 
 /// What one iteration may spend.
 ///
@@ -76,7 +78,10 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         {
             println!("unchanged at {} — skipping", observed.hex());
         } else {
-            let report = workspace.prepare(spec.clone())?.execute(NullSink).await?;
+            let report = workspace
+                .prepare(spec.clone())?
+                .execute_with_approver(NullSink, AllowAll)
+                .await?;
             println!("ran: {}", summarize(&report));
 
             // Recorded *after* the run, so the run's own edits do not retrigger

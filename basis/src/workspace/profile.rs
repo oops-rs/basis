@@ -6,7 +6,7 @@
 //! explicit clear. Applying a profile therefore never has to guess whether a
 //! host omitted a value or deliberately removed one.
 
-use mentra::{ModelInfo, ProviderRequestOptions, ReasoningOptions, ToolResultPagingConfig};
+use mentra::{ModelInfo, ProviderRequestOptions, ToolResultPagingConfig};
 
 use crate::{compaction::Compaction, context::SystemPrompt};
 
@@ -18,15 +18,12 @@ use super::ToolRoster;
 /// Builder methods return a new value, so a host may keep a common profile and
 /// derive narrower variants without shared mutation.
 ///
-/// `ProviderRequestOptions` and the dedicated reasoning override overlap on
-/// purpose. Their precedence is ordinary builder order: whichever API is
-/// called last decides reasoning. Calling
-/// [`with_provider_request_options`](Self::with_provider_request_options)
-/// clears an earlier dedicated override; calling
-/// [`with_reasoning`](Self::with_reasoning) later replaces only the reasoning
-/// inside the complete options and preserves every other provider field.
-/// Either profile-level decision outranks legacy [`RunSpec::with_effort`](super::RunSpec::with_effort)
-/// regardless of which builder method was called later: the profile is the
+/// Reasoning is decided by
+/// [`with_provider_request_options`](Self::with_provider_request_options), and
+/// only there: the complete options carry `reasoning` beside every other
+/// provider field, so a profile that states them has stated it. That decision
+/// outranks legacy [`RunSpec::with_effort`](super::RunSpec::with_effort)
+/// regardless of which builder method was called later — the profile is the
 /// complete contract, while `effort` is its compatibility fallback.
 #[derive(Clone, Default, PartialEq, Eq)]
 pub struct RunProfile {
@@ -35,8 +32,6 @@ pub struct RunProfile {
     provider_request_options: Option<ProviderRequestOptions>,
     /// Outer `None` inherits; `Some(None)` explicitly clears.
     max_output_tokens: Option<Option<u32>>,
-    /// Outer `None` inherits; `Some(None)` explicitly clears.
-    reasoning: Option<Option<ReasoningOptions>>,
     compaction: Option<Compaction>,
     /// Outer `None` inherits; `Some(None)` explicitly clears.
     tool_result_paging: Option<Option<ToolResultPagingConfig>>,
@@ -63,7 +58,6 @@ impl std::fmt::Debug for RunProfile {
                 &redacted_if(self.provider_request_options.as_ref()),
             )
             .field("max_output_tokens", &set_or_clear(&self.max_output_tokens))
-            .field("reasoning", &set_or_clear(&self.reasoning))
             .field("compaction", &self.compaction)
             .field(
                 "tool_result_paging",
@@ -114,9 +108,10 @@ impl RunProfile {
 
     /// Replaces the complete provider-specific request options for this run.
     ///
-    /// This call is also the last word on reasoning at this point in the
-    /// builder chain, including when `options.reasoning` is `None`. A later
-    /// [`with_reasoning`](Self::with_reasoning) changes only that field.
+    /// This call is also the last word on reasoning for the run, including when
+    /// `options.reasoning` is `None`: a stated contract is complete, so the
+    /// legacy [`RunSpec::with_effort`](super::RunSpec::with_effort) fallback
+    /// does not fill the gap back in.
     ///
     /// Nonempty `options.session.extra_headers` are accepted only when the
     /// runtime was explicitly built with
@@ -128,7 +123,6 @@ impl RunProfile {
     pub fn with_provider_request_options(self, options: ProviderRequestOptions) -> Self {
         Self {
             provider_request_options: Some(options),
-            reasoning: None,
             ..self
         }
     }
@@ -139,22 +133,6 @@ impl RunProfile {
     pub fn with_max_output_tokens(self, max_output_tokens: Option<u32>) -> Self {
         Self {
             max_output_tokens: Some(max_output_tokens),
-            ..self
-        }
-    }
-
-    /// Sets complete reasoning options, or explicitly restores the provider's
-    /// default with `None`.
-    ///
-    /// Called after [`with_provider_request_options`](Self::with_provider_request_options),
-    /// this is the last word on that value. Called before it, the later complete
-    /// options replace it. Either way a profile reasoning decision outranks
-    /// [`RunSpec::with_effort`](super::RunSpec::with_effort), even when the
-    /// legacy method was called later.
-    #[must_use]
-    pub fn with_reasoning(self, reasoning: Option<ReasoningOptions>) -> Self {
-        Self {
-            reasoning: Some(reasoning),
             ..self
         }
     }
@@ -198,7 +176,7 @@ impl RunProfile {
     /// Whether this profile, rather than `RunSpec::effort` or workspace
     /// config, has answered the reasoning question.
     pub(crate) fn decides_reasoning(&self) -> bool {
-        self.provider_request_options.is_some() || self.reasoning.is_some()
+        self.provider_request_options.is_some()
     }
 
     /// Whether complete request options contain headers that would be
@@ -209,17 +187,12 @@ impl RunProfile {
             .is_some_and(|options| !options.session.extra_headers.is_empty())
     }
 
-    /// A reasoning value Mentra can apply to an already resumed session.
-    pub(crate) fn reasoning(&self) -> Option<&Option<ReasoningOptions>> {
-        self.reasoning.as_ref()
-    }
-
     /// The first field Mentra 0.23 cannot change on an already resumed agent.
     ///
-    /// Model and dedicated reasoning are deliberately absent: `Session`
-    /// exposes exact setters for both. Full provider options are present even
-    /// if only their reasoning field differs, because accepting a partial
-    /// projection would silently drop the rest of the caller's contract.
+    /// The model is deliberately absent: `Session` exposes an exact setter for
+    /// it. Full provider options are present even if only their reasoning field
+    /// differs, because accepting a partial projection would silently drop the
+    /// rest of the caller's contract.
     pub(crate) fn unsupported_on_resume(&self) -> Option<&'static str> {
         if self.tool_roster.is_some() {
             Some("tool_roster")
@@ -248,9 +221,6 @@ impl RunProfile {
         }
         if let Some(options) = &self.provider_request_options {
             agent.provider_request_options = options.clone();
-        }
-        if let Some(reasoning) = &self.reasoning {
-            agent.provider_request_options.reasoning = reasoning.clone();
         }
         if let Some(max_output_tokens) = self.max_output_tokens {
             agent.max_output_tokens = max_output_tokens;
@@ -309,6 +279,8 @@ mod tests {
     use std::collections::BTreeMap;
     use std::path::PathBuf;
 
+    use mentra::ReasoningOptions;
+
     use super::*;
     use crate::run::Effort;
 
@@ -353,12 +325,10 @@ mod tests {
 
         let cleared = RunProfile::new()
             .with_max_output_tokens(None)
-            .with_reasoning(None)
             .with_tool_result_paging(None)
             .apply_to(agent);
 
         assert_eq!(cleared.max_output_tokens, None);
-        assert_eq!(cleared.provider_request_options.reasoning, None);
         assert_eq!(cleared.tool_result_paging, None);
     }
 
@@ -414,7 +384,9 @@ mod tests {
     }
 
     #[test]
-    fn later_reasoning_call_wins_without_losing_other_request_fields() {
+    fn stated_request_options_replace_the_agent_reasoning_wholesale() {
+        let mut agent = mentra::agent::AgentConfig::default();
+        agent.provider_request_options.reasoning = Some(reasoning(Effort::High));
         let mut options = ProviderRequestOptions {
             reasoning: Some(reasoning(Effort::Low)),
             ..Default::default()
@@ -423,12 +395,11 @@ mod tests {
 
         let applied = RunProfile::new()
             .with_provider_request_options(options)
-            .with_reasoning(Some(reasoning(Effort::High)))
-            .apply_to(mentra::agent::AgentConfig::default());
+            .apply_to(agent);
 
         assert_eq!(
             applied.provider_request_options.reasoning,
-            Some(reasoning(Effort::High))
+            Some(reasoning(Effort::Low))
         );
         assert_eq!(
             applied
@@ -437,23 +408,6 @@ mod tests {
                 .service_tier
                 .as_deref(),
             Some("priority")
-        );
-    }
-
-    #[test]
-    fn later_complete_options_replace_an_earlier_reasoning_override() {
-        let options = ProviderRequestOptions {
-            reasoning: Some(reasoning(Effort::Low)),
-            ..Default::default()
-        };
-        let applied = RunProfile::new()
-            .with_reasoning(Some(reasoning(Effort::High)))
-            .with_provider_request_options(options)
-            .apply_to(mentra::agent::AgentConfig::default());
-
-        assert_eq!(
-            applied.provider_request_options.reasoning,
-            Some(reasoning(Effort::Low))
         );
     }
 

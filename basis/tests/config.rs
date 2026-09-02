@@ -21,7 +21,7 @@ use std::{
 };
 
 use basis::{
-    CollectingSink, Config, ContextConfig, Effort, MemoryConfig, Runtime, Workspace,
+    AllowAll, CollectingSink, Config, ContextConfig, Effort, MemoryConfig, Runtime, Workspace,
     WorkspaceBuilder, hooks::HooksConfig, skills::SkillsConfig, templates::TemplatesConfig,
     tools::declared::ToolsConfig,
 };
@@ -211,7 +211,7 @@ async fn the_workspace_files_effort_reaches_the_provider() {
         .expect("opens against the scripted endpoint");
 
     let mut run = workspace.prepare("go").expect("mints");
-    run.execute(CollectingSink::default())
+    run.execute_with_approver(CollectingSink::default(), AllowAll)
         .await
         .expect("the scripted turn runs");
 
@@ -242,7 +242,7 @@ async fn a_run_that_asked_for_an_effort_keeps_its_own() {
     let mut run = workspace
         .prepare(basis::workspace::RunSpec::new("go").with_effort(Effort::Low))
         .expect("mints");
-    run.execute(CollectingSink::default())
+    run.execute_with_approver(CollectingSink::default(), AllowAll)
         .await
         .expect("the scripted turn runs");
 

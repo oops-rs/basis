@@ -15,8 +15,8 @@ use std::sync::{
 };
 
 use basis::{
-    CollectingSink, ContextConfig, MemoryConfig, ModelSelector, Provider, RunOutcome, Runtime,
-    Workspace, WorkspaceBuilder, async_trait,
+    AllowAll, CollectingSink, ContextConfig, MemoryConfig, ModelSelector, Provider, RunOutcome,
+    Runtime, Workspace, WorkspaceBuilder, async_trait,
     hooks::HooksConfig,
     runtime::{
         ContentBlock, ModelInfo, ProviderCapabilities, ProviderDescriptor, ProviderError,
@@ -130,7 +130,7 @@ async fn a_prepared_run_streams_through_a_host_supplied_provider() {
     let report = workspace
         .prepare("say the line")
         .expect("mints")
-        .execute(CollectingSink::default())
+        .execute_with_approver(CollectingSink::default(), AllowAll)
         .await
         .expect("completes");
 

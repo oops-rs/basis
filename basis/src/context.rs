@@ -173,7 +173,14 @@ impl ContextConfig {
 }
 
 /// `$BASIS_CONFIG_DIR`, else `$XDG_CONFIG_HOME/basis`, else `$HOME/.config/basis`.
-fn default_global_dir() -> Option<PathBuf> {
+///
+/// The *one* global directory, shared by every convention that has a global
+/// half — context, config, hooks, declared tools, skills, templates, MCP.
+/// Each keeps its own `global_dir` field, because a host may point any one of
+/// them somewhere else; what they must not do is each work out the default
+/// differently, so they all default from here. `None` on a machine with none
+/// of those variables set, which is what makes the global half optional.
+pub(crate) fn default_global_dir() -> Option<PathBuf> {
     if let Some(dir) = std::env::var_os("BASIS_CONFIG_DIR") {
         return Some(PathBuf::from(dir));
     }

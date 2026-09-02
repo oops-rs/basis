@@ -31,7 +31,8 @@ pub trait EventSink: Send + 'static {
 
 /// A boxed sink is a sink, so a host can choose one at runtime — `--json` or a
 /// progress pane or nothing — and still satisfy the `S: EventSink` that
-/// [`execute`](super::PreparedRun::execute) asks for. Without this the choice
+/// [`execute_with_approver`](super::PreparedRun::execute_with_approver) asks
+/// for. Without this the choice
 /// has to be made in the type system, which is to say at every call site that
 /// forwards it.
 impl EventSink for Box<dyn EventSink> {

@@ -30,7 +30,7 @@ use mentra::{
 };
 use serde_json::json;
 
-use basis::{CollectingSink, Event, hooks, hooks::HookRunner, run::prepare_with_session};
+use basis::{AllowAll, CollectingSink, Event, hooks, hooks::HookRunner, run::prepare_with_session};
 
 use super::Workspace;
 
@@ -135,7 +135,7 @@ async fn read_through_hooks(workspace: &Workspace, path: &str) -> (Vec<Event>, V
         "scripted-model",
     )
     .expect("prepared")
-    .execute(CollectingSink::new())
+    .execute_with_approver(CollectingSink::new(), AllowAll)
     .await
     .expect("the run completes");
 

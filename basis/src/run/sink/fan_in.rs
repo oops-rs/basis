@@ -12,7 +12,7 @@
 //!
 //! ```no_run
 //! # async fn example() -> Result<(), basis::RunError> {
-//! use basis::{EventFanIn, Workspace};
+//! use basis::{AllowAll, EventFanIn, Workspace};
 //!
 //! let workspace = Workspace::open("/repo").await?;
 //! let mut survey = workspace.prepare("what does this repo do?")?;
@@ -23,7 +23,10 @@
 //! let mut merged = fan.into_events();
 //!
 //! let runs = async move {
-//!     let (survey, coverage) = tokio::join!(survey.execute(first), coverage.execute(second));
+//!     let (survey, coverage) = tokio::join!(
+//!         survey.execute_with_approver(first, AllowAll),
+//!         coverage.execute_with_approver(second, AllowAll)
+//!     );
 //!     // Taking the answers out of the reports drops the sinks with them,
 //!     // which is what tells `merged` the stream is over.
 //!     Ok::<_, basis::RunError>((survey?.final_message, coverage?.final_message))
@@ -144,8 +147,8 @@ impl<T> EventFanIn<T> {
     /// Mints a sink that labels everything it carries with `tag`.
     ///
     /// Sinks are `Send`, so this is the handle that goes to the run —
-    /// [`PreparedRun::execute`](crate::PreparedRun::execute) and its
-    /// neighbours take one by value.
+    /// [`PreparedRun::execute_with_approver`](crate::PreparedRun::execute_with_approver)
+    /// and its neighbours take one by value.
     pub fn sink(&self, tag: T) -> TaggedSink<T> {
         TaggedSink {
             tag,

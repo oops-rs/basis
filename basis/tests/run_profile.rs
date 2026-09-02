@@ -15,8 +15,8 @@ use std::{
 #[cfg(feature = "mcp")]
 use basis::McpConfig;
 use basis::{
-    CollectingSink, Compaction, ContextConfig, Effort, Event, MemoryConfig, ModelInfo, Provider,
-    ProviderRequestOptions, ReasoningOptions, RunError, RunProfile, RunSpec, Runtime,
+    AllowAll, CollectingSink, Compaction, ContextConfig, Effort, Event, MemoryConfig, ModelInfo,
+    Provider, ProviderRequestOptions, ReasoningOptions, RunError, RunProfile, RunSpec, Runtime,
     RuntimeBuilder, SystemPrompt, ToolResultPagingConfig, ToolRoster, Workspace, WorkspaceBuilder,
     async_trait,
     hooks::HooksConfig,
@@ -282,18 +282,14 @@ async fn a_profile_reaches_the_provider_field_for_field() {
         .open()
         .await
         .expect("the discovery-free workspace opens");
-    let base_options = complete_request_options();
     let expected_options = ProviderRequestOptions {
         reasoning: Some(high_reasoning()),
-        ..base_options.clone()
+        ..complete_request_options()
     };
     let profile = RunProfile::new()
         .with_resolved_model(profile_model())
         .with_tool_roster(ToolRoster::only([VISIBLE_TOOL]))
-        .with_provider_request_options(base_options)
-        // The dedicated override is later, so it wins over the full options'
-        // reasoning while preserving every other field byte-for-byte.
-        .with_reasoning(Some(high_reasoning()))
+        .with_provider_request_options(expected_options.clone())
         .with_max_output_tokens(Some(1_234))
         .with_compaction(
             Compaction::default()
@@ -325,7 +321,7 @@ async fn a_profile_reaches_the_provider_field_for_field() {
         Event::RunStarted { ref model, .. } if model == PROFILE_MODEL
     ));
     let report = run
-        .execute(CollectingSink::default())
+        .execute_with_approver(CollectingSink::default(), AllowAll)
         .await
         .expect("the scripted provider completes");
 
@@ -427,22 +423,25 @@ async fn explicit_clears_win_and_omitted_fields_inherit() {
                 .with_profile(
                     RunProfile::new()
                         .with_max_output_tokens(None)
-                        .with_reasoning(None),
+                        .with_provider_request_options(ProviderRequestOptions::default()),
                 ),
         )
         .expect("clear profile mints")
-        .execute(CollectingSink::default())
+        .execute_with_approver(CollectingSink::default(), AllowAll)
         .await
         .expect("clear profile runs");
 
     workspace
         .prepare(
             RunSpec::new("clear even when effort is called later")
-                .with_profile(RunProfile::new().with_reasoning(None))
+                .with_profile(
+                    RunProfile::new()
+                        .with_provider_request_options(ProviderRequestOptions::default()),
+                )
                 .with_effort(Effort::High),
         )
         .expect("late legacy effort cannot override the profile")
-        .execute(CollectingSink::default())
+        .execute_with_approver(CollectingSink::default(), AllowAll)
         .await
         .expect("reverse builder order runs");
 
@@ -453,7 +452,7 @@ async fn explicit_clears_win_and_omitted_fields_inherit() {
                 .with_profile(RunProfile::new()),
         )
         .expect("empty profile mints")
-        .execute(CollectingSink::default())
+        .execute_with_approver(CollectingSink::default(), AllowAll)
         .await
         .expect("empty profile runs");
 
@@ -468,7 +467,7 @@ async fn explicit_clears_win_and_omitted_fields_inherit() {
 }
 
 #[tokio::test]
-async fn the_later_reasoning_api_is_the_deterministic_winner() {
+async fn stated_request_options_outrank_a_later_effort() {
     let provider = CapturingProvider::default();
     let dir = tempfile::tempdir().expect("workspace");
     let workspace = builder(dir.path(), provider.clone())
@@ -478,34 +477,22 @@ async fn the_later_reasoning_api_is_the_deterministic_winner() {
 
     workspace
         .prepare(
-            RunSpec::new("dedicated last").with_profile(
-                RunProfile::new()
-                    .with_provider_request_options(complete_request_options())
-                    .with_reasoning(Some(high_reasoning())),
-            ),
-        )
-        .expect("first run mints")
-        .execute(CollectingSink::default())
-        .await
-        .expect("first run completes");
-    workspace
-        .prepare(
-            RunSpec::new("complete options last")
+            RunSpec::new("complete options, then effort")
                 .with_profile(
-                    RunProfile::new()
-                        .with_reasoning(Some(high_reasoning()))
-                        .with_provider_request_options(complete_request_options()),
+                    RunProfile::new().with_provider_request_options(complete_request_options()),
                 )
                 .with_effort(Effort::High),
         )
-        .expect("second run mints")
-        .execute(CollectingSink::default())
+        .expect("the run mints")
+        .execute_with_approver(CollectingSink::default(), AllowAll)
         .await
-        .expect("second run completes");
+        .expect("the run completes");
 
-    let requests = provider.requests();
-    assert_eq!(requests[0].options.reasoning, Some(high_reasoning()));
-    assert_eq!(requests[1].options.reasoning, Some(low_reasoning()));
+    assert_eq!(
+        provider.requests()[0].options.reasoning,
+        Some(low_reasoning()),
+        "the profile is the complete contract; effort is only its fallback"
+    );
 }
 
 #[cfg(feature = "mcp")]
@@ -523,7 +510,7 @@ async fn an_exact_profile_roster_is_still_narrowed_by_foreign_tools() {
             RunProfile::new().with_tool_roster(ToolRoster::only([VISIBLE_TOOL, FOREIGN_TOOL])),
         ))
         .expect("run mints")
-        .execute(CollectingSink::default())
+        .execute_with_approver(CollectingSink::default(), AllowAll)
         .await
         .expect("run completes");
 
@@ -595,7 +582,7 @@ async fn resume_applies_exact_model_metadata_without_guessing_the_system_snapsho
         Event::RunStarted { ref model, .. } if model == PROFILE_MODEL
     ));
     let report = resumed
-        .execute(CollectingSink::default())
+        .execute_with_approver(CollectingSink::default(), AllowAll)
         .await
         .expect("resumed run completes");
 
@@ -619,11 +606,7 @@ async fn reasoning_only_resume_performs_one_mutation_and_leaves_the_window_unkno
     };
 
     let mut resumed = workspace
-        .resume(
-            &agent_id,
-            RunSpec::new("again")
-                .with_profile(RunProfile::new().with_reasoning(Some(high_reasoning()))),
-        )
+        .resume(&agent_id, RunSpec::new("again").with_effort(Effort::High))
         .expect("reasoning-only is one supported persisted mutation");
     assert_eq!(
         resumed.context_window(),
@@ -631,7 +614,7 @@ async fn reasoning_only_resume_performs_one_mutation_and_leaves_the_window_unkno
         "restoring the workspace model too would be a second persisted write"
     );
     resumed
-        .execute(CollectingSink::default())
+        .execute_with_approver(CollectingSink::default(), AllowAll)
         .await
         .expect("resumed turn completes");
 
@@ -648,21 +631,6 @@ async fn resume_refuses_model_plus_any_reasoning_mutation_before_lookup() {
         .open()
         .await
         .expect("workspace opens");
-
-    let profile_reasoning = workspace
-        .resume(
-            "missing-agent",
-            RunSpec::new("again").with_profile(
-                RunProfile::new()
-                    .with_resolved_model(profile_model())
-                    .with_reasoning(Some(high_reasoning())),
-            ),
-        )
-        .expect_err("two profile mutations are not atomic upstream");
-    assert!(matches!(
-        profile_reasoning,
-        RunError::NonAtomicResumeProfile
-    ));
 
     let legacy_effort = workspace
         .resume(

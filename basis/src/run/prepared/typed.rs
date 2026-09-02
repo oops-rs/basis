@@ -99,7 +99,8 @@ impl PreparedRun {
     /// different trades. [`OutputSpec::with_tools`] keeps the ordinary toolset
     /// on this turn, so one call reads and answers — and gives up the forcing
     /// that guaranteed an answer. Or do the work on an ordinary turn
-    /// ([`send`](Self::send) or [`execute`](Self::execute)) and ask for the
+    /// ([`send_with_options`](Self::send_with_options) or
+    /// [`execute_with_approver`](Self::execute_with_approver)) and ask for the
     /// shape on the next, which keeps the forcing and keeps each run's reading
     /// in a context of its own; `examples/review_workflow.rs` is that written
     /// out.
@@ -171,7 +172,8 @@ impl PreparedRun {
     /// );
     ///
     /// // The reading happened on an ordinary turn; this one only shapes it.
-    /// run.execute(basis::NullSink).await?;
+    /// run.execute_with_approver(basis::NullSink, basis::AllowAll)
+    ///     .await?;
     /// let output = run
     ///     .output::<Review, _, _>(
     ///         "submit your review of what you just read",
@@ -202,9 +204,9 @@ impl PreparedRun {
     ///
     /// Same relationship to [`output`](Self::output) as
     /// [`send_with_options`](Self::send_with_options) has to
-    /// [`send`](Self::send): a typed turn is cancellable and boundable like any
-    /// other, and a fan-out that gives each of its runs a deadline should not
-    /// have to give up types to get one.
+    /// [`send_parts`](Self::send_parts): a typed turn is cancellable and
+    /// boundable like any other, and a fan-out that gives each of its runs a
+    /// deadline should not have to give up types to get one.
     pub async fn output_with_options<T: DeserializeOwned, S: EventSink, A: Approver>(
         &mut self,
         prompt: impl Into<String>,

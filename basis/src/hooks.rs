@@ -206,7 +206,6 @@ pub mod wire;
 
 mod config;
 
-pub(crate) use config::load_supplied;
 pub use config::{
     DEFAULT_GLOBAL_HOOKS_FILE, DEFAULT_HOOK_TIMEOUT, DEFAULT_WORKSPACE_HOOKS_FILE, HookConfigError,
     HookSpec, HooksConfig, HooksFile, HooksSource, OnFailure, discover, load,

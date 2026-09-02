@@ -60,7 +60,8 @@ pub const NAMESPACE_SEPARATOR: &str = ":";
 /// of them encode a task.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct TemplatesConfig {
-    /// Path relative to the workspace root.
+    /// Path relative to the workspace root. Empty names no directory to look
+    /// for; [`TemplatesConfig::none`] writes it.
     pub workspace_subdir: PathBuf,
     /// The global config directory, if any. `templates/` inside it is used.
     pub global_dir: Option<PathBuf>,
@@ -70,7 +71,22 @@ impl Default for TemplatesConfig {
     fn default() -> Self {
         Self {
             workspace_subdir: PathBuf::from(DEFAULT_WORKSPACE_TEMPLATES_DIR),
-            global_dir: crate::context::ContextConfig::default().global_dir,
+            global_dir: crate::context::default_global_dir(),
+        }
+    }
+}
+
+impl TemplatesConfig {
+    /// No template discovery at all: neither `.basis/templates` nor the global
+    /// directory is read.
+    ///
+    /// What `WorkspaceBuilder::without_discovery` leaves of this config.
+    /// Templates are convention data with no host-supplied half, so there is
+    /// nothing here for `none` to keep.
+    pub fn none() -> Self {
+        Self {
+            workspace_subdir: PathBuf::new(),
+            global_dir: None,
         }
     }
 }
@@ -170,8 +186,9 @@ pub enum TemplateError {
 pub fn discover(workspace: &Path, config: &TemplatesConfig) -> Vec<TemplateSource> {
     let mut sources = Vec::new();
 
-    let workspace_dir = workspace.join(&config.workspace_subdir);
-    if workspace_dir.is_dir() {
+    if let Some(workspace_dir) = crate::paths::candidate(workspace, &config.workspace_subdir)
+        && workspace_dir.is_dir()
+    {
         sources.push(TemplateSource {
             path: workspace_dir,
             scope: ContextScope::Workspace,

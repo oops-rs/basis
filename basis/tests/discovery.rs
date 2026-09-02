@@ -14,9 +14,9 @@ use std::{
 };
 
 use basis::{
-    CollectingSink, Config, ContextConfig, ContextScope, HookOutcome, HookRequest, HookSpec,
-    HooksConfig, Interceptor, InterceptorError, MemoryConfig, ModelInfo, Provider, RunError,
-    RunOutcome, Runtime, RuntimeBuilder, Setting, SystemPrompt, ToolRoster, Workspace,
+    AllowAll, CollectingSink, Config, ContextConfig, ContextScope, HookOutcome, HookRequest,
+    HookSpec, HooksConfig, Interceptor, InterceptorError, MemoryConfig, ModelInfo, Provider,
+    RunError, RunOutcome, Runtime, RuntimeBuilder, Setting, SystemPrompt, ToolRoster, Workspace,
     WorkspaceBuilder, WorkspaceMemoryRoot, async_trait,
     event::ContextFile,
     runtime::{
@@ -386,7 +386,7 @@ async fn hostile_workspace_and_home_are_inert_but_explicit_host_inputs_run() {
     let report = workspace
         .prepare("run the explicit host tool")
         .expect("the workspace guard supports minting")
-        .execute(CollectingSink::default())
+        .execute_with_approver(CollectingSink::default(), AllowAll)
         .await
         .expect("the explicit host run completes");
 
@@ -503,7 +503,7 @@ async fn discovery_off_still_runs_supplied_hooks() {
     opened
         .prepare("run the host tool")
         .expect("the run mints")
-        .execute(CollectingSink::default())
+        .execute_with_approver(CollectingSink::default(), AllowAll)
         .await
         .expect("the supplied hook allows the call");
 

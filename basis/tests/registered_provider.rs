@@ -21,8 +21,8 @@ use std::{
 };
 
 use basis::{
-    CollectingSink, ContextConfig, MemoryConfig, ModelSelector, RunOutcome, Runtime, Workspace,
-    WorkspaceBuilder, hooks::HooksConfig, provider_core, skills::SkillsConfig,
+    AllowAll, CollectingSink, ContextConfig, MemoryConfig, ModelSelector, RunOutcome, Runtime,
+    Workspace, WorkspaceBuilder, hooks::HooksConfig, provider_core, skills::SkillsConfig,
     templates::TemplatesConfig, tools::declared::ToolsConfig,
 };
 #[cfg(feature = "responses-websocket")]
@@ -115,7 +115,7 @@ async fn a_retained_clone_shares_the_registered_responses_session() {
     let report = workspace
         .prepare("use the registered provider")
         .expect("mints")
-        .execute(CollectingSink::default())
+        .execute_with_approver(CollectingSink::default(), AllowAll)
         .await
         .expect("the prepared run completes");
 
@@ -183,7 +183,7 @@ async fn a_retained_clone_prewarms_the_websocket_the_run_uses() {
     workspace
         .prepare("tenant-a")
         .expect("mints")
-        .execute(CollectingSink::default())
+        .execute_with_approver(CollectingSink::default(), AllowAll)
         .await
         .expect("the run completes over the prewarmed websocket");
 

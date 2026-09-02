@@ -13,8 +13,8 @@ use std::{
 };
 
 use basis::{
-    CollectingSink, ContextConfig, MemoryConfig, ModelSelector, Provider, RunOutcome, Runtime,
-    ToolResultPolicy, Workspace, WorkspaceBuilder, async_trait,
+    AllowAll, CollectingSink, ContextConfig, MemoryConfig, ModelSelector, Provider, RunOutcome,
+    Runtime, ToolResultPolicy, Workspace, WorkspaceBuilder, async_trait,
     hooks::HooksConfig,
     runtime::{
         ContentBlock, ModelInfo, ProviderCapabilities, ProviderDescriptor, ProviderError,
@@ -183,7 +183,7 @@ async fn provider_visible_result(output: String, policy: Option<ToolResultPolicy
     let report = workspace
         .prepare("call the large-output tool")
         .expect("the Basis run prepares")
-        .execute(CollectingSink::default())
+        .execute_with_approver(CollectingSink::default(), AllowAll)
         .await
         .expect("the Basis run completes");
     assert!(matches!(report.outcome, RunOutcome::Ok));

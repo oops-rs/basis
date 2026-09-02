@@ -22,7 +22,7 @@
 use std::{env, path::PathBuf};
 
 use basis::{
-    Event, FnSink, MemoryConfig, ModelSelector, Workspace, WorkspaceMemoryRoot,
+    AllowAll, Event, FnSink, MemoryConfig, ModelSelector, Workspace, WorkspaceMemoryRoot,
     memory::{MemoryKind, file_contents},
 };
 
@@ -59,35 +59,38 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     let mut filed = 0_usize;
     let report = workspace
         .prepare(prompt)?
-        .execute(FnSink::new(move |event| {
-            if let Event::CompactionCompleted {
-                replaced_items,
-                preserved_items,
-                extracted_facts,
-                summary_preview,
-                ..
-            } = event
-            {
-                filed += 1;
-                let body = format!(
-                    "{replaced_items} earlier items were replaced by a summary \
+        .execute_with_approver(
+            FnSink::new(move |event| {
+                if let Event::CompactionCompleted {
+                    replaced_items,
+                    preserved_items,
+                    extracted_facts,
+                    summary_preview,
+                    ..
+                } = event
+                {
+                    filed += 1;
+                    let body = format!(
+                        "{replaced_items} earlier items were replaced by a summary \
                      ({preserved_items} kept, {extracted_facts} facts extracted).\n\n\
                      Summary preview:\n\n{summary_preview}",
-                );
-                std::fs::create_dir_all(&root)?;
-                std::fs::write(
-                    root.join(format!("compaction-{filed}.md")),
-                    file_contents(
-                        &format!("compaction-{filed}"),
-                        "what a summarizing pass replaced, kept for the next session",
-                        MemoryKind::Reference,
-                        &body,
-                    ),
-                )?;
-                eprintln!("filed compaction-{filed}.md");
-            }
-            Ok(())
-        }))
+                    );
+                    std::fs::create_dir_all(&root)?;
+                    std::fs::write(
+                        root.join(format!("compaction-{filed}.md")),
+                        file_contents(
+                            &format!("compaction-{filed}"),
+                            "what a summarizing pass replaced, kept for the next session",
+                            MemoryKind::Reference,
+                            &body,
+                        ),
+                    )?;
+                    eprintln!("filed compaction-{filed}.md");
+                }
+                Ok(())
+            }),
+            AllowAll,
+        )
         .await?;
 
     println!(

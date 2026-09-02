@@ -111,8 +111,25 @@ impl Default for SkillsConfig {
         Self {
             workspace_subdir: Some(PathBuf::from(DEFAULT_WORKSPACE_SKILLS_DIR)),
             shared_workspace_dir: true,
-            global_dir: crate::context::ContextConfig::default().global_dir,
+            global_dir: crate::context::default_global_dir(),
             shared_home_dir: true,
+        }
+    }
+}
+
+impl SkillsConfig {
+    /// No skill discovery at all: none of the four roots is read, so nothing
+    /// is registered on the runtime and the model is offered no `load_skill`.
+    ///
+    /// What `WorkspaceBuilder::without_discovery` leaves of this config.
+    /// Skills are directories on disk with no host-supplied half, so there is
+    /// nothing here for `none` to keep.
+    pub fn none() -> Self {
+        Self {
+            workspace_subdir: None,
+            shared_workspace_dir: false,
+            global_dir: None,
+            shared_home_dir: false,
         }
     }
 }
