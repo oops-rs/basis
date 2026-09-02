@@ -334,8 +334,10 @@ async fn a_refusal_with_nothing_to_say_still_refuses() {
 /// persisted to the live store *before* the oneshot is answered, and a store
 /// failure restores the pending request unanswered. Swallowing that error is a
 /// turn blocked forever on a request nobody will answer again — so basis
-/// denies the restored request instead, tells the model why in the tool
-/// result, and says on the stream that the answer was downgraded.
+/// denies the restored request instead, and what the denial *says* follows
+/// the answer that was given: an unrecordable refusal keeps the person's own
+/// reason (the outcome matched their intent; only the remembering failed),
+/// while an unrecordable approval is downgraded with the store named as why.
 #[cfg(unix)]
 #[tokio::test]
 async fn an_answer_that_cannot_be_recorded_denies_rather_than_hanging() {
@@ -344,12 +346,31 @@ async fn an_answer_that_cannot_be_recorded_denies_rather_than_hanging() {
     use basis::event::NoticeSeverity;
     use mentra::runtime::FileRuntimeStore;
 
-    struct AlwaysForSession;
+    /// Restores the store root's permissions on drop, so a panicking
+    /// assertion — or the timeout this test exists to catch — cannot leave a
+    /// read-only tempdir behind that `TempDir::drop` silently fails to
+    /// remove.
+    struct RestorePermissions<'a>(&'a Path);
+
+    impl Drop for RestorePermissions<'_> {
+        fn drop(&mut self) {
+            let _ = std::fs::set_permissions(self.0, std::fs::Permissions::from_mode(0o755));
+        }
+    }
+
+    /// Refuses the write it is asked about by name, for the session, in its
+    /// own words; approves everything else for the session.
+    struct SplitAnswers;
 
     #[async_trait]
-    impl Approver for AlwaysForSession {
-        async fn approve(&mut self, _request: &ApprovalRequest) -> ApprovalAnswer {
-            ApprovalDecision::AllowForSession.into()
+    impl Approver for SplitAnswers {
+        async fn approve(&mut self, request: &ApprovalRequest) -> ApprovalAnswer {
+            if request.input.to_string().contains("deny-me.txt") {
+                ApprovalAnswer::new(ApprovalDecision::DenyForSession)
+                    .because("writes are refused at this desk")
+            } else {
+                ApprovalDecision::AllowForSession.into()
+            }
         }
     }
 
@@ -364,15 +385,26 @@ async fn an_answer_that_cannot_be_recorded_denies_rather_than_hanging() {
             // touches — the agent's rows, `runs.jsonl` — exists before the
             // root goes read-only below.
             vec![ContentBlock::text("warmed")],
-            vec![ContentBlock::ToolUse {
-                id: "call-1".to_string(),
-                name: "files".to_string(),
-                input: json!({
-                    "operations": [
-                        { "op": "create", "path": "made.txt", "content": "hi" }
-                    ]
-                }),
-            }],
+            vec![
+                ContentBlock::ToolUse {
+                    id: "call-1".to_string(),
+                    name: "files".to_string(),
+                    input: json!({
+                        "operations": [
+                            { "op": "create", "path": "deny-me.txt", "content": "hi" }
+                        ]
+                    }),
+                },
+                ContentBlock::ToolUse {
+                    id: "call-2".to_string(),
+                    name: "files".to_string(),
+                    input: json!({
+                        "operations": [
+                            { "op": "create", "path": "allow-me.txt", "content": "hi" }
+                        ]
+                    }),
+                },
+            ],
             vec![ContentBlock::text("done")],
         ],
     );
@@ -404,13 +436,23 @@ async fn an_answer_that_cannot_be_recorded_denies_rather_than_hanging() {
     // still read its rules (there are none) and cannot record a new one.
     std::fs::set_permissions(store_dir.path(), std::fs::Permissions::from_mode(0o555))
         .expect("make the store root read-only");
+    let _restore = RestorePermissions(store_dir.path());
+
+    // Mode bits do not stop root. Probe the premise instead of trusting the
+    // effective uid: if this process can still create a file in the root, the
+    // store write below would succeed and every assertion would test nothing,
+    // so skip rather than fail a correct implementation.
+    if std::fs::write(store_dir.path().join(".probe"), b"").is_ok() {
+        eprintln!("skipping: this process writes through 0o555 (running as root?)");
+        return;
+    }
 
     let report = tokio::time::timeout(
         NOT_STUCK,
         prepared.send_with_options(
-            "make a file",
+            "make two files",
             CollectingSink::new(),
-            AlwaysForSession,
+            SplitAnswers,
             basis::TurnOptions::default(),
         ),
     )
@@ -418,33 +460,57 @@ async fn an_answer_that_cannot_be_recorded_denies_rather_than_hanging() {
     .expect("an answer the store cannot record must deny, not hang the turn")
     .expect("the run completes");
 
-    // So the tempdir can clean itself up whatever the assertions below say.
-    let _ = std::fs::set_permissions(store_dir.path(), std::fs::Permissions::from_mode(0o755));
-
     let events = report.sink.into_events();
-    assert_eq!(
-        tool_failed(&events, "files"),
-        Some(true),
-        "the downgraded answer is a denial: {events:?}"
-    );
-    let refusal = tool_result(&events, "files").expect("the refused call still completes");
+    let results: Vec<String> = events
+        .iter()
+        .filter_map(|event| match event {
+            Event::ToolCompleted {
+                tool_name, summary, ..
+            } if tool_name == "files" => Some(summary.clone()),
+            _ => None,
+        })
+        .collect();
+    assert_eq!(results.len(), 2, "both scripted calls complete: {events:?}");
     assert!(
-        refusal.contains("could not be recorded"),
-        "the model must read why its approval became a refusal: {refusal}"
+        results
+            .iter()
+            .any(|result| result.ends_with("writes are refused at this desk")),
+        "an unrecordable refusal keeps the person's own reason, \
+         not a store error dressed as one: {results:?}"
     );
     assert!(
-        !workspace.path().join("made.txt").exists(),
-        "a write whose approval could not be recorded must not happen"
+        results
+            .iter()
+            .any(|result| result.contains("could not be recorded")),
+        "an unrecordable approval is downgraded with the store named as why: {results:?}"
     );
-    assert!(
-        events.iter().any(|event| matches!(
-            event,
+    for file in ["deny-me.txt", "allow-me.txt"] {
+        assert!(
+            !workspace.path().join(file).exists(),
+            "{file}: neither write may happen"
+        );
+    }
+    let notices: Vec<&String> = events
+        .iter()
+        .filter_map(|event| match event {
             Event::Notice {
                 severity: NoticeSeverity::Warning,
                 message,
-            } if message.contains("could not be recorded")
-        )),
-        "the stream must say the answer was downgraded: {events:?}"
+            } => Some(message),
+            _ => None,
+        })
+        .collect();
+    assert!(
+        notices
+            .iter()
+            .any(|message| message.contains("could not be remembered")),
+        "the stream must say the refusal's remembering failed: {notices:?}"
+    );
+    assert!(
+        notices
+            .iter()
+            .any(|message| message.contains("could not be recorded")),
+        "the stream must say the approval was downgraded: {notices:?}"
     );
 }
 

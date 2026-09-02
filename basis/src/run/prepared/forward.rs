@@ -9,6 +9,7 @@
 
 use mentra::{
     SessionEvent, SessionEventReceiver, SessionPermissionHandle,
+    error::RuntimeError,
     session::{PermissionDecision, PermissionRuleScope},
 };
 use tokio::sync::{
@@ -50,11 +51,8 @@ pub(super) async fn forward_events<S: EventSink, A: Approver>(
             received = receiver.recv() => {
                 match received {
                     Ok(event) => {
-                        let followup = resolve_if_permission(&event, &mut approver, &permissions).await;
-                        writing = writing && emit_session_event(&mut sink, &event);
-                        if let Some(notice) = followup {
-                            writing = writing && emit(&mut sink, notice);
-                        }
+                        writing = handle(&event, &mut sink, &mut approver, &permissions, writing)
+                            .await;
                     }
                     // Lagging is recoverable — the receiver keeps working, it
                     // just skipped ahead. Say so and carry on. The lossless
@@ -93,11 +91,7 @@ async fn drain<S: EventSink, A: Approver>(
     loop {
         match receiver.try_recv() {
             Ok(event) => {
-                let followup = resolve_if_permission(&event, approver, permissions).await;
-                writing = writing && emit_session_event(sink, &event);
-                if let Some(notice) = followup {
-                    writing = writing && emit(sink, notice);
-                }
+                writing = handle(&event, sink, approver, permissions, writing).await;
             }
             Err(TryRecvError::Lagged(dropped)) => {
                 writing = writing && emit(sink, lag_notice(dropped));
@@ -107,8 +101,30 @@ async fn drain<S: EventSink, A: Approver>(
     }
 }
 
-/// Answers a pending permission request, and reports when the answer had to be
-/// downgraded to a denial.
+/// One session event, whole: resolve it if it is a permission request, map it
+/// onto the sink, and follow with whatever notice the resolution produced.
+///
+/// The one place this sequence exists, shared by the live loop and the
+/// shutdown drain so the two cannot disagree about whether a notice reaches
+/// the sink. Resolution always runs — the turn is blocked on it — while the
+/// emits obey `writing`'s failed-sink short-circuit like every other write.
+async fn handle<S: EventSink, A: Approver>(
+    event: &SessionEvent,
+    sink: &mut S,
+    approver: &mut A,
+    permissions: &SessionPermissionHandle,
+    writing: bool,
+) -> bool {
+    let followup = resolve_if_permission(event, approver, permissions).await;
+    let mut writing = writing && emit_session_event(sink, event);
+    if let Some(notice) = followup {
+        writing = writing && emit(sink, notice);
+    }
+    writing
+}
+
+/// Answers a pending permission request, and reports when the store failed to
+/// record the answer as given.
 ///
 /// The turn is blocked inside mentra waiting for this, so failing to resolve
 /// would hang the run — which is what happened before basis answered at all.
@@ -156,28 +172,42 @@ async fn resolve_if_permission<A: Approver>(
     //
     // The retry below tells the two apart by what it finds. A restored request
     // accepts a plain denial — nothing to persist, so it cannot fail the same
-    // way — which is the fail-closed reading of an answer that could not be
-    // recorded: the person's consent was conditional on being remembered, and
-    // a run must end deterministically rather than hang on the store. A
-    // request that is simply gone refuses the retry too, and silence is right
-    // for that half: mentra already resolved it.
+    // way — and a request that is simply gone refuses the retry too, and
+    // silence is right for that half: mentra already resolved it.
+    //
+    // What the plain denial *says* depends on what was answered. A refusal
+    // that could not be remembered is still exactly the outcome the person
+    // chose, so it keeps their own reason — the model must read a human "no",
+    // not a store error dressed as one — and the notice says only that the
+    // remembering failed. An allow was conditional on being remembered, so it
+    // is downgraded fail-closed and both the reason and the notice say the
+    // store is why.
+    let refused = matches!(
+        answer.decision,
+        ApprovalDecision::Deny | ApprovalDecision::DenyForSession
+    );
+    let reason = answer.reason.clone();
     let recorded = permissions.resolve_permission(request_id, permission_decision(answer));
     let Err(error) = recorded else {
         return None;
     };
 
-    let denied = PermissionDecision::deny().with_reason(format!(
-        "the approval for {tool_name} could not be recorded ({error}), so the call was denied"
-    ));
+    let (denied, notice) = if refused {
+        let denied = match reason {
+            Some(reason) => PermissionDecision::deny().with_reason(reason),
+            None => PermissionDecision::deny(),
+        };
+        (denied, unremembered_notice(tool_name, &error))
+    } else {
+        let denied = PermissionDecision::deny().with_reason(format!(
+            "the approval for {tool_name} could not be recorded ({error}), so the call was denied"
+        ));
+        (denied, downgraded_notice(tool_name, &error))
+    };
     permissions
         .resolve_permission(request_id, denied)
         .is_ok()
-        .then(|| Event::Notice {
-            severity: NoticeSeverity::Warning,
-            message: format!(
-                "the answer for {tool_name} could not be recorded ({error}); the call was denied"
-            ),
-        })
+        .then_some(notice)
 }
 
 /// Restates an approver's answer in the terms mentra resolves with.
@@ -225,6 +255,30 @@ fn lag_notice(dropped: u64) -> Event {
     }
 }
 
+/// A refusal stood, but its "…for this session" half was lost: the store
+/// could not persist the remembered rule, so this denial applied to this call
+/// only and the next call asks again.
+fn unremembered_notice(tool_name: &str, error: &RuntimeError) -> Event {
+    Event::Notice {
+        severity: NoticeSeverity::Warning,
+        message: format!(
+            "the refusal of {tool_name} could not be remembered ({error}); \
+             it applied to this call only"
+        ),
+    }
+}
+
+/// An allow that was conditional on being remembered could not be recorded,
+/// so it was downgraded to a denial.
+fn downgraded_notice(tool_name: &str, error: &RuntimeError) -> Event {
+    Event::Notice {
+        severity: NoticeSeverity::Warning,
+        message: format!(
+            "the answer for {tool_name} could not be recorded ({error}); the call was denied"
+        ),
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -237,5 +291,27 @@ mod tests {
 
         assert_eq!(severity, NoticeSeverity::Warning);
         assert!(message.contains("12"));
+    }
+
+    #[test]
+    fn the_store_failure_notices_say_which_half_failed() {
+        // The two notices answer different questions — "your refusal held but
+        // will not be remembered" against "your approval was downgraded" —
+        // and a reader must be able to tell them apart from the words alone.
+        let error = RuntimeError::Store("disk full".to_string());
+
+        let Event::Notice { severity, message } = unremembered_notice("spawn", &error) else {
+            panic!("expected a notice");
+        };
+        assert_eq!(severity, NoticeSeverity::Warning);
+        assert!(message.contains("spawn") && message.contains("could not be remembered"));
+        assert!(message.contains("disk full"));
+
+        let Event::Notice { severity, message } = downgraded_notice("spawn", &error) else {
+            panic!("expected a notice");
+        };
+        assert_eq!(severity, NoticeSeverity::Warning);
+        assert!(message.contains("spawn") && message.contains("the call was denied"));
+        assert!(message.contains("disk full"));
     }
 }
