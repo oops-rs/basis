@@ -75,7 +75,10 @@ use crate::{
     fingerprint::{self, Snapshot},
     memory::Memory,
     run::{Effort, LoadedSkill, PreparedRun, RunContext},
-    runtime::{HookChainHold, Runtime, SessionScope},
+    runtime::{
+        HookChainHold, Runtime, SessionScope,
+        agents::{AgentTools, WorkspaceAgents},
+    },
     skills::SkillRoots,
     templates::Template,
     tools::declared::DeclaredTools,
@@ -190,6 +193,14 @@ pub struct Workspace {
     /// ([`Runtime::register_hook_chain`](crate::runtime::Runtime::register_hook_chain)).
     #[allow(dead_code, reason = "held for its Drop")]
     hooks: HookChainHold,
+    /// What every session this workspace mints or resumes was minted with,
+    /// recorded by agent id so that `spawn` — which cannot ask mentra for a
+    /// template's effective profile, and cannot ask an audience which of two
+    /// live opens of this directory it is delegating from — can put the
+    /// parent's hides back into a child whose roster replaced them. Released
+    /// on drop with everything else this open put on a runtime it may not own;
+    /// see [`crate::runtime::agents`].
+    agents: WorkspaceAgents,
     #[cfg(feature = "mcp")]
     #[allow(dead_code, reason = "held for its Drop")]
     mcp_connections: McpConnections,
@@ -263,9 +274,16 @@ impl Workspace {
         let model_id = model.id.clone();
         let agent = self.minted_agent(&spec.profile);
         let context_snapshot = agent.system.clone();
+        let tools = self.agent_tools(&agent);
         let mut session =
             self.runtime
                 .mint(spec.session_name.clone(), model, agent, &self.scope)?;
+        // After the mint, because the agent id is what the ledger is keyed by
+        // and the mint is what makes one. Nothing has run yet: mentra creates
+        // the agent here and the first provider request is a `PreparedRun`
+        // away, so no call of this session can reach a guard before its answer
+        // is in.
+        self.agents.record(session.agent_id(), tools);
         if !spec.profile.decides_reasoning() {
             apply_effort(&mut session, spec.effort.or(self.effort))?;
         }
@@ -338,6 +356,15 @@ impl Workspace {
         let mut session = self
             .runtime
             .resume_minted(agent_id, &self.root, &self.scope)?;
+        // Restated here for the reason the policy and the audience above are:
+        // mentra persists none of it. What *is* persisted is the tool profile,
+        // and `SessionResumeOptions` carries no replacement — so this
+        // conversation's own roster is still the one its first mint froze,
+        // possibly in another process, before this workspace's siblings
+        // existed. The ledger is the half basis can bring up to date, so a
+        // child delegated from a resumed session inherits a hidden set
+        // computed now rather than then.
+        self.agents.record(agent_id, self.resumed_tools(&session));
         let model = if let Some(model) = spec.profile.resolved_model() {
             session.set_model(model.clone())?;
             model.id.clone()
@@ -527,14 +554,20 @@ impl Workspace {
     /// one identity — so its bridged tools resolve `Visible` here; and a host
     /// tool registered globally under an `mcp__`-shaped name is visible to
     /// every audience by the rule that makes globals global. Neither is a
-    /// server this workspace configured, so neither is offered, and neither is
-    /// reachable by a model that guesses the name.
+    /// server this workspace configured, so neither is offered.
     /// [`Runtime::foreign_mcp_tools`](crate::runtime::Runtime::foreign_mcp_tools)
     /// is the whole rule.
     ///
     /// Per mint rather than per open, because the shared registry moves as
     /// siblings come and go, and a roster is honest only about the registry it
     /// was minted against.
+    ///
+    /// The set is also recorded against the minted agent's id
+    /// ([`crate::runtime::agents`]), because one more reader needs it and
+    /// cannot ask mentra: `spawn`, when a [`ChildSpec`](crate::ChildSpec)
+    /// roster override replaces the child's cloned `ToolProfile`, has to put
+    /// these names back or hand a delegated child the sibling tools its own
+    /// parent is denied.
     fn minted_agent(&self, profile: &RunProfile) -> AgentConfig {
         let agent = profile.apply_to(self.agent.clone());
 
@@ -549,6 +582,41 @@ impl Workspace {
         };
 
         agent
+    }
+
+    /// What a freshly minted agent may see and use, for the ledger every
+    /// session this workspace makes is recorded in
+    /// ([`crate::runtime::agents`]).
+    ///
+    /// Read off the config that was just built rather than recomputed, so the
+    /// set `spawn` re-threads into a narrowed child is exactly the set the
+    /// live parent was minted with — a second derivation could only be an
+    /// opportunity for the two to disagree.
+    fn agent_tools(&self, agent: &AgentConfig) -> AgentTools {
+        AgentTools {
+            hidden: agent.tool_profile.hidden_tools.clone(),
+        }
+    }
+
+    /// The same, for a conversation this workspace has picked back up.
+    ///
+    /// The persisted roster is where the hidden half starts, because that is
+    /// what the resumed session's model is actually working from and a child
+    /// must not be handed more than its parent has. What is added is what a
+    /// resume cannot restate onto the agent itself: the `mcp__*` names that
+    /// are foreign *now* — a sibling that opened while this conversation was
+    /// on disk.
+    fn resumed_tools(&self, session: &Session) -> AgentTools {
+        let hidden = session.config().tool_profile.hidden_tools.clone();
+
+        #[cfg(feature = "mcp")]
+        let hidden = {
+            let mut hidden = hidden;
+            hidden.extend(self.runtime.foreign_mcp_tools(&self.mcp_servers));
+            hidden
+        };
+
+        AgentTools { hidden }
     }
 
     /// Wraps a freshly created or resumed session in the run context this

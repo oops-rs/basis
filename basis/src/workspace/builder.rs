@@ -37,7 +37,7 @@ use crate::{
     hooks::{self, HookRunner, HooksConfig},
     memory::{self, MemoryConfig},
     run::LoadedSkill,
-    runtime::{Runtime, RuntimeBuilder, SessionScope},
+    runtime::{Runtime, RuntimeBuilder, SessionScope, agents::WorkspaceAgents},
     shell::ShellAccess,
     skills::{self, SkillRoots, SkillsConfig},
     store,
@@ -782,6 +782,11 @@ impl WorkspaceBuilder {
         // is the refusal, and it comes after the registrations above only
         // because those release themselves on the way out.
         let hooks = runtime.register_hook_chain(&audience, &path, runner)?;
+        // Empty until the first mint, which is correct: nothing has been
+        // offered a roster yet, so nothing has been denied one either. Made
+        // before the `Workspace` so its drop takes this open's agents off a
+        // runtime that outlives it.
+        let agents = WorkspaceAgents::new(Arc::clone(runtime.agents()));
 
         // Both lists reach the header whether or not this build has MCP in it:
         // what a run reports is a schema clients parse, and a field that
@@ -839,6 +844,7 @@ impl WorkspaceBuilder {
             declared_tools: declared_tool_names,
             declared_registration: declared_tools,
             hooks,
+            agents,
             #[cfg(feature = "mcp")]
             mcp_connections,
         })

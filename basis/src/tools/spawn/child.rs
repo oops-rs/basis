@@ -128,25 +128,33 @@ impl ChildSpec {
     /// un-registered from the runtime underneath. mentra's `task` intrinsic
     /// stays hidden from a subagent whatever this roster says.
     ///
-    /// **A roster can only narrow what the parent is offered, never widen
-    /// it past its workspace.** On a shared [`Runtime`](crate::Runtime) one
-    /// tool registry serves every open workspace, and
-    /// [`Workspace`](crate::Workspace) hides each *sibling's* bridged
-    /// `mcp__*` and declared tools from its own model at mint. Replacing the
-    /// child's profile would drop those hides along with the parent's roster,
-    /// so basis puts them back: the names the parent is denied are added to
-    /// the resulting profile's `hidden_tools` whichever constructor built it.
-    /// A [`hide`](ToolRoster::hide) roster simply gains them; an
+    /// **A roster can only narrow what the parent is offered, never widen it
+    /// past its workspace.** mentra's `with_tool_profile` *replaces* the
+    /// child's cloned profile, and part of what it replaces was never the
+    /// parent's roster: on a shared [`Runtime`](crate::Runtime) one tool
+    /// registry serves every open workspace, and
+    /// [`Workspace`](crate::Workspace) hides at mint what no audience can hide
+    /// for it — the `mcp__*` names of a *second live open of its own
+    /// directory*, and a host global shaped like a bridged tool. So basis puts
+    /// the parent's hides back: every name the delegating agent was minted
+    /// denied is added to the resulting profile's `hidden_tools`. A
+    /// [`hide`](ToolRoster::hide) roster simply gains them; an
     /// [`only`](ToolRoster::only) roster that named one **loses that name,
     /// silently** — `ToolProfile::allows` checks the denylist after the
     /// allow-list — which is the same rule, stated the same way, that
     /// [`ToolRoster::only`] already documents for a workspace's own roster
     /// colliding with a sibling's tool. One composition, one outcome.
     ///
+    /// A workspace in *another* directory needs none of it: its tools are
+    /// registered for its own [`ToolAudience`](mentra::tool::ToolAudience), the
+    /// child inherits its parent's audience with the runtime handle it is
+    /// spawned from, and mentra's ladder answers a foreign audience's name
+    /// with `Hidden` however the profile is written.
+    ///
     /// This says nothing about *narrowing*: a policy may hand a child a
     /// wider roster than its parent's within the workspace's own tools, and
     /// mentra's template documents that it does not check either. What it
-    /// cannot do is reach another repository's.
+    /// cannot do is reach another open's.
     #[must_use]
     pub fn with_roster(self, roster: ToolRoster) -> Self {
         Self {

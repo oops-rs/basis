@@ -524,6 +524,13 @@ impl RuntimeBuilder {
             self.api_key,
         )?;
 
+        // Made before the mentra runtime because `spawn` — which mentra's
+        // registry is about to take ownership of — reads it, and reads it by
+        // agent id rather than by audience (see `super::agents`). Shared
+        // rather than owned by either, so the tool inside the registry never
+        // holds the `Runtime` that holds the registry.
+        let agents = Arc::new(super::agents::AgentRegistry::default());
+
         let builder = mentra::Runtime::builder()
             // Which conversations belong where, which is the only question
             // `session/list` can honestly answer (see `crate::store`). Unset,
@@ -559,6 +566,7 @@ impl RuntimeBuilder {
                 target_names,
                 self.delegation_depth,
                 self.child_policy,
+                Arc::clone(&agents),
             ));
         // No *workspace* hooks are installed here. mentra 0.26 takes them live
         // (`Runtime::register_execution_hook_for_audience`), so each workspace
@@ -656,23 +664,31 @@ impl RuntimeBuilder {
             declared_claims: Mutex::new(HashMap::new()),
             skill_root_holders: Mutex::new(HashMap::new()),
             hook_chains: Mutex::new(HashMap::new()),
+            agents,
         })
     }
 }
 
 /// The one tool basis registers, assembled once.
 ///
-/// Built here rather than inline so the one conditional fact — whether a child
-/// policy was set — is attached to *one* construction. With no policy this is
-/// `SpawnTool::with_targets_and_depth`, which is `SpawnTool::new()` in every
-/// observable respect for a runtime that registered no targets and kept the
-/// default depth.
+/// Built here rather than inline so the two facts that are not the tool's own
+/// — whether a child policy was set, and the agent ledger a delegation reads —
+/// are attached to *one* construction. With no policy this is
+/// `SpawnTool::with_targets_and_depth` plus a ledger only a roster override
+/// ever reads, which is `SpawnTool::new()` in every observable respect for a
+/// runtime that registered no targets and kept the default depth.
 fn spawn_tool(
     targets: Vec<String>,
     delegation_depth: usize,
     child_policy: Option<ChildPolicy>,
+    agents: Arc<super::agents::AgentRegistry>,
 ) -> SpawnTool {
-    let tool = SpawnTool::with_targets_and_depth(targets, delegation_depth);
+    let tool = SpawnTool::with_targets_and_depth(targets, delegation_depth)
+        // Read for one question — what is this delegation's parent denied —
+        // so a roster override cannot hand a narrowed child a sibling
+        // workspace's tools, and so the child is judged by the same guard its
+        // parent is.
+        .with_agents(agents);
 
     match child_policy {
         // The stored `Arc` goes straight through: re-wrapping it in a closure

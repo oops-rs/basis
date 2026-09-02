@@ -158,6 +158,17 @@ pub struct SpawnTool {
     /// ordinary case — is inherit-everything on the exact code path this tool
     /// has always used.
     policy: Option<ChildPolicy>,
+    /// The runtime's agent ledger
+    /// ([`crate::runtime::agents`]), read for two things a delegation cannot
+    /// ask mentra: what the delegating agent's own roster hides — mentra
+    /// exposes no reader for an agent's or a template's effective
+    /// `ToolProfile`, and `with_tool_profile` replaces it wholesale — and
+    /// where to record the child, so that the guard judging the parent judges
+    /// it too.
+    ///
+    /// `None` for a host that built this tool itself against mentra, which has
+    /// no basis workspaces to keep apart.
+    agents: Option<Arc<crate::runtime::agents::AgentRegistry>>,
 }
 
 /// The per-call facts both authorization preview and execution must decide.
@@ -179,6 +190,7 @@ impl std::fmt::Debug for SpawnTool {
             .field("depth", &self.depth)
             .field("targets", &self.targets)
             .field("policy", &self.policy.as_ref().map(|_| "<child policy>"))
+            .field("agents", &self.agents.as_ref().map(|_| "<agent ledger>"))
             .finish()
     }
 }
@@ -231,6 +243,7 @@ impl SpawnTool {
                 .into_iter()
                 .collect(),
             policy: None,
+            agents: None,
         }
     }
 
@@ -263,6 +276,20 @@ impl SpawnTool {
     pub(crate) fn with_child_policy_arc(self, policy: ChildPolicy) -> Self {
         Self {
             policy: Some(policy),
+            ..self
+        }
+    }
+
+    /// Lets this tool read what the delegating agent is denied, and record the
+    /// child it spawns under the same answer (see the
+    /// [`agents`](Self::agents) field). basis's own
+    /// [`RuntimeBuilder`](crate::RuntimeBuilder) always says this; a host
+    /// registering `SpawnTool` on its own mentra runtime has no basis
+    /// workspaces and says nothing.
+    #[must_use]
+    pub(crate) fn with_agents(self, agents: Arc<crate::runtime::agents::AgentRegistry>) -> Self {
+        Self {
+            agents: Some(agents),
             ..self
         }
     }
@@ -455,7 +482,15 @@ impl ToolExecutor for SpawnTool {
         match decision {
             SpawnDecision::Command => execute::command(&ctx, spawn.body(), spawn.target()).await,
             SpawnDecision::Agent { depth, spec, .. } => {
-                execute::delegate(&self.depth, &mut ctx, spawn.body(), depth, *spec).await
+                execute::delegate(
+                    &self.depth,
+                    &mut ctx,
+                    spawn.body(),
+                    depth,
+                    *spec,
+                    self.agents.as_ref(),
+                )
+                .await
             }
         }
     }

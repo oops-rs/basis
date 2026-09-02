@@ -595,6 +595,165 @@ async fn a_narrowed_child_is_not_offered_a_siblings_tools() {
     );
 }
 
+/// A roster override must not hand a delegated child the `mcp__*` tools its
+/// own parent was minted denied.
+///
+/// **The case mentra's audience ladder cannot express**, and the one the test
+/// above cannot show: two live opens of *one directory* resolve in one tool
+/// audience by construction — the shape `basis-host` produces on purpose, one
+/// workspace per set of client-supplied `mcpServers` — so `Hidden` is not an
+/// answer mentra can give either of them about the other's bridged tools.
+/// `Workspace::prepare` hides them by hand instead, and mentra's
+/// `with_tool_profile` replaces the child's cloned profile *wholesale*, so
+/// without the fix a `ChildSpec` roster is the shortest path from "narrow this
+/// child" to "hand it the other client's authenticated server".
+///
+/// A **`hide`** roster is the sharp case and the one `only` structurally
+/// cannot show: an allow-list omits a foreign tool by simply not naming it,
+/// while a denylist built from basis's own set carries no foreign names at
+/// all.
+///
+/// `mcp__prod-db__query` is registered as a runtime **global** here, which is
+/// the limb of `Runtime::foreign_mcp_tools` an integration test can reach —
+/// mentra exposes no way to enumerate one audience's registrations (upstream
+/// `mentra#55`), so a same-directory sibling's *bridged* names cannot be put
+/// on the registry from out here without a live MCP server. Both limbs feed
+/// one `hidden_tools` set through one line of `minted_agent`, and the
+/// same-directory limb is pinned where it can be, beside
+/// `Runtime::foreign_mcp_tools` itself. The two same-root opens are real
+/// regardless, and they are what makes the second assertion meaningful: the
+/// open that *did* configure `prod-db` must still be able to delegate it.
+#[cfg(feature = "mcp")]
+#[tokio::test]
+async fn a_narrowed_child_keeps_every_hide_its_parent_was_minted_with() {
+    const PROD_DB_QUERY: &str = "mcp__prod-db__query";
+
+    struct ProdDbQuery;
+
+    impl mentra::tool::ToolDefinition for ProdDbQuery {
+        fn descriptor(&self) -> mentra::tool::RuntimeToolDescriptor {
+            mentra::tool::RuntimeToolDescriptor::builder(PROD_DB_QUERY)
+                .description("query the production database")
+                .input_schema(json!({"type": "object"}))
+                .build()
+        }
+    }
+
+    #[async_trait]
+    impl mentra::tool::ToolExecutor for ProdDbQuery {
+        async fn execute(
+            &self,
+            _ctx: mentra::tool::ParallelToolContext,
+            _input: serde_json::Value,
+        ) -> mentra::tool::ToolResult {
+            Ok("every row".to_string())
+        }
+    }
+
+    let root = tempfile::tempdir().expect("tempdir");
+    let (provider, asked) = ScriptedProvider::new(
+        BuiltinProvider::OpenAI,
+        vec![parent_model()],
+        vec![
+            Turn::calling("call-0", "triage: is this real?"),
+            Turn::saying("child done"),
+            Turn::saying("stranger done"),
+            Turn::calling("call-1", "triage: is this real?"),
+            Turn::saying("child done"),
+            Turn::saying("owner done"),
+        ],
+    );
+    let shared = Arc::new(
+        basis::Runtime::builder()
+            .with_provider_instance(provider)
+            .with_ephemeral_history()
+            .with_tool(ProdDbQuery)
+            // Narrows the child with a *denylist*, which keeps every name the
+            // parent could use except the one this host does not want a
+            // triage child running — and says nothing about another open's
+            // tools, because a policy author has no way to know they exist.
+            .with_child_policy(|child: &ChildContext<'_>| {
+                if child.prompt().starts_with("triage:") {
+                    ChildSpec::inherit().with_roster(ToolRoster::hide(["write"]))
+                } else {
+                    ChildSpec::inherit()
+                }
+            })
+            .build()
+            .expect("builds offline"),
+    );
+
+    // One directory, two opens, different `mcpServers`. The server never comes
+    // up, which does not matter here: claiming the name is what makes the
+    // workspace own it, and owning it is what the hide turns on.
+    let owner = offline_workspace(root.path(), Arc::clone(&shared))
+        .with_mcp(basis::McpConfig {
+            workspace_file: std::path::PathBuf::new(),
+            global_dir: None,
+            supplied: vec![basis::McpServer::Stdio(basis::McpServerConfig {
+                name: "prod-db".to_string(),
+                command: "basis-test-no-such-mcp-server".to_string(),
+                args: Vec::new(),
+                env: std::collections::HashMap::new(),
+                cwd: None,
+            })],
+        })
+        .open()
+        .await
+        .expect("opens even though the server does not come up");
+    assert_eq!(owner.mcp_servers(), ["prod-db"]);
+    let stranger = offline_workspace(root.path(), shared)
+        .with_mcp(basis::McpConfig {
+            workspace_file: std::path::PathBuf::new(),
+            global_dir: None,
+            supplied: Vec::new(),
+        })
+        .open()
+        .await
+        .expect("the same directory opens again");
+    assert!(stranger.mcp_servers().is_empty());
+
+    for workspace in [&stranger, &owner] {
+        let report = workspace
+            .prepare(basis::RunSpec::new("do the thing"))
+            .expect("mints")
+            .execute_with_approver(CollectingSink::new(), AllowAll)
+            .await
+            .expect("the run completes");
+        drop(report);
+    }
+
+    let rosters: Vec<Vec<String>> = asked
+        .lock()
+        .expect("not poisoned")
+        .iter()
+        .map(|request| request.tools.clone())
+        .collect();
+    assert_eq!(rosters.len(), 6, "two runs of parent, child, parent");
+
+    for (round, roster) in rosters[..3].iter().enumerate() {
+        assert!(
+            !roster.contains(&PROD_DB_QUERY.to_string()),
+            "round {round} of the open that configured no servers was offered one: {roster:?}"
+        );
+    }
+    assert!(
+        rosters[1].contains(&SPAWN.to_string()),
+        "the narrowed child keeps everything its parent had: {:?}",
+        rosters[1]
+    );
+    assert!(
+        !rosters[1].contains(&"write".to_string()),
+        "and loses exactly what the policy hid: {:?}",
+        rosters[1]
+    );
+    assert!(
+        rosters[4].contains(&PROD_DB_QUERY.to_string()),
+        "a narrowed child of the open that *did* configure `prod-db` still has it: {:?}",
+        rosters[4]
+    );
+}
+
 /// A workspace that looks nowhere except where the test put something.
 fn offline_workspace(path: &Path, runtime: Arc<basis::Runtime>) -> basis::WorkspaceBuilder {
     basis::Workspace::builder(path)

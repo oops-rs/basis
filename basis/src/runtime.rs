@@ -46,7 +46,10 @@
 //!   shared runtime carries, and what a collision means for each.
 //! - `interception` — who judges a call: the host's global guards, and each
 //!   workspace's own chain, holder-counted per audience.
+//! - `agents` — which workspace each live agent answers for. The one question
+//!   an audience cannot answer, because two opens of one directory share one.
 
+pub(crate) mod agents;
 pub(crate) mod builder;
 mod claims;
 mod credential;
@@ -316,6 +319,14 @@ pub struct Runtime {
     /// One live interception chain per tool audience, holder-counted. See
     /// [`Runtime::register_hook_chain`].
     hook_chains: Mutex<HashMap<String, HookChainClaim>>,
+    /// Which workspace each live agent minted, resumed or delegated to here
+    /// answers for. See [`agents`].
+    ///
+    /// An `Arc` because two things outside this type read it and neither may
+    /// hold the runtime: the `spawn` tool mentra's registry owns — an
+    /// `Arc<Runtime>` there would be a cycle through the registry and the
+    /// runtime would never drop — and each workspace's interception chain.
+    agents: Arc<agents::AgentRegistry>,
 }
 
 /// Hand-written because mentra's runtime is not `Debug`. No credential lives
@@ -374,6 +385,13 @@ impl Runtime {
     /// Whether this runtime was explicitly built with ephemeral history.
     pub(crate) const fn has_ephemeral_history(&self) -> bool {
         self.ephemeral_history
+    }
+
+    /// Which workspace each live agent here answers for, for the two readers
+    /// that cannot ask an audience: a workspace's own interception chain, and
+    /// `spawn`. See [`agents`].
+    pub(crate) fn agents(&self) -> &Arc<agents::AgentRegistry> {
+        &self.agents
     }
 
     /// Resolves the model a workspace will use: its own override when it has
