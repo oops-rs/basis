@@ -728,8 +728,9 @@ what these saved was a word in tests and doc examples. The survivors take the ar
 | `run.send(prompt, sink, approver)` | `run.send_with_options(prompt, sink, approver, TurnOptions::default())` |
 
 `execute_with_approver`, `execute_with_approver_and_options`, `send_parts` and
-`send_with_options` are unchanged, and four entry points is what a turn now has: prompt or
-parts, configured prompt or a new one.
+`send_with_options` are unchanged, and four untyped prompt entry points is what a turn now
+has: prompt or parts, configured prompt or a new one. (The typed `output*` family and
+`compact` open turns of their own, as before.)
 
 **`RunProfile::with_reasoning`, gone.** A profile had two ways to decide reasoning — the
 dedicated override and the `reasoning` field inside `with_provider_request_options` — with
@@ -757,6 +758,14 @@ which of *two* profile-level spellings won.
 fields. The retry pair travels internally as one value now, but a host sets and overrides the
 waits and the count separately, exactly as before, because they are two questions and Mentra
 keeps them apart.
+
+**Two disclosures from the discovery rewrite.** An empty `TemplatesConfig::workspace_subdir`
+used to make the repository root itself a templates root — parsing every top-level `*.md` and
+failing the open on the first one without template frontmatter — and now names no directory at
+all, which is what empty always meant for the file-valued conventions. And the two
+shared-runtime refusals (`DiscoveryDisabledSharedRuntime`, `FreshOnlySharedRuntime`) now fire
+at the very top of `open()`, before workspace-path resolution, so a build with both problems
+reports the runtime-shape refusal first and performs no filesystem work to do it.
 
 ### Command targets
 

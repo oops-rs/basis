@@ -351,9 +351,9 @@ async fn a_read_only_call_is_never_put_to_the_approver() {
 }
 
 #[tokio::test]
-async fn a_run_with_no_approver_of_its_own_allows_what_it_cannot_ask_about() {
-    // What `run` gives a headless caller: nobody to ask, so nothing is refused
-    // for want of an answer. `execute` is `execute_with_approver(_, AllowAll)`.
+async fn an_allow_all_run_does_not_hang_on_what_it_cannot_ask_about() {
+    // What a headless caller passes: `AllowAll` — nobody to ask, so nothing
+    // is refused for want of an answer.
     let workspace = tempfile::tempdir().expect("tempdir");
     let (runtime, model) = runtime_writing_a_file(workspace.path());
     let session = session(&runtime, workspace.path(), model);

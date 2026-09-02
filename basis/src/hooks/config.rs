@@ -157,7 +157,8 @@ pub struct HooksFile {
 /// Where to look for hooks.
 #[derive(Clone, PartialEq, Eq)]
 pub struct HooksConfig {
-    /// Path relative to the workspace root.
+    /// Path relative to the workspace root. Empty names no file to look for;
+    /// [`HooksConfig::supplied_only`] writes it.
     pub workspace_file: PathBuf,
     /// The global config directory, if any. `hooks.json` inside it is used.
     pub global_dir: Option<PathBuf>,

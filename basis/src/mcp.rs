@@ -265,7 +265,8 @@ impl McpServer {
 /// the host already has in hand.
 #[derive(Debug, Clone)]
 pub struct McpConfig {
-    /// Path relative to the workspace root.
+    /// Path relative to the workspace root. Empty names no file to look for;
+    /// [`McpConfig::supplied_only`] writes it.
     pub workspace_file: PathBuf,
     /// The global config directory, if any. `mcp.json` inside it is used.
     pub global_dir: Option<PathBuf>,

@@ -43,6 +43,19 @@ mod tests {
     use std::path::PathBuf;
 
     #[test]
+    fn an_empty_relative_path_names_no_candidate() {
+        assert_eq!(candidate(Path::new("/repo"), Path::new("")), None);
+    }
+
+    #[test]
+    fn a_named_relative_path_joins_the_workspace() {
+        assert_eq!(
+            candidate(Path::new("/repo"), Path::new(".basis/hooks.json")),
+            Some(PathBuf::from("/repo/.basis/hooks.json"))
+        );
+    }
+
+    #[test]
     fn a_directory_is_itself() {
         let dir = tempfile::tempdir().expect("tempdir");
 

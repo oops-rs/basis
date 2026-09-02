@@ -60,7 +60,8 @@ pub const NAMESPACE_SEPARATOR: &str = ":";
 /// of them encode a task.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct TemplatesConfig {
-    /// Path relative to the workspace root.
+    /// Path relative to the workspace root. Empty names no directory to look
+    /// for; [`TemplatesConfig::none`] writes it.
     pub workspace_subdir: PathBuf,
     /// The global config directory, if any. `templates/` inside it is used.
     pub global_dir: Option<PathBuf>,

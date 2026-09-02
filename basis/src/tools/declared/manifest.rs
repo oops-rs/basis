@@ -154,7 +154,8 @@ impl DeclaredToolSpec {
 /// Where to look for declared tools.
 #[derive(Clone, PartialEq, Eq)]
 pub struct ToolsConfig {
-    /// Path relative to the workspace root.
+    /// Path relative to the workspace root. Empty names no file to look for;
+    /// [`ToolsConfig::supplied_only`] writes it.
     pub workspace_file: PathBuf,
     /// The global config directory, if any. `tools.json` inside it is used.
     pub global_dir: Option<PathBuf>,
@@ -197,9 +198,7 @@ impl ToolsConfig {
             ..self
         }
     }
-}
 
-impl ToolsConfig {
     /// Replaces the declarations supplied directly by the embedding host.
     pub fn with_supplied(self, supplied: Vec<DeclaredToolSpec>) -> Self {
         Self { supplied, ..self }
