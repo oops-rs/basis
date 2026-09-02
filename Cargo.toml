@@ -68,9 +68,19 @@ basis-tasks = { version = "0.11", path = "basis-tasks" }
 # `Session::with_tool_authorizer`, riding the same live-permission-store
 # binding above, replaces the runtime's default `ToolAuthorizer` for one live
 # session without touching its siblings, runtime-spawned agents, policy,
-# hooks, or tool-audience visibility (#43/#38). This wave adopts none of
-# them; a later wave consumes what basis actually uses, and a follow-up will
-# re-align this comment with the shipped surfaces, as 0ab68de did for 0.25.
+# hooks, or tool-audience visibility (#43/#38). `skill_root_key` is now a
+# public function for the same canonical-path-with-fallback identity basis's
+# own `skill_root_holders` claim ledger in `runtime.rs` already re-derives by
+# hand, because mentra kept that keying private until now (#36).
+# `Session::config` reads back a resumed session's persisted `AgentConfig`
+# directly; basis's own resume path has no way today to confirm what
+# configuration a resumed session actually came back with (#41). And
+# `FileToolProfile::None` closes the gap `ToolProfile::only`'s docs already
+# name as a caveat: a roster that offers no file tool still finds one sitting
+# on a shared runtime's registry, because no profile could unregister them
+# (#42). This wave adopts none of them; a later wave consumes what basis
+# actually uses, and a follow-up will re-align this comment with the shipped
+# surfaces, as 0ab68de did for 0.25.
 #
 # The 0.25 floor's reasons still hold beneath it. The primary provider stream
 # observes the run's cancellation token and deadline while the provider
