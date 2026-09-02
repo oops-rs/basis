@@ -409,6 +409,7 @@ impl Runtime {
             claims.remove(name);
         }
     }
+
     /// Registers a workspace's skills roots and counts it as a holder of each.
     ///
     /// mentra 0.24 made registration all-or-nothing and gave a host
