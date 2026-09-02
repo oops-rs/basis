@@ -38,7 +38,6 @@ fn denying_entry(root: &Path, reason: &'static str) -> WorkspaceGuardEntry {
                 .with_interceptor(Answers("workspace", HookOutcome::Deny(reason.to_string()))),
         ),
         hooks: Vec::new(),
-        foreign_tools: Default::default(),
     }
 }
 
@@ -46,7 +45,6 @@ fn permissive_entry(root: &Path) -> WorkspaceGuardEntry {
     WorkspaceGuardEntry {
         runner: Arc::new(HookRunner::new(root, Vec::new())),
         hooks: Vec::new(),
-        foreign_tools: Default::default(),
     }
 }
 
@@ -93,7 +91,6 @@ fn rewriting_entry(root: &Path, name: &'static str) -> WorkspaceGuardEntry {
     WorkspaceGuardEntry {
         runner: Arc::new(HookRunner::new(root, Vec::new()).with_interceptor(Rewrites(name))),
         hooks: Vec::new(),
-        foreign_tools: Default::default(),
     }
 }
 
@@ -236,33 +233,25 @@ async fn a_dropped_workspace_stops_being_consulted() {
 }
 
 #[tokio::test]
-async fn identical_same_root_holders_share_state_until_the_last_drop() {
+async fn identical_same_root_holders_are_consulted_until_the_last_drop() {
     let dir = tempfile::tempdir().expect("tempdir");
     let dispatch = Arc::new(HookDispatch::new(Vec::new()));
 
-    let first = registered(&dispatch, dir.path(), permissive_entry(dir.path()));
-    let second = registered(&dispatch, dir.path(), permissive_entry(dir.path()));
-    let first_foreign = first.foreign_tools();
-    let second_foreign = second.foreign_tools();
-    assert!(Arc::ptr_eq(&first_foreign, &second_foreign));
-    first_foreign
-        .write()
-        .expect("foreign set")
-        .insert("sibling_tool".to_string());
-    assert_eq!(
-        dispatch.foreign_tools(dir.path()),
-        BTreeSet::from(["sibling_tool".to_string()])
-    );
+    let first = registered(&dispatch, dir.path(), denying_entry(dir.path(), "mine"));
+    let second = registered(&dispatch, dir.path(), denying_entry(dir.path(), "mine"));
 
     drop(first);
-    assert_eq!(
-        dispatch.foreign_tools(dir.path()),
-        BTreeSet::from(["sibling_tool".to_string()]),
-        "one identical holder remains"
+    let decision = decide(&dispatch, &context(dir.path(), "files", json!({}))).await;
+    assert!(
+        matches!(&decision, HookDecision::Deny(reason) if reason.contains("mine")),
+        "one identical holder remains: {decision:?}"
     );
 
     drop(second);
-    assert!(dispatch.foreign_tools(dir.path()).is_empty());
+    assert!(matches!(
+        decide(&dispatch, &context(dir.path(), "files", json!({}))).await,
+        HookDecision::Allow
+    ));
 }
 
 #[cfg(unix)]
@@ -313,7 +302,6 @@ async fn a_broken_interceptor_fails_closed_through_the_dispatcher() {
                     .with_interceptor(Broken),
             ),
             hooks: Vec::new(),
-            foreign_tools: Default::default(),
         },
     );
 

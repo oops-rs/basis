@@ -31,7 +31,7 @@
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
 
-use mentra::mcp::McpManager;
+use mentra::{mcp::McpManager, tool::AudienceToolRegistration, tool::ToolAudience};
 
 use crate::runtime::Runtime;
 
@@ -46,11 +46,12 @@ pub(crate) struct McpConnections {
     manager: Option<McpManager>,
     /// Claimed effective names, released on drop.
     claimed: Vec<String>,
-    /// The bridged tool names this workspace put on the shared registry, taken
-    /// off again on drop. Not derivable from `claimed`: a server that failed to
-    /// connect bridged nothing, and a name the registry already answered to was
-    /// skipped.
-    bridged: Vec<String>,
+    /// mentra's holds on the tools this workspace bridged, which are what keep
+    /// them answering: dropping one takes its tool off the registry, so
+    /// dropping this vector is the unregister. Not derivable from `claimed`: a
+    /// server that failed to connect bridged nothing, and a name the registry
+    /// already answered to was skipped.
+    bridged: Vec<AudienceToolRegistration>,
     /// The claim owner; only this root can release its names.
     root: PathBuf,
     /// Every configured server's effective name, connected or not — what the
@@ -63,6 +64,7 @@ impl McpConnections {
     /// the runtime's registry under the claimed name.
     pub(crate) async fn connect(
         runtime: Arc<Runtime>,
+        audience: &ToolAudience,
         root: &Path,
         servers: Vec<ConfiguredServer>,
     ) -> Self {
@@ -103,7 +105,7 @@ impl McpConnections {
             };
 
             match outcome {
-                Ok(tools) => bridged.extend(bridge(&runtime, &effective, tools)),
+                Ok(tools) => bridged.extend(bridge(&runtime, audience, &effective, tools)),
                 // Degraded mode, mentra's own wording: one unreachable server
                 // must not sink the open.
                 Err(error) => {
@@ -151,25 +153,39 @@ fn connect_warning(name: &str, error: &str, sse_inferred: bool) -> String {
     warning
 }
 
-/// Puts one server's tools on the shared registry, reporting the names that
-/// took.
+/// Puts one server's tools on the registry for this workspace's audience,
+/// handing back the registrations that took.
 ///
-/// `try_register_tool` rather than the replacing `register_tool`: the server
-/// name is claimed, so mentra's `mcp__<server>__<tool>` namespacing already
-/// keeps two live workspaces apart, and anything left to collide with is a
-/// name basis's claim map never granted — a host that registered on the same
-/// `mentra::Runtime` itself. Replacing that silently would send calls meant
-/// for the host's tool to somebody's MCP server.
-fn bridge<T>(runtime: &Runtime, server: &str, tools: Vec<T>) -> Vec<String>
+/// Audience-scoped because a `.mcp.json` server is a *repository's*: a global
+/// registration would offer one repository's `mcp__prod-db__query` to every
+/// other workspace on the runtime, which is exactly what every mint used to
+/// have to undo by hiding the name. mentra's ladder answers it instead — a
+/// name held only by a foreign audience resolves to `Hidden`, so it is neither
+/// listed nor reachable by a model that guesses it.
+///
+/// `try_register_tool_for_audience` rather than the replacing `register_tool`:
+/// the server name is claimed, so mentra's `mcp__<server>__<tool>` namespacing
+/// already keeps two live workspaces apart, and anything left to collide with
+/// is a name basis's claim map never granted — a global a host registered on
+/// the same `mentra::Runtime` itself. Replacing that silently would send calls
+/// meant for the host's tool to somebody's MCP server.
+fn bridge<T>(
+    runtime: &Runtime,
+    audience: &ToolAudience,
+    server: &str,
+    tools: Vec<T>,
+) -> Vec<AudienceToolRegistration>
 where
     T: mentra::tool::ExecutableTool + 'static,
 {
     let mut registered = Vec::new();
 
     for tool in tools {
-        let name = tool.descriptor().provider.name;
-        match runtime.mentra_runtime().try_register_tool(tool) {
-            Ok(()) => registered.push(name),
+        match runtime
+            .mentra_runtime()
+            .try_register_tool_for_audience(audience.clone(), tool)
+        {
+            Ok(registration) => registered.push(registration),
             Err(collision) => eprintln!(
                 "Warning: MCP server '{server}' offers a tool called '{}', which this runtime \
                  already answers to; it was not bridged",
@@ -184,10 +200,9 @@ where
 impl Drop for McpConnections {
     fn drop(&mut self) {
         // Before the claims: a name freed while the tools under it are still
-        // registered is a name the next claimant would bridge over.
-        for name in self.bridged.drain(..) {
-            self.runtime.mentra_runtime().unregister_tool(&name);
-        }
+        // registered is a name the next claimant would bridge over. Dropping
+        // each registration is the unregister.
+        self.bridged.clear();
 
         for name in self.claimed.drain(..) {
             self.runtime.release_mcp_claim(&name, &self.root);
@@ -254,12 +269,30 @@ mod tests {
         )
     }
 
-    fn registers(runtime: &Runtime, name: &str) -> bool {
+    fn audience() -> ToolAudience {
+        ToolAudience::new("basis:/repo")
+    }
+
+    /// The names a batch of registrations put on the registry, in order.
+    fn named(registered: &[AudienceToolRegistration]) -> Vec<&str> {
+        registered
+            .iter()
+            .map(|registration| registration.descriptor().provider.name.as_str())
+            .collect()
+    }
+
+    /// Whether `audience` already answers to `name`.
+    ///
+    /// mentra exposes no reader for one audience's registrations —
+    /// `Runtime::tools` lists globals only (an upstream candidate) — so this
+    /// asks the question the surface does answer: a registration that collides
+    /// is a name already held, globally or in this audience. The probe's own
+    /// registration drops on the spot, so asking changes nothing.
+    fn answers(runtime: &Runtime, name: &'static str) -> bool {
         runtime
             .mentra_runtime()
-            .tools()
-            .iter()
-            .any(|tool| tool.provider.name == name)
+            .try_register_tool_for_audience(audience(), Bridged(name))
+            .is_err()
     }
 
     #[test]
@@ -283,15 +316,19 @@ mod tests {
     fn every_tool_a_server_offers_reaches_the_registry() {
         let runtime = runtime();
 
-        let names = bridge(
+        let registered = bridge(
             &runtime,
+            &audience(),
             "docs",
             vec![Bridged("mcp__docs__search"), Bridged("mcp__docs__fetch")],
         );
 
-        assert_eq!(names, ["mcp__docs__search", "mcp__docs__fetch"]);
-        assert!(registers(&runtime, "mcp__docs__search"));
-        assert!(registers(&runtime, "mcp__docs__fetch"));
+        assert_eq!(
+            named(&registered),
+            ["mcp__docs__search", "mcp__docs__fetch"]
+        );
+        assert!(answers(&runtime, "mcp__docs__search"));
+        assert!(answers(&runtime, "mcp__docs__fetch"));
     }
 
     #[test]
@@ -304,14 +341,15 @@ mod tests {
             .mentra_runtime()
             .register_tool(Bridged("mcp__docs__search"));
 
-        let names = bridge(
+        let registered = bridge(
             &runtime,
+            &audience(),
             "docs",
             vec![Bridged("mcp__docs__search"), Bridged("mcp__docs__fetch")],
         );
 
         assert_eq!(
-            names,
+            named(&registered),
             ["mcp__docs__fetch"],
             "the collision is skipped and the rest of the server still bridges"
         );
@@ -324,16 +362,21 @@ mod tests {
             runtime: Arc::clone(&runtime),
             manager: None,
             claimed: vec!["docs".to_string()],
-            bridged: bridge(&runtime, "docs", vec![Bridged("mcp__docs__search")]),
+            bridged: bridge(
+                &runtime,
+                &audience(),
+                "docs",
+                vec![Bridged("mcp__docs__search")],
+            ),
             root: PathBuf::from("/repo"),
             names: vec!["docs".to_string()],
         };
-        assert!(registers(&runtime, "mcp__docs__search"));
+        assert!(answers(&runtime, "mcp__docs__search"));
 
         drop(connections);
 
         assert!(
-            !registers(&runtime, "mcp__docs__search"),
+            !answers(&runtime, "mcp__docs__search"),
             "a registry a host keeps for its whole process must not grow by one \
              server's worth of tools per workspace open"
         );

@@ -96,8 +96,10 @@ impl RunProfile {
 
     /// Offers this exact base roster for the run.
     ///
-    /// Per-mint foreign-tool hiding still narrows it afterwards: an exact
-    /// roster cannot grant a sibling workspace's declared or MCP tools.
+    /// A roster says what this workspace offers of what it can reach, and
+    /// naming a sibling workspace's declared or MCP tool does not make it
+    /// reachable: those are registered for that workspace's own tool audience,
+    /// and mentra resolves a foreign audience's name as hidden.
     #[must_use]
     pub fn with_tool_roster(self, tool_roster: ToolRoster) -> Self {
         Self {

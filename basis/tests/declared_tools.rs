@@ -370,14 +370,10 @@ async fn opening_a_workspace_registers_what_its_manifest_declared() {
         vec![manifest],
         "a file that puts a program within the model's reach is named in the report"
     );
-    assert!(
-        workspace
-            .mentra_runtime()
-            .tools()
-            .iter()
-            .any(|tool| tool.provider.name == "jenkins_job"),
-        "and the tool is on the runtime before any session spawns"
-    );
+    // That it is genuinely on the runtime — offered to this workspace's model
+    // and to no sibling's — is asserted on the wire, where a declared tool is
+    // now registered for the declaring workspace's own audience rather than
+    // globally: `tests/runtime.rs`'s `declared_roster`.
 }
 
 #[tokio::test]
@@ -405,14 +401,9 @@ async fn discovery_off_still_registers_supplied_declared_tools() {
 
     assert_eq!(workspace.declared_tools(), ["supplied_tool"]);
     assert!(workspace.declared_tool_files().is_empty());
-    assert!(
-        workspace
-            .mentra_runtime()
-            .tools()
-            .iter()
-            .any(|tool| tool.provider.name == "supplied_tool"),
-        "the typed tool must be registered before any session mints"
-    );
+    // Registered for this workspace's audience rather than globally, so the
+    // proof is the roster on the wire; see the note in
+    // `opening_a_workspace_registers_what_its_manifest_declared`.
 }
 
 #[tokio::test]

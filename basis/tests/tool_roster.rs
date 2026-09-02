@@ -327,7 +327,6 @@ fn assert_registry_categories(registered: &BTreeSet<String>) {
         ALLOWED,
         OMITTED_HOST,
         OMITTED_MCP_SHAPED,
-        DECLARED,
         "load_skill",
     ] {
         assert!(
@@ -417,6 +416,11 @@ async fn exact_profile_roster_refuses_every_hallucinated_registered_omission() {
     // proves it is genuinely registered when enabled; this run deliberately
     // omits that registered name from its exact roster.
     omitted.insert(PAGER.to_string());
+    // The declared tool is registered for this workspace's own tool audience,
+    // so it is absent from the global listing above for the same kind of
+    // reason — and it is exactly the sort of name an exact roster must still
+    // refuse, so it is named here rather than left out.
+    omitted.insert(DECLARED.to_string());
     let omitted = omitted.into_iter().collect::<Vec<_>>();
     assert!(!omitted.is_empty());
     shared.set_omitted(omitted.clone());

@@ -73,7 +73,6 @@ use mentra::tool::{
 };
 use serde_json::{Value, json};
 
-use crate::runtime::dispatch::HookDispatch;
 use parse::{INPUT_FIELD, Mode, Spawn, parse};
 
 // A guard that has to know whether a `spawn` call is a command must not
@@ -159,13 +158,6 @@ pub struct SpawnTool {
     /// ordinary case — is inherit-everything on the exact code path this tool
     /// has always used.
     policy: Option<ChildPolicy>,
-    /// The runtime's workspace registry, read for one thing only: what the
-    /// delegating workspace's model is currently denied
-    /// ([`WorkspaceGuardEntry::foreign_tools`](crate::runtime::dispatch::WorkspaceGuardEntry)),
-    /// so a roster override cannot hand a child a sibling workspace's tools.
-    /// `None` for a host that built this tool itself against mentra, which
-    /// has no basis workspaces to shield from each other.
-    workspaces: Option<Arc<HookDispatch>>,
 }
 
 /// The per-call facts both authorization preview and execution must decide.
@@ -187,10 +179,6 @@ impl std::fmt::Debug for SpawnTool {
             .field("depth", &self.depth)
             .field("targets", &self.targets)
             .field("policy", &self.policy.as_ref().map(|_| "<child policy>"))
-            .field(
-                "workspaces",
-                &self.workspaces.as_ref().map(|_| "<registry>"),
-            )
             .finish()
     }
 }
@@ -243,7 +231,6 @@ impl SpawnTool {
                 .into_iter()
                 .collect(),
             policy: None,
-            workspaces: None,
         }
     }
 
@@ -278,34 +265,6 @@ impl SpawnTool {
             policy: Some(policy),
             ..self
         }
-    }
-
-    /// Lets this tool read what the delegating workspace's model is denied, so
-    /// a roster override cannot grant a child more than its parent has (see
-    /// the [`workspaces`](Self::workspaces) field). basis's own
-    /// [`RuntimeBuilder`](crate::RuntimeBuilder) always says this; a host
-    /// registering `SpawnTool` on its own mentra runtime has no basis
-    /// workspaces and says nothing.
-    #[must_use]
-    pub(crate) fn with_workspaces(self, workspaces: Arc<HookDispatch>) -> Self {
-        Self {
-            workspaces: Some(workspaces),
-            ..self
-        }
-    }
-
-    /// The names the delegating workspace's own model is currently denied —
-    /// a sibling workspace's bridged and declared tools, as of the mint this
-    /// delegation belongs to.
-    ///
-    /// Empty whenever there is no registry to ask or no workspace claiming
-    /// this directory, which is the whole of the private-runtime case: one
-    /// workspace, no siblings, nothing foreign to shield a child from.
-    fn denied_to_parent(&self, workspace_dir: &std::path::Path) -> BTreeSet<String> {
-        self.workspaces
-            .as_ref()
-            .map(|registry| registry.foreign_tools(workspace_dir))
-            .unwrap_or_default()
     }
 
     /// What the policy says this delegation's child is — asked identically on
@@ -495,24 +454,8 @@ impl ToolExecutor for SpawnTool {
 
         match decision {
             SpawnDecision::Command => execute::command(&ctx, spawn.body(), spawn.target()).await,
-            SpawnDecision::Agent {
-                depth,
-                spec,
-                workspace,
-            } => {
-                // Read only when a roster override is what would drop it:
-                // every other spec keeps the parent's cloned profile,
-                // per-mint hides and all. An override can only come from a
-                // policy, which is also the only path that resolves `workspace`.
-                let denied = match spec.overrides_roster() {
-                    true => self.denied_to_parent(
-                        workspace
-                            .as_deref()
-                            .expect("a roster override came from a child policy"),
-                    ),
-                    false => BTreeSet::new(),
-                };
-                execute::delegate(&self.depth, &mut ctx, spawn.body(), depth, *spec, denied).await
+            SpawnDecision::Agent { depth, spec, .. } => {
+                execute::delegate(&self.depth, &mut ctx, spawn.body(), depth, *spec).await
             }
         }
     }

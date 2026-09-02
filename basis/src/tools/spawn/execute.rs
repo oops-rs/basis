@@ -6,8 +6,6 @@
 //! model's string — they are handed a body, and a destination, that
 //! [`parse`](super::parse) already decided the meaning of.
 
-use std::collections::BTreeSet;
-
 use mentra::{
     ContentBlock, DelegationArtifact, DelegationEdge, DelegationKind, DelegationStatus,
     SpawnedAgentStatus, SpawnedAgentSummary,
@@ -141,9 +139,8 @@ pub(super) async fn delegate(
     prompt: &str,
     depth: usize,
     spec: ChildSpec,
-    denied_to_parent: BTreeSet<String>,
 ) -> ToolResult {
-    let mut child = spawn_child(ctx, spec, denied_to_parent)
+    let mut child = spawn_child(ctx, spec)
         .await
         .map_err(|error| format!("spawn could not start a subagent: {error}"))?;
     let child_id = child.id().to_string();
@@ -232,12 +229,9 @@ pub(super) async fn delegate(
 /// mentra's naming intact. A model override naming an unregistered provider
 /// arrives the same way (`ProviderNotFound`, at spawn, before anything runs).
 ///
-/// `denied_to_parent` is what a roster override must not undo: see the
-/// `with_tool_profile` call below.
 async fn spawn_child(
     ctx: &ToolContext<'_>,
     spec: ChildSpec,
-    denied_to_parent: BTreeSet<String>,
 ) -> Result<mentra::agent::Agent, mentra::error::RuntimeError> {
     if spec.is_inherit() {
         // Deliberately not the template path with zero overrides, though
@@ -256,29 +250,21 @@ async fn spawn_child(
     if let Some(roster) = roster {
         // The same mapping the workspace's own roster resolves through
         // (`ToolRoster::into_profile`), so a policy narrows a child with the
-        // exact vocabulary a host narrows a workspace with — plus the one
-        // thing the mapping cannot know.
+        // exact vocabulary a host narrows a workspace with.
         //
-        // mentra's `with_tool_profile` *replaces* the cloned config's
-        // profile, and part of what it would replace is not the parent's
-        // roster at all: `Workspace::minted_agent` adds every sibling
-        // workspace's bridged `mcp__*` and declared tools to `hidden_tools`
-        // at mint, because on a shared runtime one registry serves them all.
-        // Replacing that away would offer a *narrowed* child the very tools
-        // its parent is denied — `mcp__prod-db__query` belonging to another
-        // repository, reached through a child the policy meant to restrict.
-        // So the parent's denied set goes back into the profile here.
-        //
-        // Extending `hidden_tools` covers both roster shapes because
-        // `ToolProfile::allows` checks the denylist *after* the allow-list:
-        // a `hide` roster simply gains the names, and an `only` roster that
-        // happened to name one loses it. Dropping rather than refusing, and
-        // silently, is the rule `ToolRoster::only` already documents for the
-        // same collision on a workspace's own roster — one composition, one
-        // rule, stated in both places.
-        let mut profile = roster.into_profile();
-        profile.hidden_tools.extend(denied_to_parent);
-        template = template.with_tool_profile(profile);
+        // mentra's `with_tool_profile` *replaces* the cloned config's profile,
+        // and a roster override used to be able to hand a narrowed child the
+        // very tools its parent was denied — a sibling repository's
+        // `mcp__prod-db__query`, reached through the child a policy meant to
+        // restrict — because the parent's own denial was a name basis had
+        // hidden by hand. It is not a name any more: a workspace's bridged and
+        // declared tools are registered for that workspace's `ToolAudience`,
+        // the child inherits its parent's audience with the runtime handle it
+        // is spawned from, and mentra's resolution ladder answers a foreign
+        // audience's name with `Hidden` however the profile is written. A
+        // roster narrows what the child is offered; it cannot widen what the
+        // child can reach.
+        template = template.with_tool_profile(roster.into_profile());
     }
     if let Some(model) = model {
         template = template.with_model(model);

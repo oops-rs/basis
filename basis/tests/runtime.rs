@@ -195,7 +195,7 @@ async fn a_shared_runtimes_conversations_list_under_their_own_workspaces() {
 mod roster {
     use super::*;
 
-    use mentra::tool::{RuntimeToolDescriptor, ToolExecutor, ToolResult};
+    use mentra::tool::{RuntimeToolDescriptor, ToolAudience, ToolExecutor, ToolResult};
 
     /// Stands in for a bridged tool another workspace's MCP server left on the
     /// shared registry — same namespaced name, none of the process baggage.
@@ -226,8 +226,19 @@ mod roster {
         let endpoint = ScriptedEndpoint::start(Vec::new());
         let runtime = shared_runtime(&endpoint);
         // What a sibling workspace's open would have done: bridge its server's
-        // tools onto the runtime's single registry.
-        runtime.mentra_runtime().register_tool(ForeignBridged);
+        // tools onto the runtime's single registry, for that workspace's own
+        // audience. Global registration would be a different claim — a runtime
+        // tool the host meant every workspace to have — and is deliberately
+        // still visible to everyone.
+        let _foreign = runtime
+            .mentra_runtime()
+            .try_register_tool_for_audience(
+                ToolAudience::new(basis::store::runtime_identifier(std::path::Path::new(
+                    "/repo/sibling",
+                ))),
+                ForeignBridged,
+            )
+            .expect("the sibling's audience is free");
 
         let dir = workspace_dir();
         let workspace = pinned(dir.path(), runtime).open().await.expect("opens");
@@ -353,6 +364,43 @@ mod declared_roster {
         assert!(
             !bystanders.iter().any(|tool| tool == declared),
             "a program another repository declared must not be offered here: {bystanders:?}"
+        );
+    }
+
+    #[tokio::test]
+    async fn a_resumed_run_is_still_offered_its_own_workspaces_declared_tool() {
+        // A workspace's own tools are registered for its tool audience, and
+        // mentra deliberately keeps an audience out of the persisted agent — so
+        // a resume that failed to restate it would hand the model a roster
+        // missing exactly the tools the repository declared, with nothing
+        // anywhere failing to say so.
+        let endpoint = ScriptedEndpoint::start(Vec::new());
+        let runtime = shared_runtime(&endpoint);
+        let dir = workspace_dir();
+        let declared = declaring(dir.path());
+
+        let workspace = pinned(dir.path(), runtime).open().await.expect("opens");
+        let mut first = workspace.prepare("go").expect("mints");
+        let agent_id = first.agent_id().to_string();
+        first
+            .execute_with_approver(CollectingSink::default(), AllowAll)
+            .await
+            .expect("completes");
+        // The live run holds the agent's lease; a resume is what a later
+        // process does, and here it needs the first run to have let go.
+        drop(first);
+
+        workspace
+            .resume(&agent_id, "again")
+            .expect("resumes")
+            .execute_with_approver(CollectingSink::default(), AllowAll)
+            .await
+            .expect("completes");
+
+        let resumed = roster(&endpoint, 1);
+        assert!(
+            resumed.iter().any(|tool| tool == declared),
+            "the resumed conversation must keep the tools its workspace declared: {resumed:?}"
         );
     }
 }

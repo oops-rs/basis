@@ -547,7 +547,6 @@ impl RuntimeBuilder {
                 target_names,
                 self.delegation_depth,
                 self.child_policy,
-                Arc::clone(&dispatch),
             ))
             // The one pre-hook basis registers, always: mentra takes hooks at
             // build time only, and workspaces arrive later, through the
@@ -639,24 +638,17 @@ impl RuntimeBuilder {
 
 /// The one tool basis registers, assembled once.
 ///
-/// Built here rather than inline so the two conditional facts — whether a
-/// child policy was set, and the workspace registry the roster guard reads —
-/// are attached to *one* construction. With no policy this is
-/// `SpawnTool::with_targets_and_depth` plus a registry handle that only a
-/// roster override ever reads, which is `SpawnTool::new()` in every
+/// Built here rather than inline so the one conditional fact — whether a child
+/// policy was set — is attached to *one* construction. With no policy this is
+/// `SpawnTool::with_targets_and_depth`, which is `SpawnTool::new()` in every
 /// observable respect for a runtime that registered no targets and kept the
 /// default depth.
 fn spawn_tool(
     targets: Vec<String>,
     delegation_depth: usize,
     child_policy: Option<ChildPolicy>,
-    workspaces: Arc<HookDispatch>,
 ) -> SpawnTool {
-    let tool = SpawnTool::with_targets_and_depth(targets, delegation_depth).with_workspaces(
-        // Read for one question — what is this delegation's workspace denied
-        // — so a narrowed child cannot be handed a sibling's tools (D4, R1).
-        workspaces,
-    );
+    let tool = SpawnTool::with_targets_and_depth(targets, delegation_depth);
 
     match child_policy {
         // The stored `Arc` goes straight through: re-wrapping it in a closure

@@ -51,11 +51,10 @@ mod profile;
 mod roster;
 mod spec;
 
-use std::collections::BTreeSet;
 use std::path::{Path, PathBuf};
-use std::sync::{Arc, RwLock};
+use std::sync::Arc;
 
-use mentra::{ModelInfo, RuntimePolicy, Session, agent::AgentConfig, provider::ReasoningOptions};
+use mentra::{ModelInfo, Session, agent::AgentConfig, provider::ReasoningOptions};
 
 pub use builder::WorkspaceBuilder;
 pub use profile::RunProfile;
@@ -76,7 +75,7 @@ use crate::{
     fingerprint::{self, Snapshot},
     memory::Memory,
     run::{Effort, LoadedSkill, PreparedRun, RunContext},
-    runtime::{Runtime, dispatch::HookRegistration},
+    runtime::{Runtime, SessionScope, dispatch::HookRegistration},
     skills::SkillRoots,
     templates::Template,
     tools::declared::DeclaredTools,
@@ -107,16 +106,17 @@ pub struct Workspace {
     /// to name different directories.
     root: PathBuf,
     runtime: Arc<Runtime>,
-    /// The complete policy every session minted here runs under: this
-    /// workspace's `.git` carve-out, shell posture and memory roots, shaped by
-    /// what the runtime's builder was told
-    /// ([`Runtime::session_policy`](crate::Runtime)).
+    /// The live scope every session minted here runs in: this workspace's
+    /// identity, the policy carrying its `.git` carve-out, shell posture and
+    /// memory roots, and the tool audience its own bridged and declared tools
+    /// are registered under.
     ///
     /// Held rather than re-derived per mint because none of its inputs vary
-    /// after an open, and stated on every mint and resume because mentra does
-    /// not persist a session's policy — a resume that said nothing would
-    /// inherit the runtime's, which on a shared runtime is nobody's.
-    policy: RuntimePolicy,
+    /// after an open, and restated on every mint *and* resume because mentra
+    /// persists none of it — a resume that said nothing would inherit the
+    /// runtime's policy, which on a shared runtime is nobody's, and resolve in
+    /// no audience at all.
+    scope: SessionScope,
     /// Whether supported Basis APIs may mint more than one independent
     /// session from this workspace.
     mint_posture: MintPosture,
@@ -129,11 +129,6 @@ pub struct Workspace {
     /// the model it is looking at.
     config: Config,
     provider: String,
-    /// [`store::runtime_identifier`](crate::store::runtime_identifier) for
-    /// [`root`](Self::root), computed once: what this workspace's
-    /// conversations are (or, on a shared runtime, should be — see
-    /// [`WorkspaceBuilder::open`]) tagged with.
-    identifier: String,
     context: WorkspaceContext,
     /// The memories discovered at open, frontmatter only, name-ordered after
     /// shadowing. What the agent config's index block was rendered from.
@@ -152,16 +147,13 @@ pub struct Workspace {
     declared_tool_files: Vec<ContextFile>,
     declared_tools: Vec<String>,
     /// Keeps this workspace's declared tools claimed on the runtime's single
-    /// registry; releases the claims on drop.
+    /// registry and registered for its own audience; releases both on drop.
+    #[allow(dead_code, reason = "held for its Drop")]
     declared_registration: DeclaredTools,
     /// Keeps this workspace's hooks and guards registered on the runtime's
     /// dispatcher; deregisters on drop.
     #[allow(dead_code, reason = "held for its Drop")]
     hook_registration: HookRegistration,
-    /// The other half of the registry entry's `foreign_tools` cell, written by
-    /// [`minted_agent`](Self::minted_agent) so `spawn` can read what this
-    /// workspace's model is currently denied.
-    foreign_tools: Arc<RwLock<BTreeSet<String>>>,
     #[cfg(feature = "mcp")]
     #[allow(dead_code, reason = "held for its Drop")]
     mcp_connections: McpConnections,
@@ -235,13 +227,9 @@ impl Workspace {
         let model_id = model.id.clone();
         let agent = self.minted_agent(&spec.profile);
         let context_snapshot = agent.system.clone();
-        let mut session = self.runtime.mint(
-            spec.session_name.clone(),
-            model,
-            agent,
-            &self.identifier,
-            self.policy.clone(),
-        )?;
+        let mut session =
+            self.runtime
+                .mint(spec.session_name.clone(), model, agent, &self.scope)?;
         if !spec.profile.decides_reasoning() {
             apply_effort(&mut session, spec.effort.or(self.effort))?;
         }
@@ -303,7 +291,7 @@ impl Workspace {
             return Err(RunError::NonAtomicResumeProfile);
         }
 
-        let mut session = self.runtime.resume_minted(agent_id, self.policy.clone())?;
+        let mut session = self.runtime.resume_minted(agent_id, &self.scope)?;
         let model = if let Some(model) = spec.profile.resolved_model() {
             session.set_model(model.clone())?;
             model.id.clone()
@@ -472,58 +460,19 @@ impl Workspace {
     }
 
     /// The agent config this mint offers the model: the one built at open, with
-    /// every tool on the shared registry that belongs to another workspace
-    /// hidden — bridged `mcp__*` tools, and tools a sibling's
-    /// `.basis/tools.json` declared.
+    /// the run profile applied.
     ///
-    /// Per mint rather than per open, because the shared registry moves as
-    /// sibling workspaces come and go, and a roster is honest only about the
-    /// registry it was minted against. Hidden rather than unregistered because
-    /// these tools belong to a sibling that is still open and still serving
-    /// them; what a *dropped* sibling registered is gone from the registry
-    /// altogether, taken off with the claim it was held under.
-    ///
-    /// The same set is published to this workspace's dispatcher entry on the
-    /// way out, because one more consumer needs it and cannot ask mentra:
-    /// `spawn`, when a [`ChildSpec`](crate::ChildSpec) roster override
-    /// replaces the child's cloned `ToolProfile`, has to put these names back
-    /// or hand a delegated child the sibling tools its own parent is denied.
-    /// Written here rather than at open so both readers see one snapshot —
-    /// the config below freezes it for this mint, and the cell carries the
-    /// same names to whatever that mint delegates.
+    /// A sibling workspace's tools need no hiding here. They are registered for
+    /// that workspace's own [`ToolAudience`](mentra::tool::ToolAudience) and
+    /// this session resolves in its own, so mentra's ladder — exact agent, then
+    /// matching audience, then global — reports a foreign name as hidden rather
+    /// than visible, whether the model was offered it or guessed it. That holds
+    /// for a delegated child too, which inherits its parent's audience with the
+    /// runtime handle it is spawned from, and it is the reason a
+    /// [`ChildSpec`](crate::ChildSpec) roster override can no longer reach a
+    /// sibling's capability by replacing the profile.
     fn minted_agent(&self, profile: &RunProfile) -> AgentConfig {
-        // A run profile replaces workspace defaults first. Foreign tools are
-        // then denied against the live shared registry, so an exact roster can
-        // narrow what the workspace offered but can never grant a sibling's
-        // capability.
-        let mut agent = profile.apply_to(self.agent.clone());
-        let mut foreign = BTreeSet::new();
-
-        for name in self
-            .runtime
-            .foreign_declared_tools(self.declared_registration.root())
-        {
-            agent.tool_profile.hidden_tools.insert(name.clone());
-            foreign.insert(name);
-        }
-
-        #[cfg(feature = "mcp")]
-        for descriptor in self.runtime.mentra_runtime().tools() {
-            let name = &descriptor.provider.name;
-            if let Some((server, _)) = mentra::mcp::parse_mcp_tool_name(name)
-                && !self.mcp_servers.iter().any(|own| own == server)
-            {
-                agent.tool_profile.hidden_tools.insert(name.clone());
-                foreign.insert(name.clone());
-            }
-        }
-
-        *self
-            .foreign_tools
-            .write()
-            .expect("foreign tool set poisoned") = foreign;
-
-        agent
+        profile.apply_to(self.agent.clone())
     }
 
     /// Wraps a freshly created or resumed session in the run context this

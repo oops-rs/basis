@@ -47,6 +47,7 @@ use mentra::{
     agent::AgentConfig,
     runtime::{SessionOptions, SessionResumeOptions},
     session::PermissionRuleScope,
+    tool::{AudienceToolRegistration, ToolAudience, ToolNameCollision},
 };
 
 use crate::{shell::ShellAccess, tools::declared::DeclaredToolSpec};
@@ -280,6 +281,39 @@ pub struct Runtime {
     skill_root_holders: Mutex<HashMap<PathBuf, usize>>,
 }
 
+/// The live scope one workspace's sessions run in: what they may do, and whose
+/// tools they can see.
+///
+/// Both halves are session options upstream, both are deliberately left out of
+/// the persisted `AgentConfig`, and both therefore have to be restated on every
+/// resume — so they travel as one value rather than as arguments each caller
+/// has to remember to keep in step.
+#[derive(Debug, Clone)]
+pub(crate) struct SessionScope {
+    /// [`store::runtime_identifier`](crate::store::runtime_identifier) for the
+    /// workspace, in its two roles: the tag this session's persisted rows
+    /// carry, and the name of the tool audience it resolves in.
+    ///
+    /// One identity rather than two, because there is one workspace. A second
+    /// string would only be an opportunity for the listing and the roster to
+    /// disagree about which repository a session belongs to, and mentra treats
+    /// an audience as opaque — it compares for equality and reads nothing into
+    /// the value — so the identity basis already derives is exactly what an
+    /// audience wants.
+    pub(crate) identifier: String,
+    /// The complete policy for this session and its descendants; see
+    /// [`Runtime::session_policy`].
+    pub(crate) policy: RuntimePolicy,
+}
+
+impl SessionScope {
+    /// The namespace this workspace's own tools are registered under, and the
+    /// one its sessions resolve names in.
+    pub(crate) fn audience(&self) -> ToolAudience {
+        ToolAudience::new(self.identifier.clone())
+    }
+}
+
 /// The identity a skills root is counted under.
 ///
 /// mentra matches a root by its canonical path where the filesystem can
@@ -306,6 +340,13 @@ struct DeclaredClaim {
     /// The complete resolved declaration the live registration executes.
     /// Supplied same-root holders compare against it before joining.
     spec: DeclaredToolSpec,
+    /// mentra's own hold on the audience registration, which is what keeps
+    /// the tool answering. Kept beside the claim rather than by the workspace
+    /// because the claim is what counts holders: the second open of a root
+    /// joins this registration instead of making its own, and the tool has to
+    /// outlive the first of them to drop. `None` between the claim and the
+    /// registration, and for every holder after the first.
+    registration: Option<AudienceToolRegistration>,
 }
 
 #[derive(Debug, Clone, Copy)]
@@ -412,33 +453,28 @@ impl Runtime {
 
     /// The one place a workspace's sessions are created.
     ///
-    /// `persist_identifier` is the workspace tag the session's rows carry
-    /// ([`store::runtime_identifier`](crate::store::runtime_identifier)), and
-    /// it is applied per session rather than per runtime: on a shared runtime
-    /// every workspace's sessions would otherwise be tagged with the one
-    /// identifier fixed at build, and a per-workspace listing could not tell
-    /// them apart. The private path is unaffected — its runtime-wide
-    /// identifier already is this value, so the override is a no-op there.
-    ///
-    /// `policy` is the workspace's own ([`session_policy`](Self::session_policy)),
-    /// and is stated for the same reason: it replaces the runtime's for this
-    /// session and its descendants, so the workspace that opened with commands
-    /// off gets a session with commands off however many siblings share the
-    /// runtime.
+    /// Every field of the scope is applied per session rather than per runtime,
+    /// and for one reason: a shared runtime is built before any workspace
+    /// exists, so anything fixed on it is fixed for all of them. The
+    /// identifier tags this session's persisted rows, without which a
+    /// per-workspace listing could not tell one repository's conversations from
+    /// another's; the policy says what this repository's runs may do; and the
+    /// audience decides which of the registry's tools they can see. The private
+    /// path is unaffected by any of it — a runtime with one workspace already
+    /// agreed with itself about all three.
     pub(crate) fn mint(
         &self,
         name: impl Into<String>,
         model: ModelInfo,
         config: AgentConfig,
-        persist_identifier: &str,
-        policy: RuntimePolicy,
+        scope: &SessionScope,
     ) -> Result<Session, RunError> {
         let options = SessionOptions {
             config,
-            policy: Some(policy),
-            tool_audience: None,
+            policy: Some(scope.policy.clone()),
+            tool_audience: Some(scope.audience()),
             project_id: None,
-            runtime_identifier: Some(Arc::from(persist_identifier)),
+            runtime_identifier: Some(Arc::from(scope.identifier.as_str())),
         };
 
         Ok(self
@@ -449,21 +485,23 @@ impl Runtime {
     /// The one place a workspace's sessions are resumed; see
     /// [`mint`](Self::mint) for why it is a place at all.
     ///
-    /// The policy is restated here because mentra deliberately does not
-    /// persist it in `AgentConfig`: a resumed session that was handed none
-    /// would inherit the runtime's, which on a shared runtime is the posture
-    /// of no workspace at all.
+    /// The policy and the audience are restated here because mentra
+    /// deliberately keeps neither in the persisted agent: a resumed session
+    /// handed no policy would inherit the runtime's, which on a shared runtime
+    /// is the posture of no workspace at all, and one handed no audience would
+    /// resolve only global names — losing this workspace's own bridged and
+    /// declared tools between one process and the next.
     pub(crate) fn resume_minted(
         &self,
         agent_id: &str,
-        policy: RuntimePolicy,
+        scope: &SessionScope,
     ) -> Result<Session, RunError> {
         let session = self.mentra.resume_session_with_options(
             agent_id,
             SessionResumeOptions {
                 project_id: None,
-                policy: Some(policy),
-                tool_audience: None,
+                policy: Some(scope.policy.clone()),
+                tool_audience: Some(scope.audience()),
             },
         )?;
 
@@ -640,6 +678,7 @@ impl Runtime {
                             DeclaredToolOrigin::Supplied
                         )),
                         spec: spec.clone(),
+                        registration: None,
                     },
                 );
                 Ok(true)
@@ -647,16 +686,58 @@ impl Runtime {
         }
     }
 
+    /// Puts a claimed declared tool on the registry, for the claiming
+    /// workspace's audience alone.
+    ///
+    /// Audience-scoped rather than global because a declaration is a
+    /// *repository's* statement about a program: on a runtime serving five
+    /// repositories, a global registration would offer one repository's tool
+    /// to the other four's models. mentra's resolution ladder answers that for
+    /// basis now — a name held only by another audience resolves to `Hidden`,
+    /// so it is neither listed nor reachable by guessing it.
+    ///
+    /// The guard goes into the claim, which is the thing that knows how many
+    /// workspaces are holding this name; dropping the claim drops the guard and
+    /// takes the tool off the registry in the same breath.
+    pub(crate) fn install_declared_tool<T>(
+        &self,
+        audience: &ToolAudience,
+        name: &str,
+        root: &Path,
+        tool: T,
+    ) -> Result<(), ToolNameCollision>
+    where
+        T: mentra::tool::ExecutableTool + 'static,
+    {
+        let registration = self
+            .mentra
+            .try_register_tool_for_audience(audience.clone(), tool)?;
+
+        let mut claims = self
+            .declared_claims
+            .lock()
+            .expect("declared tool claim map poisoned");
+        // Unreachable in practice — the claim map serializes every opener on
+        // this runtime and nothing between the claim and here releases one.
+        // Dropping the guard rather than storing it is still the right answer
+        // if it ever happened: a registration nobody holds is a tool nobody
+        // would take back off.
+        if let Some(claim) = claims.get_mut(name)
+            && claim.root == root
+        {
+            claim.registration = Some(registration);
+        }
+        Ok(())
+    }
+
     /// Releases a claim [`claim_declared_tool`](Self::claim_declared_tool)
     /// granted, taking the tool off the runtime when the last holder goes.
     ///
     /// Only the owning root can release, so one workspace's drop cannot free a
-    /// name another still serves. The unregister is what makes the claim map
-    /// and mentra's registry say the same thing: a released name is free
-    /// because nothing answers to it any more, rather than free-with-a-stale-
-    /// entry-behind-it. Before mentra's unregister was public a claim had to be
-    /// remembered with `holders: 0` forever, and every dropped workspace left a
-    /// tool on a registry a host keeps for its whole process.
+    /// name another still serves. Removing the claim is what makes the claim
+    /// map and mentra's registry say the same thing: the registration guard
+    /// goes with it, so a released name is free because nothing answers to it
+    /// any more, rather than free-with-a-stale-entry-behind-it.
     pub(crate) fn release_declared_tool(
         &self,
         name: &str,
@@ -680,10 +761,10 @@ impl Runtime {
             claim.supplied_holders = claim.supplied_holders.saturating_sub(1);
         }
         if claim.holders == 0 {
-            claims.remove(name);
             // Under the claim lock, so no other claimant can see the name free
-            // while the tool is still registered.
-            self.mentra.unregister_tool(name);
+            // while the tool is still registered: the removed claim owns the
+            // registration guard, and dropping it here is the unregister.
+            claims.remove(name);
         }
     }
 
@@ -750,25 +831,35 @@ impl Runtime {
         }
     }
 
-    /// Every declared tool name on this runtime that belongs to some *other*
-    /// workspace still open.
+    /// The descriptor of the declared tool live under `name`.
     ///
-    /// What a mint hides, for the reason it hides another workspace's `mcp__*`
-    /// tools: the registry is the runtime's and single, but a tool declared by
-    /// a repository is that repository's, and offering it to a run in a
-    /// different one would run a program that workspace never asked for.
-    pub(crate) fn foreign_declared_tools(&self, root: &Path) -> Vec<String> {
+    /// Read off basis's own hold on the registration, because mentra exposes no
+    /// reader for an audience's tools: `Runtime::tools` and
+    /// `Runtime::tool_descriptor` both walk the global map only (an upstream
+    /// candidate), so an audience-registered tool is invisible to both.
+    /// `#[cfg(test)]` because the only caller is the test that pins *which*
+    /// program a name is serving when one repository is open twice.
+    #[cfg(test)]
+    pub(crate) fn declared_tool_descriptor(
+        &self,
+        name: &str,
+    ) -> Option<mentra::tool::RuntimeToolDescriptor> {
         self.declared_claims
             .lock()
             .expect("declared tool claim map poisoned")
-            .iter()
-            .filter(|(_, claim)| claim.root != root)
-            .map(|(name, _)| name.clone())
-            .collect()
+            .get(name)?
+            .registration
+            .as_ref()
+            .map(|registration| registration.descriptor().clone())
     }
 
-    /// Whether mentra's registry already answers to `name` — a builtin,
-    /// basis's own `spawn`, or a bridged MCP tool.
+    /// Whether mentra's registry already answers to `name` globally — a
+    /// builtin, basis's own `spawn`, or a host tool.
+    ///
+    /// Globals only, which is the question worth asking: an audience-scoped
+    /// name belonging to another workspace is already refused by the claim map
+    /// above, and one belonging to *this* workspace is refused by mentra's own
+    /// same-audience collision check when the registration is attempted.
     fn registers_tool(&self, name: &str) -> bool {
         self.mentra
             .tools()

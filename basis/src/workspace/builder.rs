@@ -37,7 +37,7 @@ use crate::{
     hooks::{self, HookRunner, HooksConfig},
     memory::{self, MemoryConfig},
     run::LoadedSkill,
-    runtime::{Runtime, RuntimeBuilder, dispatch},
+    runtime::{Runtime, RuntimeBuilder, SessionScope, dispatch},
     shell::ShellAccess,
     skills::{self, SkillRoots, SkillsConfig},
     store,
@@ -398,9 +398,9 @@ impl WorkspaceBuilder {
     /// has offered — `spawn`'s replaced doors and basis's never-surfaced
     /// intrinsics hidden, everything else offered. Neither constructor on
     /// [`ToolRoster`] changes what is *registered* on the runtime; see its
-    /// module docs for the two things that still apply on top of whatever
-    /// roster is set here — a per-mint hide of a sibling workspace's tools,
-    /// and the rendered prompt, which has no opinion about the roster at all.
+    /// module docs for the two things a roster says nothing about — a sibling
+    /// workspace's tools, which its own audience keeps out of reach, and the
+    /// rendered prompt, which has no opinion about the roster at all.
     pub fn with_tool_roster(self, roster: ToolRoster) -> Self {
         Self { roster, ..self }
     }
@@ -675,13 +675,19 @@ impl WorkspaceBuilder {
             )?),
         };
 
-        // What every session minted here runs under. Derived once, from the
-        // same recipe the private path just baked into the runtime, so the two
-        // runtime shapes differ in nothing a run can observe: a shared
+        // The live scope every session minted here runs in. Derived once, from
+        // the same recipe the private path just baked into the runtime, so the
+        // two runtime shapes differ in nothing a run can observe: a shared
         // runtime's session carries this workspace's shell posture, `.git`
         // carve-out and memory roots because it is handed them, and a private
-        // runtime's carries them twice over.
-        let policy = runtime.session_policy(&path, self.shell, &memory_roots);
+        // runtime's carries them twice over. The audience below is derived from
+        // the same identity, and is what this workspace's own tools are
+        // registered under a few lines further down.
+        let scope = SessionScope {
+            identifier: store::runtime_identifier(&path),
+            policy: runtime.session_policy(&path, self.shell, &memory_roots),
+        };
+        let audience = scope.audience();
 
         // The workspace's own override first, then the file, then the runtime's
         // policy — which on the private path is already the file's answer, so
@@ -735,6 +741,7 @@ impl WorkspaceBuilder {
         // that has not been resolved yet.
         let declared_tools = DeclaredTools::register_with_supplied(
             Arc::clone(&runtime),
+            &audience,
             &path,
             &declared_sources,
             &supplied_tools,
@@ -753,20 +760,13 @@ impl WorkspaceBuilder {
             HookRunner::new(&path, loaded_hooks.clone()),
             |runner, interceptor| runner.with_interceptor(interceptor),
         );
-        // Written by every mint, read by `spawn` when a child policy narrows a
-        // delegated child's roster — see `Workspace::minted_agent`. Empty
-        // until the first mint, which is correct: nothing has been offered a
-        // roster yet, so nothing has been denied one either.
-        let foreign_tools = Arc::new(std::sync::RwLock::new(std::collections::BTreeSet::new()));
         let hook_registration = runtime.register_workspace(
             &path,
             dispatch::WorkspaceGuardEntry {
                 runner: Arc::new(runner),
                 hooks: loaded_hooks,
-                foreign_tools: Arc::clone(&foreign_tools),
             },
         )?;
-        let foreign_tools = hook_registration.foreign_tools();
 
         // Both lists reach the header whether or not this build has MCP in it:
         // what a run reports is a schema clients parse, and a field that
@@ -775,7 +775,8 @@ impl WorkspaceBuilder {
         #[cfg(feature = "mcp")]
         let (mcp_connections, mcp_files, mcp_servers) = {
             let (files, servers) = discovered_mcp(&path, &self.mcp)?;
-            let connections = McpConnections::connect(Arc::clone(&runtime), &path, servers).await;
+            let connections =
+                McpConnections::connect(Arc::clone(&runtime), &audience, &path, servers).await;
             let names = connections.names().to_vec();
 
             (connections, files, names)
@@ -797,14 +798,13 @@ impl WorkspaceBuilder {
                 self.compaction,
                 runtime.transcripts_dir().to_path_buf(),
             ),
-            identifier: store::runtime_identifier(&path),
             // Not resolved a second time: `path` *is* what discovery resolved,
             // and asking again would reintroduce the second answer this open
             // exists to do without.
             root: path,
             provider: runtime.provider().to_string(),
             runtime,
-            policy,
+            scope,
             mint_posture: MintPosture::new(fresh_only),
             model,
             // The last thing the file still has to say, and the one this
@@ -824,7 +824,6 @@ impl WorkspaceBuilder {
             declared_tools: declared_tool_names,
             declared_registration: declared_tools,
             hook_registration,
-            foreign_tools,
             #[cfg(feature = "mcp")]
             mcp_connections,
         })
@@ -943,10 +942,7 @@ pub(crate) fn load_templates(
 /// The roster travels: `DisposableSubagentTemplate::from_agent` clones this
 /// whole config, so a subagent of a subagent is offered the same roster.
 ///
-/// Built once and cloned per run, because none of its inputs are per-run —
-/// the per-mint extension (hiding other workspaces' MCP tools) happens in
-/// [`Workspace::prepare`](super::Workspace::prepare)'s path, where the shared
-/// registry's current contents are known.
+/// Built once and cloned per run, because none of its inputs are per-run.
 fn agent_config(
     workspace: &Path,
     context: &WorkspaceContext,

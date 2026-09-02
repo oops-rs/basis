@@ -39,7 +39,7 @@
 //! After the call it is the same routing.
 
 use std::{
-    collections::{BTreeSet, HashMap},
+    collections::HashMap,
     path::{Path, PathBuf},
     sync::{Arc, RwLock},
 };
@@ -66,20 +66,6 @@ pub(crate) struct WorkspaceGuardEntry {
     /// Runtime interceptors are fixed on the dispatcher itself, so these are
     /// the complete per-workspace participant identity.
     pub(crate) hooks: Vec<HookSpec>,
-    /// The names [`Workspace::minted_agent`](crate::Workspace) hid from this
-    /// workspace's model at its most recent mint: a sibling workspace's
-    /// bridged `mcp__*` tools and a sibling's declared tools.
-    ///
-    /// Published here because `spawn` needs it and cannot ask mentra for it:
-    /// a child spawned from a [`ChildSpec`](crate::ChildSpec) with a roster
-    /// override replaces the cloned config's `ToolProfile` wholesale, which
-    /// would hand the child the very names the parent is denied — and mentra
-    /// 0.21 exposes no reader for a template's or an agent's effective
-    /// profile (upstream candidate). Shared rather than copied so what
-    /// `spawn` reads is the set the *live* parent was minted with, since a
-    /// mint is exactly when both are settled: the agent's config freezes it
-    /// and this cell is written in the same breath.
-    pub(crate) foreign_tools: Arc<RwLock<BTreeSet<String>>>,
 }
 
 /// Removes its workspace's entry when dropped.
@@ -91,7 +77,6 @@ pub(crate) struct WorkspaceGuardEntry {
 pub(crate) struct HookRegistration {
     dispatch: Arc<HookDispatch>,
     key: PathBuf,
-    foreign_tools: Arc<RwLock<BTreeSet<String>>>,
 }
 
 impl HookRegistration {
@@ -107,11 +92,6 @@ impl HookRegistration {
     #[cfg(test)]
     pub(crate) fn key(&self) -> &Path {
         &self.key
-    }
-
-    /// The one cell every identical holder under this key publishes into.
-    pub(crate) fn foreign_tools(&self) -> Arc<RwLock<BTreeSet<String>>> {
-        Arc::clone(&self.foreign_tools)
     }
 }
 
@@ -176,50 +156,19 @@ impl HookDispatch {
             .workspaces
             .write()
             .expect("workspace registry poisoned");
-        let foreign_tools = match workspaces.get_mut(&key) {
-            Some(held) if held.entry.hooks == entry.hooks => {
-                held.holders += 1;
-                Arc::clone(&held.entry.foreign_tools)
-            }
+        match workspaces.get_mut(&key) {
+            Some(held) if held.entry.hooks == entry.hooks => held.holders += 1,
             Some(_) => return Err(RunError::WorkspaceGuardConflict { root: key }),
             None => {
-                let foreign_tools = Arc::clone(&entry.foreign_tools);
                 workspaces.insert(key.clone(), Registered { entry, holders: 1 });
-                foreign_tools
             }
-        };
+        }
         drop(workspaces);
 
         Ok(HookRegistration {
             dispatch: Arc::clone(self),
             key,
-            foreign_tools,
         })
-    }
-
-    /// What the workspace claiming `working_directory` hid from its own model
-    /// at its last mint — what a delegated child must therefore not be
-    /// offered either (see [`WorkspaceGuardEntry::foreign_tools`]).
-    ///
-    /// Empty on a miss, and that is the honest answer rather than a fallback:
-    /// a miss means no live workspace claims this directory, so there is no
-    /// sibling to be shielded from. Every private runtime — every
-    /// `Workspace::open(path)`, the CLI, the free functions — has no siblings
-    /// at all and reads empty here for the same reason.
-    pub(crate) fn foreign_tools(&self, working_directory: &Path) -> BTreeSet<String> {
-        let key = canonical(working_directory);
-        self.workspaces
-            .read()
-            .expect("workspace registry poisoned")
-            .get(&key)
-            .map(|held| {
-                held.entry
-                    .foreign_tools
-                    .read()
-                    .expect("foreign tool set poisoned")
-                    .clone()
-            })
-            .unwrap_or_default()
     }
 
     fn deregister(&self, key: &Path) {

@@ -166,7 +166,6 @@ fn runtime(provider: CapturingProvider) -> RuntimeBuilder {
     Runtime::builder()
         .with_provider_instance(provider)
         .with_tool(NamedTool(VISIBLE_TOOL))
-        .with_tool(NamedTool(FOREIGN_TOOL))
         .with_ephemeral_history()
 }
 
@@ -504,6 +503,20 @@ async fn an_exact_profile_roster_is_still_narrowed_by_foreign_tools() {
         .open()
         .await
         .expect("workspace opens");
+    // A sibling workspace's bridged tool: registered on the same registry, for
+    // that workspace's own audience. A profile naming it cannot make it
+    // resolvable here — mentra's ladder reports a foreign audience's name as
+    // hidden — which is the invariant a roster override must never be able to
+    // widen.
+    let _foreign = workspace
+        .mentra_runtime()
+        .try_register_tool_for_audience(
+            mentra::tool::ToolAudience::new(basis::store::runtime_identifier(
+                std::path::Path::new("/repo/sibling"),
+            )),
+            NamedTool(FOREIGN_TOOL),
+        )
+        .expect("the sibling's audience is free");
 
     workspace
         .prepare(RunSpec::new("go").with_profile(

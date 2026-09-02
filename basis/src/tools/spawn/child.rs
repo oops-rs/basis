@@ -210,12 +210,6 @@ impl ChildSpec {
         self.roster.is_none() && self.model.is_none() && self.system.is_none()
     }
 
-    /// Whether applying this spec replaces the child's cloned `ToolProfile`,
-    /// which is what makes the parent's per-mint hides basis's to restore.
-    pub(crate) fn overrides_roster(&self) -> bool {
-        self.roster.is_some()
-    }
-
     /// The `child` key of the approver's preview, or `None` when there is
     /// nothing to say.
     ///
