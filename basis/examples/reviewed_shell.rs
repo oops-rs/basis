@@ -65,7 +65,7 @@ use std::{env, error::Error, sync::Arc, time::Duration};
 use basis::{
     ApprovalAnswer, ApprovalDecision, ApprovalRequest, Approver, BudgetPool, CollectingSink,
     DenyAll, Event, ModelSelector, NullSink, OutputReport, OutputSpec, PreparedRun, RunError,
-    RunSpec, Workspace,
+    RunSpec, Runtime, Workspace,
     event::{PermissionOutcome, RuleScope},
     tools::SPAWN,
 };
@@ -361,8 +361,13 @@ fn script() -> String {
 async fn main() -> Result<(), Box<dyn Error>> {
     let path = env::args().nth(1).unwrap_or_else(|| ".".to_string());
 
+    // A tempdir store, because the rules remembered below are durable rows in
+    // the runtime store and every run of a demo must not append them to the
+    // operator's real user-level one.
+    let store = tempfile::tempdir()?;
     let workspace = Arc::new(
         Workspace::builder(&path)
+            .with_runtime_builder(Runtime::builder().with_store_dir(store.path()))
             .with_model(selected_model())
             .open()
             .await?,
