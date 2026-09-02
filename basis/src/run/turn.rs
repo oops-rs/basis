@@ -11,7 +11,7 @@ use mentra::RoundStrategy;
 use mentra::runtime::{CancellationToken, ProviderRetry, RunOptions};
 
 use super::{Bounds, RunError};
-use crate::budget::BudgetPool;
+use crate::{budget::BudgetPool, runtime::RetryPolicy};
 
 /// Limits and stop signals for a single turn.
 ///
@@ -279,15 +279,11 @@ impl TurnOptions {
         }
     }
 
-    /// Builds Mentra's controls around the runtime's retry fallbacks.
+    /// Builds Mentra's controls around the runtime's retry fallback.
     ///
-    /// A turn-level schedule or count overrides its corresponding fallback
+    /// A turn-level schedule or count overrides its corresponding half
     /// independently; omission retains the runtime's answer.
-    pub(super) fn into_run_options(
-        self,
-        provider_retry: ProviderRetry,
-        retry_budget: usize,
-    ) -> RunOptions {
+    pub(super) fn into_run_options(self, retry: RetryPolicy) -> RunOptions {
         let options = RunOptions {
             cancellation: self.cancel,
             stop: self.stop,
@@ -298,8 +294,8 @@ impl TurnOptions {
             model_budget: self.model_budget,
             token_budget: self.bounds.token_budget,
             round_strategy: self.round_strategy,
-            provider_retry: self.provider_retry.unwrap_or(provider_retry),
-            retry_budget: self.retry_budget.unwrap_or(retry_budget),
+            provider_retry: self.provider_retry.unwrap_or(retry.schedule),
+            retry_budget: self.retry_budget.unwrap_or(retry.budget),
             ..RunOptions::default()
         };
 
@@ -381,7 +377,7 @@ mod tests {
     /// ([`RuntimeBuilder::with_provider_retry`](crate::RuntimeBuilder::with_provider_retry)),
     /// asserted where it is set rather than restated in each of these.
     fn as_mentra_would(options: TurnOptions) -> RunOptions {
-        options.into_run_options(ProviderRetry::default(), RunOptions::default().retry_budget)
+        options.into_run_options(RetryPolicy::default())
     }
 
     #[test]
@@ -488,10 +484,13 @@ mod tests {
 
     #[test]
     fn model_and_retry_controls_map_exactly_and_inherit_by_half() {
-        let runtime_retry = ProviderRetry {
-            base_delay: Duration::from_secs(7),
-            max_delay: Duration::from_secs(11),
-            retry_after_cap: Duration::from_secs(13),
+        let runtime_policy = RetryPolicy {
+            schedule: ProviderRetry {
+                base_delay: Duration::from_secs(7),
+                max_delay: Duration::from_secs(11),
+                retry_after_cap: Duration::from_secs(13),
+            },
+            budget: 17,
         };
         let turn_retry = ProviderRetry {
             base_delay: Duration::from_millis(1),
@@ -502,15 +501,15 @@ mod tests {
         let schedule_only = TurnOptions::default()
             .with_model_budget(0)
             .with_provider_retry(turn_retry)
-            .into_run_options(runtime_retry, 17);
+            .into_run_options(runtime_policy);
         assert_eq!(schedule_only.model_budget, Some(0));
         assert_eq!(schedule_only.provider_retry, turn_retry);
         assert_eq!(schedule_only.retry_budget, 17);
 
         let count_only = TurnOptions::default()
             .with_retry_budget(0)
-            .into_run_options(runtime_retry, 17);
-        assert_eq!(count_only.provider_retry, runtime_retry);
+            .into_run_options(runtime_policy);
+        assert_eq!(count_only.provider_retry, runtime_policy.schedule);
         assert_eq!(count_only.retry_budget, 0);
     }
 

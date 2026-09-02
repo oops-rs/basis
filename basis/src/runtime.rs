@@ -84,6 +84,43 @@ pub use mentra::runtime::{
 /// spellings of one policy, and mentra is the half that does the sleeping.
 pub use mentra::runtime::ProviderRetry;
 
+/// One statement about how a provider connection is retried: the waits, and
+/// how many of them.
+///
+/// mentra keeps the two apart on `RunOptions` — a typed schedule beside a bare
+/// count — and basis's hosts set them apart too, since the commonest adjustment
+/// is the count alone. But nothing downstream of a builder ever wants one
+/// without the other: a runtime's fallback, the copy every
+/// [`PreparedRun`](crate::PreparedRun) carries from it, and the value a turn's
+/// options fall back to are each *both* halves. So they travel as one value
+/// from the builder to the run rather than as a pair that every hop has to
+/// remember to keep together.
+///
+/// Internal: the halves are set and overridden separately on the public
+/// surface — [`RuntimeBuilder::with_provider_retry`] and
+/// [`RuntimeBuilder::with_provider_retry_budget`], and their
+/// [`TurnOptions`](crate::TurnOptions) counterparts — which is the shape a host
+/// asked for and mentra's own.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) struct RetryPolicy {
+    /// How patiently a failing provider is waited out.
+    pub(crate) schedule: ProviderRetry,
+    /// How many retries follow the initial call.
+    pub(crate) budget: usize,
+}
+
+impl Default for RetryPolicy {
+    /// mentra's own answer to both halves: *unset* and *mentra's default* are
+    /// the same policy, so a runtime nobody configured builds exactly the
+    /// `RunOptions` mentra would have.
+    fn default() -> Self {
+        Self {
+            schedule: ProviderRetry::default(),
+            budget: mentra::runtime::RunOptions::default().retry_budget,
+        }
+    }
+}
+
 /// Which wire transport mentra streams the Responses format over, as
 /// [`RuntimeBuilder::with_responses_transport`] takes it.
 ///
@@ -189,22 +226,18 @@ pub struct Runtime {
     /// The default model *policy*; a workspace may override the selector, and
     /// the resolved id is always the workspace's own fact.
     model: ModelSelector,
-    /// Default retry schedule for runs minted here, from
-    /// [`RuntimeBuilder::with_provider_retry`].
+    /// Default retry policy for runs minted here, from
+    /// [`RuntimeBuilder::with_provider_retry`] and
+    /// [`RuntimeBuilder::with_provider_retry_budget`].
     ///
     /// Runtime-scoped for ADR-0018's reason: it describes the *connection* to
     /// the provider, like the credential and the base URL beside it, and not
     /// what one prompt may spend. Kept here because mentra takes it on each
     /// run's options rather than on its runtime, so this is the value every
     /// [`PreparedRun`](crate::PreparedRun) minted on this runtime copies. A
-    /// turn may override it through [`TurnOptions`](crate::TurnOptions).
-    provider_retry: ProviderRetry,
-    /// Default retry count after the initial provider call, from
-    /// [`RuntimeBuilder::with_provider_retry_budget`]. Kept beside the
-    /// schedule and travelling with it for the same reason: mentra splits the
-    /// count from the waits, and a runtime that widened one without the other
-    /// would be half a statement.
-    provider_retry_budget: usize,
+    /// turn may override either half through
+    /// [`TurnOptions`](crate::TurnOptions).
+    retry_policy: RetryPolicy,
     /// Whether the builder explicitly selected in-memory, process-local
     /// history with `with_ephemeral_history`.
     ///
@@ -316,14 +349,12 @@ impl Runtime {
         &self.transcripts
     }
 
-    /// The retry schedule and retry-count fallbacks every run minted on this
-    /// runtime carries.
+    /// The retry fallback every run minted on this runtime carries.
     ///
     /// Read at mint by `Workspace::minted`, which is what makes a
-    /// runtime-scoped knob reach a per-run option. The two travel together
-    /// because they are one statement about one provider connection.
-    pub(crate) fn provider_retry(&self) -> (ProviderRetry, usize) {
-        (self.provider_retry, self.provider_retry_budget)
+    /// runtime-scoped knob reach a per-run option.
+    pub(crate) const fn retry_policy(&self) -> RetryPolicy {
+        self.retry_policy
     }
 
     /// Whether this runtime was explicitly built with ephemeral history.

@@ -536,7 +536,7 @@ impl Workspace {
         // provider connection this workspace borrows (ADR-0018), and mentra
         // takes it per run, so the mint is where a runtime-scoped knob becomes
         // a per-run option.
-        .with_provider_retry(self.runtime.provider_retry())
+        .with_retry_policy(self.runtime.retry_policy())
         .with_context_snapshot(context_snapshot)
     }
 }

@@ -40,7 +40,7 @@ pub(crate) use history::History;
 pub(in crate::runtime) use provider_settlement::HostProvider;
 
 use super::{
-    FileToolProfile, ProviderRetry, ResponsesTransport, Runtime, ToolResultPolicy, Wire,
+    FileToolProfile, ResponsesTransport, RetryPolicy, Runtime, ToolResultPolicy, Wire,
     dispatch::{DispatchHook, HookDispatch},
     executor::{CommandTargets, TargetedExecutor},
 };
@@ -75,22 +75,17 @@ pub struct RuntimeBuilder {
     history: Option<History>,
     interceptors: Vec<Arc<dyn Interceptor>>,
     command_environment: BTreeMap<String, String>,
-    /// How patiently a run waits out a failing provider
-    /// ([`with_provider_retry`](Self::with_provider_retry)).
+    /// How patiently a run waits out a failing provider, and how many attempts
+    /// it gets ([`with_provider_retry`](Self::with_provider_retry) and
+    /// [`with_provider_retry_budget`](Self::with_provider_retry_budget) set the
+    /// halves separately, as mentra and a host both spell them).
     ///
     /// A plain value rather than an `Option`, unlike [`History`] below: *unset*
-    /// and *mentra's default* are the same schedule here, so there is nothing
-    /// for a `None` to mean that `ProviderRetry::default()` does not already
-    /// say. Applying it unconditionally therefore leaves a builder nobody
-    /// touched building exactly the `RunOptions` mentra would have.
-    provider_retry: ProviderRetry,
-    /// How many attempts that schedule gets
-    /// ([`with_provider_retry_budget`](Self::with_provider_retry_budget)).
-    ///
-    /// Separate from the field above because mentra keeps the two apart —
-    /// `RunOptions::retry_budget` is a bare count beside the typed schedule —
-    /// and seeded from mentra's own default for the same reason that one is.
-    provider_retry_budget: usize,
+    /// and *mentra's default* are the same policy here, so there is nothing for
+    /// a `None` to mean that [`RetryPolicy::default`] does not already say.
+    /// Applying it unconditionally therefore leaves a builder nobody touched
+    /// building exactly the `RunOptions` mentra would have.
+    retry_policy: RetryPolicy,
     /// Which transport mentra streams the Responses wire format over
     /// ([`with_responses_transport`](Self::with_responses_transport)).
     ///
@@ -176,8 +171,8 @@ impl std::fmt::Debug for RuntimeBuilder {
                     .map(|interceptor| interceptor.name())
                     .collect::<Vec<_>>(),
             )
-            .field("provider_retry", &self.provider_retry)
-            .field("provider_retry_budget", &self.provider_retry_budget)
+            .field("provider_retry", &self.retry_policy.schedule)
+            .field("provider_retry_budget", &self.retry_policy.budget)
             .field("responses_transport", &self.responses_transport)
             .field("wire", &self.wire)
             .field("file_tools", &self.file_tools)
@@ -213,8 +208,7 @@ impl Default for RuntimeBuilder {
             model: None,
             history: None,
             interceptors: Vec::new(),
-            provider_retry: ProviderRetry::default(),
-            provider_retry_budget: mentra::runtime::RunOptions::default().retry_budget,
+            retry_policy: RetryPolicy::default(),
             responses_transport: None,
             wire: Wire::ChatCompletions,
             file_tools: FileToolProfile::Split,
@@ -629,8 +623,7 @@ impl RuntimeBuilder {
             // Unsaid is the newest the provider offers, which is what this
             // builder has always resolved for a caller that named no model.
             model: self.model.unwrap_or(ModelSelector::NewestAvailable),
-            provider_retry: self.provider_retry,
-            provider_retry_budget: self.provider_retry_budget,
+            retry_policy: self.retry_policy,
             ephemeral_history,
             transcripts,
             dispatch,

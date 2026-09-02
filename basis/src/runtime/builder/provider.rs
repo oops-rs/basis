@@ -16,7 +16,8 @@
 
 use mentra::{BuiltinProvider, ModelSelector, Provider};
 
-use super::{HostProvider, ProviderRetry, ResponsesTransport, RuntimeBuilder, Wire};
+use super::{HostProvider, ResponsesTransport, RetryPolicy, RuntimeBuilder, Wire};
+use crate::runtime::ProviderRetry;
 
 impl RuntimeBuilder {
     /// Names the provider basis resolves the credential and the models
@@ -304,7 +305,10 @@ impl RuntimeBuilder {
     #[must_use]
     pub fn with_provider_retry(self, provider_retry: ProviderRetry) -> Self {
         Self {
-            provider_retry,
+            retry_policy: RetryPolicy {
+                schedule: provider_retry,
+                ..self.retry_policy
+            },
             ..self
         }
     }
@@ -332,7 +336,10 @@ impl RuntimeBuilder {
     #[must_use]
     pub fn with_provider_retry_budget(self, budget: usize) -> Self {
         Self {
-            provider_retry_budget: budget,
+            retry_policy: RetryPolicy {
+                budget,
+                ..self.retry_policy
+            },
             ..self
         }
     }

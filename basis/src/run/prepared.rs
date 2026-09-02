@@ -9,11 +9,7 @@
 
 use std::sync::{Arc, Mutex, PoisonError};
 
-use mentra::{
-    Session,
-    agent::AgentEvent,
-    runtime::{ProviderRetry, RunOptions},
-};
+use mentra::{Session, agent::AgentEvent, runtime::RunOptions};
 use tokio::sync::oneshot;
 
 use self::{
@@ -32,6 +28,7 @@ use crate::{
     approval::Approver,
     context::WorkspaceContext,
     event::{ContextFile, EVENT_SCHEMA_VERSION, Event, RunOutcome, SkillSummary, TemplateSummary},
+    runtime::RetryPolicy,
     runtime::Role,
     templates::Template,
     workspace::Workspace,
@@ -76,17 +73,14 @@ pub struct PreparedRun {
     /// that minted it.
     ///
     /// A per-run field for a runtime-scoped knob because that is the shape
-    /// mentra offers: the schedule rides on `RunOptions`, so a runtime's
-    /// default has to be carried to each run rather than set once upstream.
-    /// One [`TurnOptions`](crate::TurnOptions) may override it for its call.
-    /// [`Workspace`](crate::Workspace) puts it here at mint; a caller on the
-    /// [`prepare_with_session`](super::prepare_with_session) path built the
+    /// mentra offers: the policy rides on `RunOptions`, so a runtime's default
+    /// has to be carried to each run rather than set once upstream. One
+    /// [`TurnOptions`](crate::TurnOptions) may override either half for its
+    /// call. [`Workspace`](crate::Workspace) puts it here at mint; a caller on
+    /// the [`prepare_with_session`](super::prepare_with_session) path built the
     /// mentra runtime itself and gets mentra's default, which is the only
     /// honest answer when basis was never told about a provider connection.
-    provider_retry: ProviderRetry,
-    /// The retry-count fallback carried from the same runtime and for the same
-    /// reason. A turn may override it independently of the schedule.
-    retry_budget: usize,
+    retry_policy: RetryPolicy,
     /// What this run's mint knew about its system prompt; see
     /// [`estimated_context_tokens`](Self::estimated_context_tokens).
     ///
@@ -121,8 +115,7 @@ impl PreparedRun {
             run,
             bounds: TurnOptions::default(),
             workspace: None,
-            provider_retry: ProviderRetry::default(),
-            retry_budget: RunOptions::default().retry_budget,
+            retry_policy: RetryPolicy::default(),
             context_snapshot: ContextSnapshot::default(),
         }
     }
@@ -157,31 +150,27 @@ impl PreparedRun {
         }
     }
 
-    /// Carries the minting runtime's provider retry fallbacks onto this run.
+    /// Carries the minting runtime's provider retry fallback onto this run.
     ///
     /// Set by [`Workspace`](crate::Workspace) at mint, at the one place both
     /// `prepare` and `resume` go through. Per-turn overrides compose on top in
     /// [`run_options`](Self::run_options).
-    pub(crate) fn with_provider_retry(
-        self,
-        (provider_retry, retry_budget): (ProviderRetry, usize),
-    ) -> Self {
+    pub(crate) fn with_retry_policy(self, retry_policy: RetryPolicy) -> Self {
         Self {
-            provider_retry,
-            retry_budget,
+            retry_policy,
             ..self
         }
     }
 
     /// The mentra options one turn runs on: what the caller asked for, filled
-    /// in from this run's bounds by the caller, with the runtime's retry
-    /// schedule and count as fallbacks.
+    /// in from this run's bounds by the caller, with the runtime's retry policy
+    /// as the fallback.
     ///
     /// The one place basis composes a [`RunOptions`], so the untyped and typed
     /// turns below cannot drift about what a turn carries — and so a test can
     /// read the same value a turn is about to be driven on.
     pub(crate) fn run_options(&self, options: TurnOptions) -> RunOptions {
-        options.into_run_options(self.provider_retry, self.retry_budget)
+        options.into_run_options(self.retry_policy)
     }
 
     /// Sets what every turn on this run may spend.

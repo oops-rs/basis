@@ -13,6 +13,7 @@ use std::thread;
 use mentra::{Provider, provider_core::AuthScheme};
 
 use super::*;
+use crate::runtime::ProviderRetry;
 use crate::tools::SPAWN;
 use crate::{provider, runtime::credential::Credential};
 // `provider_settlement` is private to `builder.rs`, visible here for the same
@@ -729,7 +730,13 @@ fn a_retry_schedule_and_its_budget_reach_the_runtime_together() {
         .build()
         .expect("builds offline");
 
-    assert_eq!(runtime.provider_retry(), (patient(), 9));
+    assert_eq!(
+        runtime.retry_policy(),
+        RetryPolicy {
+            schedule: patient(),
+            budget: 9
+        }
+    );
 }
 
 #[test]
@@ -741,8 +748,11 @@ fn an_untouched_builder_retries_exactly_as_mentra_would() {
     let mentra_default = mentra::runtime::RunOptions::default();
 
     assert_eq!(
-        runtime.provider_retry(),
-        (mentra_default.provider_retry, mentra_default.retry_budget),
+        runtime.retry_policy(),
+        RetryPolicy {
+            schedule: mentra_default.provider_retry,
+            budget: mentra_default.retry_budget,
+        },
         "an unset builder must reproduce mentra's own schedule and count"
     );
 }
@@ -758,8 +768,8 @@ fn the_last_word_about_retrying_is_the_one_that_counts() {
         .with_provider_retry(ProviderRetry::default())
         .with_provider_retry_budget(2);
 
-    assert_eq!(builder.provider_retry, ProviderRetry::default());
-    assert_eq!(builder.provider_retry_budget, 2);
+    assert_eq!(builder.retry_policy.schedule, ProviderRetry::default());
+    assert_eq!(builder.retry_policy.budget, 2);
 }
 
 #[test]
