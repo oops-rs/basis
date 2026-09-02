@@ -147,8 +147,8 @@ impl<T> EventFanIn<T> {
     /// Mints a sink that labels everything it carries with `tag`.
     ///
     /// Sinks are `Send`, so this is the handle that goes to the run —
-    /// [`PreparedRun::execute`](crate::PreparedRun::execute) and its
-    /// neighbours take one by value.
+    /// [`PreparedRun::execute_with_approver`](crate::PreparedRun::execute_with_approver)
+    /// and its neighbours take one by value.
     pub fn sink(&self, tag: T) -> TaggedSink<T> {
         TaggedSink {
             tag,

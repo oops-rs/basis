@@ -311,7 +311,8 @@ pub use crate::error::RunError;
 ///
 /// The session is dropped when this returns, and so is the workspace opened to
 /// hold it. For a conversation, open the [`Workspace`] yourself and keep the
-/// run it mints — [`send`](PreparedRun::send) is what makes it one; for many
+/// run it mints — [`send_with_options`](PreparedRun::send_with_options) is what
+/// makes it one; for many
 /// conversations, keep the workspace. Anything beyond a path and a prompt —
 /// a model, an endpoint, a bound — is the same shape one call earlier:
 /// `Workspace::builder(path)` and a [`RunSpec`].

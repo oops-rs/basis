@@ -181,7 +181,7 @@ impl Default for HooksConfig {
     fn default() -> Self {
         Self {
             workspace_file: PathBuf::from(DEFAULT_WORKSPACE_HOOKS_FILE),
-            global_dir: crate::context::ContextConfig::default().global_dir,
+            global_dir: crate::context::default_global_dir(),
             supplied: Vec::new(),
         }
     }

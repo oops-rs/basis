@@ -278,7 +278,7 @@ impl Default for McpConfig {
     fn default() -> Self {
         Self {
             workspace_file: PathBuf::from(DEFAULT_WORKSPACE_MCP_FILE),
-            global_dir: crate::context::ContextConfig::default().global_dir,
+            global_dir: crate::context::default_global_dir(),
             supplied: Vec::new(),
         }
     }

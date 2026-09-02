@@ -71,13 +71,7 @@ use mentra::{BuiltinProvider, ModelSelector};
 use serde::Deserialize;
 use thiserror::Error;
 
-use crate::{
-    context::{ContextConfig, ContextScope},
-    event::ContextFile,
-    expand::expand,
-    provider,
-    run::Effort,
-};
+use crate::{context::ContextScope, event::ContextFile, expand::expand, provider, run::Effort};
 
 /// Where basis looks inside a workspace, relative to its root.
 pub const DEFAULT_WORKSPACE_CONFIG_FILE: &str = ".basis/config.json";
@@ -149,7 +143,8 @@ impl Config {
     /// reason. A repository that pinned a model and then misspelled the key
     /// should not run a different model in silence.
     ///
-    /// `global_dir` is the directory [`ContextConfig::global_dir`] resolves —
+    /// `global_dir` is the directory
+    /// [`ContextConfig::global_dir`](crate::ContextConfig::global_dir) resolves —
     /// `$BASIS_CONFIG_DIR`, else `$XDG_CONFIG_HOME/basis`, else
     /// `$HOME/.config/basis`. Passed in rather than resolved here so one
     /// process cannot read two different global directories.
@@ -160,7 +155,7 @@ impl Config {
     /// [`discover`](Self::discover) against the process's environment and the
     /// default global directory.
     pub fn discover_default(workspace: &Path) -> Result<Self, ConfigError> {
-        Self::discover(workspace, ContextConfig::default().global_dir.as_deref())
+        Self::discover(workspace, crate::context::default_global_dir().as_deref())
     }
 
     /// The same, against an explicit environment, so `${VAR}` expansion is

@@ -70,7 +70,7 @@ impl Default for TemplatesConfig {
     fn default() -> Self {
         Self {
             workspace_subdir: PathBuf::from(DEFAULT_WORKSPACE_TEMPLATES_DIR),
-            global_dir: crate::context::ContextConfig::default().global_dir,
+            global_dir: crate::context::default_global_dir(),
         }
     }
 }

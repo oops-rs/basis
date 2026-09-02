@@ -183,6 +183,25 @@ impl HookDispatch {
         &self.interceptors
     }
 
+    /// A runner holding this dispatcher's host interceptors and nothing else,
+    /// for a call in a directory no workspace claims.
+    ///
+    /// `None` when the host registered no interceptors: there is nobody to ask,
+    /// and building an empty runner to be told so would be the same answer at
+    /// the price of a `HookRunner`. Both miss paths — before a call and after
+    /// it — take exactly this runner, from here, so they cannot come to differ
+    /// about which participants speak for an unclaimed directory.
+    fn interceptors_only(&self, working_directory: &Path) -> Option<HookRunner> {
+        if self.interceptors.is_empty() {
+            return None;
+        }
+
+        Some(self.interceptors.iter().cloned().fold(
+            HookRunner::new(working_directory, Vec::new()),
+            |runner, interceptor| runner.with_interceptor(interceptor),
+        ))
+    }
+
     pub(crate) fn register(
         self: &Arc<Self>,
         entry: WorkspaceGuardEntry,
@@ -285,15 +304,11 @@ impl PreExecutionHook for HookDispatch {
         context: &PreExecutionContext,
     ) -> Result<HookDecision, RuntimeError> {
         let Some((runner, shell, root, shared)) = self.entry_for(&context.working_directory) else {
-            if self.interceptors.is_empty() {
-                return Ok(HookDecision::Allow);
-            }
             // No workspace claims this directory, so there are no workspace
             // hooks to consult — the host's own guards still speak.
-            let runner = self.interceptors.iter().cloned().fold(
-                HookRunner::new(&context.working_directory, Vec::new()),
-                |runner, interceptor| runner.with_interceptor(interceptor),
-            );
+            let Some(runner) = self.interceptors_only(&context.working_directory) else {
+                return Ok(HookDecision::Allow);
+            };
             return runner.pre_tool_execution(context).await;
         };
 
@@ -354,13 +369,9 @@ impl PostExecutionHook for HookDispatch {
         context: &PostExecutionContext,
     ) -> Result<ResultDecision, RuntimeError> {
         let Some((runner, ..)) = self.entry_for(&context.working_directory) else {
-            if self.interceptors.is_empty() {
+            let Some(runner) = self.interceptors_only(&context.working_directory) else {
                 return Ok(ResultDecision::Keep);
-            }
-            let runner = self.interceptors.iter().cloned().fold(
-                HookRunner::new(&context.working_directory, Vec::new()),
-                |runner, interceptor| runner.with_interceptor(interceptor),
-            );
+            };
             return runner.post_tool_execution(context).await;
         };
 

@@ -111,7 +111,7 @@ impl Default for SkillsConfig {
         Self {
             workspace_subdir: Some(PathBuf::from(DEFAULT_WORKSPACE_SKILLS_DIR)),
             shared_workspace_dir: true,
-            global_dir: crate::context::ContextConfig::default().global_dir,
+            global_dir: crate::context::default_global_dir(),
             shared_home_dir: true,
         }
     }

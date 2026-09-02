@@ -204,8 +204,8 @@ impl Workspace {
     /// The spec's prompt may be empty. Once a session outlives a turn, a
     /// conversation with nothing said yet is a real state — it is what ACP's
     /// `session/new` opens — so the emptiness check belongs where a prompt is
-    /// actually sent, which is [`PreparedRun::execute`] and
-    /// [`PreparedRun::send`]. (The free [`run`](crate::run()) keeps
+    /// actually sent, which is [`PreparedRun::execute_with_approver`] and
+    /// [`PreparedRun::send_with_options`]. (The free [`run`](crate::run()) keeps
     /// its own up-front check, because a one-shot caller that passed nothing
     /// wants to hear about it before a session exists.)
     pub fn prepare(&self, spec: impl Into<RunSpec>) -> Result<PreparedRun, RunError> {

@@ -204,9 +204,9 @@ impl PreparedRun {
     ///
     /// Same relationship to [`output`](Self::output) as
     /// [`send_with_options`](Self::send_with_options) has to
-    /// [`send`](Self::send): a typed turn is cancellable and boundable like any
-    /// other, and a fan-out that gives each of its runs a deadline should not
-    /// have to give up types to get one.
+    /// [`send_parts`](Self::send_parts): a typed turn is cancellable and
+    /// boundable like any other, and a fan-out that gives each of its runs a
+    /// deadline should not have to give up types to get one.
     pub async fn output_with_options<T: DeserializeOwned, S: EventSink, A: Approver>(
         &mut self,
         prompt: impl Into<String>,
