@@ -41,11 +41,15 @@ use std::collections::HashMap;
 use std::path::{Path, PathBuf};
 use std::sync::{Arc, Mutex};
 
+// `skill_root_key` is the identity mentra's own registry matches a skills root
+// by, so the holder count below is keyed exactly the way upstream keys it —
+// where basis used to carry a copy of the rule that could drift out of step.
 use mentra::{
     ModelSelector, RuntimePolicy, Session,
     agent::AgentConfig,
     runtime::{SessionOptions, SessionResumeOptions},
     session::PermissionRuleScope,
+    skill_root_key,
     tool::{AudienceToolRegistration, ToolAudience, ToolNameCollision},
 };
 
@@ -321,18 +325,6 @@ impl SessionScope {
     pub(crate) fn audience(&self) -> ToolAudience {
         ToolAudience::new(self.identifier.clone())
     }
-}
-
-/// The identity a skills root is counted under.
-///
-/// mentra matches a root by its canonical path where the filesystem can
-/// resolve one and by the exact path it was registered with otherwise
-/// (`runtime/skill/registry.rs`'s `root_key`), so the holder count has to be
-/// keyed the same way: two workspaces reaching the user's global root through
-/// different spellings are one root upstream and must be one entry here, or
-/// the first of them to drop would free what the second is still serving.
-fn skill_root_key(path: &Path) -> PathBuf {
-    std::fs::canonicalize(path).unwrap_or_else(|_| path.to_path_buf())
 }
 
 /// A declared tool name registered on this runtime by a workspace still open.
@@ -777,7 +769,10 @@ impl Runtime {
     /// roots. Unregistering on the first drop would take the user's own skills
     /// away from every repository still open, so the count lives here — the
     /// same ledger, and for the same reason, as
-    /// [`claim_declared_tool`](Self::claim_declared_tool).
+    /// [`claim_declared_tool`](Self::claim_declared_tool). Upstream says as
+    /// much itself: [`mentra::skill_root_key`]'s own doc tells a host counting
+    /// several holders of one root to capture that key and hold it, which is
+    /// what the map below is.
     ///
     /// The registration happens under the holder lock, so nothing can observe
     /// a root counted but absent, or free one between the register and the
