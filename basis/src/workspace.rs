@@ -96,6 +96,31 @@ use crate::{
 /// `Send` and `Sync`: the runtime is shared through `Arc`s and creates
 /// sessions from `&self`, so concurrent minting from one workspace needs no
 /// lock of basis's own.
+///
+/// # What a workspace's guards do and do not cover
+///
+/// Everything a repository says about itself — its `.basis/hooks.json` chain,
+/// its `ShellAccess` posture, its `.git` carve-out, its memory roots — reaches
+/// a run through the session this workspace mints: the policy is stated per
+/// session, and the hook chain is registered for this workspace's own
+/// [`ToolAudience`](mentra::tool::ToolAudience), which every session minted or
+/// resumed here carries and every delegated child inherits.
+///
+/// **A session this workspace did not mint carries none of it, even in this
+/// directory.** An agent a host creates for itself through
+/// [`mentra_runtime`](Self::mentra_runtime), or drives through
+/// [`run::prepare_with_session`](crate::run::prepare_with_session), has no tool
+/// audience at all, and mentra never consults an audience-scoped registration
+/// for such an agent — so a `.basis/hooks.json` deny hook guarding this
+/// repository is *not* asked about that agent's calls, and its policy is the
+/// runtime's rather than this workspace's, however its base directory is
+/// spelled. basis routed on the call's working directory before mentra could
+/// scope a registration, and that is what changed. The two things a host can
+/// do about it: register a
+/// [`RuntimeBuilder::with_interceptor`](crate::RuntimeBuilder::with_interceptor)
+/// guard, which is global and therefore judges every session on the runtime;
+/// or mint through [`prepare`](Self::prepare) and [`resume`](Self::resume),
+/// which is what puts a run inside this workspace's guards in the first place.
 pub struct Workspace {
     /// The directory this workspace is scoped to: absolute and canonical,
     /// resolved exactly once by [`WorkspaceBuilder::open`] and never derived

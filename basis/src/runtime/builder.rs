@@ -42,6 +42,7 @@ pub(in crate::runtime) use provider_settlement::HostProvider;
 use super::{
     FileToolProfile, ResponsesTransport, RetryPolicy, Runtime, ToolResultPolicy, Wire,
     executor::{CommandTargets, TargetedExecutor},
+    interception::HostInterceptors,
 };
 
 /// The persist tag a shared runtime's own conversations carry until mentra can
@@ -308,6 +309,20 @@ impl RuntimeBuilder {
     /// precedence: a hook still sees, and can still refuse, whatever an
     /// interceptor rewrote.
     ///
+    /// **Runtime scope is meant literally, and includes sessions basis did not
+    /// mint.** These are registered globally on mentra's chain when
+    /// [`build`](Self::build) runs, so a session a host creates for itself
+    /// through [`Runtime::mentra_runtime`](crate::Runtime::mentra_runtime), or
+    /// drives through
+    /// [`run::prepare_with_session`](crate::run::prepare_with_session), is
+    /// judged by them exactly as a workspace's own runs are — such a session
+    /// has no tool audience, and only a global registration reaches it. That is
+    /// the one thing a workspace's own hooks cannot say: `.basis/hooks.json`
+    /// belongs to a repository, is registered for that workspace's audience,
+    /// and is not consulted for an agent that belongs to no workspace even when
+    /// its base directory is inside one. A host that wants a guard over *every*
+    /// call on the runtime writes it here.
+    ///
     /// Fail-closed carries over unchanged: an interceptor that returns an error
     /// or panics denies the call, and says which one it was.
     pub fn with_interceptor(self, interceptor: impl Interceptor + 'static) -> Self {
@@ -545,11 +560,15 @@ impl RuntimeBuilder {
                 self.delegation_depth,
                 self.child_policy,
             ));
-        // No hooks are installed here. mentra 0.26 takes them live
-        // (`Runtime::register_pre_hook_for_audience`), so each workspace
+        // No *workspace* hooks are installed here. mentra 0.26 takes them live
+        // (`Runtime::register_execution_hook_for_audience`), so each workspace
         // registers its own folded runner at open and holds the guard — which
         // is what a runtime built before any workspace exists could not do
-        // when hooks were a build-time list.
+        // when hooks were a build-time list. The host's own interceptors are
+        // registered below, globally, once the runtime exists: they are the
+        // runtime's and not any workspace's, and an audience-scoped
+        // registration would silently skip every session a host creates for
+        // itself.
 
         // Installed whenever either half has something to say. With both
         // empty, mentra keeps its own local executor and basis adds no layer
@@ -609,6 +628,17 @@ impl RuntimeBuilder {
             mentra.try_register_tool(tool)?;
         }
 
+        // Global, and registered before any workspace can open on this
+        // runtime — which settles both halves of what `with_interceptor`
+        // promises. *Every* session, because a global batch matches an agent
+        // in any audience and an agent in none, so a host driving
+        // `mentra_runtime().create_session` is judged by its own guards like
+        // everything else. And *first*, because mentra composes one chain out
+        // of the batches whose audience matches, in registration order, and a
+        // workspace's own batch is necessarily later than this one.
+        let host_interceptors = HostInterceptors::new(self.interceptors)
+            .map(|participant| mentra.register_execution_hook(participant));
+
         Ok(Runtime {
             mentra,
             command_environment,
@@ -620,7 +650,7 @@ impl RuntimeBuilder {
             ephemeral_history,
             transcripts,
             policy_shaping,
-            interceptors: self.interceptors,
+            host_interceptors,
             #[cfg(feature = "mcp")]
             mcp_claims: Mutex::new(HashMap::new()),
             declared_claims: Mutex::new(HashMap::new()),

@@ -35,6 +35,7 @@
 pub(crate) mod builder;
 mod credential;
 mod executor;
+mod interception;
 mod tool_results;
 
 use std::collections::HashMap;
@@ -268,19 +269,24 @@ pub struct Runtime {
     /// so a workspace's own policy gets the same shaping the runtime's did.
     /// See [`session_policy`](Self::session_policy).
     policy_shaping: PolicyShaping,
-    /// The host's own interception participants, fixed at build like
-    /// everything else on the runtime (ADR-0018).
+    /// mentra's hold on the host's own interception participants, registered
+    /// globally when this runtime was built (ADR-0018) and kept for as long as
+    /// it lives.
     ///
-    /// Kept here rather than registered on mentra's seams, because they are
-    /// not a chain of their own: each workspace folds them ahead of its own
-    /// hooks into one [`HookRunner`](crate::hooks::HookRunner), and that one
-    /// runner is what gets registered. Splitting them into a second
-    /// registration would run the same participants in a second chain, where
-    /// a rewrite's attribution could not survive into a later refusal — the
-    /// "every hand that touched the call is named" property `hooks::chain`
-    /// states, and the "same chain" `RuntimeBuilder::with_interceptor`
-    /// promises.
-    interceptors: Vec<Arc<dyn crate::hooks::Interceptor>>,
+    /// Global rather than per workspace, because host scope *is* runtime
+    /// scope: an audience-scoped registration would run a host's guards for
+    /// the sessions basis mints and silently skip the ones a host creates for
+    /// itself through [`mentra_runtime`](Self::mentra_runtime), which is the
+    /// case `with_interceptor`'s doc promises. Still one chain with each
+    /// workspace's own: mentra composes one participant snapshot per call out
+    /// of every matching batch, so this batch and a workspace's join in
+    /// registration order — this one first, since a runtime is built before
+    /// any workspace on it opens — and a rewrite's attribution accumulates
+    /// across both. [`crate::runtime::interception`] carries the argument.
+    ///
+    /// `None` when the host registered no interceptors.
+    #[allow(dead_code, reason = "held for its Drop")]
+    host_interceptors: Option<mentra::runtime::ExecutionHookRegistration>,
     /// Which workspace owns each MCP server name on this runtime's single tool
     /// registry — bridged tools are namespaced by server, so two workspaces
     /// configuring one name must be told apart here.
@@ -611,12 +617,6 @@ impl Runtime {
             .iter()
             .map(|(name, value)| (name.clone(), value.clone()))
             .collect()
-    }
-
-    /// The host interceptors this runtime was built with, for the workspace
-    /// open that folds them ahead of its own hooks.
-    pub(crate) fn interceptors(&self) -> &[Arc<dyn crate::hooks::Interceptor>] {
-        &self.interceptors
     }
 
     /// Claims an MCP server name on this runtime's tool registry for the

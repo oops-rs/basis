@@ -746,12 +746,14 @@ impl WorkspaceBuilder {
         // data, rendered into a prompt by whatever surface offers them.
         let (templates_dirs, templates) = load_templates(&path, &self.templates)?;
 
-        // One runner for both interception bindings, host interceptors folded
-        // first: the chain order host interceptors → supplied hooks → global
-        // hooks → workspace hooks is basis's own, decided inside one
-        // `HookRunner`, and registering that one runner is what keeps it so —
-        // a second registration for the interceptors would be a second chain,
-        // and mentra keeps only the last rewrite's reason across two of them.
+        // This workspace's own hooks, and only its own: the host's
+        // interceptors are the *runtime's* and were registered globally when it
+        // was built (`runtime::interception`). The documented order — host
+        // interceptors → supplied hooks → global hooks → workspace hooks — is
+        // unchanged and is now mentra's to compose: it walks one chain per call
+        // built from every batch whose audience matches, in registration order,
+        // and this runtime's global batch necessarily precedes any workspace
+        // batch registered on it.
         //
         // Registered for this workspace's audience, not globally, because a
         // runner does not filter: it answers for every call it is handed. The
@@ -759,11 +761,10 @@ impl WorkspaceBuilder {
         // workspace's runs" true, and it is a better answer than the working
         // directory basis used to route on — two agents can share a directory
         // and belong to different repositories, and a call from a delegated
-        // child carries its parent's audience wherever it runs.
-        let runner = runtime.interceptors().iter().cloned().fold(
-            HookRunner::new(&path, loaded_hooks),
-            |runner, interceptor| runner.with_interceptor(interceptor),
-        );
+        // child carries its parent's audience wherever it runs. What it cannot
+        // express is the reverse: a session with *no* audience whose base
+        // directory is inside this workspace. See `Workspace`'s own docs.
+        let runner = HookRunner::new(&path, loaded_hooks);
         // One registration, both seams: mentra 0.26 takes a chain as
         // `ExecutionHookParticipant`s and answers with a single guard whose
         // participant snapshot is retained across a whole call. Two guards, one

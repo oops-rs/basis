@@ -666,6 +666,160 @@ async fn a_second_open_of_one_root_cannot_weaken_the_first_ones_hooks() {
     );
 }
 
+/// The host's own guards reach a session basis never minted.
+///
+/// `RuntimeBuilder::with_interceptor` promises runtime scope, and a runtime is
+/// larger than any workspace on it: a host that builds a basis `Runtime` and
+/// then drives a session of its own through `mentra_runtime` — which is what
+/// `run::prepare_with_session` does — has an agent with no tool audience, so
+/// every audience-scoped registration skips it. Only a global one reaches it,
+/// which is where the interceptors are.
+#[cfg(unix)]
+#[tokio::test]
+async fn a_host_interceptor_judges_a_session_no_workspace_minted() {
+    use basis::{HookOutcome, HookRequest, Interceptor, InterceptorError};
+    use mentra::{
+        ContentBlock, ModelInfo,
+        agent::{AgentConfig, WorkspaceConfig},
+        provider::ProviderId,
+    };
+    use std::sync::atomic::AtomicUsize;
+
+    struct Refusing(Arc<AtomicUsize>);
+
+    #[async_trait::async_trait]
+    impl Interceptor for Refusing {
+        fn name(&self) -> &str {
+            "host-guard"
+        }
+
+        async fn intercept(&self, _call: &HookRequest) -> Result<HookOutcome, InterceptorError> {
+            self.0.fetch_add(1, Ordering::SeqCst);
+            Ok(HookOutcome::Deny("the host says no".to_string()))
+        }
+    }
+
+    let endpoint = ScriptedEndpoint::start(vec![Reply::write_file("unguarded.txt"), Reply::Text]);
+    let consulted = Arc::new(AtomicUsize::new(0));
+    let runtime = Arc::new(
+        Runtime::builder()
+            .with_base_url(&endpoint.base_url)
+            .with_api_key("test-key")
+            .with_ephemeral_history()
+            .with_interceptor(Refusing(Arc::clone(&consulted)))
+            .build()
+            .expect("builds"),
+    );
+
+    // A session the host makes for itself: no workspace, no audience, based in
+    // a directory a workspace could perfectly well have been opened on.
+    let dir = workspace_dir();
+    let mut session = runtime
+        .mentra_runtime()
+        .create_session_with_config(
+            "the host's own",
+            ModelInfo::new("test-model", ProviderId::new(runtime.provider())),
+            AgentConfig {
+                workspace: WorkspaceConfig {
+                    base_dir: dir.path().to_path_buf(),
+                    ..Default::default()
+                },
+                ..Default::default()
+            },
+        )
+        .expect("the host's session is created");
+    let _ = session.append_turn(vec![ContentBlock::text("go")]).await;
+
+    assert_eq!(
+        consulted.load(Ordering::SeqCst),
+        1,
+        "the host's interceptor must be asked about a call it did not mint"
+    );
+    assert!(
+        !dir.path().join("unguarded.txt").exists(),
+        "and its refusal must hold: the write never happened"
+    );
+}
+
+/// And they still speak *first*, from a batch of their own.
+///
+/// The ordering `RuntimeBuilder::with_interceptor` documents — host
+/// interceptors before any subprocess hook, so the host's own guard can stop a
+/// program a repository chose from being spawned at all — used to be basis's
+/// because one `HookRunner` held both. It is now mentra's: one chain per call
+/// composed from the global batch this runtime registered at build and the
+/// audience batch the workspace registered at open, in that order. Pinned end
+/// to end because nothing inside basis can assert it any more.
+#[cfg(unix)]
+#[tokio::test]
+async fn the_hosts_guard_still_speaks_before_a_workspaces_own() {
+    use basis::{HookOutcome, HookRequest, Interceptor, InterceptorError};
+    use std::os::unix::fs::PermissionsExt;
+
+    struct Refusing;
+
+    #[async_trait::async_trait]
+    impl Interceptor for Refusing {
+        fn name(&self) -> &str {
+            "host-guard"
+        }
+
+        async fn intercept(&self, _call: &HookRequest) -> Result<HookOutcome, InterceptorError> {
+            Ok(HookOutcome::Deny("my program, my rules".to_string()))
+        }
+    }
+
+    let endpoint = ScriptedEndpoint::start(vec![Reply::write_file("made.txt"), Reply::Text]);
+    let runtime = Arc::new(
+        Runtime::builder()
+            .with_base_url(&endpoint.base_url)
+            .with_api_key("test-key")
+            .with_ephemeral_history()
+            .with_interceptor(Refusing)
+            .build()
+            .expect("builds"),
+    );
+
+    let dir = workspace_dir();
+    let marker = dir.path().join("hook-ran");
+    let script = dir.path().join("allow.sh");
+    std::fs::write(
+        &script,
+        format!(
+            "#!/bin/sh\ntouch '{}'\necho '{{\"decision\":\"allow\"}}'\n",
+            marker.display()
+        ),
+    )
+    .expect("script");
+    std::fs::set_permissions(&script, std::fs::Permissions::from_mode(0o755)).expect("chmod");
+    std::fs::create_dir_all(dir.path().join(".basis")).expect("dir");
+    std::fs::write(
+        dir.path().join(".basis/hooks.json"),
+        format!(
+            r#"{{"schema": 1, "hooks": [{{"name": "repo", "command": ["{}"]}}]}}"#,
+            script.display()
+        ),
+    )
+    .expect("hooks file");
+
+    let workspace = pinned(dir.path(), runtime).open().await.expect("opens");
+    workspace
+        .prepare("write a file")
+        .expect("mints")
+        .execute_with_approver(CollectingSink::default(), AllowAll)
+        .await
+        .expect("a denial is an answer, not a run failure");
+
+    assert!(
+        !marker.exists(),
+        "the host's refusal must land before a program the repository chose is spawned"
+    );
+    assert!(
+        !dir.path().join("made.txt").exists(),
+        "and the call it refused must not have run"
+    );
+}
+
 // ---------------------------------------------------------------------------
 // The endpoint
 // ---------------------------------------------------------------------------

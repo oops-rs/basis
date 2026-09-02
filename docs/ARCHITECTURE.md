@@ -804,14 +804,36 @@ runtime behave like several. All three are gone, and what replaced each is upstr
 **The hook dispatcher is gone.** `basis/src/runtime/dispatch.rs` in full: one hook registered
 on each of Mentra's two seams, a registry of workspaces keyed by canonicalized root, and the
 routing that looked up a call's working directory to find whose `HookRunner` should answer.
-A workspace now registers its own folded runner when it opens and holds the registration until
-it drops. Two effects a host can see. A call from an agent that belongs to no basis workspace
-— one a host created for itself through `Runtime::mentra_runtime` — no longer runs the host's
-`Interceptor`s; the dispatcher's miss path was the only thing that did, and interception is a
-promise about basis's own sessions. And two live opens of one directory used to be refused
-when their hooks differed (`RunError::WorkspaceGuardConflict`, gone with the check that raised
-it) and now both register: every guard runs, the first refusal still wins, so nothing is
-weakened, but a repository's hook programs are spawned once per live open.
+A workspace now registers its own runner when it opens — one `ExecutionHookParticipant`, one
+guard for both seams — and holds the registration until it drops. The host's `Interceptor`s do
+not travel in it: they are the *runtime's* (host scope is runtime scope, ADR-0018), so they are
+registered once, globally, when the runtime is built. Mentra composes one chain per call out of
+every batch whose audience matches — the global one matches every session, a workspace's
+matches its own — in registration order, so the documented order (host interceptors → supplied
+hooks → global hooks → workspace hooks) is unchanged, a host's refusal still short-circuits
+before a repository's hook program is spawned, and a rewrite's attribution accumulates across
+both batches instead of being lost between two chains. A call from an agent that belongs to no
+basis workspace — one a host created for itself through `Runtime::mentra_runtime`, or drives
+through `run::prepare_with_session` — therefore still runs the host's interceptors, as
+`with_interceptor` has always promised.
+
+**The effect a host can see is the other half of that, and it is a real loss.** Such an agent
+has no tool audience, and mentra never consults an audience-scoped registration for one — so a
+session a host creates directly, with a base directory *inside* a live workspace, does not run
+that workspace's `.basis/hooks.json` chain, deny hooks included. The deleted dispatcher keyed on
+the call's working directory and caught exactly that case; an audience is derived from the
+workspace that minted the session, and a session no workspace minted has none to derive from.
+There is no honest guard to put in its place at this layer: basis would have to re-introduce
+directory-keyed routing, which is the machinery this removal exists to delete, and which was
+wrong in its own way (two agents can share a directory and belong to different repositories).
+What a host that wants a guard over *every* call on its runtime writes instead is an
+`Interceptor`, which is global by construction. A host that wants a repository's own hooks to
+apply drives that repository through `Workspace::prepare`/`resume` rather than minting its own
+session.
+
+Two live opens of one directory used to be refused when their hooks differed
+(`RunError::WorkspaceGuardConflict`) and now both register: every guard runs and the first
+refusal still wins, but a repository's hook programs are spawned once per live open.
 
 **Basis's own guards are gone, and the rules are not.** The `.git/hooks` and `.git/config`
 carve-out and the `ShellAccess::Denied` posture used to be enforced twice — baked into policy
