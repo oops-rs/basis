@@ -193,12 +193,13 @@ impl PreparedRun {
     ///
     /// **A floor, not the real number.** On a freshly prepared workspace run,
     /// Mentra may add a task-reminder banner and a skill-description block on
-    /// top of the system prompt Basis configured. On a resumed run the floor
-    /// excludes the entire system prompt: Mentra 0.23 exposes no persisted
-    /// `AgentConfig` reader, and substituting the current workspace default
-    /// would be wrong when the original run carried a profile override. The
-    /// effective prompt is private, so nothing outside Mentra can close either
-    /// gap. Useful beside
+    /// top of the system prompt Basis configured — additions that are
+    /// Mentra-private, so that gap is not basis's to close. On a resumed run
+    /// the floor also excludes the entire system prompt: basis does not yet
+    /// read the persisted `AgentConfig` back (mentra 0.26's
+    /// `Session::config` exposes it — mentra#41, an adoption still pending
+    /// here), and substituting the current workspace default would be wrong
+    /// when the original run carried a profile override. Useful beside
     /// [`context_window`](Self::context_window) for a host deciding whether to
     /// compact or warn before mentra's own trigger would.
     pub fn estimated_context_tokens(&self) -> usize {

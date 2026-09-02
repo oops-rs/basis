@@ -941,9 +941,10 @@ match run.compact_with_options(instructions, &mut sink, options).await {
 Two bounds apply and only two: the cancellation token and the deadline. A graceful
 `stop()` does not, because it means "end at the next round boundary with everything
 committed" and abandoning a summary half-way is not that; the tool and token budgets do
-not, because there is no reported usage for them to measure. `compact` is this call with
-`TurnOptions::default()`, so it inherits whatever `with_bounds` configured on the run — a
-run given a deadline now has one on its manual passes too, where before it ran to
+not, because a standalone pass is not a run and has no run counter for them to enforce
+against — even though its usage is reported on the stream (below). `compact` is this call
+with `TurnOptions::default()`, so it inherits whatever `with_bounds` configured on the run
+— a run given a deadline now has one on its manual passes too, where before it ran to
 completion whatever the run was allowed.
 
 Reaching a bound leaves the transcript exactly as it was and reports as the bound rather
@@ -953,12 +954,20 @@ than as a refused summarizer: `RunError::Runtime` carrying `RuntimeError::Cancel
 for the same reason a failure's is — a client that asked for a conversation to shrink is
 owed a reason it did not — and the two are told apart by what the line says.
 
-Two limits worth knowing, both upstream's and neither worked around here. A summarizing
-call is billed by the provider but does not appear in `RunReport::usage` and is not
-charged against a token budget or a `BudgetPool`: mentra reports no usage for it, and
-basis tallies only what is reported. And an *automatic* pass that fails is retried and
-then dropped silently — the run carries on with an unshortened history, but nothing on
-the stream says so. The pass a host asks for itself is the one whose failure is visible.
+How a pass is accounted depends on where it happens, and both halves changed with the
+0.26 floor (see ARCHITECTURE.md's "Compaction usage: real spend, now counted"). A
+compaction *inside a run* — automatic, context-overflow recovery, the model's own
+`compact` intrinsic — reports its exact provider usage as ordinary `usage` events after
+the compaction pair, lands in `RunReport::usage` and `RunFinished`, and is charged
+against the run's token budget and any `BudgetPool`: size budgets to pay for roughly one
+summarizing request per compaction, or runs end earlier than provisioned. A *standalone*
+`compact` pass reports the same `usage` lines on the borrowed sink but has no report and
+no run counter, so the stream is its whole account and no budget is drawn. A provider
+that reports no usage emits no line either way; basis estimates nothing. One limit is
+still upstream's and not worked around here: an *automatic* pass that fails is retried
+and then dropped silently — the run carries on with an unshortened history, but nothing
+on the stream says so. The pass a host asks for itself is the one whose failure is
+visible.
 
 The instructions are **added** to mentra's standing continuity requirements rather than
 substituted for them, so asking for one extra thing cannot cost the file paths and command
@@ -974,8 +983,8 @@ rather than reading `Ok(None)` as consent.
 It is a model call: the summary is written by the same provider the conversation runs on,
 and it is billed and can fail like any other request. It is not a *turn*, though: no prompt
 is committed, the transcript gains no exchange, and nothing is sent afterwards. The sink is
-borrowed rather than taken, because there is no report to hand it back in — two events and
-a value are the whole of what happened.
+borrowed rather than taken, because there is no report to hand it back in — a handful of
+events (the pair, then the usage) and a value are the whole of what happened.
 
 Where the snapshots go is not a knob here: it follows the store (above).
 

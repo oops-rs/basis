@@ -139,8 +139,9 @@ impl PreparedRun {
     /// client's stream, with no second line, is worse than silence.
     ///
     /// The sink is borrowed rather than taken. Every other verb on a run hands
-    /// its sink back inside a report, and there is no report here: two events
-    /// and a value are the whole of what happened.
+    /// its sink back inside a report, and there is no report here: a handful
+    /// of events — the announcement pair, then one usage line per provider
+    /// sample — and a value are the whole of what happened.
     ///
     /// Bounded by whatever the run itself was configured with
     /// ([`bounds`](Self::bounds)) and by nothing else. For a pass a caller
@@ -291,7 +292,7 @@ fn drain<S: EventSink>(
         match events.try_recv() {
             // `from_session_event` is the same mapping a turn's forwarder
             // uses, so a compaction announced during a turn and one announced
-            // on its own are the same two lines.
+            // on its own are the same lines — the pair, then the usage.
             Ok(event) => {
                 if let Some(mapped) = Event::from_session_event(&event) {
                     announced_failure |= matches!(mapped, Event::Error { .. });

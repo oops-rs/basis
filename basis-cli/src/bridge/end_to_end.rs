@@ -94,7 +94,13 @@ impl SessionSource for MockSource {
         )
     }
 
-    /// The same pickup a second tab performs through `session/load`.
+    /// The transcript pickup a second tab's `session/load` performs — but not
+    /// the production resume whole: `Workspace::resume` goes through
+    /// `Runtime::resume_minted`, which also clears the conversation's
+    /// session-scope approval rules at attach, and this raw `resume_session`
+    /// skips that clear. Fine for what these tests pin (the bridge's
+    /// transcript and event plumbing); not a harness for the attach-time
+    /// approval contract.
     async fn resume(
         &self,
         agent_id: &str,

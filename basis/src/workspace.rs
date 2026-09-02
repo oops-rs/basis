@@ -302,10 +302,12 @@ impl Workspace {
 
         apply_effort(&mut session, effort)?;
 
-        // Mentra 0.23 exposes no resumed AgentConfig reader. The persisted
-        // agent may carry a per-run system override that differs from this
-        // workspace's current default, so substituting `self.agent.system`
-        // would turn an unknown estimate into a confidently wrong one.
+        // basis does not yet read the resumed AgentConfig back (mentra
+        // 0.26's `Session::config` exposes it — mentra#41, unadopted here).
+        // The persisted agent may carry a per-run system override that
+        // differs from this workspace's current default, so substituting
+        // `self.agent.system` would turn an unknown estimate into a
+        // confidently wrong one.
         Ok(self.minted(session, spec, model, None))
     }
 

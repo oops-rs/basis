@@ -108,8 +108,14 @@ impl SessionSource for MockSource {
         _cwd: PathBuf,
         _mcp: Vec<basis::McpServer>,
     ) -> Result<PreparedRun, RunError> {
-        // The mock persists to a real store, so this is the same resume a
-        // second process would perform — which is what `session/load` is for.
+        // The mock persists to a real store, so this replays the transcript
+        // the way a second process's `session/load` would. It is NOT the
+        // production resume whole: `Workspace::resume` goes through
+        // `Runtime::resume_minted`, which also clears the conversation's
+        // session-scope approval rules at attach — this raw
+        // `resume_session` skips that, so a protocol-level test of
+        // for-this-session answers dying at `session/load` cannot be pinned
+        // through this harness.
         let session = self.mock.runtime().resume_session(agent_id)?;
 
         Ok(prepare_with_session(
