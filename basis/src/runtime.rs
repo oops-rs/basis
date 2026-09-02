@@ -31,26 +31,51 @@
 //! # Ok(())
 //! # }
 //! ```
+//!
+//! # What is where
+//!
+//! This file is the noun: the [`Runtime`] itself, what a builder settled on it,
+//! and the readers a workspace asks. The three questions sharing one costs
+//! answers to live beside it, because each is a subject of its own and this
+//! file was carrying all four:
+//!
+//! - `scope` — what a workspace's sessions run *as*. The policy, the tool
+//!   audience and the persisted identity mentra keeps in no agent, restated on
+//!   every mint and every resume.
+//! - `claims` — who holds what on the single tool and skill registries a
+//!   shared runtime carries, and what a collision means for each.
+//! - `interception` — who judges a call: the host's global guards, and each
+//!   workspace's own chain, holder-counted per audience.
+//! - `agents` — which workspace each live agent answers for. The one question
+//!   an audience cannot answer, because two opens of one directory share one.
 
+pub(crate) mod agents;
 pub(crate) mod builder;
+mod claims;
 mod credential;
-pub(crate) mod dispatch;
 mod executor;
+mod interception;
+#[cfg(test)]
+pub(crate) mod probe;
+mod scope;
 mod tool_results;
 
 use std::collections::HashMap;
 use std::path::{Path, PathBuf};
 use std::sync::{Arc, Mutex};
 
-use mentra::{
-    ModelSelector, Session, agent::AgentConfig, runtime::SessionOptions,
-    session::PermissionRuleScope,
-};
-
-use crate::tools::declared::DeclaredToolSpec;
+use mentra::ModelSelector;
 
 pub use builder::RuntimeBuilder;
 pub use tool_results::ToolResultPolicy;
+
+use claims::DeclaredClaim;
+pub(crate) use claims::DeclaredToolOrigin;
+#[cfg(feature = "mcp")]
+use claims::McpClaim;
+use interception::HookChainClaim;
+pub(crate) use interception::HookChainHold;
+pub(crate) use scope::SessionScope;
 
 /// The types a **command target's executor** is written against.
 ///
@@ -199,7 +224,7 @@ pub enum Wire {
 
 use crate::error::RunError;
 
-use dispatch::{HookDispatch, HookRegistration, WorkspaceGuardEntry};
+use builder::execution::PolicyShaping;
 
 /// One process's substrate: mentra's runtime plus the resolution policy and
 /// host guards that were fixed when it was built.
@@ -258,53 +283,50 @@ pub struct Runtime {
     /// beside it in that config are the workspace's
     /// ([`Compaction`](crate::Compaction)), the directory is this.
     transcripts: PathBuf,
-    /// The one pre-hook basis registered, and the registry workspaces join.
-    dispatch: Arc<HookDispatch>,
+    /// What this runtime's builder said about every policy it hands out, kept
+    /// so a workspace's own policy gets the same shaping the runtime's did.
+    /// See [`session_policy`](Self::session_policy).
+    policy_shaping: PolicyShaping,
+    /// mentra's hold on the host's own interception participants, registered
+    /// globally when this runtime was built (ADR-0018) and kept for as long as
+    /// it lives.
+    ///
+    /// Global rather than per workspace, because host scope *is* runtime
+    /// scope: an audience-scoped registration would run a host's guards for
+    /// the sessions basis mints and silently skip the ones a host creates for
+    /// itself through [`mentra_runtime`](Self::mentra_runtime), which is the
+    /// case `with_interceptor`'s doc promises. Still one chain with each
+    /// workspace's own: mentra composes one participant snapshot per call out
+    /// of every matching batch, so this batch and a workspace's join in
+    /// registration order — this one first, since a runtime is built before
+    /// any workspace on it opens — and a rewrite's attribution accumulates
+    /// across both. [`crate::runtime::interception`] carries the argument.
+    ///
+    /// `None` when the host registered no interceptors.
+    #[allow(dead_code, reason = "held for its Drop")]
+    host_interceptors: Option<mentra::runtime::ExecutionHookRegistration>,
     /// Which workspace owns each MCP server name on this runtime's single tool
     /// registry — bridged tools are namespaced by server, so two workspaces
     /// configuring one name must be told apart here.
     #[cfg(feature = "mcp")]
-    mcp_claims: Mutex<HashMap<String, PathBuf>>,
+    mcp_claims: Mutex<HashMap<String, McpClaim>>,
     /// Which workspace owns each declared tool name on the same single
     /// registry. See [`Runtime::claim_declared_tool`] for why this exists.
     declared_claims: Mutex<HashMap<String, DeclaredClaim>>,
     /// How many open workspaces hold each skills root on this runtime's single
     /// skill registry. See [`Runtime::register_skill_roots`].
     skill_root_holders: Mutex<HashMap<PathBuf, usize>>,
-}
-
-/// The identity a skills root is counted under.
-///
-/// mentra matches a root by its canonical path where the filesystem can
-/// resolve one and by the exact path it was registered with otherwise
-/// (`runtime/skill/registry.rs`'s `root_key`), so the holder count has to be
-/// keyed the same way: two workspaces reaching the user's global root through
-/// different spellings are one root upstream and must be one entry here, or
-/// the first of them to drop would free what the second is still serving.
-fn skill_root_key(path: &Path) -> PathBuf {
-    std::fs::canonicalize(path).unwrap_or_else(|_| path.to_path_buf())
-}
-
-/// A declared tool name registered on this runtime by a workspace still open.
-///
-/// `holders` rather than a bare owner because one root may be open twice — a
-/// host that opens the same repository for two concurrent callers — and the
-/// first of those to drop must not free a name the second is still serving.
-/// The entry goes when the count reaches zero, together with the tool itself.
-#[derive(Debug)]
-struct DeclaredClaim {
-    root: PathBuf,
-    holders: usize,
-    supplied_holders: usize,
-    /// The complete resolved declaration the live registration executes.
-    /// Supplied same-root holders compare against it before joining.
-    spec: DeclaredToolSpec,
-}
-
-#[derive(Debug, Clone, Copy)]
-pub(crate) enum DeclaredToolOrigin {
-    File,
-    Supplied,
+    /// One live interception chain per tool audience, holder-counted. See
+    /// [`Runtime::register_hook_chain`].
+    hook_chains: Mutex<HashMap<String, HookChainClaim>>,
+    /// Which workspace each live agent minted, resumed or delegated to here
+    /// answers for. See [`agents`].
+    ///
+    /// An `Arc` because two things outside this type read it and neither may
+    /// hold the runtime: the `spawn` tool mentra's registry owns — an
+    /// `Arc<Runtime>` there would be a cycle through the registry and the
+    /// runtime would never drop — and each workspace's interception chain.
+    agents: Arc<agents::AgentRegistry>,
 }
 
 /// Hand-written because mentra's runtime is not `Debug`. No credential lives
@@ -365,6 +387,13 @@ impl Runtime {
         self.ephemeral_history
     }
 
+    /// Which workspace each live agent here answers for, for the two readers
+    /// that cannot ask an audience: a workspace's own interception chain, and
+    /// `spawn`. See [`agents`].
+    pub(crate) fn agents(&self) -> &Arc<agents::AgentRegistry> {
+        &self.agents
+    }
+
     /// Resolves the model a workspace will use: its own override when it has
     /// one, this runtime's policy otherwise. The result is the workspace's
     /// fact; the policy is the runtime's (ADR-0018).
@@ -380,73 +409,6 @@ impl Runtime {
             .await?)
     }
 
-    /// The one place a workspace's sessions are created.
-    ///
-    /// `persist_identifier` is the workspace tag the session's rows carry
-    /// ([`store::runtime_identifier`](crate::store::runtime_identifier)), and
-    /// it is applied per session rather than per runtime: on a shared runtime
-    /// every workspace's sessions would otherwise be tagged with the one
-    /// identifier fixed at build, and a per-workspace listing could not tell
-    /// them apart. The private path is unaffected — its runtime-wide
-    /// identifier already is this value, so the override is a no-op there.
-    pub(crate) fn mint(
-        &self,
-        name: impl Into<String>,
-        model: ModelInfo,
-        config: AgentConfig,
-        persist_identifier: &str,
-    ) -> Result<Session, RunError> {
-        let options = SessionOptions {
-            config,
-            policy: None,
-            tool_audience: None,
-            project_id: None,
-            runtime_identifier: Some(Arc::from(persist_identifier)),
-        };
-
-        Ok(self
-            .mentra
-            .create_session_with_options(name, model, options)?)
-    }
-
-    /// The one place a workspace's sessions are resumed; see
-    /// [`mint`](Self::mint) for why it is a place at all.
-    pub(crate) fn resume_minted(&self, agent_id: &str) -> Result<Session, RunError> {
-        let session = self.mentra.resume_session(agent_id)?;
-
-        // basis's documented duration for a "…for this session" answer is the
-        // live session: it survives further runs in the process that holds it
-        // and dies at the next attach. mentra 0.26 disagrees — its session
-        // rule namespace is the stable agent id, persisted in the runtime
-        // store and replayed across every resume — so the attach is where
-        // basis restores its own contract: clear the session scope before the
-        // resumed session answers anything from it. A fresh mint has a fresh
-        // agent id and nothing to clear; project- and global-scope rules are
-        // durable by definition and stay.
-        //
-        // The `?` fails the whole resume, and the two ways the clear can fail
-        // deserve stating apart, because the refusal earns its keep on only
-        // one of them. A store that cannot be *read* (corrupt, truncated,
-        // newer schema) would fail closed at point of use anyway — mentra
-        // propagates the same read error from every rule lookup before
-        // applying anything — so refusing the resume there adds determinism,
-        // not protection. A store that reads but cannot be *rewritten*
-        // (permissions, disk full) is the case the refusal genuinely guards:
-        // point-of-use lookups succeed, so the stale session grants WOULD
-        // apply, silently. The cost — one bad rules.json fails every resume
-        // on the store until repaired — is documented on the error variant
-        // and on `Workspace::resume`.
-        session
-            .permission_handle()
-            .clear_scope(PermissionRuleScope::Session)
-            .map_err(|error| RunError::SessionRulesNotCleared {
-                agent_id: agent_id.to_owned(),
-                error,
-            })?;
-
-        Ok(session)
-    }
-
     /// The fixed command environment, as the pairs a spawned program is given.
     ///
     /// A `Vec` rather than the map it is stored as, because that is the shape
@@ -458,285 +420,6 @@ impl Runtime {
             .map(|(name, value)| (name.clone(), value.clone()))
             .collect()
     }
-
-    /// The host interceptors this runtime was built with, for the workspace
-    /// open that folds them ahead of its own hooks.
-    pub(crate) fn interceptors(&self) -> &[Arc<dyn crate::hooks::Interceptor>] {
-        self.dispatch.interceptors()
-    }
-
-    /// Joins a workspace to this runtime's hook dispatcher. The registration
-    /// deregisters on drop, which is how a dropped workspace stops being
-    /// consulted.
-    pub(crate) fn register_workspace(
-        &self,
-        entry: WorkspaceGuardEntry,
-    ) -> Result<HookRegistration, RunError> {
-        self.dispatch.register(entry)
-    }
-
-    /// Claims an MCP server name on this runtime's tool registry for the
-    /// workspace at `root`, returning the name that took effect.
-    ///
-    /// Bridged tools are namespaced `mcp__<server>__<tool>` on one registry,
-    /// so a name two workspaces both configure would collide: the second
-    /// claimant gets a deterministic suffix derived from its root instead, and
-    /// reports it through [`Workspace::mcp_servers`](crate::Workspace::mcp_servers).
-    #[cfg(feature = "mcp")]
-    pub(crate) fn claim_mcp_server(&self, name: &str, root: &Path) -> String {
-        let mut claims = self.mcp_claims.lock().expect("mcp claim map poisoned");
-
-        if !claims.contains_key(name) {
-            claims.insert(name.to_string(), root.to_path_buf());
-            return name.to_string();
-        }
-
-        // `-` cannot appear in the `__` separators mentra parses on, so a
-        // suffixed name still round-trips through `parse_mcp_tool_name`.
-        let mut effective = format!("{name}-{}", root_suffix(root));
-        let mut attempt = 2_u32;
-        while claims.contains_key(&effective) {
-            effective = format!("{name}-{}-{attempt}", root_suffix(root));
-            attempt += 1;
-        }
-
-        claims.insert(effective.clone(), root.to_path_buf());
-        effective
-    }
-
-    /// Releases a claim [`claim_mcp_server`](Self::claim_mcp_server) granted.
-    /// Only the owning root can release, so one workspace's drop cannot free a
-    /// name another still serves.
-    #[cfg(feature = "mcp")]
-    pub(crate) fn release_mcp_claim(&self, name: &str, root: &Path) {
-        let mut claims = self.mcp_claims.lock().expect("mcp claim map poisoned");
-        if claims.get(name).is_some_and(|owner| owner == root) {
-            claims.remove(name);
-        }
-    }
-
-    /// Claims a declared tool's name for the workspace at `root`, or says who
-    /// holds it.
-    ///
-    /// Refused rather than suffixed, which is where this parts company with
-    /// [`claim_mcp_server`](Self::claim_mcp_server). A bridged tool's name is
-    /// already synthetic (`mcp__<server>__<tool>`), so renaming one on a
-    /// collision costs nothing; a declared tool's name is what the model calls,
-    /// what an operator writes in a remembered rule, and what a
-    /// `.basis/hooks.json` entry matches on, so a silently renamed one is a
-    /// guard that silently stops matching.
-    ///
-    /// The check that matters is the first-time one: mentra's registry is a map
-    /// and `register_tool` *replaces*, so without this a workspace file could
-    /// declare a tool called `spawn` and take over the name basis's own tool —
-    /// and every rule an operator ever wrote about it — answers to.
-    ///
-    /// `Ok(true)` means this caller is the name's *first* live holder and owes
-    /// the runtime a registration; `Ok(false)` means a sibling open of the same
-    /// root already registered it, and the tool on the runtime is the one that
-    /// open is serving. One name is one program, so the second open of a
-    /// repository joins the registration rather than replacing it under the
-    /// first open's running agents.
-    pub(crate) fn claim_declared_tool(
-        &self,
-        root: &Path,
-        spec: &DeclaredToolSpec,
-        origin: DeclaredToolOrigin,
-    ) -> Result<bool, String> {
-        let name = &spec.name;
-        let mut claims = self
-            .declared_claims
-            .lock()
-            .expect("declared tool claim map poisoned");
-
-        match claims.get_mut(name) {
-            Some(claim) if claim.root != root => Err(format!(
-                "the workspace at {} is open on this runtime and declares a tool by that name",
-                claim.root.display()
-            )),
-            Some(claim)
-                if claim.spec != *spec
-                    && (claim.supplied_holders > 0
-                        || matches!(origin, DeclaredToolOrigin::Supplied)) =>
-            {
-                Err(
-                    "another live open of this workspace supplied different configuration under \
-                     that name"
-                        .to_string(),
-                )
-            }
-            Some(claim) => {
-                claim.holders += 1;
-                if matches!(origin, DeclaredToolOrigin::Supplied) {
-                    claim.supplied_holders += 1;
-                }
-                Ok(false)
-            }
-            None if self.registers_tool(name) => {
-                Err("this runtime already offers a tool by that name".to_string())
-            }
-            None => {
-                claims.insert(
-                    name.to_string(),
-                    DeclaredClaim {
-                        root: root.to_path_buf(),
-                        holders: 1,
-                        supplied_holders: usize::from(matches!(
-                            origin,
-                            DeclaredToolOrigin::Supplied
-                        )),
-                        spec: spec.clone(),
-                    },
-                );
-                Ok(true)
-            }
-        }
-    }
-
-    /// Releases a claim [`claim_declared_tool`](Self::claim_declared_tool)
-    /// granted, taking the tool off the runtime when the last holder goes.
-    ///
-    /// Only the owning root can release, so one workspace's drop cannot free a
-    /// name another still serves. The unregister is what makes the claim map
-    /// and mentra's registry say the same thing: a released name is free
-    /// because nothing answers to it any more, rather than free-with-a-stale-
-    /// entry-behind-it. Before mentra's unregister was public a claim had to be
-    /// remembered with `holders: 0` forever, and every dropped workspace left a
-    /// tool on a registry a host keeps for its whole process.
-    pub(crate) fn release_declared_tool(
-        &self,
-        name: &str,
-        root: &Path,
-        origin: DeclaredToolOrigin,
-    ) {
-        let mut claims = self
-            .declared_claims
-            .lock()
-            .expect("declared tool claim map poisoned");
-
-        let Some(claim) = claims.get_mut(name) else {
-            return;
-        };
-        if claim.root != root {
-            return;
-        }
-
-        claim.holders = claim.holders.saturating_sub(1);
-        if matches!(origin, DeclaredToolOrigin::Supplied) {
-            claim.supplied_holders = claim.supplied_holders.saturating_sub(1);
-        }
-        if claim.holders == 0 {
-            claims.remove(name);
-            // Under the claim lock, so no other claimant can see the name free
-            // while the tool is still registered.
-            self.mentra.unregister_tool(name);
-        }
-    }
-
-    /// Registers a workspace's skills roots and counts it as a holder of each.
-    ///
-    /// mentra 0.24 made registration all-or-nothing and gave a host
-    /// `unregister_skills_dirs` to take a root back, which is what lets a
-    /// workspace stop leaving its skills on a runtime that outlives it. What
-    /// mentra cannot know is *how many* workspaces asked for a root: a root is
-    /// one entry upstream however often it is registered, and on a shared
-    /// runtime (ADR-0018) every workspace registers the same two user-scoped
-    /// roots. Unregistering on the first drop would take the user's own skills
-    /// away from every repository still open, so the count lives here — the
-    /// same ledger, and for the same reason, as
-    /// [`claim_declared_tool`](Self::claim_declared_tool).
-    ///
-    /// The registration happens under the holder lock, so nothing can observe
-    /// a root counted but absent, or free one between the register and the
-    /// count. An `Err` leaves both sides untouched: mentra commits nothing,
-    /// and no holder is recorded.
-    pub(crate) fn register_skill_roots(
-        &self,
-        roots: &[PathBuf],
-    ) -> Result<(), mentra::SkillLoadError> {
-        let mut holders = self
-            .skill_root_holders
-            .lock()
-            .expect("skill root holder map poisoned");
-
-        self.mentra.register_skills_dirs(roots)?;
-        for root in roots {
-            *holders.entry(skill_root_key(root)).or_insert(0) += 1;
-        }
-        Ok(())
-    }
-
-    /// Releases the holds [`register_skill_roots`](Self::register_skill_roots)
-    /// recorded, taking a root off the runtime when its last holder goes.
-    ///
-    /// A root nobody else holds leaves mentra's registry entirely: the skills
-    /// it contributed stop being listed to the model, `load_skill` refuses
-    /// them, and a name this root had shadowed resolves to the weaker root
-    /// again. Dropping the last root of all also withdraws `load_skill`, which
-    /// the next workspace to open restores.
-    ///
-    /// Under the holder lock, like the declared-tool release above, so no
-    /// other opener can see a root free while its skills are still registered.
-    pub(crate) fn release_skill_roots(&self, roots: &[PathBuf]) {
-        let mut holders = self
-            .skill_root_holders
-            .lock()
-            .expect("skill root holder map poisoned");
-
-        for root in roots {
-            let key = skill_root_key(root);
-            let Some(count) = holders.get_mut(&key) else {
-                continue;
-            };
-            *count = count.saturating_sub(1);
-            if *count == 0 {
-                holders.remove(&key);
-                self.mentra.unregister_skills_dir(&key);
-            }
-        }
-    }
-
-    /// Every declared tool name on this runtime that belongs to some *other*
-    /// workspace still open.
-    ///
-    /// What a mint hides, for the reason it hides another workspace's `mcp__*`
-    /// tools: the registry is the runtime's and single, but a tool declared by
-    /// a repository is that repository's, and offering it to a run in a
-    /// different one would run a program that workspace never asked for.
-    pub(crate) fn foreign_declared_tools(&self, root: &Path) -> Vec<String> {
-        self.declared_claims
-            .lock()
-            .expect("declared tool claim map poisoned")
-            .iter()
-            .filter(|(_, claim)| claim.root != root)
-            .map(|(name, _)| name.clone())
-            .collect()
-    }
-
-    /// Whether mentra's registry already answers to `name` — a builtin,
-    /// basis's own `spawn`, or a bridged MCP tool.
-    fn registers_tool(&self, name: &str) -> bool {
-        self.mentra
-            .tools()
-            .iter()
-            .any(|descriptor| descriptor.provider.name == name)
-    }
-}
-
-/// Eight hex characters of FNV-1a over the workspace root: stable across
-/// processes, so the same collision resolves to the same name every run.
-#[cfg(feature = "mcp")]
-fn root_suffix(root: &Path) -> String {
-    const OFFSET: u64 = 0xcbf2_9ce4_8422_2325;
-    const PRIME: u64 = 0x0000_0100_0000_01b3;
-
-    let mut hash = OFFSET;
-    for byte in root.as_os_str().as_encoded_bytes() {
-        hash ^= u64::from(*byte);
-        hash = hash.wrapping_mul(PRIME);
-    }
-
-    format!("{:08x}", (hash >> 32) as u32 ^ hash as u32)
 }
 
 #[cfg(test)]
@@ -751,43 +434,5 @@ mod tests {
 
         assert_send_sync::<Runtime>();
         assert_send_sync::<RuntimeBuilder>();
-    }
-
-    #[cfg(feature = "mcp")]
-    #[test]
-    fn a_taken_server_name_is_suffixed_and_a_released_one_is_free_again() {
-        use std::path::Path;
-
-        let runtime = Runtime::builder()
-            .with_base_url("http://127.0.0.1:1/v1")
-            .with_api_key("test-key")
-            .with_ephemeral_history()
-            .build()
-            .expect("builds");
-
-        let first = runtime.claim_mcp_server("fs", Path::new("/repo/one"));
-        let second = runtime.claim_mcp_server("fs", Path::new("/repo/two"));
-        let again = runtime.claim_mcp_server("fs", Path::new("/repo/two"));
-
-        assert_eq!(first, "fs", "the first claimant keeps the plain name");
-        assert_ne!(second, "fs", "the second must not collide in the registry");
-        assert!(second.starts_with("fs-"), "{second}");
-        assert_ne!(again, second, "every live claim is its own namespace");
-
-        // Only the owner can free a name.
-        runtime.release_mcp_claim("fs", Path::new("/repo/two"));
-        runtime.release_mcp_claim(&second, Path::new("/repo/one"));
-        assert_eq!(
-            runtime.claim_mcp_server("fs", Path::new("/repo/three")),
-            format!("fs-{}", root_suffix(Path::new("/repo/three"))),
-            "a name someone else holds stays held"
-        );
-
-        runtime.release_mcp_claim("fs", Path::new("/repo/one"));
-        assert_eq!(
-            runtime.claim_mcp_server("fs", Path::new("/repo/four")),
-            "fs",
-            "a released name is claimable plain again"
-        );
     }
 }

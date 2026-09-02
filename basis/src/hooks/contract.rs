@@ -154,10 +154,11 @@ impl HookRequest {
     ///
     /// `workspace` is the root basis scoped the run to, and it is also the
     /// call's working directory: mentra's `PreExecutionContext` carries one
-    /// (`working_directory`, the agent's `base_dir`), and it is the key the
-    /// dispatcher (`runtime::dispatch`) resolves to this workspace's runner in
-    /// the first place — so the two are one path by construction, and a
-    /// second field would only invite them to disagree.
+    /// (`working_directory`, the agent's `base_dir`), which is the same path
+    /// the open handed this runner — so the two are one by construction, and a
+    /// second field would only invite them to disagree. The runner's own copy
+    /// is what is reported, so a hook is told where its *workspace* is even
+    /// when a call arrives from an agent scoped somewhere else.
     pub fn from_call(event: HookEvent, workspace: &Path, call: &HookCall) -> Self {
         Self {
             hook_schema: HOOK_SCHEMA_VERSION,

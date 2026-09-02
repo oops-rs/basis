@@ -9,10 +9,10 @@
 //!    registry — a `mcp__*` bridged one, or one its `.basis/tools.json`
 //!    declared — never reaches another workspace's roster, asserted on the
 //!    wire, in the `tools` array of the request the model actually receives.
-//! 3. **The dispatcher's key holds.** The `working_directory` mentra hands a
-//!    pre-hook is the agent's `base_dir` — the assumption basis's per-workspace
-//!    hook routing dispatches on — and a workspace's own hooks therefore still
-//!    guard its runs on a shared runtime.
+//! 3. **A workspace's hooks are its own.** Each open registers its folded
+//!    chain live, for its own tool audience, so a workspace's hooks guard its
+//!    runs on a shared runtime, a sibling is untouched by them, and a second
+//!    open of one root joins the first rather than replacing it.
 //!
 //! The endpoint is `tests/workspace.rs`'s, grown two abilities: it can script
 //! a tool call, and it keeps every request body so a test can read the roster
@@ -30,7 +30,7 @@ use std::{
 };
 
 use basis::{
-    AllowAll, CollectingSink, ContextConfig, HookSpec, MemoryConfig, RunError, RunOutcome, Runtime,
+    AllowAll, CollectingSink, ContextConfig, HookSpec, MemoryConfig, RunOutcome, Runtime,
     Workspace, WorkspaceBuilder, hooks::HooksConfig, skills::SkillsConfig, store,
     templates::TemplatesConfig, tools::declared::ToolsConfig,
 };
@@ -191,11 +191,59 @@ async fn a_shared_runtimes_conversations_list_under_their_own_workspaces() {
     );
 }
 
+#[tokio::test]
+async fn a_conversation_cannot_be_resumed_under_a_workspace_it_did_not_run_in() {
+    // The pairing a shared runtime makes possible and an agent id cannot
+    // refuse: a host that picks the workspace from a client's `cwd` and the
+    // conversation from an id it was handed can bring the two together wrongly
+    // — ACP's `session/load` is exactly that shape. A resume states this
+    // workspace's policy and tool audience onto whatever it picks up, so under
+    // the wrong one a conversation would run with another repository's `.git`
+    // carve-out and shell posture while its agent stayed based in its own
+    // directory, which mentra's file tools always allow writes under.
+    let endpoint = ScriptedEndpoint::start(Vec::new());
+    let runtime = shared_runtime(&endpoint);
+    let (dir_a, dir_b) = (workspace_dir(), workspace_dir());
+    let a = pinned(dir_a.path(), Arc::clone(&runtime))
+        .open()
+        .await
+        .expect("opens");
+    let b = pinned(dir_b.path(), runtime).open().await.expect("opens");
+
+    let run = a.prepare("go").expect("mints");
+    let agent_id = run.agent_id().to_string();
+    // The live run holds the agent's lease; a resume is what a later attach
+    // does, and here it needs the first to have let go.
+    drop(run);
+
+    let refused = b
+        .resume(&agent_id, "again")
+        .expect_err("a sibling workspace must not adopt this conversation");
+    assert!(
+        matches!(refused, basis::RunError::WorkspaceMismatch { .. }),
+        "the refusal has to be the typed one a host can react to: {refused}"
+    );
+    let message = refused.to_string();
+    assert!(
+        message.contains(&dir_a.path().to_string_lossy().to_string())
+            && message.contains(&dir_b.path().to_string_lossy().to_string()),
+        "and it has to name both directories: {message}"
+    );
+
+    assert_eq!(
+        a.resume(&agent_id, "again")
+            .expect("its own workspace still resumes it")
+            .agent_id(),
+        agent_id,
+        "the check must refuse the mismatch and nothing else"
+    );
+}
+
 #[cfg(feature = "mcp")]
 mod roster {
     use super::*;
 
-    use mentra::tool::{RuntimeToolDescriptor, ToolExecutor, ToolResult};
+    use mentra::tool::{RuntimeToolDescriptor, ToolAudience, ToolExecutor, ToolResult};
 
     /// Stands in for a bridged tool another workspace's MCP server left on the
     /// shared registry — same namespaced name, none of the process baggage.
@@ -226,8 +274,19 @@ mod roster {
         let endpoint = ScriptedEndpoint::start(Vec::new());
         let runtime = shared_runtime(&endpoint);
         // What a sibling workspace's open would have done: bridge its server's
-        // tools onto the runtime's single registry.
-        runtime.mentra_runtime().register_tool(ForeignBridged);
+        // tools onto the runtime's single registry, for that workspace's own
+        // audience. Global registration would be a different claim — a runtime
+        // tool the host meant every workspace to have — and is deliberately
+        // still visible to everyone.
+        let _foreign = runtime
+            .mentra_runtime()
+            .try_register_tool_for_audience(
+                ToolAudience::new(basis::store::runtime_identifier(std::path::Path::new(
+                    "/repo/sibling",
+                ))),
+                ForeignBridged,
+            )
+            .expect("the sibling's audience is free");
 
         let dir = workspace_dir();
         let workspace = pinned(dir.path(), runtime).open().await.expect("opens");
@@ -259,6 +318,370 @@ mod roster {
         assert!(
             !offered.contains(&"mcp__foreign__peek"),
             "a tool this workspace never configured must not be offered to its model: {offered:?}"
+        );
+    }
+
+    /// The tool a client's authenticated server put on the shared registry,
+    /// remembering whether it was ever actually entered.
+    struct ProdDbQuery(Arc<std::sync::atomic::AtomicBool>);
+
+    impl mentra::tool::ToolDefinition for ProdDbQuery {
+        fn descriptor(&self) -> RuntimeToolDescriptor {
+            RuntimeToolDescriptor::builder(PROD_DB_QUERY)
+                .description("query the production database")
+                .input_schema(json!({"type": "object"}))
+                .build()
+        }
+    }
+
+    #[async_trait::async_trait]
+    impl ToolExecutor for ProdDbQuery {
+        async fn execute(
+            &self,
+            _ctx: mentra::tool::ParallelToolContext,
+            _input: serde_json::Value,
+        ) -> ToolResult {
+            self.0.store(true, std::sync::atomic::Ordering::SeqCst);
+            Ok("every row".to_string())
+        }
+    }
+
+    const PROD_DB_QUERY: &str = "mcp__prod-db__query";
+
+    /// A server named but never reachable, which is all this test needs of
+    /// one: claiming the name is what makes the workspace *own* it.
+    fn unreachable_server(name: &str) -> basis::McpServer {
+        basis::McpServer::Stdio(basis::McpServerConfig {
+            name: name.to_string(),
+            command: "basis-test-no-such-mcp-server".to_string(),
+            args: Vec::new(),
+            env: std::collections::HashMap::new(),
+            cwd: None,
+        })
+    }
+
+    fn no_mcp() -> basis::McpConfig {
+        basis::McpConfig {
+            workspace_file: PathBuf::new(),
+            global_dir: None,
+            supplied: Vec::new(),
+        }
+    }
+
+    /// **The case mentra's audience ladder cannot express.** Two live opens of
+    /// *one directory* resolve in one tool audience by construction, which is
+    /// the shape `basis-host` produces on purpose — one workspace per set of
+    /// client-supplied `mcpServers`. So the open that supplied none sees the
+    /// other's bridged tool as `Visible`, and nothing mentra scopes can tell
+    /// the two apart.
+    ///
+    /// Both directions are asserted, because a rule that simply refused every
+    /// `mcp__*` name would pass the first: the open that *did* configure
+    /// `prod-db` must still be served by it.
+    ///
+    /// Three details are deliberate. The owner opens **first**, so the
+    /// interception chain both share is the one *it* registered and the
+    /// stranger's own guard is the one that was dropped on joining — the guard
+    /// has to answer for an open that did not install it. Its server is
+    /// **unreachable**, which reproduces the window between `claim_mcp_server`
+    /// and `record_bridged_tools`: the claim carries no tool names, so the
+    /// mint-time hide has nothing to hide and the stranger really is offered
+    /// the name (asserted below). And the bridged tool is registered **by
+    /// hand, for the audience the two opens share** — the same call
+    /// `mcp::connections::bridge` makes — because an integration test has no
+    /// MCP server to run.
+    #[tokio::test]
+    async fn a_bridged_tool_is_refused_to_the_same_root_open_that_did_not_configure_it() {
+        let endpoint = ScriptedEndpoint::start(vec![
+            Reply::ToolCall {
+                name: PROD_DB_QUERY.to_string(),
+                arguments: "{}".to_string(),
+            },
+            Reply::Text,
+            Reply::ToolCall {
+                name: PROD_DB_QUERY.to_string(),
+                arguments: "{}".to_string(),
+            },
+            Reply::Text,
+        ]);
+        let runtime = shared_runtime(&endpoint);
+        let dir = workspace_dir();
+
+        let owner = pinned(dir.path(), Arc::clone(&runtime))
+            .with_mcp(no_mcp().with_supplied(vec![unreachable_server("prod-db")]))
+            .open()
+            .await
+            .expect("opens even though the server does not come up");
+        assert_eq!(
+            owner.mcp_servers(),
+            ["prod-db"],
+            "a configured server is the workspace's whether or not it connected"
+        );
+        let stranger = pinned(dir.path(), runtime)
+            .with_mcp(no_mcp())
+            .open()
+            .await
+            .expect("the same directory opens again");
+        assert!(stranger.mcp_servers().is_empty());
+
+        let ran = Arc::new(std::sync::atomic::AtomicBool::new(false));
+        let _bridged = stranger
+            .mentra_runtime()
+            .try_register_tool_for_audience(
+                ToolAudience::new(store::runtime_identifier(dir.path())),
+                ProdDbQuery(Arc::clone(&ran)),
+            )
+            .expect("nothing answers to that name yet");
+
+        stranger
+            .prepare("go")
+            .expect("mints")
+            .execute_with_approver(CollectingSink::default(), AllowAll)
+            .await
+            .expect("the run completes — a denial is an answer, not an error");
+        assert!(
+            !ran.load(std::sync::atomic::Ordering::SeqCst),
+            "the open that configured no servers must not reach the other's"
+        );
+
+        let requests = endpoint.requests();
+        let offered: Vec<String> = tool_names(&requests[0]);
+        assert!(
+            offered.iter().any(|name| name == PROD_DB_QUERY),
+            "the mint-time hide cannot cover a claim with no recorded tools — which is \
+             exactly why the refusal above has to come from somewhere else: {offered:?}"
+        );
+        assert!(
+            requests[1].contains("which this workspace did not configure"),
+            "the model is told why, in the guard's own words: {}",
+            requests[1]
+        );
+
+        owner
+            .prepare("go")
+            .expect("mints")
+            .execute_with_approver(CollectingSink::default(), AllowAll)
+            .await
+            .expect("completes");
+        assert!(
+            ran.load(std::sync::atomic::Ordering::SeqCst),
+            "the open that did configure `prod-db` must still be served by it"
+        );
+    }
+
+    /// The `tools` array of a recorded request: the roster the model was
+    /// actually offered, read off the wire.
+    fn tool_names(request: &str) -> Vec<String> {
+        let body: serde_json::Value =
+            serde_json::from_str(request.split("\r\n\r\n").nth(1).expect("a body"))
+                .expect("a JSON request");
+
+        body["tools"]
+            .as_array()
+            .expect("a tools array")
+            .iter()
+            .filter_map(|tool| tool["function"]["name"].as_str().map(str::to_string))
+            .collect()
+    }
+
+    /// **A workspace's departure must not disarm a live sibling's guard.**
+    ///
+    /// The guard reads a ledger keyed by *agent id*, which is the one identity
+    /// that tells two opens of one directory apart — and an agent id can move
+    /// between them. `Workspace::resume` checks the persisted conversation's
+    /// *root*, and same-root opens have the identical root identifier by
+    /// construction, so either may pick up an id the other minted. Whoever
+    /// recorded last owns the row, which is right on its own terms: mentra
+    /// refuses a second live session on one agent id, so the open holding the
+    /// lease and the open that wrote last are the same one.
+    ///
+    /// What that leaves is the *release*. `b` here resumes `a`'s conversation,
+    /// hands it back, and then goes away still holding the id in its recorded
+    /// set — and a release that did not check who owns the row now would take
+    /// away the answer `a`'s running turn depends on. An absent row is not a
+    /// safe default: this guard reads it as "an agent basis did not make" and
+    /// allows the call, and `spawn` reads it as "no inherited hides", so one
+    /// unconditional removal reopens both holes for as long as the victim's
+    /// session lives.
+    ///
+    /// Three opens of one directory, because the case needs a server nobody in
+    /// the exchange configured: `owner` is the other client, `a` is the victim,
+    /// `b` is the sibling that borrows and leaves. The server is unreachable
+    /// and its tool is registered by hand for the audience all three share —
+    /// the same call `mcp::connections::bridge` makes — so no mint-time hide
+    /// can cover the name and the refusal has to come from the guard, which is
+    /// asserted on the wire below.
+    #[tokio::test]
+    async fn a_departing_sibling_does_not_release_the_agent_a_live_open_took_back() {
+        let endpoint = ScriptedEndpoint::start(vec![
+            // `a` mints the conversation and says something.
+            Reply::Text,
+            // `b` picks it up and says something.
+            Reply::Text,
+            // `a` has it back, and reaches for the other client's server.
+            Reply::ToolCall {
+                name: PROD_DB_QUERY.to_string(),
+                arguments: "{}".to_string(),
+            },
+            // …and wraps up on whatever it was told.
+            Reply::Text,
+        ]);
+        let runtime = shared_runtime(&endpoint);
+        let dir = workspace_dir();
+
+        let owner = pinned(dir.path(), Arc::clone(&runtime))
+            .with_mcp(no_mcp().with_supplied(vec![unreachable_server("prod-db")]))
+            .open()
+            .await
+            .expect("opens even though the server does not come up");
+        let a = pinned(dir.path(), Arc::clone(&runtime))
+            .with_mcp(no_mcp())
+            .open()
+            .await
+            .expect("the same directory opens again");
+        let b = pinned(dir.path(), runtime)
+            .with_mcp(no_mcp())
+            .open()
+            .await
+            .expect("and again");
+        assert!(a.mcp_servers().is_empty() && b.mcp_servers().is_empty());
+
+        let ran = Arc::new(std::sync::atomic::AtomicBool::new(false));
+        let _bridged = owner
+            .mentra_runtime()
+            .try_register_tool_for_audience(
+                ToolAudience::new(store::runtime_identifier(dir.path())),
+                ProdDbQuery(Arc::clone(&ran)),
+            )
+            .expect("nothing answers to that name yet");
+
+        // `a` mints the conversation, runs a turn, and lets the lease go — the
+        // shape a host produces between two client prompts.
+        let mut minted = a.prepare("go").expect("mints");
+        let agent_id = minted.agent_id().to_string();
+        minted
+            .execute_with_approver(CollectingSink::default(), AllowAll)
+            .await
+            .expect("completes");
+        drop(minted);
+
+        // `b` borrows it. This is the cross-contamination write: the ledger row
+        // for `agent_id` is `b`'s from here.
+        let mut borrowed = b
+            .resume(&agent_id, "again")
+            .expect("a same-root sibling may resume it — the root check passes by construction");
+        borrowed
+            .execute_with_approver(CollectingSink::default(), AllowAll)
+            .await
+            .expect("completes");
+        drop(borrowed);
+
+        // `a` takes it back and holds the run live. Only `a` can be running it
+        // now, because mentra hands out one session per agent id.
+        let mut live = a
+            .resume(&agent_id, "again")
+            .expect("its own workspace resumes it");
+
+        // And `b` goes, releasing what it recorded — which no longer includes
+        // this conversation.
+        drop(b);
+
+        live.execute_with_approver(CollectingSink::default(), AllowAll)
+            .await
+            .expect("the run completes — a denial is an answer, not an error");
+
+        assert!(
+            !ran.load(std::sync::atomic::Ordering::SeqCst),
+            "a sibling's drop must not hand this open the other client's authenticated server"
+        );
+
+        let requests = endpoint.requests();
+        let offered = tool_names(&requests[2]);
+        assert!(
+            offered.iter().any(|name| name == PROD_DB_QUERY),
+            "the resumed roster still carries the name, which is why the refusal has to \
+             come from the guard rather than from a hide: {offered:?}"
+        );
+        assert!(
+            requests[3].contains("which this workspace did not configure"),
+            "and the model is told why, in the guard's own words: {}",
+            requests[3]
+        );
+
+        drop(owner);
+    }
+
+    /// A host tool registered under an `mcp__`-shaped name.
+    struct HostShapedLikeBridged;
+
+    impl mentra::tool::ToolDefinition for HostShapedLikeBridged {
+        fn descriptor(&self) -> RuntimeToolDescriptor {
+            RuntimeToolDescriptor::builder("mcp__internal__admin")
+                .description("the host's own tool, under a bridged name")
+                .input_schema(json!({"type": "object"}))
+                .build()
+        }
+    }
+
+    #[async_trait::async_trait]
+    impl ToolExecutor for HostShapedLikeBridged {
+        async fn execute(
+            &self,
+            _ctx: mentra::tool::ParallelToolContext,
+            _input: serde_json::Value,
+        ) -> ToolResult {
+            Ok("administered".to_string())
+        }
+    }
+
+    #[tokio::test]
+    async fn a_global_mcp_shaped_host_tool_is_not_in_the_default_roster() {
+        // Globals are visible to every audience on purpose — that is what
+        // `RuntimeBuilder::with_tool` means. An `mcp__server__tool` name is the
+        // one shape where that rule reads wrong: it says a server this
+        // workspace never configured, and no `.mcp.json` here ever named
+        // `internal`. Asserted against the *default* roster, because an exact
+        // roster that names the tool by hand is a host saying otherwise.
+        let endpoint = ScriptedEndpoint::start(Vec::new());
+        let runtime = Arc::new(
+            Runtime::builder()
+                .with_base_url(&endpoint.base_url)
+                .with_api_key("test-key")
+                .with_ephemeral_history()
+                .with_tool(HostShapedLikeBridged)
+                .build()
+                .expect("a shared runtime builds without touching the network"),
+        );
+
+        let dir = workspace_dir();
+        let workspace = pinned(dir.path(), runtime).open().await.expect("opens");
+        let report = workspace
+            .prepare("go")
+            .expect("mints")
+            .execute_with_approver(CollectingSink::default(), AllowAll)
+            .await
+            .expect("completes");
+        assert!(matches!(report.outcome, RunOutcome::Ok));
+
+        let requests = endpoint.requests();
+        let body: serde_json::Value =
+            serde_json::from_str(requests[0].split("\r\n\r\n").nth(1).expect("a body"))
+                .expect("a JSON request");
+        let offered: Vec<&str> = body["tools"]
+            .as_array()
+            .expect("a tools array")
+            .iter()
+            .filter_map(|tool| tool["function"]["name"].as_str())
+            .collect();
+
+        assert!(
+            offered.contains(&"spawn"),
+            "the roster parsed: basis's own tool must be in it: {offered:?}"
+        );
+        assert!(
+            !offered.contains(&"mcp__internal__admin"),
+            "a host global shaped like a bridged tool must not ride into a \
+             workspace's default roster: {offered:?}"
         );
     }
 }
@@ -355,84 +778,48 @@ mod declared_roster {
             "a program another repository declared must not be offered here: {bystanders:?}"
         );
     }
-}
 
-mod dispatch_key {
-    use super::*;
-
-    use mentra::{
-        ContentBlock,
-        error::RuntimeError,
-        runtime::{HookDecision, PreExecutionContext, PreExecutionHook},
-        test::{MockRuntime, MockToolCall},
-    };
-
-    struct Recording(Arc<Mutex<Vec<PathBuf>>>);
-
-    #[async_trait::async_trait]
-    impl PreExecutionHook for Recording {
-        async fn pre_tool_execution(
-            &self,
-            context: &PreExecutionContext,
-        ) -> Result<HookDecision, RuntimeError> {
-            self.0
-                .lock()
-                .expect("recorder")
-                .push(context.working_directory.clone());
-            Ok(HookDecision::Allow)
-        }
-    }
-
-    /// Pins the assumption basis's hook dispatcher is built on: what mentra
-    /// hands a pre-hook as `working_directory` is the agent's `base_dir` —
-    /// the same path basis keys its workspace registry with. If this ever moves
-    /// upstream, dispatch would miss and workspace hooks would silently stop
-    /// running; this test is the tripwire.
     #[tokio::test]
-    async fn the_working_directory_a_hook_sees_is_the_agents_base_dir() {
-        let seen = Arc::new(Mutex::new(Vec::new()));
-        let workspace = tempfile::tempdir().expect("tempdir");
+    async fn a_resumed_run_is_still_offered_its_own_workspaces_declared_tool() {
+        // A workspace's own tools are registered for its tool audience, and
+        // mentra deliberately keeps an audience out of the persisted agent — so
+        // a resume that failed to restate it would hand the model a roster
+        // missing exactly the tools the repository declared, with nothing
+        // anywhere failing to say so.
+        let endpoint = ScriptedEndpoint::start(Vec::new());
+        let runtime = shared_runtime(&endpoint);
+        let dir = workspace_dir();
+        let declared = declaring(dir.path());
 
-        let mock = MockRuntime::builder()
-            .model("test-model", "openai")
-            .with_pre_hook(Recording(Arc::clone(&seen)))
-            .tool_calls(vec![MockToolCall::new(
-                "files",
-                json!({"operations": [{"op": "list", "path": "."}]}),
-            )])
-            .text("done")
-            .build()
-            .expect("the mock runtime builds");
-        let mut session = mock
-            .runtime()
-            .create_session_with_config(
-                "test",
-                mock.model(),
-                mentra::agent::AgentConfig {
-                    workspace: mentra::agent::WorkspaceConfig {
-                        base_dir: workspace.path().to_path_buf(),
-                        ..Default::default()
-                    },
-                    ..Default::default()
-                },
-            )
-            .expect("session");
-        session
-            .append_turn(vec![ContentBlock::text("go")])
+        let workspace = pinned(dir.path(), runtime).open().await.expect("opens");
+        let mut first = workspace.prepare("go").expect("mints");
+        let agent_id = first.agent_id().to_string();
+        first
+            .execute_with_approver(CollectingSink::default(), AllowAll)
             .await
-            .expect("a scripted turn completes");
+            .expect("completes");
+        // The live run holds the agent's lease; a resume is what a later
+        // process does, and here it needs the first run to have let go.
+        drop(first);
 
-        assert_eq!(
-            seen.lock().expect("recorder").as_slice(),
-            &[workspace.path().to_path_buf()],
-            "dispatching on working_directory only works if it is base_dir"
+        workspace
+            .resume(&agent_id, "again")
+            .expect("resumes")
+            .execute_with_approver(CollectingSink::default(), AllowAll)
+            .await
+            .expect("completes");
+
+        let resumed = roster(&endpoint, 1);
+        assert!(
+            resumed.iter().any(|tool| tool == declared),
+            "the resumed conversation must keep the tools its workspace declared: {resumed:?}"
         );
     }
 }
 
 /// A workspace's own hooks still guard its runs when the runtime is shared —
-/// the registration moved onto the dispatcher, the effect did not — and a
-/// sibling workspace without hooks is untouched by them.
+/// the registration is a live, audience-scoped one now, the effect is unchanged
+/// — and a sibling workspace without hooks is untouched by them.
 #[cfg(unix)]
 #[tokio::test]
 async fn a_workspaces_hooks_guard_its_runs_on_a_shared_runtime() {
@@ -495,25 +882,118 @@ async fn a_workspaces_hooks_guard_its_runs_on_a_shared_runtime() {
     );
 }
 
+/// One directory is one tool audience, so one directory is one chain.
+///
+/// A second live open of a root — the shape `basis-host` produces on purpose,
+/// one workspace per set of client-supplied MCP servers — joins the
+/// registration already there instead of putting a second complete chain behind
+/// the same audience. Both halves are asserted, because a rule that registered
+/// nothing at all would pass the first: the hook still runs, and it runs
+/// *once*, which is what keeps a rewrite that is not idempotent from being fed
+/// its own output.
 #[cfg(unix)]
 #[tokio::test]
-async fn same_root_hooks_must_match_and_survive_until_the_last_holder() {
+async fn a_second_open_of_one_root_joins_the_first_ones_chain_rather_than_doubling_it() {
     use std::os::unix::fs::PermissionsExt;
 
-    let endpoint = ScriptedEndpoint::start(vec![Reply::write_file("same-root.txt"), Reply::Text]);
+    let endpoint = ScriptedEndpoint::start(vec![
+        Reply::write_file("same-root.txt"),
+        Reply::Text,
+        Reply::write_file("same-root.txt"),
+        Reply::Text,
+    ]);
     let runtime = shared_runtime(&endpoint);
     let root = workspace_dir();
-    let script = root.path().join("deny-same-root.sh");
+    let ledger = root.path().join("consulted");
+
+    let path = root.path().join("count.sh");
     std::fs::write(
-        &script,
-        "#!/bin/sh\necho '{\"decision\":\"deny\",\"reason\":\"first guard stays\"}'\n",
+        &path,
+        format!(
+            "#!/bin/sh\necho ran >> '{}'\necho '{{\"decision\":\"allow\"}}'\n",
+            ledger.display()
+        ),
     )
     .expect("script");
-    std::fs::set_permissions(&script, std::fs::Permissions::from_mode(0o755)).expect("chmod");
-    let deny = HookSpec::new(
-        "same-root-guard",
-        vec![script.to_string_lossy().into_owned()],
+    std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o755)).expect("chmod");
+    let counting = HookSpec::new("count", vec![path.to_string_lossy().into_owned()]);
+    let config = || HooksConfig {
+        workspace_file: PathBuf::from(".basis/hooks.json"),
+        global_dir: None,
+        supplied: vec![counting.clone()],
+    };
+    let consultations = || {
+        std::fs::read_to_string(&ledger)
+            .map(|body| body.lines().count())
+            .unwrap_or_default()
+    };
+
+    let first = pinned(root.path(), Arc::clone(&runtime))
+        .with_hooks(config())
+        .open()
+        .await
+        .expect("the chain registers");
+    let second = pinned(root.path(), runtime)
+        .with_hooks(config())
+        .open()
+        .await
+        .expect("an identical second open of one root joins it");
+
+    second
+        .prepare("write a file")
+        .expect("mints")
+        .execute_with_approver(CollectingSink::default(), AllowAll)
+        .await
+        .expect("completes");
+    assert_eq!(
+        consultations(),
+        1,
+        "one directory carries one chain, however many times it is open"
     );
+
+    // The first holder going does not take the chain with it: the second is
+    // still serving.
+    drop(first);
+    second
+        .prepare("write a file")
+        .expect("mints")
+        .execute_with_approver(CollectingSink::default(), AllowAll)
+        .await
+        .expect("completes");
+    assert_eq!(
+        consultations(),
+        2,
+        "and the surviving open's runs are still guarded"
+    );
+}
+
+/// The other answer, because there is no third one.
+///
+/// Two live opens of a root either share one chain — which needs them to
+/// configure the same chain — or would have two behind one audience, and mentra
+/// would walk both for either one's calls: every hook spawned twice, and the
+/// first open's sessions judged by a chain their caller never wrote. Refused by
+/// name, as it was before hooks went live.
+#[cfg(unix)]
+#[tokio::test]
+async fn a_second_open_of_one_root_with_a_different_chain_is_refused() {
+    use std::os::unix::fs::PermissionsExt;
+
+    let endpoint = ScriptedEndpoint::start(Vec::new());
+    let runtime = shared_runtime(&endpoint);
+    let root = workspace_dir();
+
+    let script = |name: &str, body: &str| {
+        let path = root.path().join(name);
+        std::fs::write(&path, format!("#!/bin/sh\n{body}\n")).expect("script");
+        std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o755)).expect("chmod");
+        HookSpec::new(name, vec![path.to_string_lossy().into_owned()])
+    };
+    let deny = script(
+        "deny-same-root.sh",
+        r#"echo '{"decision":"deny","reason":"first guard stays"}'"#,
+    );
+    let allow = script("allow-same-root.sh", r#"echo '{"decision":"allow"}'"#);
     let config = |supplied| HooksConfig {
         workspace_file: PathBuf::from(".basis/hooks.json"),
         global_dir: None,
@@ -521,36 +1001,182 @@ async fn same_root_hooks_must_match_and_survive_until_the_last_holder() {
     };
 
     let first = pinned(root.path(), Arc::clone(&runtime))
-        .with_hooks(config(vec![deny.clone()]))
-        .open()
-        .await
-        .expect("the first guard registers");
-    let error = pinned(root.path(), Arc::clone(&runtime))
-        .with_hooks(config(vec![HookSpec::new(
-            "same-root-guard",
-            vec!["/bin/true".to_string()],
-        )]))
-        .open()
-        .await
-        .expect_err("a differing live guard cannot replace the first");
-    assert!(matches!(error, RunError::WorkspaceGuardConflict { .. }));
-
-    let identical = pinned(root.path(), runtime)
         .with_hooks(config(vec![deny]))
         .open()
         .await
-        .expect("an identical same-root guard joins the existing registration");
-    drop(first);
+        .expect("the first chain registers");
 
-    identical
+    let refused = pinned(root.path(), Arc::clone(&runtime))
+        .with_hooks(config(vec![allow.clone()]))
+        .open()
+        .await
+        .expect_err("a second open must not be able to install a second chain");
+    assert!(
+        matches!(refused, basis::RunError::WorkspaceGuardConflict { .. }),
+        "the refusal has to be the typed one a host can react to: {refused}"
+    );
+
+    // And the refusal is about the conflict, not about the root: once the
+    // first open goes, the same configuration opens.
+    drop(first);
+    pinned(root.path(), runtime)
+        .with_hooks(config(vec![allow]))
+        .open()
+        .await
+        .expect("a root nobody holds is free to configure");
+}
+
+/// The host's own guards reach a session basis never minted.
+///
+/// `RuntimeBuilder::with_interceptor` promises runtime scope, and a runtime is
+/// larger than any workspace on it: a host that builds a basis `Runtime` and
+/// then drives a session of its own through `mentra_runtime` — which is what
+/// `run::prepare_with_session` does — has an agent with no tool audience, so
+/// every audience-scoped registration skips it. Only a global one reaches it,
+/// which is where the interceptors are.
+#[cfg(unix)]
+#[tokio::test]
+async fn a_host_interceptor_judges_a_session_no_workspace_minted() {
+    use basis::{HookOutcome, HookRequest, Interceptor, InterceptorError};
+    use mentra::{
+        ContentBlock, ModelInfo,
+        agent::{AgentConfig, WorkspaceConfig},
+        provider::ProviderId,
+    };
+    use std::sync::atomic::AtomicUsize;
+
+    struct Refusing(Arc<AtomicUsize>);
+
+    #[async_trait::async_trait]
+    impl Interceptor for Refusing {
+        fn name(&self) -> &str {
+            "host-guard"
+        }
+
+        async fn intercept(&self, _call: &HookRequest) -> Result<HookOutcome, InterceptorError> {
+            self.0.fetch_add(1, Ordering::SeqCst);
+            Ok(HookOutcome::Deny("the host says no".to_string()))
+        }
+    }
+
+    let endpoint = ScriptedEndpoint::start(vec![Reply::write_file("unguarded.txt"), Reply::Text]);
+    let consulted = Arc::new(AtomicUsize::new(0));
+    let runtime = Arc::new(
+        Runtime::builder()
+            .with_base_url(&endpoint.base_url)
+            .with_api_key("test-key")
+            .with_ephemeral_history()
+            .with_interceptor(Refusing(Arc::clone(&consulted)))
+            .build()
+            .expect("builds"),
+    );
+
+    // A session the host makes for itself: no workspace, no audience, based in
+    // a directory a workspace could perfectly well have been opened on.
+    let dir = workspace_dir();
+    let mut session = runtime
+        .mentra_runtime()
+        .create_session_with_config(
+            "the host's own",
+            ModelInfo::new("test-model", ProviderId::new(runtime.provider())),
+            AgentConfig {
+                workspace: WorkspaceConfig {
+                    base_dir: dir.path().to_path_buf(),
+                    ..Default::default()
+                },
+                ..Default::default()
+            },
+        )
+        .expect("the host's session is created");
+    let _ = session.append_turn(vec![ContentBlock::text("go")]).await;
+
+    assert_eq!(
+        consulted.load(Ordering::SeqCst),
+        1,
+        "the host's interceptor must be asked about a call it did not mint"
+    );
+    assert!(
+        !dir.path().join("unguarded.txt").exists(),
+        "and its refusal must hold: the write never happened"
+    );
+}
+
+/// And they still speak *first*, from a batch of their own.
+///
+/// The ordering `RuntimeBuilder::with_interceptor` documents — host
+/// interceptors before any subprocess hook, so the host's own guard can stop a
+/// program a repository chose from being spawned at all — used to be basis's
+/// because one `HookRunner` held both. It is now mentra's: one chain per call
+/// composed from the global batch this runtime registered at build and the
+/// audience batch the workspace registered at open, in that order. Pinned end
+/// to end because nothing inside basis can assert it any more.
+#[cfg(unix)]
+#[tokio::test]
+async fn the_hosts_guard_still_speaks_before_a_workspaces_own() {
+    use basis::{HookOutcome, HookRequest, Interceptor, InterceptorError};
+    use std::os::unix::fs::PermissionsExt;
+
+    struct Refusing;
+
+    #[async_trait::async_trait]
+    impl Interceptor for Refusing {
+        fn name(&self) -> &str {
+            "host-guard"
+        }
+
+        async fn intercept(&self, _call: &HookRequest) -> Result<HookOutcome, InterceptorError> {
+            Ok(HookOutcome::Deny("my program, my rules".to_string()))
+        }
+    }
+
+    let endpoint = ScriptedEndpoint::start(vec![Reply::write_file("made.txt"), Reply::Text]);
+    let runtime = Arc::new(
+        Runtime::builder()
+            .with_base_url(&endpoint.base_url)
+            .with_api_key("test-key")
+            .with_ephemeral_history()
+            .with_interceptor(Refusing)
+            .build()
+            .expect("builds"),
+    );
+
+    let dir = workspace_dir();
+    let marker = dir.path().join("hook-ran");
+    let script = dir.path().join("allow.sh");
+    std::fs::write(
+        &script,
+        format!(
+            "#!/bin/sh\ntouch '{}'\necho '{{\"decision\":\"allow\"}}'\n",
+            marker.display()
+        ),
+    )
+    .expect("script");
+    std::fs::set_permissions(&script, std::fs::Permissions::from_mode(0o755)).expect("chmod");
+    std::fs::create_dir_all(dir.path().join(".basis")).expect("dir");
+    std::fs::write(
+        dir.path().join(".basis/hooks.json"),
+        format!(
+            r#"{{"schema": 1, "hooks": [{{"name": "repo", "command": ["{}"]}}]}}"#,
+            script.display()
+        ),
+    )
+    .expect("hooks file");
+
+    let workspace = pinned(dir.path(), runtime).open().await.expect("opens");
+    workspace
         .prepare("write a file")
         .expect("mints")
         .execute_with_approver(CollectingSink::default(), AllowAll)
         .await
-        .expect("a hook denial is an answer, not a run failure");
+        .expect("a denial is an answer, not a run failure");
+
     assert!(
-        !root.path().join("same-root.txt").exists(),
-        "the identical holder must keep the first supplied denial after one holder drops"
+        !marker.exists(),
+        "the host's refusal must land before a program the repository chose is spawned"
+    );
+    assert!(
+        !dir.path().join("made.txt").exists(),
+        "and the call it refused must not have run"
     );
 }
 
@@ -564,7 +1190,7 @@ enum Reply {
     /// A finished assistant message, numbered by connection.
     Text,
     /// A single tool call; the next connection is expected to wrap up.
-    #[cfg(unix)]
+    #[cfg(any(unix, feature = "mcp"))]
     ToolCall { name: String, arguments: String },
 }
 
@@ -688,7 +1314,7 @@ fn sse_body(index: usize, reply: &Reply) -> String {
                 "choices": [{"index": 0, "delta": {}, "finish_reason": "stop"}]
             }));
         }
-        #[cfg(unix)]
+        #[cfg(any(unix, feature = "mcp"))]
         Reply::ToolCall { name, arguments } => {
             events.push(json!({
                 "id": id, "model": "test-model",

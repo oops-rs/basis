@@ -356,11 +356,11 @@ pub async fn run_with_approver<S: EventSink, A: Approver>(
 /// half is the carry: these functions hand back a [`PreparedRun`] and nothing
 /// else, so the run must be what keeps the workspace alive until the run ends
 /// — the module's own promise. A workspace dropped when this returns would
-/// take its hook registration and MCP connections with it *before the first
-/// turn is driven*: the dispatcher fails open for a directory no live
-/// workspace claims, so every `.basis/hooks.json` hook would be silently
-/// bypassed, and the minted roster would offer `mcp__*` tools whose servers
-/// were already torn down. See [`PreparedRun::with_workspace`].
+/// take its hook registrations and MCP connections with it *before the first
+/// turn is driven*: dropping a live hook registration is what deregisters it,
+/// so every `.basis/hooks.json` hook would be silently bypassed, and the
+/// minted roster would offer `mcp__*` tools whose servers were already torn
+/// down. See [`PreparedRun::with_workspace`].
 async fn mint_carrying_workspace(
     builder: WorkspaceBuilder,
     mint: impl FnOnce(&Workspace) -> Result<PreparedRun, RunError>,
@@ -424,6 +424,17 @@ async fn mint_carrying_workspace(
 /// (`with_tool_authorizer`, or mentra 0.26's `Session::with_tool_authorizer`
 /// on the live session). On 0.25 the rule store was consulted even with no
 /// authorizer; that ordering is gone, and this seam inherits mentra's.
+///
+/// **No workspace's hooks apply here either, whatever `workspace` says.** The
+/// path is discovered against for context and templates; it does not enrol the
+/// session in any open [`Workspace`]'s guards. A workspace registers its
+/// `.basis/hooks.json` chain for its own tool audience, and a session created
+/// outside `Workspace::prepare`/`resume` has no audience — so a deny hook
+/// guarding that directory is not consulted for these calls, and neither is
+/// that workspace's `RuntimePolicy`. What *does* apply is every
+/// [`RuntimeBuilder::with_interceptor`](crate::RuntimeBuilder::with_interceptor)
+/// guard on the runtime the session was created on, which is global by
+/// construction — see [`Workspace`]'s own docs for the whole of this boundary.
 #[doc(hidden)]
 pub fn prepare_with_session(
     session: Session,

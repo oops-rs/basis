@@ -53,7 +53,11 @@ run.send_with_options(
 ```
 
 `run.agent_id()` is the handle `Workspace::resume` takes, so a later process can pick the
-same conversation back up.
+same conversation back up — under the workspace it belongs to. A resume restates *that*
+workspace's policy and tool audience onto whatever it picks up, so resuming one repository's
+conversation under another's is refused with `RunError::WorkspaceMismatch` rather than run
+with the wrong `.git` carve-out and the wrong shell posture. A host that lists with
+`basis::store::list(&workspace)` and resumes what it found never meets this.
 
 Three more verbs act on the conversation rather than on a turn. `run.set_name(…)` renames it
 — mentra fixes a name at creation, which is before anyone knows what the conversation will
@@ -131,15 +135,21 @@ What sharing shares is the runtime's; the rest stays the workspace's. The model 
 `with_model`, and the resolved id is the workspace's fact either way. Skills land on the one
 tool registry, so a skill one workspace registered is loadable by another's runs, while
 `Workspace::skills` still reports only its own. MCP connections are workspace-owned — minted
-from that repository's config, shut down when it drops — and every roster hides the `mcp__*`
-tools of servers its workspace does not own, so a name two repositories both configure is
-claimed once and suffixed for the second. Hooks, `ShellAccess`, and the `.git` carve-out
-remain per workspace as well, enforced on a shared runtime by the one dispatch hook basis
-registers.
+from that repository's config, shut down when it drops — and their tools are registered for
+that workspace's own tool audience, so a sibling's `mcp__*` is out of reach rather than merely
+unlisted; a name two repositories both configure is still claimed once and suffixed for the
+second. Declared tools work the same way. Hooks stay per workspace too: each open registers
+its own chain live on the runtime and drops it when the workspace goes. `ShellAccess` and the
+`.git` carve-out ride in the complete `RuntimePolicy` every session receives, so a shared
+runtime enforces each repository's posture in mentra's own words — including its memory roots,
+which a runtime-wide policy could not carry.
 
-Conversations on a shared runtime are still tagged per minted session with the workspace's
+Conversations on a shared runtime are tagged per minted session with the workspace's
 identifier. `store::list` — and ACP's `session/list` over it — therefore returns only that
-workspace's conversations even though provider, store handle, and runtime are shared.
+workspace's conversations even though provider, store handle, and runtime are shared. One
+exception, and it is upstream's: mentra carries no identifier through a resume, so a resumed
+conversation re-files under the runtime's own tag when it next persists and leaves the
+workspace's list. It stays resumable by id.
 
 The knobs ADR-0018 moved are `RuntimeBuilder`'s now — `with_provider`, `with_base_url`,
 `with_api_key`, `with_store_dir`, `with_ephemeral_history`, `with_interceptor`,
@@ -704,12 +714,20 @@ let workspace = basis::Workspace::builder("/repo")
     .await?;
 ```
 
-Both bindings speak the same vocabulary and are folded by the same chain, so allow, deny,
-and modify mean one thing whichever side said it. They are consulted interceptors first in
+Both bindings speak the same vocabulary and the same chain rules, so allow, deny, and modify
+mean one thing whichever side said it. They are consulted interceptors first in
 registration order, then supplied hooks, global hooks, and workspace hooks — the further a
 participant is from the workspace's own data, the earlier it speaks — and since the first refusal
 short-circuits, that is what lets your own guard refuse before a repository's program is
-spawned at all. A participant that errors or panics **denies**. The trait is `async`, and
+spawned at all. A participant that errors or panics **denies**.
+
+Your interceptors reach further than a workspace's hooks do, and deliberately: they are
+registered on the runtime for *every* session it carries, including one you create yourself
+through `Runtime::mentra_runtime` or drive through `run::prepare_with_session`. A workspace's
+`.basis/hooks.json` chain is registered for that workspace's tool audience, which only a
+session minted by `Workspace::prepare` or `Workspace::resume` carries — so a session you make
+by hand does not run a repository's hooks even when its base directory is inside that
+repository. If you want a guard over every call on your runtime, write it here. The trait is `async`, and
 `basis::async_trait` is the attribute to spell it with — re-exported, so implementing a
 basis trait costs your manifest nothing.
 

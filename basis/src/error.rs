@@ -90,6 +90,38 @@ pub enum RunError {
         error: mentra::error::RuntimeError,
     },
 
+    /// [`Workspace::resume`](crate::Workspace::resume) was handed a
+    /// conversation that belongs to a different workspace.
+    ///
+    /// mentra's store is keyed by agent, not by path, so an id alone says
+    /// nothing about where its conversation ran — and everything a resume
+    /// restates is *this* workspace's: the policy carrying its `.git`
+    /// carve-out and shell posture, the tool audience deciding which of the
+    /// registry's tools it can see, the persisted-row tag. Stamping those onto
+    /// another repository's conversation would run it under a posture nobody
+    /// chose for it while its agent stayed based in its own directory — which
+    /// mentra's file tools always allow writes under. So the binding is
+    /// checked against the persisted agent's own base directory, and a
+    /// mismatch is refused before the session is handed out.
+    ///
+    /// A host that means "resume one of mine" takes the id from
+    /// [`store::list`](crate::store::list) for its own workspace, which is
+    /// where a client got it anyway.
+    #[error(
+        "conversation `{agent_id}` belongs to the workspace at {} and cannot be resumed \
+         under the one at {}",
+        agent_workspace.display(),
+        workspace.display()
+    )]
+    WorkspaceMismatch {
+        /// The conversation whose resume was refused.
+        agent_id: String,
+        /// The workspace that tried to resume it.
+        workspace: std::path::PathBuf,
+        /// The directory the persisted agent is actually based in.
+        agent_workspace: std::path::PathBuf,
+    },
+
     #[error(transparent)]
     Config(#[from] crate::config::ConfigError),
 
@@ -239,10 +271,27 @@ pub enum RunError {
     #[error("failed to load hooks: {0}")]
     Hooks(#[from] crate::hooks::HookConfigError),
 
-    /// Two live opens of one canonical workspace asked the shared hook
-    /// dispatcher to enforce different effective guard configurations.
+    /// Two live opens of one workspace present different interception chains.
+    ///
+    /// One directory is one tool audience, and a workspace registers its
+    /// chain for that audience — so a second live open of the same root either
+    /// **joins** the registration already there, which needs the two chains to
+    /// be the same, or would put a second complete chain behind one audience.
+    /// The second is not a middle ground: mentra would walk both for either
+    /// open's calls, spawning every subprocess hook twice per call and feeding
+    /// a non-idempotent rewrite its own output, and the first open's sessions
+    /// would be judged by a chain their caller never configured. So identical
+    /// chains join and different ones are refused here.
+    ///
+    /// A host that genuinely needs two hook configurations for one directory
+    /// needs two [`Runtime`](crate::Runtime)s. A host whose two opens differ
+    /// only in their supplied MCP servers — `basis-host`'s deliberate shape —
+    /// never meets this: the hooks come from one discovery configuration and
+    /// are equal.
     #[error(
-        "workspace guard configuration for '{}' differs from another live open of that workspace",
+        "the workspace at '{}' is already open on this runtime with a different hook \
+         configuration; two live opens of one directory share one interception chain, so they \
+         must configure the same one",
         root.display()
     )]
     WorkspaceGuardConflict { root: std::path::PathBuf },

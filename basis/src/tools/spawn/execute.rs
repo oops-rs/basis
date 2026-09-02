@@ -6,7 +6,7 @@
 //! model's string — they are handed a body, and a destination, that
 //! [`parse`](super::parse) already decided the meaning of.
 
-use std::collections::BTreeSet;
+use std::sync::Arc;
 
 use mentra::{
     ContentBlock, DelegationArtifact, DelegationEdge, DelegationKind, DelegationStatus,
@@ -14,6 +14,8 @@ use mentra::{
     runtime::CommandOutput,
     tool::{ToolContext, ToolResult},
 };
+
+use crate::runtime::agents::{AgentRegistry, AgentTools};
 
 use super::{child::ChildSpec, depth::Depth};
 
@@ -141,12 +143,28 @@ pub(super) async fn delegate(
     prompt: &str,
     depth: usize,
     spec: ChildSpec,
-    denied_to_parent: BTreeSet<String>,
+    agents: Option<&Arc<AgentRegistry>>,
 ) -> ToolResult {
-    let mut child = spawn_child(ctx, spec, denied_to_parent)
+    // Read before the child exists, because it is the *parent's* answer: what
+    // this workspace's mint denied its own model, which a roster override must
+    // not undo. `None` on a runtime with no basis workspaces on it.
+    let inherited = agents.and_then(|agents| agents.of(&ctx.agent_id));
+    let mut child = spawn_child(ctx, spec, inherited.as_deref())
         .await
         .map_err(|error| format!("spawn could not start a subagent: {error}"))?;
     let child_id = child.id().to_string();
+
+    // Held for the child's whole run, like the depth entry below, and read by
+    // both of the ledger's readers. A child of this child asks it the same
+    // question this delegation just did, and the honest answer is its
+    // grandparent's: the whole tree delegated from one session is one
+    // workspace's, and a roster narrowed at any depth must not widen at the
+    // next. And the child inherits its parent's tool audience, so the
+    // workspace's own chain judges its calls — but by the child's own agent
+    // id, which nothing else would have put in here: without this a delegated
+    // child is the one agent in that audience the MCP ownership guard has no
+    // answer for.
+    let _adopted = agents.and_then(|agents| agents.adopt(&ctx.agent_id, &child_id));
 
     // Held for the child's whole run: while this lives, a `spawn` call made
     // *by* the child sees itself one level deeper than this one.
@@ -232,12 +250,12 @@ pub(super) async fn delegate(
 /// mentra's naming intact. A model override naming an unregistered provider
 /// arrives the same way (`ProviderNotFound`, at spawn, before anything runs).
 ///
-/// `denied_to_parent` is what a roster override must not undo: see the
-/// `with_tool_profile` call below.
+/// `inherited` is what the delegating agent's own mint denied it, and what a
+/// roster override must not undo: see the `with_tool_profile` call below.
 async fn spawn_child(
     ctx: &ToolContext<'_>,
     spec: ChildSpec,
-    denied_to_parent: BTreeSet<String>,
+    inherited: Option<&AgentTools>,
 ) -> Result<mentra::agent::Agent, mentra::error::RuntimeError> {
     if spec.is_inherit() {
         // Deliberately not the template path with zero overrides, though
@@ -257,27 +275,41 @@ async fn spawn_child(
         // The same mapping the workspace's own roster resolves through
         // (`ToolRoster::into_profile`), so a policy narrows a child with the
         // exact vocabulary a host narrows a workspace with — plus the one
-        // thing the mapping cannot know.
+        // thing that mapping cannot know.
         //
-        // mentra's `with_tool_profile` *replaces* the cloned config's
-        // profile, and part of what it would replace is not the parent's
-        // roster at all: `Workspace::minted_agent` adds every sibling
-        // workspace's bridged `mcp__*` and declared tools to `hidden_tools`
-        // at mint, because on a shared runtime one registry serves them all.
-        // Replacing that away would offer a *narrowed* child the very tools
-        // its parent is denied — `mcp__prod-db__query` belonging to another
-        // repository, reached through a child the policy meant to restrict.
-        // So the parent's denied set goes back into the profile here.
+        // mentra's `with_tool_profile` *replaces* the cloned config's profile,
+        // and part of what it would replace was never the parent's roster.
+        // **A workspace in another directory needs nothing here:** its bridged
+        // and declared tools are registered for its own `ToolAudience`, the
+        // child inherits its parent's audience with the runtime handle it is
+        // spawned from, and mentra's ladder answers a foreign audience's name
+        // with `Hidden` however the profile is written.
+        //
+        // A second live open of *this* directory is the case the ladder cannot
+        // express — one directory is one audience — so `Workspace::prepare`
+        // hides that sibling's `mcp__*` names by hand, and replacing the
+        // profile away would hand a *narrowed* child the very tools its parent
+        // is denied: `mcp__prod-db__query` belonging to the other client's
+        // authenticated server, reached through the child a policy wrote to
+        // restrict. So the parent's own hidden set goes back in here. It
+        // carries the rest of what the parent was minted with too — the doors
+        // `spawn` replaced, the workspace's own roster — which is the same
+        // rule said once instead of twice: a roster narrows a child, it never
+        // widens one.
         //
         // Extending `hidden_tools` covers both roster shapes because
-        // `ToolProfile::allows` checks the denylist *after* the allow-list:
-        // a `hide` roster simply gains the names, and an `only` roster that
+        // `ToolProfile::allows` checks the denylist *after* the allow-list: a
+        // `hide` roster simply gains the names, and an `only` roster that
         // happened to name one loses it. Dropping rather than refusing, and
         // silently, is the rule `ToolRoster::only` already documents for the
         // same collision on a workspace's own roster — one composition, one
         // rule, stated in both places.
         let mut profile = roster.into_profile();
-        profile.hidden_tools.extend(denied_to_parent);
+        if let Some(inherited) = inherited {
+            profile
+                .hidden_tools
+                .extend(inherited.hidden.iter().cloned());
+        }
         template = template.with_tool_profile(profile);
     }
     if let Some(model) = model {

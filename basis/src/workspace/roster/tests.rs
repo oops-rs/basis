@@ -1,7 +1,9 @@
-//! What each `ToolRoster` constructor actually produces, and how the per-mint
-//! foreign-tool hide composes with either one. The prompt-independence half of
-//! item (d) is pinned beside the memory index in `workspace::builder::tests`,
-//! where the rendered prompt is assembled.
+//! What each `ToolRoster` constructor actually produces. The
+//! prompt-independence half of item (d) is pinned beside the memory index in
+//! `workspace::builder::tests`, where the rendered prompt is assembled; that a
+//! sibling workspace's tool is out of reach whatever a roster says is pinned on
+//! the wire, in `tests/runtime.rs` and `tests/child_policy.rs`, because it is
+//! now mentra's audience ladder answering rather than a name basis hides.
 
 use super::*;
 
@@ -110,44 +112,5 @@ fn only_does_not_imply_spawn_or_load_skill() {
     assert!(
         profile.allows("read"),
         "what was actually named still works"
-    );
-}
-
-/// Item (c), the `hide` half: a per-mint hide
-/// ([`super::super::Workspace::minted_agent`]) inserts directly into
-/// `hidden_tools`, which `ToolProfile::allows` checks unconditionally — so it
-/// suppresses a name whether or not an allow-list is in play.
-#[test]
-fn a_per_mint_hide_composes_on_top_of_hide() {
-    let mut profile = ToolRoster::default().into_profile();
-    assert!(profile.allows("read"), "read starts out offered");
-
-    profile.hidden_tools.insert("read".to_string());
-
-    assert!(!profile.allows("read"), "the per-mint hide wins");
-}
-
-/// Item (c), the `only` half: the same insertion still suppresses a name even
-/// when it was on the allow-list, because `allows` checks `hidden_tools` after
-/// `allowed_tools` regardless of which populated the profile.
-#[test]
-fn a_per_mint_hide_composes_on_top_of_only() {
-    let mut profile = ToolRoster::only(["spawn", "mcp__sibling__tool"]).into_profile();
-    assert!(
-        profile.allows("mcp__sibling__tool"),
-        "named, so offered so far"
-    );
-
-    profile
-        .hidden_tools
-        .insert("mcp__sibling__tool".to_string());
-
-    assert!(
-        !profile.allows("mcp__sibling__tool"),
-        "a sibling workspace's tool loses even though this roster named it"
-    );
-    assert!(
-        profile.allows("spawn"),
-        "the hide is per-name, not a reset of the allow-list"
     );
 }

@@ -1,14 +1,17 @@
 //! Turning both bindings' participants into one decision.
 //!
-//! [`HookRunner`] is the single [`PreExecutionHook`] basis registers. It walks the
-//! in-process interceptors and then the configured subprocess hooks, threading
-//! any modification through the rest, and stops at the first refusal.
+//! [`HookRunner`] is the single [`ExecutionHookParticipant`] a workspace
+//! registers. It walks the in-process interceptors and then the configured
+//! subprocess hooks, threading any modification through the rest, and stops at
+//! the first refusal.
 //!
 //! One runner rather than one registration per participant, even though
-//! `RuntimeBuilder::with_pre_hook` appends: basis wants the ordering and the
-//! short-circuit to be its own, so an interceptor's denial can stop a workspace
-//! hook from being spawned at all. Handing mentra a list would compose the same
-//! way but hand that control over with it.
+//! mentra's registries append: basis wants the ordering and the short-circuit
+//! to be its own, so an interceptor's denial can stop a workspace hook from
+//! being spawned at all. Handing mentra a list would compose the same way but
+//! hand that control over with it. One *participant* rather than two
+//! registrations, because mentra 0.26's mixed chain takes both seams in one
+//! guard and one snapshot — see the trait impl for what that buys.
 //!
 //! What an answer *means* is not decided here — that is [`chain`](super::chain),
 //! one implementation for both bindings. This module is two adapters: asking a
@@ -36,8 +39,9 @@ use std::{fmt, path::PathBuf, sync::Arc, time::Duration};
 use mentra::{
     error::RuntimeError,
     runtime::{
-        HookDecision, PostExecutionContext, PostExecutionHook, PreExecutionContext,
-        PreExecutionHook, ResultDecision,
+        AfterDecision, BeforeDecision, ExecutionHookParticipant, HookDecision,
+        PostExecutionContext, PostExecutionHook, PreExecutionContext, PreExecutionHook,
+        ResultDecision,
     },
     tool::ToolResultContent,
 };
@@ -57,6 +61,11 @@ use super::{
 #[derive(Clone)]
 pub struct HookRunner {
     workspace: PathBuf,
+    /// What this chain answers to when mentra names it — in a refusal the
+    /// model reads, and in the attribution a rewrite carries into a later
+    /// one. The workspace is in it because a shared runtime carries several of
+    /// these at once and "which chain spoke" is otherwise unanswerable.
+    name: String,
     interceptors: Vec<Arc<dyn Interceptor>>,
     hooks: Vec<HookSpec>,
     report: Arc<dyn Fn(&str) + Send + Sync>,
@@ -64,8 +73,11 @@ pub struct HookRunner {
 
 impl HookRunner {
     pub fn new(workspace: impl Into<PathBuf>, hooks: Vec<HookSpec>) -> Self {
+        let workspace = workspace.into();
+
         Self {
-            workspace: workspace.into(),
+            name: format!("basis hooks ({})", workspace.display()),
+            workspace,
             interceptors: Vec::new(),
             hooks,
             report: Arc::new(|message| eprintln!("basis: {message}")),
@@ -109,6 +121,17 @@ impl HookRunner {
     /// Whether this runner would consult anybody at all.
     pub fn is_empty(&self) -> bool {
         self.hooks.is_empty() && self.interceptors.is_empty()
+    }
+
+    /// The subprocess hooks this runner would consult, in order.
+    ///
+    /// What a same-root open is compared against before it joins a live
+    /// registration rather than making a second one
+    /// ([`Runtime::register_hook_chain`](crate::runtime::Runtime::register_hook_chain)).
+    /// The specs, not a digest of them: a [`HookSpec`] is small, `Eq`, and
+    /// already the complete statement of what a participant will do.
+    pub(crate) fn hooks(&self) -> &[HookSpec] {
+        &self.hooks
     }
 
     /// Consults every applicable **subprocess hook**, in order, until one
@@ -354,6 +377,123 @@ impl HookRunner {
             output: subprocess::truncated_output(&stdout),
             source,
         })
+    }
+}
+
+/// One participant, both seams — which is how basis registers a workspace's
+/// chain and the shape upstream added in 0.26 for exactly this.
+///
+/// The two legacy impls below say the same things to mentra's two older
+/// registries, and they are kept because they are the only door a
+/// `mentra::test::MockRuntime` has (its builder takes a `PreExecutionHook` and
+/// a `PostExecutionHook` and nothing mixed — upstream gap), and because
+/// `HookRunner` is public and a host on those seams may still be using them.
+/// All four methods route through [`decide_async`](HookRunner::decide_async)
+/// and [`review_async`](HookRunner::review_async), so there is one chain and
+/// one set of semantics however a runner is installed.
+///
+/// **What the mixed registration buys**, and why basis's own open uses it: one
+/// [`ExecutionHookRegistration`](mentra::runtime::ExecutionHookRegistration)
+/// rather than two independent guards, whose snapshot is taken once and
+/// retained across both sides of a call — so a workspace cannot be consulted
+/// before a tool and absent after it, which two separately dropped guards
+/// permit. And a rewrite's *attribution* survives: mentra threads the reason a
+/// `Modify` carried into the refusal that a rejected rewrite earns (invalid
+/// JSON, a schema violation, a parallel-lane category flip), where the legacy
+/// seam drops it. Threading it into a *policy* or authorizer denial is a
+/// separate upstream gap (`mentra#57`), which is why a refusal of a rewritten
+/// write still speaks in the policy's words and does not name the hook.
+#[async_trait::async_trait]
+impl ExecutionHookParticipant for HookRunner {
+    fn name(&self) -> &str {
+        &self.name
+    }
+
+    /// Never returns `Err`, for
+    /// [`pre_tool_execution`](HookRunner::pre_tool_execution)'s reason: an
+    /// error would reach the model as a blocked call with the reason thrown
+    /// away.
+    async fn before(&self, context: &PreExecutionContext) -> Result<BeforeDecision, RuntimeError> {
+        let call = HookCall::new(
+            context.agent_id.clone(),
+            context.tool_name.clone(),
+            context.tool_call_id.clone(),
+            context.input_json.clone(),
+        );
+
+        Ok(match self.decide_async(&call).await {
+            HookOutcome::Allow => BeforeDecision::Continue,
+            HookOutcome::Deny(reason) => BeforeDecision::Deny(reason),
+            HookOutcome::Modify { input, reason } => match serde_json::to_string(&input) {
+                Ok(input_json) => BeforeDecision::Modify {
+                    input_json,
+                    // Every hand that touched the call, as `hooks::chain`
+                    // composed it — mentra carries this into whatever refuses
+                    // the rewrite later.
+                    attribution: reason,
+                },
+                // Unreachable in practice — `input` is a `Value`, and every
+                // `Value` re-encodes. Denying rather than unwrapping is what
+                // keeps "a runner never panics" true by construction.
+                Err(error) => BeforeDecision::Deny(format!(
+                    "a replacement input could not be re-encoded: {error}"
+                )),
+            },
+            // Unreachable: the chain refuses a replacement before the call has
+            // run, so one cannot survive to here.
+            HookOutcome::Replace { .. } => BeforeDecision::Deny(
+                "a participant replaced the result of a call that has not run yet".to_string(),
+            ),
+        })
+    }
+
+    /// A refusal arrives as a `Replace` rather than an
+    /// [`AfterDecision::Deny`], and deliberately: mentra prefixes a `Deny` with
+    /// its own "denied by execution hook" wording, and after a tool has run the
+    /// strongest thing left is *what the model reads* — which basis's chain has
+    /// already worded, naming the participant that objected. Overwriting the
+    /// result with that text and `is_error: true` is the same answer
+    /// [`post_tool_execution`](HookRunner::post_tool_execution) gives, in the
+    /// same words.
+    async fn after(&self, context: &PostExecutionContext) -> Result<AfterDecision, RuntimeError> {
+        let call = HookCall::new(
+            context.agent_id.clone(),
+            context.tool_name.clone(),
+            context.tool_call_id.clone(),
+            context.input_json.clone(),
+        );
+
+        Ok(
+            match self
+                .review_async(&call, as_json(&context.content), context.is_error)
+                .await
+            {
+                HookOutcome::Allow => AfterDecision::Continue,
+                HookOutcome::Replace {
+                    output,
+                    is_error,
+                    reason,
+                } => AfterDecision::Replace {
+                    content: as_content(output),
+                    is_error: Some(is_error),
+                    attribution: reason,
+                },
+                HookOutcome::Deny(reason) => AfterDecision::Replace {
+                    content: ToolResultContent::text(reason),
+                    is_error: Some(true),
+                    attribution: None,
+                },
+                // Unreachable: the chain refuses a rewritten input once the
+                // call has run.
+                HookOutcome::Modify { .. } => AfterDecision::Replace {
+                    content: ToolResultContent::text(
+                        "a participant rewrote the input of a call that had already run",
+                    ),
+                    is_error: Some(true),
+                    attribution: None,
+                },
+            },
+        )
     }
 }
 

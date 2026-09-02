@@ -13,7 +13,7 @@
 // and, beside the last, where the provider question is settled at build.
 // What stays here is the builder itself: its fields, its defaults, the
 // registration knobs with no better home, and `build`.
-mod execution;
+pub(super) mod execution;
 mod history;
 mod provider;
 mod provider_settlement;
@@ -35,14 +35,14 @@ use crate::{
     tools::{ChildContext, ChildSpec, SpawnTool, spawn::ChildPolicy},
 };
 
-use execution::{shared_policy, validate_target_names, with_command_patience, workspace_policy};
+use execution::{PolicyShaping, shared_policy, validate_target_names, workspace_policy};
 pub(crate) use history::History;
 pub(in crate::runtime) use provider_settlement::HostProvider;
 
 use super::{
     FileToolProfile, ResponsesTransport, RetryPolicy, Runtime, ToolResultPolicy, Wire,
-    dispatch::{DispatchHook, HookDispatch},
     executor::{CommandTargets, TargetedExecutor},
+    interception::HostInterceptors,
 };
 
 /// The persist tag a shared runtime's own conversations carry until mentra can
@@ -309,6 +309,20 @@ impl RuntimeBuilder {
     /// precedence: a hook still sees, and can still refuse, whatever an
     /// interceptor rewrote.
     ///
+    /// **Runtime scope is meant literally, and includes sessions basis did not
+    /// mint.** These are registered globally on mentra's chain when
+    /// [`build`](Self::build) runs, so a session a host creates for itself
+    /// through [`Runtime::mentra_runtime`](crate::Runtime::mentra_runtime), or
+    /// drives through
+    /// [`run::prepare_with_session`](crate::run::prepare_with_session), is
+    /// judged by them exactly as a workspace's own runs are — such a session
+    /// has no tool audience, and only a global registration reaches it. That is
+    /// the one thing a workspace's own hooks cannot say: `.basis/hooks.json`
+    /// belongs to a repository, is registered for that workspace's audience,
+    /// and is not consulted for an agent that belongs to no workspace even when
+    /// its base directory is inside one. A host that wants a guard over *every*
+    /// call on the runtime writes it here.
+    ///
     /// Fail-closed carries over unchanged: an interceptor that returns an error
     /// or panics denies the call, and says which one it was.
     pub fn with_interceptor(self, interceptor: impl Interceptor + 'static) -> Self {
@@ -441,42 +455,43 @@ impl RuntimeBuilder {
     /// concern and are connected by [`Workspace::open`](crate::Workspace::open),
     /// never here.
     ///
-    /// Per-workspace file confinement needs no policy roots: mentra's builtin
-    /// file tools always allow paths under the calling agent's own `base_dir`,
-    /// which basis sets per workspace. What this policy grants is command
-    /// execution — shell and background on, workspace-bounded's timeouts — and
-    /// a workspace that says [`ShellAccess::Denied`] is enforced per-workspace
-    /// by the runtime's hook dispatcher instead of by this shared policy.
+    /// The policy this installs is only what runs on the runtime *outside* any
+    /// workspace: every session a [`Workspace`](crate::Workspace) mints carries
+    /// its own complete policy instead
+    /// ([`Runtime::session_policy`](Runtime)), which is what lets one shared
+    /// runtime hold one workspace's `.git` carve-out, memory roots and
+    /// [`ShellAccess::Denied`] posture without imposing them on the next.
     pub fn build(self) -> Result<Runtime, RunError> {
-        let policy = with_command_patience(shared_policy(), self.command_timeout);
-        self.build_with(SHARED_IDENTIFIER.to_string(), policy)
+        self.build_with(SHARED_IDENTIFIER.to_string(), shared_policy())
     }
 
     /// The sugar path: the same build, bound to one workspace.
     ///
     /// What `Workspace::open(path)` has always done, byte for byte — the
-    /// per-path persist identifier, `git_protected(workspace_bounded(path))`,
-    /// the caller's shell posture baked into policy as a second belt beside
-    /// the dispatcher's guard.
+    /// per-path persist identifier and
+    /// `git_protected(workspace_bounded(path))` on the runtime itself. The
+    /// workspace hands its sessions the same policy either way; baking it here
+    /// as well is what keeps a private runtime's own agents bounded.
     pub(crate) fn build_for(
         self,
         workspace: &Path,
         shell: ShellAccess,
         memory_roots: &[PathBuf],
     ) -> Result<Runtime, RunError> {
-        let policy = with_command_patience(
+        self.build_with(
+            store::runtime_identifier(workspace),
             workspace_policy(workspace, shell, memory_roots),
-            self.command_timeout,
-        );
-
-        self.build_with(store::runtime_identifier(workspace), policy)
+        )
     }
 
     fn build_with(self, identifier: String, policy: RuntimePolicy) -> Result<Runtime, RunError> {
-        let policy = match self.tool_result_policy {
-            Some(tool_result_policy) => tool_result_policy.apply_to(policy),
-            None => policy,
-        };
+        // Held rather than consumed: a per-session policy replaces this one
+        // wholesale upstream, so every workspace's policy has to be shaped by
+        // the same two knobs or a host's `with_command_timeout` and
+        // `with_tool_result_policy` would hold for the runtime and silently
+        // not for the sessions actually running on it.
+        let policy_shaping = PolicyShaping::new(self.command_timeout, self.tool_result_policy);
+        let policy = policy_shaping.apply_to(policy);
 
         // First, before even the credential is looked up, because opening the
         // store is what refuses a directory still holding a basis ≤0.6
@@ -509,7 +524,12 @@ impl RuntimeBuilder {
             self.api_key,
         )?;
 
-        let dispatch = Arc::new(HookDispatch::new(self.interceptors));
+        // Made before the mentra runtime because `spawn` — which mentra's
+        // registry is about to take ownership of — reads it, and reads it by
+        // agent id rather than by audience (see `super::agents`). Shared
+        // rather than owned by either, so the tool inside the registry never
+        // holds the `Runtime` that holds the registry.
+        let agents = Arc::new(super::agents::AgentRegistry::default());
 
         let builder = mentra::Runtime::builder()
             // Which conversations belong where, which is the only question
@@ -546,17 +566,17 @@ impl RuntimeBuilder {
                 target_names,
                 self.delegation_depth,
                 self.child_policy,
-                Arc::clone(&dispatch),
-            ))
-            // The one pre-hook basis registers, always: mentra takes hooks at
-            // build time only, and workspaces arrive later, through the
-            // dispatcher (see `runtime::dispatch`).
-            .with_pre_hook(DispatchHook(Arc::clone(&dispatch)))
-            // And the one post-hook, for the same reason and the same
-            // dispatcher — a second handle on it, because mentra's two seams
-            // are two registrations. Always, again: whether a workspace will
-            // declare a `post_tool_use` hook is not knowable from here.
-            .with_post_hook(DispatchHook(Arc::clone(&dispatch)));
+                Arc::clone(&agents),
+            ));
+        // No *workspace* hooks are installed here. mentra 0.26 takes them live
+        // (`Runtime::register_execution_hook_for_audience`), so each workspace
+        // registers its own folded runner at open and holds the guard — which
+        // is what a runtime built before any workspace exists could not do
+        // when hooks were a build-time list. The host's own interceptors are
+        // registered below, globally, once the runtime exists: they are the
+        // runtime's and not any workspace's, and an audience-scoped
+        // registration would silently skip every session a host creates for
+        // itself.
 
         // Installed whenever either half has something to say. With both
         // empty, mentra keeps its own local executor and basis adds no layer
@@ -616,6 +636,17 @@ impl RuntimeBuilder {
             mentra.try_register_tool(tool)?;
         }
 
+        // Global, and registered before any workspace can open on this
+        // runtime — which settles both halves of what `with_interceptor`
+        // promises. *Every* session, because a global batch matches an agent
+        // in any audience and an agent in none, so a host driving
+        // `mentra_runtime().create_session` is judged by its own guards like
+        // everything else. And *first*, because mentra composes one chain out
+        // of the batches whose audience matches, in registration order, and a
+        // workspace's own batch is necessarily later than this one.
+        let host_interceptors = HostInterceptors::new(self.interceptors)
+            .map(|participant| mentra.register_execution_hook(participant));
+
         Ok(Runtime {
             mentra,
             command_environment,
@@ -626,35 +657,38 @@ impl RuntimeBuilder {
             retry_policy: self.retry_policy,
             ephemeral_history,
             transcripts,
-            dispatch,
+            policy_shaping,
+            host_interceptors,
             #[cfg(feature = "mcp")]
             mcp_claims: Mutex::new(HashMap::new()),
             declared_claims: Mutex::new(HashMap::new()),
             skill_root_holders: Mutex::new(HashMap::new()),
+            hook_chains: Mutex::new(HashMap::new()),
+            agents,
         })
     }
 }
 
 /// The one tool basis registers, assembled once.
 ///
-/// Built here rather than inline so the two conditional facts — whether a
-/// child policy was set, and the workspace registry the roster guard reads —
+/// Built here rather than inline so the two facts that are not the tool's own
+/// — whether a child policy was set, and the agent ledger a delegation reads —
 /// are attached to *one* construction. With no policy this is
-/// `SpawnTool::with_targets_and_depth` plus a registry handle that only a
-/// roster override ever reads, which is `SpawnTool::new()` in every
-/// observable respect for a runtime that registered no targets and kept the
-/// default depth.
+/// `SpawnTool::with_targets_and_depth` plus a ledger only a roster override
+/// ever reads, which is `SpawnTool::new()` in every observable respect for a
+/// runtime that registered no targets and kept the default depth.
 fn spawn_tool(
     targets: Vec<String>,
     delegation_depth: usize,
     child_policy: Option<ChildPolicy>,
-    workspaces: Arc<HookDispatch>,
+    agents: Arc<super::agents::AgentRegistry>,
 ) -> SpawnTool {
-    let tool = SpawnTool::with_targets_and_depth(targets, delegation_depth).with_workspaces(
-        // Read for one question — what is this delegation's workspace denied
-        // — so a narrowed child cannot be handed a sibling's tools (D4, R1).
-        workspaces,
-    );
+    let tool = SpawnTool::with_targets_and_depth(targets, delegation_depth)
+        // Read for one question — what is this delegation's parent denied —
+        // so a roster override cannot hand a narrowed child a sibling
+        // workspace's tools, and so the child is judged by the same guard its
+        // parent is.
+        .with_agents(agents);
 
     match child_policy {
         // The stored `Arc` goes straight through: re-wrapping it in a closure

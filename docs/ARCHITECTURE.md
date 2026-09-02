@@ -209,30 +209,41 @@ subprocess around that by writing one word. **The approver is shown the command*
 the tool's name: the name was chosen by the same file that chose the program, so the name is
 not evidence. And **a name the runtime already answers to cannot be claimed** — mentra's
 registry replaces on a duplicate name, so without that check a manifest could quietly become
-`spawn` and inherit every rule an operator ever wrote about it. On a shared runtime the same
-claim keeps one repository's tools out of another's roster, exactly as the `mcp__*` hiding
-does.
+`spawn` and inherit every rule an operator ever wrote about it. On a shared runtime the claim
+also keeps two repositories from declaring one name; what keeps one repository's tools *out of
+another's roster* is a different thing — each workspace registers its declared and bridged
+tools for its own `ToolAudience`, and mentra reports a foreign audience's name as hidden
+however a roster is written. One directory is one audience, so *two live opens of the same
+directory* are the case that ladder cannot answer; the migration section below has what basis
+does about it.
 
 Interception is not a subsystem parallel to anything either. `hooks::contract` holds the request
 and outcome types both bindings speak, one `Chain` decides what an answer *means* — first
-refusal wins, modifications compose, nothing is smuggled past a later guard — and the one
-hook basis registers with mentra dispatches each call to the calling workspace's own
-`HookRunner`, keyed by the agent's base directory, since a shared runtime is built before
-any workspace opens (ADR-0018). The ordering and the short-circuit are therefore basis's
-rather than the runtime's. Participants speak in-process interceptors first (registration
+refusal wins, modifications compose, nothing is smuggled past a later guard — and each
+workspace registers its `HookRunner` live on the runtime, for its own `ToolAudience`, so a
+shared runtime built before any workspace opened still runs each repository's guards over its
+own runs and nobody else's (ADR-0018). The host's own `Interceptor`s are registered once and
+globally beside them, because host scope *is* runtime scope: an audience-scoped registration
+would skip every session a host creates for itself. Each is one `ExecutionHookParticipant`
+batch rather than one registration per participant and per seam, so the ordering and the
+short-circuit inside a runner stay basis's, a call's participants are snapshotted once and
+retained across both seams, and a rewrite's attribution survives into the refusal it earns.
+Participants speak in-process interceptors first (registration
 order), then typed supplied hooks, global hooks, then workspace hooks, on the rule that **the
 further a participant is from the workspace's own data, the earlier it speaks**: a host's compiled
 guard can then refuse before a program that arrived with a five-minute-old clone is spawned
-at all. Anything that cannot answer denies.
+at all. Mentra composes that order across the two batches — global before audience, in
+registration order — where basis's single folded runner used to. Anything that cannot answer
+denies.
 
 Since mentra 0.24 the chain runs *before* authorization, on both execution lanes: hooks,
 then the tool's `input_schema` against what they left, then the `ToolAuthorizer`. Two things
 follow. A hook is consulted about **every** registered call, including ones the approver
 goes on to refuse — so being asked is not being approved, and a participant with side
 effects of its own should deny what it will not stand behind. And a participant that
-*rewrites* is judged by the approver on what it produced, not on what the model asked for;
-basis's own guards on the shared path do the same, re-reading a `HookDecision::Modify`
-before it becomes the call (`basis/src/runtime/dispatch.rs`).
+*rewrites* is judged by the approver on what it produced, not on what the model asked for —
+and so is the workspace's `RuntimePolicy`, which every session carries and which binds the
+input the tool actually runs on rather than the one the model wrote.
 
 `Approver` is a *sibling* seam, not a parent and not a child. It answers *may this happen*
 and its answer feeds the permission machinery a person drives; an interceptor answers *may
@@ -343,11 +354,13 @@ flowchart LR
   it, so N repositories cost one provider resolution rather than N. `Workspace::open(path)`
   is unchanged sugar over a private one bound to that path, so the one-repository host never
   meets the noun. What stays per workspace is what a repository says: hooks, `ShellAccess`,
-  the `.git` carve-out — enforced on a shared runtime by the single dispatch hook basis
-  registers, since mentra fixes hooks at build time and workspaces arrive later — its
+  the `.git` carve-out — the last two carried in the complete `RuntimePolicy` every session
+  it mints receives, so a shared runtime enforces each repository's posture in mentra's own
+  words — its
   declared tools, skills roots, and MCP connections. The last three are minted from its own config
   and die with it while the registries underneath are the runtime's, so each is claimed at open and
-  released at drop. Declared tools and bridged MCP tools are claimed by name and hidden from every
+  released at drop. Declared tools and bridged MCP tools are claimed by name and registered for the
+  workspace's own tool audience, which is what keeps them out of every
   other workspace's roster; skills roots are counted rather than
   owned, because two repositories legitimately register the same user-scoped root and the
   first to close must not take it from the second. Skills are the one thing that *does* travel
@@ -793,6 +806,151 @@ nothing: a provider that reports no usage emits no usage line and charges nothin
 The standalone `PreparedRun::compact` verb is the one summarizing pass outside that rule: it
 is not a run, has no report and no run counter, so its samples reach only the sink it borrows
 — the stream is the account for `/compact`, and a spent budget still does not refuse it.
+
+### Sharing a runtime: the compensations, removed
+
+A shared runtime used to be the shape basis had to work around. Mentra fixed a runtime's
+policy, its hooks and its tool registry at build time, and a runtime is built before any
+workspace opens — so basis kept three pieces of machinery whose only job was to make one
+runtime behave like several. Two are gone outright and the third is reduced to the sliver
+upstream's own mechanism cannot express; what replaced each is upstream's, and what is left
+of the third says exactly why it is left.
+
+**The hook dispatcher is gone.** `basis/src/runtime/dispatch.rs` in full: one hook registered
+on each of Mentra's two seams, a registry of workspaces keyed by canonicalized root, and the
+routing that looked up a call's working directory to find whose `HookRunner` should answer.
+A workspace now registers its own runner when it opens — one `ExecutionHookParticipant`, one
+guard for both seams — and holds the registration until it drops. The host's `Interceptor`s do
+not travel in it: they are the *runtime's* (host scope is runtime scope, ADR-0018), so they are
+registered once, globally, when the runtime is built. Mentra composes one chain per call out of
+every batch whose audience matches — the global one matches every session, a workspace's
+matches its own — in registration order, so the documented order (host interceptors → supplied
+hooks → global hooks → workspace hooks) is unchanged, a host's refusal still short-circuits
+before a repository's hook program is spawned, and a rewrite's attribution accumulates across
+both batches instead of being lost between two chains. A call from an agent that belongs to no
+basis workspace — one a host created for itself through `Runtime::mentra_runtime`, or drives
+through `run::prepare_with_session` — therefore still runs the host's interceptors, as
+`with_interceptor` has always promised.
+
+**The effect a host can see is the other half of that, and it is a real loss.** Such an agent
+has no tool audience, and mentra never consults an audience-scoped registration for one — so a
+session a host creates directly, with a base directory *inside* a live workspace, does not run
+that workspace's `.basis/hooks.json` chain, deny hooks included. The deleted dispatcher keyed on
+the call's working directory and caught exactly that case; an audience is derived from the
+workspace that minted the session, and a session no workspace minted has none to derive from.
+There is no honest guard to put in its place at this layer: basis would have to re-introduce
+directory-keyed routing, which is the machinery this removal exists to delete, and which was
+wrong in its own way (two agents can share a directory and belong to different repositories).
+What a host that wants a guard over *every* call on its runtime writes instead is an
+`Interceptor`, which is global by construction. A host that wants a repository's own hooks to
+apply drives that repository through `Workspace::prepare`/`resume` rather than minting its own
+session.
+
+**One directory is one chain, and it is counted rather than owned.** A tool audience is
+derived from the workspace root, so two live opens of one directory — what `basis-host`
+produces on purpose, one workspace per set of client-supplied MCP servers — resolve in one
+audience. Registering both would put two complete chains behind it and Mentra would walk both
+for either open's calls: every subprocess hook spawned twice per call, an audit hook logging
+each call twice, and a rewrite that is not idempotent fed its own output. So the second open
+**joins** the first's registration and the chain comes off when the last holder goes — the same
+join-and-count ledger `declared_claims` and `skill_root_holders` already are, and the same
+behaviour the deleted directory-keyed registry had. Joining needs the two chains to be the
+same, and a same-root open presenting a different one is refused by name, as it was before:
+`RunError::WorkspaceGuardConflict` survives the removal of the guard layer that named it, with
+its message rewritten to describe interception chains rather than guards. A host that genuinely
+needs two hook configurations for one directory needs two runtimes.
+
+**Basis's own guards are gone, and the rules are not.** The `.git/hooks` and `.git/config`
+carve-out and the `ShellAccess::Denied` posture used to be enforced twice — baked into policy
+on a private runtime, and re-implemented as a hook guard on a shared one, because a
+runtime-wide policy could not carry either per workspace. Each workspace now hands its
+complete `RuntimePolicy` to every session it mints and resumes, so there is one implementation
+and a shared runtime enforces the same rules a private one always did. On a shared runtime the
+wording of a refusal therefore changes: it arrives from Mentra's policy, in Mentra's words,
+exactly as it always has on a private runtime, instead of from basis's guard — and a refusal
+of a *hook-rewritten* call no longer names the hook that rewrote it, because it is the tool's
+policy answering rather than basis's chain. Mentra's mixed chain does carry a rewrite's
+attribution into the refusals *it* raises — invalid JSON, a schema violation, a parallel-lane
+category flip — but not into a policy or authorizer denial, which is a gap upstream owns
+([mentra#57](https://github.com/oops-rs/mentra/issues/57)) and not one basis can close from
+here. A `--no-shell` workspace's command is likewise
+refused inside the call rather than ahead of it, which means the approver is asked first: the
+private path's behaviour, now on both — and it has a UX cost worth naming, because a
+`Prompt`-mode approver is shown a command that can never run, the person's yes is recorded,
+and the model is then told commands are disabled. Nothing is weakened by it, and the
+alternative is a second implementation of the shell posture ahead of the authorizer, which is
+exactly the duplicate this removes; a host that wants the prompt suppressed reads the posture
+itself, or refuses in an `Interceptor`, which does run before the authorizer. Two side effects worth naming: a shared runtime's
+workspace can write its **memories** now, since the roots ride in its own policy where a
+runtime-wide one could never carry them; and `with_command_timeout` and
+`with_tool_result_policy` are re-applied to each workspace's policy, because Mentra replaces a
+runtime's policy wholesale for a session rather than merging with it.
+
+**Per-mint foreign-tool hiding is nearly gone, and what is left is exactly the part the
+audience cannot express.** Every mint used to walk the shared registry and add a sibling
+workspace's bridged `mcp__*` and declared tools to `hidden_tools`, publish that set into a cell
+the `spawn` tool read, and re-apply it whenever a child policy replaced a delegated child's
+roster. A workspace's tools are registered for its own `ToolAudience` now, and Mentra resolves
+a name held only by a foreign audience as hidden rather than visible — so for a workspace in
+**another directory** the invariant holds whether the model was offered the name or guessed
+it, the cell and the `spawn` threading are gone, and a delegated child inherits its parent's
+audience with the handle it is spawned from. Two `mcp__*` cases stay basis's own, because an
+audience is derived from the directory and cannot tell them apart: a **second live open of one
+directory** shares the first's audience by construction — which is the pair `basis-host`
+produces when one repository is opened twice with different client-supplied `mcpServers` — and
+a **host tool registered globally under an `mcp__`-shaped name**, since a global is visible to
+every audience on purpose. So a mint still hides every `mcp__<server>__<tool>` whose `<server>`
+this workspace did not configure, reading the bridged names off the claim ledger beside the
+server names (`Runtime::foreign_mcp_tools`). Host tools registered with
+`RuntimeBuilder::with_tool` stay global otherwise: they are the runtime's, and a global is
+visible to every audience. `ToolRoster` is unchanged in shape and in effect.
+
+**And hiding at mint is not, by itself, the isolation.** A roster is a snapshot of the registry
+the mint saw, and three things outlive it: a sibling of the *same directory* that bridges its
+server after this session minted, a resumed conversation (Mentra persists the tool profile and
+`SessionResumeOptions` restates none of it, so the roster is the one the first mint froze), and
+the window inside a sibling's own open between `claim_mcp_server`, which reserves the name, and
+`record_bridged_tools`, which says what came back. So basis decides *execution* separately from
+*listing*: `runtime::agents::ForeignMcpGuard` joins every workspace's own interception chain and
+refuses any `mcp__<server>__<tool>` call whose `<server>` is not in the calling agent's
+workspace's own server list — a list settled at that workspace's open and restated onto the
+ledger by every mint and every resume, so the guard never reads the roster a past mint froze. It
+reads the runtime's agent ledger (`runtime::agents`) rather than the workspace that installed
+it, which is what makes it right for the *other* open of the same directory: that open joins the
+first's chain rather than registering one, so one guard answers for both, by agent id.
+
+Keying the ledger on the agent id is also what it has to defend, because an agent id can move
+between two opens of one root: a resume checks the conversation's *root*, and same-root opens
+have the identical one by construction, so either may pick up an id the other minted. Whoever
+recorded last owns the row, which is right on its own terms — Mentra hands out one live session
+per agent id, so the open holding the lease is the open that wrote last. Each row therefore
+carries a stamp naming the handle that wrote it, and a workspace releases on drop only the rows
+it still owns. An unconditional release would have taken a live sibling's row away for as long
+as that session ran, and a missing row is *allowed*: this guard reads it as a session basis
+never minted, and `spawn` reads it as no inherited hides. The same ledger carries the parent's
+`hidden_tools` back into a delegated child whose `ChildSpec` roster replaced the profile —
+`with_tool_profile` replaces it wholesale and Mentra exposes no reader for a template's
+effective profile — and `spawn` adopts the child into the ledger for the length of the
+delegation, so the guard has an answer for it too. Hiding and refusing are not substitutes: one
+decides what the model is told exists, the other what runs.
+
+**A resume now refuses the wrong workspace.** Because a resume is where a workspace's policy
+and tool audience are *restated* — Mentra persists neither — picking up another repository's
+conversation would run it under this repository's `.git` carve-out and shell posture while its
+agent stayed based in its own directory, which Mentra's file tools always allow writes under. A
+shared runtime is what makes the pairing reachable: a host that picks the workspace from a
+client's `cwd` and the conversation from an id it was handed (ACP's `session/load`) can bring
+the two together wrongly. `Workspace::resume` compares the persisted agent's base directory
+against its own identity and refuses with `RunError::WorkspaceMismatch` before anything is
+stated onto the conversation. `store::forget` still keys on the id alone, and deliberately: a
+deletion states nothing.
+
+**One gap this does not close, and it is upstream's.** A *resumed* session carries no runtime
+identifier — Mentra's resume options have no field for one
+([mentra#54](https://github.com/oops-rs/mentra/issues/54)) — so a resumed conversation re-files
+under the runtime's own tag when it next persists, which on a shared runtime takes it out of
+that workspace's `session/list`. The conversation is still resumable by id. `basis::store`'s
+module docs have the whole of it.
 
 ### Command targets
 

@@ -30,11 +30,9 @@
 //!   every workspace borrowing the runtime the identical directory, each
 //!   reading the others' memory index into its own prompt. So
 //!   `WorkspaceBuilder::open` passes no store dir on the shared path at all,
-//!   and [`WorkspaceMemoryRoot::BesideStore`] resolves to nothing there,
-//!   exactly parallel to the dispatcher's existing shared-runtime posture: it
-//!   can deny a write, never grant a root policy never named. An explicit
-//!   [`WorkspaceMemoryRoot::Dir`] is unaffected either way — naming a path is
-//!   the host taking responsibility for it.
+//!   and [`WorkspaceMemoryRoot::BesideStore`] resolves to nothing there. An
+//!   explicit [`WorkspaceMemoryRoot::Dir`] is unaffected either way — naming a
+//!   path is the host taking responsibility for it.
 //!
 //! A workspace memory shadows a global one of the same name — the rule skills
 //! and templates already follow. Zero memories render no block at all, and a

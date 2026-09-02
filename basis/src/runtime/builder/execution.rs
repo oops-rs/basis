@@ -4,9 +4,10 @@
 //! The knobs: how patiently a command is waited out, the fixed environment
 //! every spawned process receives, and the named executors `!@<target>`
 //! routes to (ADR-0021). And the derivations `build` reaches for from them:
-//! the name validation a routable target has to pass, and the two
-//! `RuntimePolicy` recipes — one shared across workspaces, one bound to a
-//! single one — that say what a command is allowed to do.
+//! the name validation a routable target has to pass, the two
+//! `RuntimePolicy` recipes — one bound to a single workspace, one for
+//! everything on the runtime that belongs to no workspace — and the
+//! [`PolicyShaping`] both of them pass through.
 //!
 //! Grouped because they answer one question between them and are read
 //! together: a target name is validated against the same rule the `!@`
@@ -23,7 +24,7 @@ use crate::{
     tools::spawn::{LOCAL_TARGET, is_target_name},
 };
 
-use super::{CommandTargets, RuntimeBuilder};
+use super::{CommandTargets, RuntimeBuilder, ToolResultPolicy};
 
 impl RuntimeBuilder {
     /// How long a command may run before it is killed.
@@ -116,9 +117,16 @@ pub(super) fn validate_target_names(targets: &CommandTargets) -> Result<(), RunE
     Ok(())
 }
 
-/// The policy a private runtime bakes for one workspace:
-/// `git_protected(workspace_bounded(path))`, the caller's shell posture as a
-/// second belt beside the dispatcher's guard, and the memory roots.
+/// The policy one workspace runs under:
+/// `git_protected(workspace_bounded(path))`, the caller's shell posture, and
+/// the memory roots.
+///
+/// One recipe for both runtime shapes. A private runtime bakes it at build,
+/// and every workspace — private or sharing — also hands it to its own
+/// sessions through
+/// [`SessionOptions::policy`](mentra::runtime::SessionOptions), which is what
+/// makes a shared runtime enforce a per-workspace posture in mentra's own
+/// words rather than in a hook of basis's.
 ///
 /// Path roots are hygiene, not a boundary: per ADR-0004 that is the kernel's
 /// job, and per ADR-0013 basis ships no instance of one. What the caller said
@@ -129,10 +137,36 @@ pub(super) fn validate_target_names(targets: &CommandTargets) -> Result<(), RunE
 /// `grep`) and writing a memory (`write`, `edit`) need them stated here, on
 /// both the read and the write lists. Stated whether or not a directory
 /// exists yet: the first memory is written by exactly the run that finds none
-/// to read. The shared policy deliberately gets none of this — it is fixed
-/// before any workspace exists and a per-workspace root added there could not
-/// be unsaid — so on a shared runtime the index renders and these writes are
-/// refused, a recorded cost of sharing beside the others.
+/// to read.
+///
+/// # The shell posture is enforced *inside* the call, and that has a cost
+///
+/// `allow_shell_commands(shell.is_granted())` is where a workspace's answer
+/// about commands stops being a guard of basis's own and becomes a statement
+/// in mentra's policy — which is the whole point of this recipe, because a
+/// policy is the only thing a shared runtime can carry per session. Mentra's
+/// admission order is hooks, then the schema, then the
+/// [`ToolAuthorizer`](mentra::tool::ToolAuthorizer); the shell check fires
+/// later still, inside the tool's own execution. So on a
+/// [`ShellAccess::Denied`] workspace a command reaches
+/// [`Approver`](crate::Approver) **first** and is refused **after** it is
+/// answered.
+///
+/// For a `Prompt`-mode approver that is a real cost, and it is not a bug to be
+/// fixed here: the person is shown `!curl … | sh` and asked whether to allow
+/// it, their yes is recorded, and the model is then told commands are
+/// disabled — a prompt about something that could never have run. Nothing is
+/// weakened by it (the command does not run either way, and a *deny* is still
+/// a deny), and the alternative is worse: refusing before the authorizer takes
+/// a second implementation of the shell posture — the pre-hook guard the
+/// dispatcher used to carry — which is exactly the duplicate this recipe
+/// removed, and which a shared runtime could only apply by routing on a
+/// directory. A host that wants the prompt suppressed can read the posture
+/// itself and answer [`ApprovalDecision::Deny`](crate::ApprovalDecision)
+/// without asking, or refuse in an
+/// [`Interceptor`](crate::hooks::Interceptor), which does run before the
+/// authorizer. Pinned by `a_denied_command_is_put_to_the_approver_before_the
+/// _policy_refuses_it` in `basis/tests/hooks/guarded.rs`.
 pub(crate) fn workspace_policy(
     workspace: &Path,
     shell: ShellAccess,
@@ -149,15 +183,17 @@ pub(crate) fn workspace_policy(
     })
 }
 
-/// The command posture a shared runtime grants: shell and background on, with
-/// `workspace_bounded`'s timeouts, and no path roots of its own.
+/// What a shared runtime falls back to for anything running on it that belongs
+/// to no workspace: shell and background on, `workspace_bounded`'s timeouts,
+/// and no path roots of its own.
 ///
-/// Commands are on because ADR-0013 grants them by default and a shared policy
-/// cannot say otherwise per workspace — the dispatcher's guard is where a
-/// `ShellAccess::Denied` workspace is enforced. No roots, because mentra's
-/// file bounding always allows under the calling agent's `base_dir`: with the
-/// list empty, each workspace's agents are confined to their own directory and
-/// no workspace's root widens another's.
+/// Every session basis mints carries its workspace's own
+/// [`workspace_policy`] instead, so this governs only what a host reaches
+/// through [`Runtime::mentra_runtime`](crate::Runtime::mentra_runtime) and
+/// creates for itself. Commands are on because ADR-0013 grants them by
+/// default. No roots, because mentra's file bounding always allows under the
+/// calling agent's `base_dir`: with the list empty, such an agent is confined
+/// to its own directory and no workspace's root widens it.
 pub(crate) fn shared_policy() -> RuntimePolicy {
     RuntimePolicy::default()
         .allow_shell_commands(true)
@@ -169,13 +205,52 @@ pub(crate) fn shared_policy() -> RuntimePolicy {
         .with_max_command_timeout(std::time::Duration::from_secs(600))
 }
 
+/// What a runtime's builder says about *every* policy it hands out, whichever
+/// recipe produced it.
+///
+/// A per-session policy replaces the runtime's wholesale — mentra's
+/// [`SessionOptions::policy`](mentra::runtime::SessionOptions) does not merge
+/// or intersect — so a knob a host set on the builder has to be re-applied to
+/// each workspace's policy or it silently stops holding for every session on
+/// the runtime. Carried as one value, and applied through one function, so the
+/// runtime's own policy and a workspace's cannot come to disagree about what
+/// the builder was told.
+#[derive(Debug, Clone, Copy, Default)]
+pub(crate) struct PolicyShaping {
+    /// [`RuntimeBuilder::with_command_timeout`].
+    command_timeout: Option<std::time::Duration>,
+    /// [`RuntimeBuilder::with_tool_result_policy`].
+    tool_results: Option<ToolResultPolicy>,
+}
+
+impl PolicyShaping {
+    pub(super) const fn new(
+        command_timeout: Option<std::time::Duration>,
+        tool_results: Option<ToolResultPolicy>,
+    ) -> Self {
+        Self {
+            command_timeout,
+            tool_results,
+        }
+    }
+
+    /// One recipe, shaped by what the builder was told.
+    pub(crate) fn apply_to(self, policy: RuntimePolicy) -> RuntimePolicy {
+        let policy = with_command_patience(policy, self.command_timeout);
+        match self.tool_results {
+            Some(tool_results) => tool_results.apply_to(policy),
+            None => policy,
+        }
+    }
+}
+
 /// Applies a host's chosen command timeout, raising the ceiling to match.
 ///
 /// The ceiling moves with the default because the two mean different things to
 /// mentra — one is what a command gets when it asks for nothing, the other is
 /// the most it may ask for — and a host setting the first past the second
 /// would otherwise be silently clamped back to a number it did not choose.
-pub(super) fn with_command_patience(
+fn with_command_patience(
     policy: RuntimePolicy,
     timeout: Option<std::time::Duration>,
 ) -> RuntimePolicy {
@@ -201,9 +276,7 @@ pub(super) fn with_command_patience(
 /// `sh -c 'echo … > .git/hooks/pre-commit'` still reaches the path, because
 /// nothing here parses shell. It closes the route a model actually takes and
 /// remains hygiene; per ADR-0004 and ADR-0013 the boundary is the OS's, and
-/// basis does not ship one. On shared runtimes the same rule is enforced by the
-/// hook dispatcher, which knows which workspace a call belongs to; the private
-/// path keeps this policy baking as a second belt.
+/// basis does not ship one.
 fn git_protected(policy: RuntimePolicy, workspace: &Path) -> RuntimePolicy {
     let git = workspace.join(".git");
     policy

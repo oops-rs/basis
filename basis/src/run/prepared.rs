@@ -139,13 +139,13 @@ impl PreparedRun {
     /// Records the system prompt this run's mint opened with.
     ///
     /// [`Workspace::minted`](crate::workspace::Workspace) is the only caller.
-    /// A fresh prepare records the final per-run prompt Basis handed Mentra;
-    /// resume records `None`, because basis does not yet read the persisted
-    /// agent config back (mentra 0.26's `Session::config` exposes it —
-    /// mentra#41, unadopted here) and its prompt may differ from the
-    /// workspace's current default.
+    /// A fresh prepare records the final per-run prompt Basis handed Mentra; a
+    /// resume records the prompt the *persisted* agent carries, read back off
+    /// the resumed session, which may differ from what this workspace would
+    /// mint today and is the one the run will actually send.
     /// [`prepare_with_session`](super::prepare_with_session),
-    /// the path with no workspace, also leaves this unknown.
+    /// the path with no workspace, leaves this unknown: there is no workspace
+    /// to ask and no session config basis put there.
     pub(crate) fn with_context_snapshot(self, system_prompt: Option<String>) -> Self {
         Self {
             context_snapshot: ContextSnapshot::new(system_prompt),
@@ -196,11 +196,11 @@ impl PreparedRun {
     ///
     /// A `PreparedRun` owns its session but only *describes* its workspace,
     /// and two things live exactly as long as the workspace does: its hook
-    /// registration on the runtime's dispatcher, and its MCP connections. A
+    /// registrations on the runtime, and its MCP connections. A
     /// caller that drops the workspace at mint and drives the run afterwards
-    /// runs every turn with the workspace's hooks silently unenforced — the
-    /// dispatcher fails open for a directory no live workspace claims, which
-    /// is correct for a retired workspace and catastrophic for one that was
+    /// runs every turn with the workspace's hooks silently unenforced —
+    /// dropping a live registration is what deregisters it, which is correct
+    /// for a retired workspace and catastrophic for one that was
     /// merely dropped early — and with its MCP servers torn down while the
     /// minted roster still offers their tools. The free functions in
     /// [`run`](mod@crate::run) attach the workspace here for exactly that

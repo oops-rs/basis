@@ -11,25 +11,25 @@
 //! (see [`crate::workspace::builder`]'s module docs for why that distinction
 //! matters to `spawn`).
 //!
-//! # Composes with two other things, always
+//! # What a roster is not
 //!
 //! A roster is the *base* `ToolProfile` an opened workspace carries in its
-//! `AgentConfig`. Two things still apply on top of it, regardless of which
-//! constructor built it:
+//! `AgentConfig`, and two things sit outside it entirely:
 //!
-//! - **Per-mint foreign-tool hiding.**
-//!   [`Workspace::minted_agent`](super::Workspace::minted_agent) adds every
-//!   `mcp__*` tool and every declared tool that belongs to a *sibling*
-//!   workspace on a shared runtime into `hidden_tools` at mint time, because
-//!   that set moves as siblings come and go and a roster fixed at
-//!   [`WorkspaceBuilder::open`](super::WorkspaceBuilder::open) cannot know it
-//!   yet. mentra's `ToolProfile::allows` checks `hidden_tools` after
-//!   `allowed_tools`, so this addition suppresses a name whether the roster is
-//!   a [`hide`](ToolRoster::hide) (the name joins an already-populated
-//!   denylist) or an [`only`](ToolRoster::only) (the name was already absent
-//!   from the allow-list, and the insertion is a harmless no-op — unless a
-//!   caller's `only` set named a sibling's tool by coincidence, in which case
-//!   it now correctly loses).
+//! - **A sibling workspace's tools.** On a shared runtime one registry serves
+//!   every open repository, and a roster says nothing about whose tool a name
+//!   belongs to. It does not have to: a workspace's bridged `mcp__*` tools and
+//!   its declared tools are registered for that workspace's own
+//!   [`ToolAudience`](mentra::tool::ToolAudience), and mentra resolves a name
+//!   held only by a foreign audience as hidden rather than visible. So a
+//!   sibling's tool is out of reach whether or not a roster mentions it, and
+//!   whether the model was offered the name or guessed it. A roster is about
+//!   what *this* workspace offers of what it can reach. The two `mcp__*` cases
+//!   an audience cannot express — a second live open of the *same* directory,
+//!   and a host global under an `mcp__`-shaped name — are hidden by name at
+//!   every mint instead, and that hiding composes with whatever roster is set
+//!   here rather than being part of it
+//!   ([`Workspace::minted_agent`](super::Workspace)).
 //! - **The rendered prompt.** Whatever a workspace's `AGENTS.md`, `CLAUDE.md`
 //!   or memory files ([`crate::memory`]) put in the system prompt is a
 //!   property of [`WorkspaceContext`](crate::context::WorkspaceContext) and

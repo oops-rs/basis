@@ -37,7 +37,7 @@ use crate::{
     hooks::{self, HookRunner, HooksConfig},
     memory::{self, MemoryConfig},
     run::LoadedSkill,
-    runtime::{Runtime, RuntimeBuilder, dispatch},
+    runtime::{Runtime, RuntimeBuilder, SessionScope, agents::WorkspaceAgents},
     shell::ShellAccess,
     skills::{self, SkillRoots, SkillsConfig},
     store,
@@ -398,9 +398,9 @@ impl WorkspaceBuilder {
     /// has offered — `spawn`'s replaced doors and basis's never-surfaced
     /// intrinsics hidden, everything else offered. Neither constructor on
     /// [`ToolRoster`] changes what is *registered* on the runtime; see its
-    /// module docs for the two things that still apply on top of whatever
-    /// roster is set here — a per-mint hide of a sibling workspace's tools,
-    /// and the rendered prompt, which has no opinion about the roster at all.
+    /// module docs for the two things a roster says nothing about — a sibling
+    /// workspace's tools, which its own audience keeps out of reach, and the
+    /// rendered prompt, which has no opinion about the roster at all.
     pub fn with_tool_roster(self, roster: ToolRoster) -> Self {
         Self { roster, ..self }
     }
@@ -459,11 +459,12 @@ impl WorkspaceBuilder {
     /// shuts the command tools and nothing else, so it is a narrowing of what
     /// these runs do, never a claim about what the process could do.
     ///
-    /// Workspace-level because it is a statement about this repository's runs.
-    /// On a private runtime it is baked into the runtime's policy; on a shared
-    /// one — whose policy cannot vary per workspace — it is enforced by the
-    /// runtime's hook dispatcher, which denies `spawn`'s command mode for this
-    /// workspace's agents (see [`crate::runtime`]).
+    /// Workspace-level because it is a statement about this repository's runs,
+    /// and carried as such: it goes into the policy every session this
+    /// workspace mints ([`crate::Runtime`]), so a shared runtime holds this
+    /// posture for these runs and a sibling repository's for its own. A
+    /// private runtime bakes it as well, for anything reached through
+    /// [`Runtime::mentra_runtime`](crate::Runtime::mentra_runtime).
     pub fn with_shell(self, shell: ShellAccess) -> Self {
         Self { shell, ..self }
     }
@@ -502,8 +503,9 @@ impl WorkspaceBuilder {
     /// directory is [`Workspace::root`] — a workspace opened as `.`, through a
     /// symlink, or with a `..` in it reports the directory those spellings
     /// name, not the spelling. Everything downstream takes that one value: the
-    /// agent's base directory, the runtime's policy roots, the hook
-    /// dispatcher's key, the store identifier, and the run header's
+    /// agent's base directory, the runtime's policy roots, the hook runner's
+    /// directory, the store identifier — which also names this workspace's tool
+    /// audience — and the run header's
     /// `workspace`. Nothing resolves it again, so a process that changes its
     /// working directory afterwards changes nothing about a workspace already
     /// open. A path that does not exist, or is not a directory, fails the open
@@ -511,19 +513,19 @@ impl WorkspaceBuilder {
     ///
     /// # What this workspace's conversations are tagged with
     ///
-    /// Every agent persisted from here should carry
+    /// Every agent minted from here carries
     /// [`store::runtime_identifier`](crate::store::runtime_identifier) for this
     /// workspace, which is what makes [`store::list`](crate::store::list) — and
     /// therefore ACP's `session/list` — able to answer *which conversations
-    /// belong to this repository*. On a private runtime it does, exactly as
-    /// before. On a shared runtime mentra 0.18 can only tag with the
-    /// runtime-wide identifier fixed at build (`"basis:runtime"`), so rows minted
-    /// there stay out of every per-workspace list until the per-session
-    /// override lands upstream — see [`Runtime::mint`](crate::Runtime), which
-    /// is the one line that changes. Mis-listing is the whole cost: mentra
-    /// loads an agent by id alone, so resuming is unaffected, and an agent
-    /// re-tags itself the next time it persists under a runtime that knows its
-    /// workspace.
+    /// belong to this repository*. [`Runtime::mint`](crate::Runtime) states it
+    /// per session, so a shared runtime tags each workspace's conversations
+    /// with that workspace rather than with the process.
+    ///
+    /// A *resumed* conversation is the exception, and it is upstream's:
+    /// mentra's resume options carry no identifier, so a resumed session
+    /// re-files under the runtime's own tag when it next persists — which on a
+    /// shared runtime takes it out of this list. [`crate::store`] has the whole
+    /// of it.
     ///
     /// # What sharing a runtime shares
     ///
@@ -537,7 +539,10 @@ impl WorkspaceBuilder {
     /// ones, on any host that opens more than one repository — stays until the
     /// last of them goes. MCP tools live on the same single registry but do
     /// **not** travel even while both are open: every roster minted here hides
-    /// the `mcp__*` tools of servers this workspace does not own.
+    /// the `mcp__*` tools of servers this workspace does not own, and every
+    /// call of one is refused by this workspace's own interception chain
+    /// whether or not the roster it was offered had caught it
+    /// ([`crate::runtime::agents`]).
     pub async fn open(mut self) -> Result<Workspace, RunError> {
         // A shared runtime can acquire a skill loader after any one-time
         // inspection, and Mentra appends that loader's descriptions on every
@@ -565,8 +570,8 @@ impl WorkspaceBuilder {
         }
 
         // **The one resolution.** Everything below this line names the
-        // workspace through `path` and nothing re-derives it: the dispatcher
-        // key, the private runtime's policy roots, the agent's base directory,
+        // workspace through `path` and nothing re-derives it: the private
+        // runtime's policy roots, the agent's base directory,
         // the hook runner's directory, the store identifier and the run
         // header all take this value. A relative spelling would otherwise
         // survive into all of them and be resolved again — against whatever
@@ -621,12 +626,9 @@ impl WorkspaceBuilder {
         // private path.** A shared runtime's store dir is one runtime-wide
         // fact, not this workspace's — every workspace borrowing it would
         // derive the identical sibling `memory/` directory, and each would
-        // read the others' memory index into its own prompt (worse than the
-        // write-is-refused gap this replaces: that let the index render
-        // anyway). `None` here is what makes `memory::roots` skip the
-        // workspace root entirely on a shared runtime, exactly parallel to
-        // the dispatcher's existing shared-runtime posture — it can deny, it
-        // cannot grant a root the policy never named. The global root is
+        // read the others' memory index into its own prompt. `None` here is
+        // what makes `memory::roots` skip the workspace root entirely on a
+        // shared runtime. The global root is
         // unaffected: every workspace's own memories are exactly that,
         // whichever runtime they borrow. An explicit
         // [`WorkspaceMemoryRoot::Dir`](crate::memory::WorkspaceMemoryRoot::Dir)
@@ -658,7 +660,6 @@ impl WorkspaceBuilder {
             .map(|source| source.path.clone())
             .collect();
 
-        let shared = matches!(self.runtime, RuntimeSource::Shared(_));
         let runtime = match self.runtime {
             // A shared runtime's provider, credential and endpoint are the
             // host's process facts and were settled before this workspace
@@ -674,6 +675,20 @@ impl WorkspaceBuilder {
                 &memory_roots,
             )?),
         };
+
+        // The live scope every session minted here runs in. Derived once, from
+        // the same recipe the private path just baked into the runtime, so the
+        // two runtime shapes differ in nothing a run can observe: a shared
+        // runtime's session carries this workspace's shell posture, `.git`
+        // carve-out and memory roots because it is handed them, and a private
+        // runtime's carries them twice over. The audience below is derived from
+        // the same identity, and is what this workspace's own tools are
+        // registered under a few lines further down.
+        let scope = SessionScope {
+            identifier: store::runtime_identifier(&path),
+            policy: runtime.session_policy(&path, self.shell, &memory_roots),
+        };
+        let audience = scope.audience();
 
         // The workspace's own override first, then the file, then the runtime's
         // policy — which on the private path is already the file's answer, so
@@ -719,14 +734,11 @@ impl WorkspaceBuilder {
         // without it. The names are claimed first, so a manifest naming a tool
         // this runtime already answers to — `spawn`, a mentra builtin, another
         // workspace's declaration — refuses the open instead of replacing it.
-        // No `dispatch::canonical` around the root here or on the guard entry
-        // below: `path` already is what that helper would return, and calling
-        // it again would be the second resolution this open exists to do
-        // without. Registration and lookup still meet on one key, because the
-        // lookup side canonicalizes the *call's* directory, which is the side
-        // that has not been resolved yet.
+        // The root is `path` as resolved above and is not canonicalized again:
+        // that would be the second resolution this open exists to do without.
         let declared_tools = DeclaredTools::register_with_supplied(
             Arc::clone(&runtime),
+            &audience,
             &path,
             &declared_sources,
             &supplied_tools,
@@ -737,31 +749,59 @@ impl WorkspaceBuilder {
         // data, rendered into a prompt by whatever surface offers them.
         let (templates_dirs, templates) = load_templates(&path, &self.templates)?;
 
-        // One runner for both interception bindings, host interceptors folded
-        // first: the chain order host interceptors → supplied hooks → global
-        // hooks → workspace hooks survives the runtime split — only the
-        // registration point moved onto the runtime's dispatcher.
-        let runner = runtime.interceptors().iter().cloned().fold(
-            HookRunner::new(&path, loaded_hooks.clone()),
-            |runner, interceptor| runner.with_interceptor(interceptor),
-        );
-        // Written by every mint, read by `spawn` when a child policy narrows a
-        // delegated child's roster — see `Workspace::minted_agent`. Empty
-        // until the first mint, which is correct: nothing has been offered a
-        // roster yet, so nothing has been denied one either.
-        let foreign_tools = Arc::new(std::sync::RwLock::new(std::collections::BTreeSet::new()));
-        let hook_registration = runtime.register_workspace(dispatch::WorkspaceGuardEntry {
-            runner: Arc::new(runner),
-            hooks: loaded_hooks,
-            shell: self.shell,
-            root: path.clone(),
-            // On a private runtime the shell posture and the `.git` carve-out
-            // are already in policy; enforcing them in the dispatcher too
-            // would change whose words a denial arrives in.
-            shared,
-            foreign_tools: Arc::clone(&foreign_tools),
-        })?;
-        let foreign_tools = hook_registration.foreign_tools();
+        // This workspace's own hooks, and only its own: the host's
+        // interceptors are the *runtime's* and were registered globally when it
+        // was built (`runtime::interception`). The documented order — host
+        // interceptors → supplied hooks → global hooks → workspace hooks — is
+        // unchanged and is now mentra's to compose: it walks one chain per call
+        // built from every batch whose audience matches, in registration order,
+        // and this runtime's global batch necessarily precedes any workspace
+        // batch registered on it.
+        //
+        // Registered for this workspace's audience, not globally, because a
+        // runner does not filter: it answers for every call it is handed. The
+        // audience is what makes "this workspace's hooks judge this
+        // workspace's runs" true, and it is a better answer than the working
+        // directory basis used to route on — two agents can share a directory
+        // and belong to different repositories, and a call from a delegated
+        // child carries its parent's audience wherever it runs. What it cannot
+        // express is the reverse: a session with *no* audience whose base
+        // directory is inside this workspace. See `Workspace`'s own docs.
+        let runner = HookRunner::new(&path, loaded_hooks);
+        // basis's own guard, ahead of whatever this repository declared,
+        // because a bridged tool this workspace does not own is not a call a
+        // repository's hook should have to be written to catch. It reads the
+        // runtime's agent ledger rather than this workspace, which is what
+        // makes it right for the *other* live open of this directory too: that
+        // open joins this chain rather than registering one of its own, so only
+        // one of the two guards is ever live and it has to answer for both.
+        // See `crate::runtime::agents::ForeignMcpGuard`.
+        #[cfg(feature = "mcp")]
+        let runner = runner.with_interceptor(crate::runtime::agents::ForeignMcpGuard::new(
+            Arc::clone(runtime.agents()),
+        ));
+        // One registration, both seams: mentra 0.26 takes a chain as
+        // `ExecutionHookParticipant`s and answers with a single guard whose
+        // participant snapshot is retained across a whole call. Two guards, one
+        // per seam, could not promise that — a drop between the tool and its
+        // result would leave the call half-guarded — and only the mixed chain
+        // carries a rewrite's attribution into the refusal a rejected rewrite
+        // earns. Taken unconditionally: whether this workspace will ever answer
+        // about a *result* is knowable here, but a runner with nothing to say
+        // costs one map walk and the alternative is a workspace that silently
+        // could not be given a post hook.
+        //
+        // Through the runtime's ledger rather than straight at mentra, because
+        // one root may be open twice and one audience must carry one chain:
+        // an identical second open joins, a differing one is refused. The `?`
+        // is the refusal, and it comes after the registrations above only
+        // because those release themselves on the way out.
+        let hooks = runtime.register_hook_chain(&audience, &path, runner)?;
+        // Empty until the first mint, which is correct: nothing has been
+        // offered a roster yet, so nothing has been denied one either. Made
+        // before the `Workspace` so its drop takes this open's agents off a
+        // runtime that outlives it.
+        let agents = WorkspaceAgents::new(Arc::clone(runtime.agents()));
 
         // Both lists reach the header whether or not this build has MCP in it:
         // what a run reports is a schema clients parse, and a field that
@@ -770,7 +810,8 @@ impl WorkspaceBuilder {
         #[cfg(feature = "mcp")]
         let (mcp_connections, mcp_files, mcp_servers) = {
             let (files, servers) = discovered_mcp(&path, &self.mcp)?;
-            let connections = McpConnections::connect(Arc::clone(&runtime), &path, servers).await;
+            let connections =
+                McpConnections::connect(Arc::clone(&runtime), &audience, &path, servers).await;
             let names = connections.names().to_vec();
 
             (connections, files, names)
@@ -792,13 +833,13 @@ impl WorkspaceBuilder {
                 self.compaction,
                 runtime.transcripts_dir().to_path_buf(),
             ),
-            identifier: store::runtime_identifier(&path),
             // Not resolved a second time: `path` *is* what discovery resolved,
             // and asking again would reintroduce the second answer this open
             // exists to do without.
             root: path,
             provider: runtime.provider().to_string(),
             runtime,
+            scope,
             mint_posture: MintPosture::new(fresh_only),
             model,
             // The last thing the file still has to say, and the one this
@@ -817,8 +858,8 @@ impl WorkspaceBuilder {
             declared_tool_files: sourced(&declared_sources),
             declared_tools: declared_tool_names,
             declared_registration: declared_tools,
-            hook_registration,
-            foreign_tools,
+            hooks,
+            agents,
             #[cfg(feature = "mcp")]
             mcp_connections,
         })
@@ -930,18 +971,14 @@ pub(crate) fn load_templates(
 /// hides stays registered on the runtime, which is precisely why `spawn` can
 /// still reach the command executor underneath even though
 /// [`ToolRoster::default`] hides it by name. What a caller said about
-/// commands is still decided by [`ShellAccess`] — baked into policy on a
-/// private runtime, enforced by the hook dispatcher on a shared one — on the
-/// path `spawn` uses: `--no-shell` shuts commands off for `spawn` exactly as
-/// it did for `shell`.
+/// commands is still decided by [`ShellAccess`], in the policy every session
+/// carries, on the path `spawn` uses: `--no-shell` shuts commands off for
+/// `spawn` exactly as it did for `shell`.
 ///
 /// The roster travels: `DisposableSubagentTemplate::from_agent` clones this
 /// whole config, so a subagent of a subagent is offered the same roster.
 ///
-/// Built once and cloned per run, because none of its inputs are per-run —
-/// the per-mint extension (hiding other workspaces' MCP tools) happens in
-/// [`Workspace::prepare`](super::Workspace::prepare)'s path, where the shared
-/// registry's current contents are known.
+/// Built once and cloned per run, because none of its inputs are per-run.
 fn agent_config(
     workspace: &Path,
     context: &WorkspaceContext,

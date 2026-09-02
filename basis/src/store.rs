@@ -33,15 +33,23 @@
 //! persists. [`WorkspaceBuilder::open`](crate::WorkspaceBuilder::open) is where
 //! the tag is set, and where that ruling is written down.
 //!
-//! One caveat since ADR-0018: mentra fixes the tag per *runtime* at build
-//! time, so only a workspace on its own private runtime — every
-//! `Workspace::open(path)`, the CLI, the free functions — tags rows with its
-//! path. A workspace on a **shared** [`Runtime`](crate::Runtime) mints rows
-//! tagged `"basis:runtime"` until mentra grows a per-session override; those
-//! rows stay out of every per-workspace list (the `"default"` ruling above,
-//! applied again) and re-file themselves the first time they persist under a
-//! runtime that knows their workspace. [`Runtime`](crate::Runtime)'s `mint` is
-//! the one line that changes when the override lands.
+//! Every workspace tags its own rows, on a private runtime and on a shared
+//! one alike: [`Runtime`](crate::Runtime)'s `mint` states the identifier per
+//! session, so one store file serving five repositories still lists each one's
+//! conversations apart.
+//!
+//! **One gap, and it is upstream's.** A *resumed* session carries no
+//! identifier: mentra's `SessionResumeOptions` has no field for one
+//! ([mentra#54](https://github.com/oops-rs/mentra/issues/54)), so a
+//! resumed conversation persists under the runtime's own tag — its workspace's
+//! on a private runtime, and `"basis:runtime"` on a shared one. On a shared
+//! runtime, therefore, resuming a conversation and running it takes its row
+//! out of that workspace's list, exactly as the `"default"` ruling above
+//! takes an unrecorded one out. Nothing is stranded — mentra loads an agent by
+//! id and a client that already holds the id can still resume it — but a
+//! client that lists to find its conversations will not see that one again.
+//! `Runtime::resume_minted` is the one line that changes when the field
+//! lands.
 //!
 //! # Where the files go
 //!
@@ -243,10 +251,12 @@ fn by_recency(sessions: &mut [PersistedSession]) {
 /// same store, and "it is gone" is the outcome both of them asked for.
 ///
 /// Keyed by the conversation, not by a workspace: mentra's store is indexed by
-/// agent id, so this does not check that the id belongs anywhere in
-/// particular — the same ruling [`Workspace::resume`](crate::Workspace::resume)
-/// makes for the same reason. A caller that means "one of mine" takes the id
-/// from [`list`] for its own workspace, which is where a client got it anyway.
+/// agent id, so this does not check that the id belongs anywhere in particular.
+/// [`Workspace::resume`](crate::Workspace::resume) *does* check, and the two
+/// differ for a reason — a resume states a workspace's policy and tool audience
+/// onto the conversation it picks up, and a deletion states nothing. A caller
+/// that means "one of mine" takes the id from [`list`] for its own workspace,
+/// which is where a client got it anyway.
 ///
 /// **A live conversation is not stopped by this.** mentra deletes rows; an
 /// agent still in memory keeps running and writes its row back on its next

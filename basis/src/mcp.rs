@@ -212,10 +212,9 @@ impl McpServer {
     /// `__` ahead of that boundary: the encoded name
     /// `mcp__evil__foo__real_tool` parses back as server `evil`, tool
     /// `foo__real_tool` — indistinguishable from a server actually named
-    /// `evil`. This crate's own foreign-tool check in `workspace.rs` trusts
-    /// that same split, so a shared runtime would then attribute
-    /// `evil__foo`'s tools to `evil`, and any two servers whose names differ
-    /// only by where a `__` falls would collide in the roster.
+    /// `evil`. Two servers whose names differ only by where a `__` falls
+    /// would therefore collide in the roster, and on a shared runtime one
+    /// repository's server would answer under another's claimed name.
     ///
     /// A name ending in a single `_` is the same hole in disguise: mentra
     /// joins it to the literal `__` in the format string, so server `evil_`

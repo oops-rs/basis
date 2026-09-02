@@ -17,6 +17,8 @@ use std::{
     sync::Arc,
 };
 
+use mentra::tool::ToolAudience;
+
 use crate::runtime::{DeclaredToolOrigin, Runtime};
 
 use super::{
@@ -43,10 +45,11 @@ impl DeclaredTools {
     #[cfg(test)]
     pub(crate) fn register(
         runtime: Arc<Runtime>,
+        audience: &ToolAudience,
         root: &Path,
         sources: &[ToolsSource],
     ) -> Result<Self, DeclaredToolError> {
-        Self::register_with_supplied(runtime, root, sources, &[])
+        Self::register_with_supplied(runtime, audience, root, sources, &[])
     }
 
     /// Claims every name, then registers the tools this open is the first
@@ -57,16 +60,22 @@ impl DeclaredTools {
     /// a shared runtime a half-registered manifest from a workspace that failed
     /// to open would still be in every other workspace's roster.
     ///
-    /// The second pass registers with `try_register_tool`, which is the
-    /// difference between a check-then-act that is safe *because* of the claim
-    /// map and one that is safe on its own. Nothing basis does can reach the
-    /// gap between the two passes — the claim map serializes every workspace on
-    /// this runtime — but a host holding the same `mentra::Runtime` can call
-    /// `register_tool` on it directly, and a claim it walked past would
-    /// otherwise be a repository's program silently answering to the host's
-    /// name, or the reverse.
+    /// The second pass registers with `try_register_tool_for_audience`, which
+    /// is the difference between a check-then-act that is safe *because* of the
+    /// claim map and one that is safe on its own. Nothing basis does can reach
+    /// the gap between the two passes — the claim map serializes every
+    /// workspace on this runtime — but a host holding the same `mentra::Runtime`
+    /// can call `register_tool` on it directly, and a claim it walked past
+    /// would otherwise be a repository's program silently answering to the
+    /// host's name, or the reverse.
+    ///
+    /// `audience` is the workspace's own, so a tool a repository declares is
+    /// offered to that repository's runs and to nothing else on the runtime —
+    /// mentra's ladder resolves a foreign audience's name to `Hidden`, which is
+    /// what the roster used to have to hide by hand at every mint.
     pub(crate) fn register_with_supplied(
         runtime: Arc<Runtime>,
+        audience: &ToolAudience,
         root: &Path,
         sources: &[ToolsSource],
         supplied: &[DeclaredToolSpec],
@@ -79,7 +88,7 @@ impl DeclaredTools {
             names: Vec::new(),
             origins: Vec::new(),
         };
-        let mut first_holder = Vec::new();
+        let mut permissions = Vec::new();
 
         for (path, spec) in &declared {
             // On failure `claimed` drops, releasing whatever it had taken, so a
@@ -88,36 +97,30 @@ impl DeclaredTools {
                 Some(_) => DeclaredToolOrigin::File,
                 None => DeclaredToolOrigin::Supplied,
             };
-            let fresh = claimed
+            let claim = claimed
                 .runtime
                 .claim_declared_tool(root, spec, origin)
                 .map_err(|reason| name_taken(path.as_deref(), &spec.name, reason))?;
             claimed.names.push(spec.name.clone());
             claimed.origins.push(origin);
-            first_holder.push(fresh);
+            permissions.push(claim);
         }
 
-        for ((path, spec), fresh) in declared.into_iter().zip(first_holder) {
-            // A sibling open of this same root already registered it, and one
-            // name is one program: joining that registration is what keeps the
-            // sibling's running agents on the program they started with.
-            if !fresh {
+        for ((path, spec), claim) in declared.into_iter().zip(permissions) {
+            // `None` is a sibling open of this same root that already
+            // registered it, and one name is one program: joining that
+            // registration is what keeps the sibling's running agents on the
+            // program they started with.
+            let Some(claim) = claim else {
                 continue;
-            }
+            };
 
+            let name = spec.name.clone();
+            let tool = wrapped(&claimed.runtime, spec, root);
             claimed
                 .runtime
-                .mentra_runtime()
-                .try_register_tool(wrapped(&claimed.runtime, spec, root))
-                .map_err(|collision| {
-                    name_taken(
-                        path.as_deref(),
-                        &collision.name,
-                        "something registered a tool by that name on this runtime while this \
-                         workspace was opening"
-                            .to_string(),
-                    )
-                })?;
+                .install_declared_tool(audience, claim, tool)
+                .map_err(|reason| name_taken(path.as_deref(), &name, reason))?;
         }
 
         Ok(claimed)
@@ -128,10 +131,15 @@ impl DeclaredTools {
         &self.names
     }
 
-    /// The root these names are claimed under, which is the one a mint has to
-    /// ask [`Runtime::foreign_declared_tools`] with — claiming under one
-    /// spelling of a directory and asking under another would have a workspace
-    /// hiding its own tools.
+    /// The root these names are claimed under.
+    ///
+    /// Exposed so the open's own tests can assert it against
+    /// [`Workspace::root`](crate::Workspace::root): the claim owner is one of
+    /// the names an open promises to settle on one directory, and without a
+    /// reader nothing failed if an edit reintroduced a second spelling of it.
+    /// `#[cfg(test)]` because that assertion is the only caller — every
+    /// claim and release in this module reads the field directly.
+    #[cfg(test)]
     pub(crate) fn root(&self) -> &Path {
         &self.root
     }
@@ -223,15 +231,17 @@ mod tests {
         }
     }
 
-    /// Whether mentra's registry answers to `name` — the only honest answer to
-    /// "is this tool on the runtime", since basis's claim map is a separate
-    /// ledger that could disagree.
-    fn registers(runtime: &Runtime, name: &str) -> bool {
-        runtime
-            .mentra_runtime()
-            .tools()
-            .iter()
-            .any(|tool| tool.provider.name == name)
+    /// A workspace's audience, keyed on its root the way an open keys it.
+    fn audience_for(root: &str) -> ToolAudience {
+        crate::runtime::probe::audience_for(Path::new(root))
+    }
+
+    /// Whether mentra's registry answers to `name` for `root`'s audience — the
+    /// only honest answer to "is this tool on the runtime", since basis's claim
+    /// map is a separate ledger that could disagree. See
+    /// [`crate::runtime::probe`] for why a read is written as a write.
+    fn registers(runtime: &Runtime, root: &str, name: &str) -> bool {
+        crate::runtime::probe::answers(runtime, Path::new(root), name)
     }
 
     #[test]
@@ -239,17 +249,22 @@ mod tests {
         let runtime = runtime();
         let sources = [source("/repo/.basis/tools.json", &["jenkins_job"])];
 
-        let registered =
-            DeclaredTools::register(Arc::clone(&runtime), Path::new("/repo"), &sources)
-                .expect("registers");
+        let registered = DeclaredTools::register(
+            Arc::clone(&runtime),
+            &audience_for("/repo"),
+            Path::new("/repo"),
+            &sources,
+        )
+        .expect("registers");
 
         assert_eq!(registered.names(), ["jenkins_job"]);
         assert!(
-            runtime
-                .mentra_runtime()
-                .tools()
-                .iter()
-                .any(|tool| tool.provider.name == "jenkins_job")
+            registers(&runtime, "/repo", "jenkins_job"),
+            "the declaring workspace's own audience answers to it"
+        );
+        assert!(
+            !registers(&runtime, "/elsewhere", "jenkins_job"),
+            "and a sibling workspace's does not"
         );
     }
 
@@ -297,8 +312,13 @@ mod tests {
         let runtime = runtime();
         let sources = [source("/repo/.basis/tools.json", &[crate::tools::SPAWN])];
 
-        let error =
-            DeclaredTools::register(runtime, Path::new("/repo"), &sources).expect_err("refused");
+        let error = DeclaredTools::register(
+            runtime,
+            &audience_for("/repo"),
+            Path::new("/repo"),
+            &sources,
+        )
+        .expect_err("refused");
 
         assert!(
             matches!(error, DeclaredToolError::NameTaken { .. }),
@@ -317,8 +337,13 @@ mod tests {
         let runtime = runtime();
         let sources = [source("/repo/.basis/tools.json", &["edit"])];
 
-        let error =
-            DeclaredTools::register(runtime, Path::new("/repo"), &sources).expect_err("refused");
+        let error = DeclaredTools::register(
+            runtime,
+            &audience_for("/repo"),
+            Path::new("/repo"),
+            &sources,
+        )
+        .expect_err("refused");
 
         assert!(
             matches!(error, DeclaredToolError::NameTaken { .. }),
@@ -331,6 +356,7 @@ mod tests {
         let runtime = runtime();
         let first = DeclaredTools::register(
             Arc::clone(&runtime),
+            &audience_for("/repo/one"),
             Path::new("/repo/one"),
             &[source("/repo/one/.basis/tools.json", &["deploy"])],
         )
@@ -338,6 +364,7 @@ mod tests {
 
         let error = DeclaredTools::register(
             Arc::clone(&runtime),
+            &audience_for("/repo/two"),
             Path::new("/repo/two"),
             &[source("/repo/two/.basis/tools.json", &["deploy"])],
         )
@@ -360,6 +387,7 @@ mod tests {
 
         DeclaredTools::register(
             runtime,
+            &audience_for("/repo/two"),
             Path::new("/repo/two"),
             &[source("/repo/two/.basis/tools.json", &["deploy"])],
         )
@@ -376,21 +404,20 @@ mod tests {
         let runtime = runtime();
         let sources = [source("/repo/.basis/tools.json", &["deploy"])];
 
-        let held = DeclaredTools::register(Arc::clone(&runtime), Path::new("/repo"), &sources)
-            .expect("registers");
-        assert!(registers(&runtime, "deploy"));
+        let held = DeclaredTools::register(
+            Arc::clone(&runtime),
+            &audience_for("/repo"),
+            Path::new("/repo"),
+            &sources,
+        )
+        .expect("registers");
+        assert!(registers(&runtime, "/repo", "deploy"));
 
         drop(held);
 
         assert!(
-            !registers(&runtime, "deploy"),
+            !registers(&runtime, "/repo", "deploy"),
             "the workspace is gone and so is what it declared"
-        );
-        assert!(
-            runtime
-                .foreign_declared_tools(Path::new("/elsewhere"))
-                .is_empty(),
-            "and nothing is left to hide from anyone"
         );
     }
 
@@ -399,12 +426,22 @@ mod tests {
         let runtime = runtime();
         let sources = [source("/repo/.basis/tools.json", &["deploy"])];
 
-        let first = DeclaredTools::register(Arc::clone(&runtime), Path::new("/repo"), &sources)
-            .expect("registers");
+        let first = DeclaredTools::register(
+            Arc::clone(&runtime),
+            &audience_for("/repo"),
+            Path::new("/repo"),
+            &sources,
+        )
+        .expect("registers");
         drop(first);
 
-        DeclaredTools::register(runtime, Path::new("/repo"), &sources)
-            .expect("the same workspace registers its own tool again");
+        DeclaredTools::register(
+            runtime,
+            &audience_for("/repo"),
+            Path::new("/repo"),
+            &sources,
+        )
+        .expect("the same workspace registers its own tool again");
     }
 
     #[test]
@@ -425,12 +462,14 @@ mod tests {
 
         let _first = DeclaredTools::register(
             Arc::clone(&runtime),
+            &audience_for("/repo"),
             Path::new("/repo"),
             &[serving("deploy", "the first open's program")],
         )
         .expect("registers");
         let _second = DeclaredTools::register(
             Arc::clone(&runtime),
+            &audience_for("/repo"),
             Path::new("/repo"),
             &[serving("deploy", "the second open's program")],
         )
@@ -438,8 +477,7 @@ mod tests {
 
         assert_eq!(
             runtime
-                .mentra_runtime()
-                .tool_descriptor("deploy")
+                .declared_tool_descriptor("deploy")
                 .expect("registered")
                 .provider
                 .description
@@ -453,20 +491,31 @@ mod tests {
         let runtime = runtime();
         let sources = [source("/repo/.basis/tools.json", &["deploy"])];
 
-        let first = DeclaredTools::register(Arc::clone(&runtime), Path::new("/repo"), &sources)
-            .expect("registers");
-        let second = DeclaredTools::register(Arc::clone(&runtime), Path::new("/repo"), &sources)
-            .expect("registers");
+        let first = DeclaredTools::register(
+            Arc::clone(&runtime),
+            &audience_for("/repo"),
+            Path::new("/repo"),
+            &sources,
+        )
+        .expect("registers");
+        let second = DeclaredTools::register(
+            Arc::clone(&runtime),
+            &audience_for("/repo"),
+            Path::new("/repo"),
+            &sources,
+        )
+        .expect("registers");
 
         drop(first);
         assert!(
-            registers(&runtime, "deploy"),
+            registers(&runtime, "/repo", "deploy"),
             "one holder went, the other is still serving it"
         );
 
         // The second is still open, so the name is still spoken for.
         let error = DeclaredTools::register(
             Arc::clone(&runtime),
+            &audience_for("/elsewhere"),
             Path::new("/elsewhere"),
             &[source("/elsewhere/.basis/tools.json", &["deploy"])],
         )
@@ -479,6 +528,7 @@ mod tests {
         drop(second);
         DeclaredTools::register(
             runtime,
+            &audience_for("/elsewhere"),
             Path::new("/elsewhere"),
             &[source("/elsewhere/.basis/tools.json", &["deploy"])],
         )
@@ -490,6 +540,7 @@ mod tests {
         let runtime = runtime();
         let _held = DeclaredTools::register(
             Arc::clone(&runtime),
+            &audience_for("/repo/one"),
             Path::new("/repo/one"),
             &[source("/repo/one/.basis/tools.json", &["taken"])],
         )
@@ -497,6 +548,7 @@ mod tests {
 
         let error = DeclaredTools::register(
             Arc::clone(&runtime),
+            &audience_for("/repo/two"),
             Path::new("/repo/two"),
             &[source("/repo/two/.basis/tools.json", &["fine", "taken"])],
         )
@@ -517,6 +569,7 @@ mod tests {
 
         DeclaredTools::register(
             runtime,
+            &audience_for("/repo/three"),
             Path::new("/repo/three"),
             &[source("/repo/three/.basis/tools.json", &["fine"])],
         )
@@ -528,20 +581,19 @@ mod tests {
         let runtime = runtime();
         let _held = DeclaredTools::register(
             Arc::clone(&runtime),
+            &audience_for("/repo/one"),
             Path::new("/repo/one"),
             &[source("/repo/one/.basis/tools.json", &["deploy"])],
         )
         .expect("registers");
 
-        assert_eq!(
-            runtime.foreign_declared_tools(Path::new("/repo/two")),
-            vec!["deploy".to_string()],
-            "a program one repository declared is not the other's to run"
+        assert!(
+            registers(&runtime, "/repo/one", "deploy"),
+            "the declaring repository's runs can reach the program it declared"
         );
         assert!(
-            runtime
-                .foreign_declared_tools(Path::new("/repo/one"))
-                .is_empty()
+            !registers(&runtime, "/repo/two", "deploy"),
+            "a program one repository declared is not the other's to run"
         );
     }
 
@@ -565,6 +617,7 @@ mod tests {
             let runtime = runtime();
             let _held = DeclaredTools::register_with_supplied(
                 Arc::clone(&runtime),
+                &audience_for("/repo"),
                 Path::new("/repo"),
                 &[],
                 std::slice::from_ref(&first),
@@ -573,6 +626,7 @@ mod tests {
 
             let error = DeclaredTools::register_with_supplied(
                 runtime,
+                &audience_for("/repo"),
                 Path::new("/repo"),
                 &[],
                 &[differing],
@@ -610,12 +664,14 @@ mod tests {
             let runtime = runtime();
             let _file = DeclaredTools::register(
                 Arc::clone(&runtime),
+                &audience_for("/repo"),
                 Path::new("/repo"),
                 &[source_with(path, file.clone())],
             )
             .expect("the file declaration registers first");
             let error = DeclaredTools::register_with_supplied(
                 runtime,
+                &audience_for("/repo"),
                 Path::new("/repo"),
                 &[],
                 std::slice::from_ref(&supplied),
@@ -633,14 +689,19 @@ mod tests {
             let runtime = runtime();
             let _supplied = DeclaredTools::register_with_supplied(
                 Arc::clone(&runtime),
+                &audience_for("/repo"),
                 Path::new("/repo"),
                 &[],
                 std::slice::from_ref(&supplied),
             )
             .expect("the supplied declaration registers first");
-            let error =
-                DeclaredTools::register(runtime, Path::new("/repo"), &[source_with(path, file)])
-                    .expect_err("a differing file declaration cannot join a live supplied claim");
+            let error = DeclaredTools::register(
+                runtime,
+                &audience_for("/repo"),
+                Path::new("/repo"),
+                &[source_with(path, file)],
+            )
+            .expect_err("a differing file declaration cannot join a live supplied claim");
 
             assert!(matches!(&error, DeclaredToolError::NameTaken { .. }));
             let message = error.to_string();
