@@ -282,7 +282,7 @@ pub fn forget_in(dir: &Path, agent_id: &str) -> Result<(), RunError> {
     // — would sit in the store root's `rules.json` forever, keyed to a dead
     // agent id nothing can match again: a privacy leftover and unbounded
     // growth. Forgetting means the rules too. (Upstream cleaning its own
-    // rules on delete is asked for; this stays correct either way, because
+    // rules on delete is mentra#51; this stays correct either way, because
     // clearing an already-empty scope removes nothing.)
     rules.clear_scope(
         &PermissionRuleContext {
