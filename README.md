@@ -139,7 +139,7 @@ stops minting on it instead of retrying it like a provider error.
 Work a run delegates through `spawn` is inside the **bound** and, since mentra `5f303b8` and
 basis `e22aa63`, inside the **tally** too: the subagent runs on the parent's accounting handle,
 the child's usage is relayed onto the parent's stream, and `RunReport::usage` agrees with the
-figure the bound stops on. [docs/REDESIGN.md](docs/REDESIGN.md) records the gap as closed.
+figure the bound stops on. [docs/archive/REDESIGN.md](docs/archive/REDESIGN.md) records the gap as closed.
 
 Who that subagent *is* is a host decision since 0.7: `RuntimeBuilder::with_child_policy` maps
 each delegation (its prompt, the parent, the workspace) to a `ChildSpec` overriding the child's
@@ -488,7 +488,7 @@ Docs: [PROPOSAL.md](docs/PROPOSAL.md) (why) · [ARCHITECTURE.md](docs/ARCHITECTU
 for `--effort`, custom endpoints, and the hooks `shell`→`spawn` migration) ·
 [conventions.md](docs/conventions.md) (every file and variable basis reads, in precedence order) ·
 [embedding.md](docs/embedding.md) (the SDK in detail) · [targets.md](docs/targets.md) (running a
-command somewhere else) · [REDESIGN.md](docs/REDESIGN.md) (ledger) ·
+command somewhere else) · [REDESIGN.md](docs/archive/REDESIGN.md) (closed ledger) ·
 [adr/](docs/adr/) (26 locked decisions) · [proposals/](docs/proposals/) (deferred ideas).
 
 ## License

@@ -20,8 +20,8 @@ implementation.
   Consequences), `docs/proposals/` holds deferred ideas (numbered, with Status line,
   trigger conditions, and the properties any implementation must preserve). New
   significant decisions get an ADR; deferred ideas get a proposal, not a TODO.
-  `docs/REDESIGN.md` is the ledger of the ADR-0010…0015 transition: what is built,
-  what is in between, what is not started. `README.md` and `ARCHITECTURE.md` describe
+  `docs/archive/REDESIGN.md` is the ledger of the ADR-0010…0015 transition, archived and
+  closed now that transition has landed. `README.md` and `ARCHITECTURE.md` describe
   the *shipped* state and are updated as phases land, never ahead of them.
 - The core principle: **the core has no opinions** — no task-specific types,
   pipelines, or vocabulary (PROPOSAL.md Bet 4).
