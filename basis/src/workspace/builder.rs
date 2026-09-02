@@ -513,19 +513,19 @@ impl WorkspaceBuilder {
     ///
     /// # What this workspace's conversations are tagged with
     ///
-    /// Every agent persisted from here should carry
+    /// Every agent minted from here carries
     /// [`store::runtime_identifier`](crate::store::runtime_identifier) for this
     /// workspace, which is what makes [`store::list`](crate::store::list) — and
     /// therefore ACP's `session/list` — able to answer *which conversations
-    /// belong to this repository*. On a private runtime it does, exactly as
-    /// before. On a shared runtime mentra 0.18 can only tag with the
-    /// runtime-wide identifier fixed at build (`"basis:runtime"`), so rows minted
-    /// there stay out of every per-workspace list until the per-session
-    /// override lands upstream — see [`Runtime::mint`](crate::Runtime), which
-    /// is the one line that changes. Mis-listing is the whole cost: mentra
-    /// loads an agent by id alone, so resuming is unaffected, and an agent
-    /// re-tags itself the next time it persists under a runtime that knows its
-    /// workspace.
+    /// belong to this repository*. [`Runtime::mint`](crate::Runtime) states it
+    /// per session, so a shared runtime tags each workspace's conversations
+    /// with that workspace rather than with the process.
+    ///
+    /// A *resumed* conversation is the exception, and it is upstream's:
+    /// mentra's resume options carry no identifier, so a resumed session
+    /// re-files under the runtime's own tag when it next persists — which on a
+    /// shared runtime takes it out of this list. [`crate::store`] has the whole
+    /// of it.
     ///
     /// # What sharing a runtime shares
     ///

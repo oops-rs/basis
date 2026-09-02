@@ -259,21 +259,17 @@ impl SessionSource for ConfiguredSource {
     /// on disk.
     ///
     /// This depends on a conversation being tagged with
-    /// [`store::runtime_identifier`](basis::store::runtime_identifier) for
-    /// its workspace, and since ADR-0018 that is exactly what a *shared*
-    /// runtime cannot do: mentra 0.18 fixes the tag per runtime at build time,
-    /// so conversations opened over ACP are filed under the process's tag and
-    /// stay out of every per-workspace list until the per-session override
-    /// lands upstream — see [`Runtime`](basis::Runtime)'s `mint`, the one
-    /// line that closes it. What this still answers for is every conversation
-    /// the CLI and the free functions wrote, which do run on a private runtime
-    /// per workspace; a row re-files itself the next time it persists under a
-    /// runtime that knows its workspace.
+    /// [`store::runtime_identifier`](basis::store::runtime_identifier) for its
+    /// workspace, and every session opened here is: `Runtime::mint` states the
+    /// identifier per session, so the shared runtime this source runs on files
+    /// each `session/new` under the `cwd` it was opened for.
     ///
-    /// The capability is claimed regardless, because the alternative is worse
-    /// in both directions: withdrawing `session/list` hides the conversations
-    /// that *are* listed correctly, and re-claiming it later would move the
-    /// advertised surface under a client that had already read it.
+    /// One conversation this cannot answer for is one that has been *resumed*
+    /// and run again: mentra carries no identifier through a resume, so the row
+    /// re-files itself under the shared runtime's own tag and leaves the
+    /// workspace's list ([`basis::store`] has the gap, and the one line that
+    /// closes it upstream). The conversation is still resumable by id, which is
+    /// what a client that kept the session id does.
     async fn list_sessions(&self, cwd: PathBuf) -> Result<Vec<PersistedSession>, RunError> {
         basis::store::list(&cwd)
     }
@@ -648,6 +644,61 @@ mod tests {
         assert!(
             std::ptr::eq(opened[0].mentra_runtime(), runtime.mentra_runtime()),
             "and both were minted on the one runtime this process built"
+        );
+    }
+
+    /// The claim `list_sessions` is built on, and the one nothing checked: a
+    /// session this source opens is filed under the directory it was opened
+    /// for, so a client asking about that directory gets it back.
+    ///
+    /// Worth a test of its own because the doc beside `list_sessions` asserted
+    /// the opposite for two releases after it stopped being true — the tag is a
+    /// per-session fact now (`Runtime::mint`), and a shared runtime files each
+    /// workspace's conversations apart.
+    ///
+    /// Read through `store::list_in` rather than through `list_sessions`
+    /// itself, which resolves the store root the process would use. Opening
+    /// that directory in a test is a legitimate refusal on any machine that
+    /// ran basis 0.6 (`RunError::LegacyStore`), and that the two roots are one
+    /// path is pinned in `basis`'s own `store` tests.
+    #[tokio::test]
+    async fn a_session_this_source_opens_is_listed_for_its_own_directory() {
+        let store = tempfile::tempdir().expect("tempdir");
+        let repository = tempfile::tempdir().expect("tempdir");
+        let elsewhere = tempfile::tempdir().expect("tempdir");
+        let runtime = Arc::new(
+            Runtime::builder()
+                .with_base_url("http://127.0.0.1:1/v1")
+                .with_api_key("test-key")
+                .with_store_dir(store.path())
+                .build()
+                .expect("a runtime builds without touching the network"),
+        );
+        let source = ConfiguredSource::on_runtime(
+            runtime,
+            Some(offline_template().with_discovery(offline_discovery())),
+        );
+
+        let opened = source
+            .create(repository.path().to_path_buf(), Vec::new())
+            .await
+            .expect("the session opens");
+
+        let listed: Vec<String> = basis::store::list_in(store.path(), repository.path())
+            .expect("lists")
+            .into_iter()
+            .map(|session| session.agent_id)
+            .collect();
+        assert_eq!(
+            listed,
+            vec![opened.agent_id().to_string()],
+            "a client asking about this directory must be handed the session it opened here"
+        );
+        assert!(
+            basis::store::list_in(store.path(), elsewhere.path())
+                .expect("lists")
+                .is_empty(),
+            "and no other directory may claim it"
         );
     }
 
