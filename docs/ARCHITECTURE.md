@@ -213,7 +213,9 @@ registry replaces on a duplicate name, so without that check a manifest could qu
 also keeps two repositories from declaring one name; what keeps one repository's tools *out of
 another's roster* is a different thing — each workspace registers its declared and bridged
 tools for its own `ToolAudience`, and mentra reports a foreign audience's name as hidden
-however a roster is written.
+however a roster is written. One directory is one audience, so *two live opens of the same
+directory* are the case that ladder cannot answer; the migration section below has what basis
+does about it.
 
 Interception is not a subsystem parallel to anything either. `hooks::contract` holds the request
 and outcome types both bindings speak, one `Chain` decides what an answer *means* — first
@@ -902,6 +904,25 @@ this workspace did not configure, reading the bridged names off the claim ledger
 server names (`Runtime::foreign_mcp_tools`). Host tools registered with
 `RuntimeBuilder::with_tool` stay global otherwise: they are the runtime's, and a global is
 visible to every audience. `ToolRoster` is unchanged in shape and in effect.
+
+**And hiding at mint is not, by itself, the isolation.** A roster is a snapshot of the registry
+the mint saw, and three things outlive it: a sibling of the *same directory* that bridges its
+server after this session minted, a resumed conversation (Mentra persists the tool profile and
+`SessionResumeOptions` restates none of it, so the roster is the one the first mint froze), and
+the window inside a sibling's own open between `claim_mcp_server`, which reserves the name, and
+`record_bridged_tools`, which says what came back. So basis decides *execution* separately from
+*listing*: `runtime::agents::ForeignMcpGuard` joins every workspace's own interception chain and
+refuses any `mcp__<server>__<tool>` call whose `<server>` is not in the calling agent's
+workspace's own server list — settled at that workspace's open, so it cannot go stale whatever
+the mint or resume timing. It reads the runtime's agent ledger (`runtime::agents`) rather than
+the workspace that installed it, which is what makes it right for the *other* open of the same
+directory: that open joins the first's chain rather than registering one, so one guard answers
+for both, by agent id. The same ledger carries the parent's `hidden_tools` back into a delegated
+child whose `ChildSpec` roster replaced the profile — `with_tool_profile` replaces it wholesale
+and Mentra exposes no reader for a template's effective profile — and `spawn` adopts the child
+into the ledger for the length of the delegation, so the guard has an answer for it too. Hiding
+and refusing are not substitutes: one decides what the model is told exists, the other what
+runs.
 
 **A resume now refuses the wrong workspace.** Because a resume is where a workspace's policy
 and tool audience are *restated* — Mentra persists neither — picking up another repository's

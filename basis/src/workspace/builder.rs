@@ -539,7 +539,10 @@ impl WorkspaceBuilder {
     /// ones, on any host that opens more than one repository — stays until the
     /// last of them goes. MCP tools live on the same single registry but do
     /// **not** travel even while both are open: every roster minted here hides
-    /// the `mcp__*` tools of servers this workspace does not own.
+    /// the `mcp__*` tools of servers this workspace does not own, and every
+    /// call of one is refused by this workspace's own interception chain
+    /// whether or not the roster it was offered had caught it
+    /// ([`crate::runtime::agents`]).
     pub async fn open(mut self) -> Result<Workspace, RunError> {
         // A shared runtime can acquire a skill loader after any one-time
         // inspection, and Mentra appends that loader's descriptions on every

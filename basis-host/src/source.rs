@@ -314,12 +314,19 @@ impl SessionSource for ConfiguredSource {
 /// its interception chain live, for its own tool audience, and two opens of one
 /// directory share that audience — so basis counts holders of one chain rather
 /// than registering two, and refuses a same-root open whose chain differs
-/// (`RunError::WorkspaceGuardConflict`). This source can never provoke that
-/// refusal: hooks come from one `SessionTemplate`'s discovery configuration and
-/// are equal for every session, and the servers a key varies on are not part of
-/// a chain. What two live opens of one directory cost is what they always cost
-/// — a second set of MCP connections and a second discovery — and not a second
-/// pass through the repository's hook programs on every call.
+/// (`RunError::WorkspaceGuardConflict`). Nothing *this source decides* can
+/// provoke that refusal: every session's hooks come from one `SessionTemplate`'s
+/// discovery configuration, which does not vary per session, and the servers a
+/// key varies on are not part of a chain at all. What the configuration points
+/// at is another matter — the chain is read off disk at each open, so editing
+/// `.basis/hooks.json` between two opens of one directory *does* refuse the
+/// second, and the refusal names the directory. That is the honest boundary:
+/// this source never asks for two chains, and cannot promise a repository
+/// stopped changing under it.
+///
+/// What two live opens of one directory cost is what they always cost — a
+/// second set of MCP connections and a second discovery — and not a second pass
+/// through the repository's hook programs on every call.
 #[derive(Debug, PartialEq, Eq, Hash)]
 struct WorkspaceKey {
     workspace: PathBuf,
