@@ -6,7 +6,21 @@
 //! of them needs lives here rather than being copied, so the conventions
 //! cannot quietly drift apart from each other.
 
-use std::path::Path;
+use std::path::{Path, PathBuf};
+
+/// The workspace-relative candidate a config named, or `None` when it named
+/// nothing to look for.
+///
+/// An empty relative path is how a config says *probe no file here* — the same
+/// spelling [`ContextConfig::none`](crate::ContextConfig::none) uses for its
+/// file name, and what `WorkspaceBuilder::without_discovery` rewrites each
+/// convention's workspace path to. Joining it instead would name the workspace
+/// directory itself: harmless for a candidate that must be a file, and wrong
+/// for one that may be a directory, since the repository root is not a
+/// templates root.
+pub(crate) fn candidate(workspace: &Path, relative: &Path) -> Option<PathBuf> {
+    (!relative.as_os_str().is_empty()).then(|| workspace.join(relative))
+}
 
 /// Whether two paths name the same directory, following symlinks when both
 /// resolve.

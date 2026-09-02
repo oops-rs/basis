@@ -75,6 +75,21 @@ impl Default for TemplatesConfig {
     }
 }
 
+impl TemplatesConfig {
+    /// No template discovery at all: neither `.basis/templates` nor the global
+    /// directory is read.
+    ///
+    /// What `WorkspaceBuilder::without_discovery` leaves of this config.
+    /// Templates are convention data with no host-supplied half, so there is
+    /// nothing here for `none` to keep.
+    pub fn none() -> Self {
+        Self {
+            workspace_subdir: PathBuf::new(),
+            global_dir: None,
+        }
+    }
+}
+
 /// A templates directory that exists on disk.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct TemplateSource {
@@ -170,8 +185,9 @@ pub enum TemplateError {
 pub fn discover(workspace: &Path, config: &TemplatesConfig) -> Vec<TemplateSource> {
     let mut sources = Vec::new();
 
-    let workspace_dir = workspace.join(&config.workspace_subdir);
-    if workspace_dir.is_dir() {
+    if let Some(workspace_dir) = crate::paths::candidate(workspace, &config.workspace_subdir)
+        && workspace_dir.is_dir()
+    {
         sources.push(TemplateSource {
             path: workspace_dir,
             scope: ContextScope::Workspace,

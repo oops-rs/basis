@@ -184,6 +184,22 @@ impl Default for ToolsConfig {
 }
 
 impl ToolsConfig {
+    /// The host's own declarations, and no file discovery at all: neither
+    /// `.basis/tools.json` nor the global one is read.
+    ///
+    /// What `WorkspaceBuilder::without_discovery` leaves of this config.
+    /// Supplied declarations survive and are still registered, because a tool
+    /// the host handed basis is one it named rather than one basis found.
+    pub fn supplied_only(self) -> Self {
+        Self {
+            workspace_file: PathBuf::new(),
+            global_dir: None,
+            ..self
+        }
+    }
+}
+
+impl ToolsConfig {
     /// Replaces the declarations supplied directly by the embedding host.
     pub fn with_supplied(self, supplied: Vec<DeclaredToolSpec>) -> Self {
         Self { supplied, ..self }
@@ -275,8 +291,9 @@ pub fn discover(
 ) -> Result<Vec<ToolsSource>, DeclaredToolError> {
     let mut sources = Vec::new();
 
-    let workspace_file = workspace.join(&config.workspace_file);
-    if workspace_file.is_file() {
+    if let Some(workspace_file) = crate::paths::candidate(workspace, &config.workspace_file)
+        && workspace_file.is_file()
+    {
         sources.push(read(workspace_file, ContextScope::Workspace)?);
     }
 

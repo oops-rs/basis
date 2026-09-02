@@ -192,6 +192,20 @@ impl HooksConfig {
     pub fn with_supplied(self, supplied: Vec<HookSpec>) -> Self {
         Self { supplied, ..self }
     }
+
+    /// The host's own hooks, and no file discovery at all: neither
+    /// `.basis/hooks.json` nor the global one is read.
+    ///
+    /// What `WorkspaceBuilder::without_discovery` leaves of this config.
+    /// Supplied hooks survive, because a host handing basis a typed hook has
+    /// stated it rather than left it on disk to be found.
+    pub fn supplied_only(self) -> Self {
+        Self {
+            workspace_file: PathBuf::new(),
+            global_dir: None,
+            ..self
+        }
+    }
 }
 
 /// A hooks file that exists on disk, and what it contained.
@@ -253,10 +267,10 @@ pub fn discover(
         }
     }
 
-    let workspace_path = workspace.join(&config.workspace_file);
     // A global directory pointed at the workspace would otherwise run every
     // hook twice, which for a guard means two denials for one call.
-    if workspace_path.is_file()
+    if let Some(workspace_path) = crate::paths::candidate(workspace, &config.workspace_file)
+        && workspace_path.is_file()
         && !sources
             .iter()
             .any(|source| same_file(&source.path, &workspace_path))
@@ -279,7 +293,7 @@ pub fn load(workspace: &Path, config: &HooksConfig) -> Result<Vec<HookSpec>, Hoo
 }
 
 /// The host-supplied hooks only, with no file discovery.
-pub(crate) fn load_supplied(config: &HooksConfig) -> Result<Vec<HookSpec>, HookConfigError> {
+fn load_supplied(config: &HooksConfig) -> Result<Vec<HookSpec>, HookConfigError> {
     validate(&config.supplied, HookOrigin::Supplied)?;
     Ok(config.supplied.clone())
 }

@@ -289,6 +289,21 @@ impl McpConfig {
     pub fn with_supplied(self, supplied: Vec<McpServer>) -> Self {
         Self { supplied, ..self }
     }
+
+    /// The host's own servers, and no file discovery at all: neither
+    /// `.mcp.json` nor the global one is read.
+    ///
+    /// What `WorkspaceBuilder::without_discovery` leaves of this config. An
+    /// ACP client's `mcpServers` arrived through
+    /// [`with_supplied`](Self::with_supplied) and still connects, because
+    /// being handed a server is not finding one.
+    pub fn supplied_only(self) -> Self {
+        Self {
+            workspace_file: PathBuf::new(),
+            global_dir: None,
+            ..self
+        }
+    }
 }
 
 /// One `.mcp.json` that exists on disk, and what it configured.
@@ -395,8 +410,9 @@ pub fn discover(workspace: &Path, config: &McpConfig) -> Result<Vec<McpSource>, 
 fn discovered(workspace: &Path, config: &McpConfig) -> Result<Vec<ReadSource>, McpError> {
     let mut sources = Vec::new();
 
-    let workspace_file = workspace.join(&config.workspace_file);
-    if workspace_file.is_file() {
+    if let Some(workspace_file) = crate::paths::candidate(workspace, &config.workspace_file)
+        && workspace_file.is_file()
+    {
         sources.push(read(workspace_file, ContextScope::Workspace)?);
     }
 

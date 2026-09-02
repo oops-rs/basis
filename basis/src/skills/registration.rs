@@ -45,19 +45,6 @@ impl SkillRoots {
         Ok(Self { runtime, dirs })
     }
 
-    /// A workspace that registered nothing — discovery off, or four roots that
-    /// do not exist.
-    ///
-    /// Spelled out rather than left as an empty `Vec` at each call site,
-    /// because a workspace always has one of these and *no roots* is a state
-    /// the type should be able to say.
-    pub(crate) fn none(runtime: Arc<Runtime>) -> Self {
-        Self {
-            runtime,
-            dirs: Vec::new(),
-        }
-    }
-
     /// The roots registered, in the order [`discover`](super::discover)
     /// returns them — which is the precedence order mentra applies.
     pub(crate) fn dirs(&self) -> &[PathBuf] {

@@ -300,6 +300,35 @@ impl WorkspaceBuilder {
         }
     }
 
+    /// Every discovered input rewritten to probe nothing, with what the host
+    /// stated left exactly as it was.
+    ///
+    /// [`without_discovery`](Self::without_discovery)'s whole effect, in one
+    /// place. Each convention answers *probe no files* in its own words, and
+    /// the three with a host-supplied half keep it — supplying a hook, a
+    /// declared tool or an MCP server is stating one, not discovering one, and
+    /// D9 turns off discovery. An unset [`Config`] becomes the empty one for
+    /// the same reason: `Config::discover` is the probe, and a host that
+    /// supplied a config through [`with_config`](Self::with_config) already
+    /// said what it wanted.
+    ///
+    /// Applied at the top of [`open`](Self::open) rather than from
+    /// `without_discovery` itself, so builder-setter order stays irrelevant.
+    fn probing_no_files(self) -> Self {
+        Self {
+            context: ContextConfig::none(),
+            config: Some(self.config.unwrap_or_default()),
+            skills: SkillsConfig::none(),
+            memory: MemoryConfig::disabled(),
+            templates: TemplatesConfig::none(),
+            hooks: self.hooks.supplied_only(),
+            tools: self.tools.supplied_only(),
+            #[cfg(feature = "mcp")]
+            mcp: self.mcp.supplied_only(),
+            ..self
+        }
+    }
+
     /// Supplies the `config.json` answers instead of discovering them.
     ///
     /// Unset, [`open`](Self::open) reads `.basis/config.json` and the global
@@ -509,7 +538,32 @@ impl WorkspaceBuilder {
     /// last of them goes. MCP tools live on the same single registry but do
     /// **not** travel even while both are open: every roster minted here hides
     /// the `mcp__*` tools of servers this workspace does not own.
-    pub async fn open(self) -> Result<Workspace, RunError> {
+    pub async fn open(mut self) -> Result<Workspace, RunError> {
+        // A shared runtime can acquire a skill loader after any one-time
+        // inspection, and Mentra appends that loader's descriptions on every
+        // round independently of the agent roster. Reject the ownership shape
+        // itself before anything else, so the refusal precedes workspace
+        // validation, runtime acquisition, model resolution and all
+        // provider/tool/interceptor activity.
+        if !self.discovery_enabled && matches!(&self.runtime, RuntimeSource::Shared(_)) {
+            return Err(RunError::DiscoveryDisabledSharedRuntime);
+        }
+        if self.fresh_only && matches!(&self.runtime, RuntimeSource::Shared(_)) {
+            return Err(RunError::FreshOnlySharedRuntime);
+        }
+        let fresh_only = self.fresh_only;
+
+        // **`without_discovery` is answered once, here.** Rewriting the
+        // configs it governs rather than branching at each of the eight places
+        // one is settled below is what keeps the open a straight line, and
+        // what makes the answer impossible to give differently in two of them.
+        // Done after the builder chain rather than inside the setter, so
+        // setter order stays irrelevant: a host may call `without_discovery`
+        // before or after `with_mcp` and mean the same thing either way.
+        if !self.discovery_enabled {
+            self = self.probing_no_files();
+        }
+
         // **The one resolution.** Everything below this line names the
         // workspace through `path` and nothing re-derives it: the dispatcher
         // key, the private runtime's policy roots, the agent's base directory,
@@ -526,27 +580,9 @@ impl WorkspaceBuilder {
         // gives: a symlinked spelling and its target are one workspace.
         let path = crate::context::resolve_workspace(&self.path)?;
 
-        let context = if self.discovery_enabled {
-            WorkspaceContext::discover_with(&path, &self.context)?
-        } else {
-            // `none` skips every file candidate but deliberately retains
-            // canonical workspace-path validation.
-            WorkspaceContext::discover_with(&path, &ContextConfig::none())?
-        };
-
-        // A shared runtime can acquire a skill loader after any one-time
-        // inspection, and Mentra appends that loader's descriptions on every
-        // round independently of the agent roster. Reject the ownership shape
-        // itself, immediately after the one operation discovery-off retains
-        // (workspace validation), so the refusal precedes runtime acquisition,
-        // model resolution and all provider/tool/interceptor activity.
-        if !self.discovery_enabled && matches!(&self.runtime, RuntimeSource::Shared(_)) {
-            return Err(RunError::DiscoveryDisabledSharedRuntime);
-        }
-        if self.fresh_only && matches!(&self.runtime, RuntimeSource::Shared(_)) {
-            return Err(RunError::FreshOnlySharedRuntime);
-        }
-        let fresh_only = self.fresh_only;
+        // `ContextConfig::none` skips every file candidate but deliberately
+        // retains the canonical workspace-path validation above.
+        let context = WorkspaceContext::discover_with(&path, &self.context)?;
 
         // Read before the runtime is acquired, for the reason the hooks file
         // below is: a config that does not parse must fail the open rather
@@ -555,32 +591,20 @@ impl WorkspaceBuilder {
         // two different global directories.
         let config = match self.config {
             Some(config) => config,
-            None if self.discovery_enabled => {
-                config::Config::discover(&path, self.context.global_dir.as_deref())?
-            }
-            None => Config::default(),
+            None => config::Config::discover(&path, self.context.global_dir.as_deref())?,
         };
 
         // Loaded before the runtime is acquired so a hooks file that does not
         // parse fails the open loudly, rather than at the first tool call —
         // or worse, never.
-        let loaded_hooks = if self.discovery_enabled {
-            hooks::load(&path, &self.hooks)?
-        } else {
-            hooks::load_supplied(&self.hooks)?
-        };
+        let loaded_hooks = hooks::load(&path, &self.hooks)?;
 
         // Validate supplied values and read files here for the same reason, and
         // one of their own: an invalid declaration is a tool the model's
         // instructions assume and will not find. Registering needs the runtime,
-        // so that waits until there is one. Discovery-off keeps the typed list
-        // and touches no manifest path.
+        // so that waits until there is one.
         let supplied_tools = declared::load_supplied(&self.tools)?;
-        let declared_sources = if self.discovery_enabled {
-            declared::discover(&path, &self.tools)?
-        } else {
-            Vec::new()
-        };
+        let declared_sources = declared::discover(&path, &self.tools)?;
 
         // Memory, before the runtime is acquired for the reason the files
         // above are — a memory that does not parse fails the open naming the
@@ -622,17 +646,13 @@ impl WorkspaceBuilder {
         // they predate this wave and are not what it added, so smoothing the
         // asymmetry away here would be a second refactor nobody asked for.
         let memory_config = self.memory;
-        let (memory_sources, memories) = if self.discovery_enabled {
-            tokio::task::spawn_blocking(move || {
-                let memory_sources = memory::roots(&memory_config, store_dir.as_deref());
-                let memories = memory::load(&memory_sources)?;
-                Ok::<_, memory::MemoryError>((memory_sources, memories))
-            })
-            .await
-            .map_err(RunError::MemoryDiscovery)??
-        } else {
-            (Vec::new(), Vec::new())
-        };
+        let (memory_sources, memories) = tokio::task::spawn_blocking(move || {
+            let memory_sources = memory::roots(&memory_config, store_dir.as_deref());
+            let memories = memory::load(&memory_sources)?;
+            Ok::<_, memory::MemoryError>((memory_sources, memories))
+        })
+        .await
+        .map_err(RunError::MemoryDiscovery)??;
         let memory_roots: Vec<PathBuf> = memory_sources
             .iter()
             .map(|source| source.path.clone())
@@ -680,24 +700,19 @@ impl WorkspaceBuilder {
         // stack value until the `Workspace` below takes it: every `?` between
         // here and there drops it, so an open refused after this point leaves
         // a shared runtime holding no skills of a workspace that never opened.
-        let (skills_registration, skills) = if self.discovery_enabled {
-            let registration = register_skills(Arc::clone(&runtime), &path, &self.skills)?;
-            let loaded = runtime
-                .mentra_runtime()
-                .skills()
-                .into_iter()
-                .map(|skill| LoadedSkill {
-                    name: skill.name,
-                    description: skill.description,
-                    model_invocable: skill.model_invocable,
-                    path: skill.path,
-                    root: skill.root,
-                })
-                .collect();
-            (registration, loaded)
-        } else {
-            (SkillRoots::none(Arc::clone(&runtime)), Vec::new())
-        };
+        let skills_registration = register_skills(Arc::clone(&runtime), &path, &self.skills)?;
+        let skills: Vec<LoadedSkill> = runtime
+            .mentra_runtime()
+            .skills()
+            .into_iter()
+            .map(|skill| LoadedSkill {
+                name: skill.name,
+                description: skill.description,
+                model_invocable: skill.model_invocable,
+                path: skill.path,
+                root: skill.root,
+            })
+            .collect();
 
         // Beside the skills and for the same reason: a tool has to be on the
         // runtime before any session spawns, or the first roster is offered
@@ -720,11 +735,7 @@ impl WorkspaceBuilder {
 
         // Templates need no runtime registration — they are basis-side convention
         // data, rendered into a prompt by whatever surface offers them.
-        let (templates_dirs, templates) = if self.discovery_enabled {
-            load_templates(&path, &self.templates)?
-        } else {
-            (Vec::new(), Vec::new())
-        };
+        let (templates_dirs, templates) = load_templates(&path, &self.templates)?;
 
         // One runner for both interception bindings, host interceptors folded
         // first: the chain order host interceptors → supplied hooks → global
@@ -758,20 +769,11 @@ impl WorkspaceBuilder {
         // how basis was built.
         #[cfg(feature = "mcp")]
         let (mcp_connections, mcp_files, mcp_servers) = {
-            if self.discovery_enabled {
-                let (files, servers) = discovered_mcp(&path, &self.mcp)?;
-                let connections =
-                    McpConnections::connect(Arc::clone(&runtime), &path, servers).await;
-                let names = connections.names().to_vec();
+            let (files, servers) = discovered_mcp(&path, &self.mcp)?;
+            let connections = McpConnections::connect(Arc::clone(&runtime), &path, servers).await;
+            let names = connections.names().to_vec();
 
-                (connections, files, names)
-            } else {
-                let servers = mcp::configured_supplied(&self.mcp)?;
-                let connections =
-                    McpConnections::connect(Arc::clone(&runtime), &path, servers).await;
-                let names = connections.names().to_vec();
-                (connections, Vec::new(), names)
-            }
+            (connections, files, names)
         };
         #[cfg(not(feature = "mcp"))]
         let (mcp_files, mcp_servers): (Vec<ContextFile>, Vec<String>) = (Vec::new(), Vec::new());

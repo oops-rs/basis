@@ -117,6 +117,23 @@ impl Default for SkillsConfig {
     }
 }
 
+impl SkillsConfig {
+    /// No skill discovery at all: none of the four roots is read, so nothing
+    /// is registered on the runtime and the model is offered no `load_skill`.
+    ///
+    /// What `WorkspaceBuilder::without_discovery` leaves of this config.
+    /// Skills are directories on disk with no host-supplied half, so there is
+    /// nothing here for `none` to keep.
+    pub fn none() -> Self {
+        Self {
+            workspace_subdir: None,
+            shared_workspace_dir: false,
+            global_dir: None,
+            shared_home_dir: false,
+        }
+    }
+}
+
 /// A skills directory that exists on disk.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct SkillsSource {
