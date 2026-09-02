@@ -242,6 +242,16 @@ impl Workspace {
     /// replays the transcript from the store, so the first turn after this
     /// already knows everything the last one did.
     ///
+    /// Resuming is also where a "…for this session" approval answer dies
+    /// (see [`ApprovalDecision`](crate::ApprovalDecision)): the attach clears
+    /// the conversation's session-scope rules before anything can answer
+    /// from them. That clear must read the store's `rules.json`, so a
+    /// corrupt or unwritable file fails **every** resume against the store —
+    /// not just this conversation's — with
+    /// [`RunError::SessionRulesNotCleared`](crate::RunError) naming the file
+    /// to repair or delete; fresh conversations keep working, and deleting
+    /// the file costs only remembered approval answers, never history.
+    ///
     /// The workspace has to be the one the conversation belongs to. Nothing
     /// here checks that — mentra's store is keyed by agent, not by path — so
     /// resuming an agent under a workspace it never ran in gives it that

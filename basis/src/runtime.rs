@@ -422,11 +422,27 @@ impl Runtime {
         // basis restores its own contract: clear the session scope before the
         // resumed session answers anything from it. A fresh mint has a fresh
         // agent id and nothing to clear; project- and global-scope rules are
-        // durable by definition and stay. Failing the resume on a failed
-        // clear is deliberate — proceeding would leave stale grants live.
+        // durable by definition and stay.
+        //
+        // The `?` fails the whole resume, and the two ways the clear can fail
+        // deserve stating apart, because the refusal earns its keep on only
+        // one of them. A store that cannot be *read* (corrupt, truncated,
+        // newer schema) would fail closed at point of use anyway — mentra
+        // propagates the same read error from every rule lookup before
+        // applying anything — so refusing the resume there adds determinism,
+        // not protection. A store that reads but cannot be *rewritten*
+        // (permissions, disk full) is the case the refusal genuinely guards:
+        // point-of-use lookups succeed, so the stale session grants WOULD
+        // apply, silently. The cost — one bad rules.json fails every resume
+        // on the store until repaired — is documented on the error variant
+        // and on `Workspace::resume`.
         session
             .permission_handle()
-            .clear_scope(PermissionRuleScope::Session)?;
+            .clear_scope(PermissionRuleScope::Session)
+            .map_err(|error| RunError::SessionRulesNotCleared {
+                agent_id: agent_id.to_owned(),
+                error,
+            })?;
 
         Ok(session)
     }
