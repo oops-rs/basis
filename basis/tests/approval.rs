@@ -330,6 +330,190 @@ async fn a_refusal_with_nothing_to_say_still_refuses() {
     );
 }
 
+/// mentra 0.26 made resolving a remembered answer fallible: the rule is
+/// persisted to the live store *before* the oneshot is answered, and a store
+/// failure restores the pending request unanswered. Swallowing that error is a
+/// turn blocked forever on a request nobody will answer again — so basis
+/// denies the restored request instead, and what the denial *says* follows
+/// the answer that was given: an unrecordable refusal keeps the person's own
+/// reason (the outcome matched their intent; only the remembering failed),
+/// while an unrecordable approval is downgraded with the store named as why.
+#[cfg(unix)]
+#[tokio::test]
+async fn an_answer_that_cannot_be_recorded_denies_rather_than_hanging() {
+    use std::os::unix::fs::PermissionsExt;
+
+    use basis::event::NoticeSeverity;
+    use mentra::runtime::FileRuntimeStore;
+
+    /// Restores the store root's permissions on drop, so a panicking
+    /// assertion — or the timeout this test exists to catch — cannot leave a
+    /// read-only tempdir behind that `TempDir::drop` silently fails to
+    /// remove.
+    struct RestorePermissions<'a>(&'a Path);
+
+    impl Drop for RestorePermissions<'_> {
+        fn drop(&mut self) {
+            let _ = std::fs::set_permissions(self.0, std::fs::Permissions::from_mode(0o755));
+        }
+    }
+
+    /// Refuses the write it is asked about by name, for the session, in its
+    /// own words; approves everything else for the session.
+    struct SplitAnswers;
+
+    #[async_trait]
+    impl Approver for SplitAnswers {
+        async fn approve(&mut self, request: &ApprovalRequest) -> ApprovalAnswer {
+            if request.input.to_string().contains("deny-me.txt") {
+                ApprovalAnswer::new(ApprovalDecision::DenyForSession)
+                    .because("writes are refused at this desk")
+            } else {
+                ApprovalDecision::AllowForSession.into()
+            }
+        }
+    }
+
+    let workspace = tempfile::tempdir().expect("tempdir");
+    let store_dir = tempfile::tempdir().expect("tempdir");
+
+    let model = ModelInfo::new("scripted-model", BuiltinProvider::OpenAI);
+    let provider = ScriptedProvider::new(
+        model.clone(),
+        vec![
+            // A plain first turn, so every store file the turn machinery
+            // touches — the agent's rows, `runs.jsonl` — exists before the
+            // root goes read-only below.
+            vec![ContentBlock::text("warmed")],
+            vec![
+                ContentBlock::ToolUse {
+                    id: "call-1".to_string(),
+                    name: "files".to_string(),
+                    input: json!({
+                        "operations": [
+                            { "op": "create", "path": "deny-me.txt", "content": "hi" }
+                        ]
+                    }),
+                },
+                ContentBlock::ToolUse {
+                    id: "call-2".to_string(),
+                    name: "files".to_string(),
+                    input: json!({
+                        "operations": [
+                            { "op": "create", "path": "allow-me.txt", "content": "hi" }
+                        ]
+                    }),
+                },
+            ],
+            vec![ContentBlock::text("done")],
+        ],
+    );
+    let runtime = Runtime::builder()
+        .with_provider_instance(provider)
+        .with_store(FileRuntimeStore::new(store_dir.path()))
+        .with_policy(RuntimePolicy::workspace_bounded(workspace.path()))
+        .with_tool_authorizer(ApprovalGate::new())
+        .build()
+        .expect("runtime builds");
+    let session = session(&runtime, workspace.path(), model);
+
+    let mut prepared = prepare_with_session(
+        session,
+        workspace.path(),
+        "warm the store",
+        &context(),
+        "openai",
+        "scripted-model",
+    )
+    .expect("prepared");
+    prepared
+        .execute_with_approver(CollectingSink::new(), AllowAll)
+        .await
+        .expect("the warming turn runs");
+
+    // Remembering a rule rewrites `rules.json` atomically — a fresh temp file
+    // in the store root — so a read-only root is exactly a store that can
+    // still read its rules (there are none) and cannot record a new one.
+    std::fs::set_permissions(store_dir.path(), std::fs::Permissions::from_mode(0o555))
+        .expect("make the store root read-only");
+    let _restore = RestorePermissions(store_dir.path());
+
+    // Mode bits do not stop root. Probe the premise instead of trusting the
+    // effective uid: if this process can still create a file in the root, the
+    // store write below would succeed and every assertion would test nothing,
+    // so skip rather than fail a correct implementation.
+    if std::fs::write(store_dir.path().join(".probe"), b"").is_ok() {
+        eprintln!("skipping: this process writes through 0o555 (running as root?)");
+        return;
+    }
+
+    let report = tokio::time::timeout(
+        NOT_STUCK,
+        prepared.send_with_options(
+            "make two files",
+            CollectingSink::new(),
+            SplitAnswers,
+            basis::TurnOptions::default(),
+        ),
+    )
+    .await
+    .expect("an answer the store cannot record must deny, not hang the turn")
+    .expect("the run completes");
+
+    let events = report.sink.into_events();
+    let results: Vec<String> = events
+        .iter()
+        .filter_map(|event| match event {
+            Event::ToolCompleted {
+                tool_name, summary, ..
+            } if tool_name == "files" => Some(summary.clone()),
+            _ => None,
+        })
+        .collect();
+    assert_eq!(results.len(), 2, "both scripted calls complete: {events:?}");
+    assert!(
+        results
+            .iter()
+            .any(|result| result.ends_with("writes are refused at this desk")),
+        "an unrecordable refusal keeps the person's own reason, \
+         not a store error dressed as one: {results:?}"
+    );
+    assert!(
+        results
+            .iter()
+            .any(|result| result.contains("could not be recorded")),
+        "an unrecordable approval is downgraded with the store named as why: {results:?}"
+    );
+    for file in ["deny-me.txt", "allow-me.txt"] {
+        assert!(
+            !workspace.path().join(file).exists(),
+            "{file}: neither write may happen"
+        );
+    }
+    let notices: Vec<&String> = events
+        .iter()
+        .filter_map(|event| match event {
+            Event::Notice {
+                severity: NoticeSeverity::Warning,
+                message,
+            } => Some(message),
+            _ => None,
+        })
+        .collect();
+    assert!(
+        notices
+            .iter()
+            .any(|message| message.contains("could not be remembered")),
+        "the stream must say the refusal's remembering failed: {notices:?}"
+    );
+    assert!(
+        notices
+            .iter()
+            .any(|message| message.contains("could not be recorded")),
+        "the stream must say the approval was downgraded: {notices:?}"
+    );
+}
+
 #[tokio::test]
 async fn a_read_only_call_is_never_put_to_the_approver() {
     let workspace = tempfile::tempdir().expect("tempdir");

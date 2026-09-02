@@ -53,8 +53,13 @@ fn ask(request: &ApprovalRequest) -> std::io::Result<ApprovalAnswer> {
     Ok(match answer.trim().to_ascii_lowercase().as_str() {
         "y" | "yes" => ApprovalDecision::Allow.into(),
         "a" | "always" => ApprovalDecision::AllowForSession.into(),
+        // "Session", not "run": the remembered refusal answers every later
+        // call on this live session — further runs in this process included —
+        // and dies at the next attach (see `basis::ApprovalDecision`). The
+        // reason is persisted with the rule and read back by the model on
+        // each later denial, so it must describe that whole span truthfully.
         "r" | "never" => ApprovalAnswer::new(ApprovalDecision::DenyForSession).because(format!(
-            "{} was refused at the prompt, for the rest of this run",
+            "{} was refused at the prompt, for the rest of this session",
             request.tool_name
         )),
         // Anything else, including a bare newline, is a refusal: the

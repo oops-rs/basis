@@ -386,6 +386,17 @@ fn children_of(data: &DataDir, task: &str) -> Result<Vec<String>, String> {
 /// means to its own caller, one layer down. For the claimed-conversation
 /// case that is T2(b)'s double-continuation race; for the timed-out waiter
 /// it is README's "waiting is not owning".
+///
+/// One residue is accepted rather than cleaned here: a "…for this session"
+/// approval answered during a drive persists in the store's `rules.json`
+/// until the task's next attach, whose resume clears it. A task nobody ever
+/// reattaches keeps those rows — reasons included — indefinitely. There is
+/// deliberately no end-of-drive clear: this function returns from eight
+/// places (deadline-abandoned turns among them, where the run is still
+/// borrowed), a crash leaves the rows regardless, and a durable task's whole
+/// point is that the next attach exists — which is also the moment the
+/// documented duration ends. The upstream fix is process-scoped rules that
+/// never touch the store (mentra#53).
 pub(crate) async fn drive(
     data: &DataDir,
     task: &str,

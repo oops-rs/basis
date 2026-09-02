@@ -24,7 +24,8 @@
 //!
 //! Draining after rather than forwarding concurrently is enough because the
 //! pass emits at its end — mentra applies the compaction and *then* announces
-//! it — and because the two events cannot outrun a broadcast channel that
+//! it — and because its handful of events (the announcement pair, then one
+//! usage report per provider sample) cannot outrun a broadcast channel that
 //! holds 512. A turn needs the concurrent forwarder for a different reason:
 //! it has to answer permission requests while the turn is blocked on them,
 //! and a summarizing pass asks for nothing.
@@ -109,18 +110,20 @@ impl PreparedRun {
     /// request. It is not a turn, though — no prompt is committed, the
     /// transcript gains no exchange, and nothing is sent afterwards.
     ///
-    /// Billed by the provider, but *not* accounted by basis. mentra reports no
-    /// usage for a summarizing call — the engine reads the response's content
-    /// and drops its `usage` (mentra 0.24.0 `src/compaction.rs`
-    /// `summarize_locally`; the provider-native remote path has no usage on
-    /// its response type at all) — so no `UsageReport` is emitted, and what
-    /// basis tallies is what mentra reports. A pass therefore adds nothing to
-    /// any [`RunReport::usage`](crate::RunReport) and is not charged against
-    /// [`Bounds::token_budget`](crate::Bounds) or a
-    /// [`BudgetPool`](crate::BudgetPool). Basis does not estimate the
-    /// difference: a made-up number in a field documented as *reported*
-    /// (see [`RunUsage`](crate::RunUsage)) would be worse than a known gap,
-    /// and the gap is upstream's to close (ADR-0005).
+    /// Billed by the provider, and announced on the stream. Since mentra 0.26
+    /// a summarizing pass reports its exact provider usage — one
+    /// [`Event::Usage`](crate::Event) line per provider sample, after the
+    /// compaction's own pair of events — so the sink this verb borrows is
+    /// where its cost is read; a provider that reports no usage emits no
+    /// line, and basis still estimates nothing. There is deliberately no
+    /// figure on the return value: a pass is not a run and produces no
+    /// [`RunReport`](crate::RunReport), so a caller metering it sums the
+    /// stream, exactly as a stream-only consumer meters a turn. And because
+    /// there is no run there is no run counter: a *standalone* pass draws
+    /// nothing from [`Bounds::token_budget`](crate::Bounds) or a
+    /// [`BudgetPool`](crate::BudgetPool) — unlike a compaction inside a turn,
+    /// whose samples land in [`RunReport::usage`](crate::RunReport) and are
+    /// charged against both (see [`RunUsage`](crate::RunUsage)).
     ///
     /// A failure reaches the sink as one [`Event::Error`](crate::Event) before
     /// it reaches the caller as an `Err`, so a client watching the stream is
@@ -136,8 +139,9 @@ impl PreparedRun {
     /// client's stream, with no second line, is worse than silence.
     ///
     /// The sink is borrowed rather than taken. Every other verb on a run hands
-    /// its sink back inside a report, and there is no report here: two events
-    /// and a value are the whole of what happened.
+    /// its sink back inside a report, and there is no report here: a handful
+    /// of events — the announcement pair, then one usage line per provider
+    /// sample — and a value are the whole of what happened.
     ///
     /// Bounded by whatever the run itself was configured with
     /// ([`bounds`](Self::bounds)) and by nothing else. For a pass a caller
@@ -166,11 +170,14 @@ impl PreparedRun {
     /// (`CompactionBounds::from_run_options`): a graceful
     /// [`stop`](crate::TurnOptions::stop) ends a *turn* at its next round
     /// boundary with everything committed, and abandoning a summary half-way
-    /// is not that. The tool and token budgets do not apply either — mentra
-    /// reports no usage for a summarizing call, so there is nothing for them
-    /// to measure (see [`compact`](Self::compact)) — and a spent
-    /// [`BudgetPool`](crate::BudgetPool) does not refuse a pass for the same
-    /// reason.
+    /// is not that. The tool and token budgets do not apply either — a
+    /// standalone pass is not a run and has no run counter to charge, so
+    /// even though its usage is reported on the stream (see
+    /// [`compact`](Self::compact)) there is no allowance for these bounds to
+    /// enforce — and a spent [`BudgetPool`](crate::BudgetPool) does not
+    /// refuse a pass for the same reason. A compaction *inside* a turn is the
+    /// other way around on every count: it inherits the turn's bounds and its
+    /// usage is charged to the turn's budgets.
     ///
     /// A bound left unset falls back to the run's own, exactly as it does for
     /// [`send_with_options`](Self::send_with_options): attaching a token says
@@ -271,10 +278,11 @@ impl PreparedRun {
 /// event, its line is the one the client gets and basis stays quiet, which is
 /// the right precedence: the runtime's own account of its own failure.
 ///
-/// A lag is impossible in practice — a compaction emits two events into a
-/// channel that holds 512 — so a receiver that reports one has been overtaken
-/// by something this function cannot see, and stopping is the honest response:
-/// the alternative is a stream that quietly disagrees with what happened.
+/// A lag is impossible in practice — a compaction emits its announcement pair
+/// plus one usage report per provider sample into a channel that holds 512 —
+/// so a receiver that reports one has been overtaken by something this
+/// function cannot see, and stopping is the honest response: the alternative
+/// is a stream that quietly disagrees with what happened.
 fn drain<S: EventSink>(
     events: &mut mentra::SessionEventReceiver,
     sink: &mut S,
@@ -284,7 +292,7 @@ fn drain<S: EventSink>(
         match events.try_recv() {
             // `from_session_event` is the same mapping a turn's forwarder
             // uses, so a compaction announced during a turn and one announced
-            // on its own are the same two lines.
+            // on its own are the same lines — the pair, then the usage.
             Ok(event) => {
                 if let Some(mapped) = Event::from_session_event(&event) {
                     announced_failure |= matches!(mapped, Event::Error { .. });

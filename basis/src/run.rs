@@ -413,6 +413,17 @@ async fn mint_carrying_workspace(
 /// bridge tests among them — where a scripted [`Session`] needs basis's event
 /// stream and context discovery without a real runtime underneath it, and the
 /// signature this wave found already fits every caller that still needs it.
+///
+/// **A caller-built runtime with no `ToolAuthorizer` enforces nothing.** basis
+/// installs its [`ApprovalGate`](crate::approval::ApprovalGate) only on
+/// runtimes it builds; this path takes the session as given. Since mentra
+/// 0.26 a session with no authorizer allows every call *before* remembered
+/// rules are read — so a rule seeded through
+/// `run.session().permission_handle()`, a deny included, is silently ignored
+/// here unless the caller put an authorizer on its own runtime
+/// (`with_tool_authorizer`, or mentra 0.26's `Session::with_tool_authorizer`
+/// on the live session). On 0.25 the rule store was consulted even with no
+/// authorizer; that ordering is gone, and this seam inherits mentra's.
 #[doc(hidden)]
 pub fn prepare_with_session(
     session: Session,

@@ -64,6 +64,32 @@ pub enum RunError {
         dir: std::path::PathBuf,
     },
 
+    /// Resuming a conversation could not clear its "…for this session"
+    /// approval rules, so the resume is refused rather than run with grants
+    /// a person gave to an earlier session possibly still live.
+    ///
+    /// The clear reads the store's `rules.json` before it can filter, so one
+    /// corrupt, truncated, or unwritable file fails **every** resume against
+    /// that store — ACP `session/load`, `--continue`, a task reattach —
+    /// until the file is repaired or deleted. Fresh conversations are
+    /// unaffected. Deliberately surfaced rather than worked around: the
+    /// underlying store error names the exact file path, and deleting
+    /// `rules.json` costs only remembered approval answers, never history.
+    #[error(
+        "resuming `{agent_id}` could not clear its for-this-session approval rules \
+         ({error}); every resume on this store will fail until its rules.json — the \
+         path in the error above — is repaired or deleted (deleting it costs only \
+         remembered approval answers, never history)"
+    )]
+    SessionRulesNotCleared {
+        /// The conversation whose resume was refused.
+        agent_id: String,
+        /// The store's own failure, naming the file it could not read or
+        /// rewrite.
+        #[source]
+        error: mentra::error::RuntimeError,
+    },
+
     #[error(transparent)]
     Config(#[from] crate::config::ConfigError),
 

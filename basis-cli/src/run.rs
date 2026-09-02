@@ -85,12 +85,25 @@ pub(crate) async fn execute_run(args: RunArgs) -> Result<ExitCode, String> {
     // The stream is the whole output: every fact a caller could want — the
     // outcome, the bound that tripped, the failure's words — is a line on it,
     // so there is nothing left for this function to say afterwards.
-    let report = workspace
-        .prepare(spec)
-        .map_err(|error| error.to_string())?
+    let mut run = workspace.prepare(spec).map_err(|error| error.to_string())?;
+    let report = run
         .execute_with_approver(JsonlWriter::new(io::stdout()), approver)
         .await
         .map_err(|error| error.to_string())?;
+
+    // This route mints and never resumes, so the attach-time death of a
+    // "…for this session" answer never arrives for its conversation — an
+    // 'always'/'never' answered at the prompt above would sit in the store's
+    // rules.json until someone happened to resume or forget it. The run is
+    // over, so the answers are too. Best-effort: cleanup failing must not
+    // mask the run's own result, so it is a warning on stderr, never the
+    // exit code.
+    if let Err(error) = run.forget_session_answers() {
+        eprintln!(
+            "warning: this run's session-scope approval answers could not be cleared: {error}"
+        );
+    }
+
     Ok(ExitCode::from(exit_code(&report)))
 }
 

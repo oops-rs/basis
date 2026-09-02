@@ -140,9 +140,11 @@ impl PreparedRun {
     ///
     /// [`Workspace::minted`](crate::workspace::Workspace) is the only caller.
     /// A fresh prepare records the final per-run prompt Basis handed Mentra;
-    /// resume records `None`, because Mentra 0.23 exposes no reader for the
-    /// persisted agent config and its prompt may differ from the workspace's
-    /// current default. [`prepare_with_session`](super::prepare_with_session),
+    /// resume records `None`, because basis does not yet read the persisted
+    /// agent config back (mentra 0.26's `Session::config` exposes it —
+    /// mentra#41, unadopted here) and its prompt may differ from the
+    /// workspace's current default.
+    /// [`prepare_with_session`](super::prepare_with_session),
     /// the path with no workspace, also leaves this unknown.
     pub(crate) fn with_context_snapshot(self, system_prompt: Option<String>) -> Self {
         Self {

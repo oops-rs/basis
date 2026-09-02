@@ -16,7 +16,7 @@
 //!
 //! 1. **A remembered rule answers first**, without the approver being asked at
 //!    all. Because the command rides inside `spawn`'s input, a
-//!    `RuleKey { tool_name: "spawn", pattern }` globbed against the parsed call
+//!    `RuleKey { tool_name: "spawn", pattern }` matched against the parsed call
 //!    *is* a command allowlist expressible as data.
 //! 2. **The reviewer sees the residue** — the calls no rule covers — and
 //!    answers with a reason.
@@ -65,7 +65,7 @@ use std::{env, error::Error, sync::Arc, time::Duration};
 use basis::{
     ApprovalAnswer, ApprovalDecision, ApprovalRequest, Approver, BudgetPool, CollectingSink,
     DenyAll, Event, ModelSelector, NullSink, OutputReport, OutputSpec, PreparedRun, RunError,
-    RunSpec, Workspace,
+    RunSpec, Runtime, Workspace,
     event::{PermissionOutcome, RuleScope},
     tools::SPAWN,
 };
@@ -306,24 +306,61 @@ fn answer(verdict: Verdict) -> ApprovalAnswer {
 /// rule through mentra directly, at the cost of naming mentra in its own
 /// manifest, pinned to whatever version basis resolved.
 ///
-/// Two details are traps rather than API:
+/// Four details are traps rather than API:
 ///
-/// - **Two stars, not one.** mentra globs with `glob-match`, where a single
-///   `*` does not cross `/`. The serialized input carries `cwd`, which is a
-///   path, so a one-star pattern silently matches nothing — and an operator
-///   sees a reviewer they thought they had bypassed rather than an error.
-/// - **The pattern globs the serialized JSON**, so it is written against
-///   `"body":"…"` — the field name and the quoting are part of the rule.
-fn allowlist(run: &PreparedRun, command: &str) {
-    run.session().rule_store().add_rule(RememberedRule {
-        key: RuleKey {
-            tool_name: SPAWN.to_string(),
-            pattern: Some(format!("**\"body\":\"{command}\"**")),
-        },
-        allow: true,
-        scope: PermissionRuleScope::Session,
-        reason: None,
-    });
+/// - **The pattern is matched by mentra's own rule matcher, not a path
+///   globber.** Its syntax is deliberately small and separator-free: `*`
+///   matches any run of characters — `/` included, so the `cwd` path in the
+///   serialized input does not stop it — `?` matches exactly one character,
+///   `**` means the same as `*`, and everything else, JSON punctuation
+///   included, is literal. Matching is anchored, which is why a substring
+///   rule is written `*needle*` (mentra `session/permission/pattern.rs`).
+/// - **The pattern is matched against the serialized JSON**, so it is written
+///   against `"body":"…"` — the field name and the quoting are part of the
+///   rule.
+/// - **Interpolating an unchecked command is an injection.** A `*` or `?`
+///   inside the command becomes matcher syntax: `ls *`'s star crosses the
+///   closing quote, auto-approving every later `spawn` whose serialized
+///   input happens to contain `"body":"ls ` — review bypassed for commands
+///   nobody allowlisted. And a `"` or `\` is serde-escaped in the serialized
+///   input, so a raw interpolation of it silently never matches: the command
+///   is reviewed forever, with no error saying why. [`allowlist`] therefore
+///   refuses those four characters outright rather than seed a rule that is
+///   wider or deader than the command that was reviewed.
+/// - **A rule on a read-only tool never applies — a deny included.** A
+///   remembered rule can only resolve the authorizer's `Prompt`, and basis's
+///   `ApprovalGate` answers `Allow` outright for a call with no side effects,
+///   so a seeded deny on a read-only tool is silently passed over: the tool
+///   runs, no error, no event. Seed rules for consequential tools only —
+///   `spawn` here is one, which is why this rung works at all. The full rule
+///   is on [`ApprovalGate`](basis::approval::ApprovalGate).
+fn allowlist(run: &PreparedRun, command: &str) -> Result<(), Box<dyn Error>> {
+    // The refusal that keeps rung one honest — the third trap above, made
+    // unrepresentable instead of merely documented.
+    if command
+        .chars()
+        .any(|character| matches!(character, '*' | '?' | '"' | '\\'))
+    {
+        return Err(format!(
+            "refusing to allowlist {command:?}: `*`, `?`, `\"` and `\\` become matcher \
+             syntax or serde escapes inside the rule pattern, so the rule would be \
+             wider or deader than the command that was reviewed"
+        )
+        .into());
+    }
+
+    run.session()
+        .permission_handle()
+        .remember_rule(RememberedRule {
+            key: RuleKey {
+                tool_name: SPAWN.to_string(),
+                pattern: Some(format!("*\"body\":\"{command}\"*")),
+            },
+            allow: true,
+            scope: PermissionRuleScope::Session,
+            reason: None,
+        })?;
+    Ok(())
 }
 
 /// What the run is asked to do.
@@ -352,8 +389,13 @@ fn script() -> String {
 async fn main() -> Result<(), Box<dyn Error>> {
     let path = env::args().nth(1).unwrap_or_else(|| ".".to_string());
 
+    // A tempdir store, because the rules remembered below are durable rows in
+    // the runtime store and every run of a demo must not append them to the
+    // operator's real user-level one.
+    let store = tempfile::tempdir()?;
     let workspace = Arc::new(
         Workspace::builder(&path)
+            .with_runtime_builder(Runtime::builder().with_store_dir(store.path()))
             .with_model(selected_model())
             .open()
             .await?,
@@ -368,7 +410,7 @@ async fn main() -> Result<(), Box<dyn Error>> {
     // Rung one, seeded before the run starts. A cold session has no rules in
     // it, which is why the first `cargo test` of every session is otherwise
     // reviewed.
-    allowlist(&run, ALLOWLISTED);
+    allowlist(&run, ALLOWLISTED)?;
 
     // The reviewer's allowance is held here as well as in the reviewer: a
     // `BudgetPool` clone is another handle on the same figure, never another
@@ -409,8 +451,9 @@ async fn main() -> Result<(), Box<dyn Error>> {
 /// Everything below is read off the public stream rather than recorded by the
 /// approver on the way past, because what the stream says is what a host
 /// actually gets to see — and the load-bearing fact is an *absence*. A call a
-/// remembered rule answered raises no `PermissionRequested` at all, since the
-/// rule store answers before the authorizer is consulted. So "was this
+/// remembered rule answered raises no `PermissionRequested` at all: mentra
+/// 0.26 asks the authorizer first, and a matching rule resolves the gate's
+/// `Prompt` before any request is put to the reviewer. So "was this
 /// reviewed" is legible without trusting this file's own bookkeeping.
 struct Call {
     tool_call_id: String,

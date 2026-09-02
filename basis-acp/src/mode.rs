@@ -17,12 +17,15 @@
 //!
 //! # Where the mode is applied, and why not on the authorizer
 //!
-//! mentra takes a `ToolAuthorizer` when a runtime is built and never hands it
-//! back, so a decision made there is fixed for the session's life — which is
-//! precisely what a switchable mode cannot be. basis's
-//! [`ApprovalGate`](basis::approval::ApprovalGate) therefore surfaces every
-//! consequential call without answering any, and the mode decides *here*, where
-//! it can still change between one call and the next.
+//! mentra 0.26 samples a session's current authorizer once per call and
+//! treats its `Allow` and `Deny` as final — it could even host a stateful or
+//! live-swapped one (`Session::with_tool_authorizer`). basis still does not
+//! put the mode there, deliberately: the
+//! [`ApprovalGate`](basis::approval::ApprovalGate) is one fixed, stateless
+//! surface that answers nothing, so every consequential call is surfaced as
+//! a `Prompt` — and the mode decides *here*, beside the protocol session the
+//! client's `session/set_mode` actually arrives on, where it can change
+//! between one call and the next without reaching two layers down.
 //!
 //! That is why [`ModedApprover`] wraps the approver that asks the client rather
 //! than replacing it: `Always` and `Never` answer without asking, and `Prompt`
@@ -31,12 +34,35 @@
 //! # Why basis remembers "for this session" itself
 //!
 //! mentra can remember a decision — `PermissionDecision::allow_and_remember` —
-//! and its rule store is consulted *before* the authorizer runs. A rule stored
-//! there would survive a switch to a stricter mode and silently override it:
-//! someone who allowed `shell` for the session and then moved to read-only
-//! would still be running commands. So [`ModedApprover`] answers mentra with a
-//! plain allow or deny and keeps the "…for this session" answer here, where
-//! changing the mode clears it.
+//! and since 0.26 its remembered rules resolve the gate's `Prompt` *before*
+//! the approver is consulted, from a store persisted under the conversation's
+//! stable agent id. A rule stored there answers ahead of the mode on every
+//! later call in the live session: someone who allowed `shell` for the
+//! session and then moved to read-only would still be running commands. So
+//! [`ModedApprover`] answers mentra with a plain allow or deny and keeps the
+//! "…for this session" answer here, in process memory, where changing the
+//! mode clears it — which is also why, on a stock basis-acp session, the
+//! approver really does see every surfaced call: this layer never writes a
+//! rule for mentra to answer from.
+//!
+//! # The bypass a seeded durable rule is
+//!
+//! That guarantee is about what *this layer writes*, not about the pipeline.
+//! A host that seeds a **Global- or Project-scope** rule through the
+//! session's permission handle (the seam `basis`'s `reviewed_shell` example
+//! teaches, at Session scope) has installed an answer that resolves the
+//! gate's `Prompt` with no `PermissionRequested` ever emitted — so the mode
+//! is never consulted, and the rule survives everything this module relies
+//! on: it outlives every mode switch (it is not in [`SessionApproval`]'s
+//! memory) and outlives the attach-time clear too (that clear is
+//! session-scope only). A seeded durable allow on a store whose sessions
+//! offer a read-only mode is therefore a standing override of that mode.
+//! The sound fix path is upstream and adopted later: mentra 0.26's
+//! session-scoped authorizer replacement (mentra#38) over its revocable,
+//! scope-addressed rules (mentra#43) would let a read-only session install
+//! an authorizer whose `Deny` is final over any remembered rule. Until that
+//! wave lands, do not seed durable allows on stores serving mode-switchable
+//! sessions.
 //!
 //! # A request already put to the client stays put
 //!

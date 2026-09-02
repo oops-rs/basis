@@ -42,7 +42,10 @@ use std::collections::HashMap;
 use std::path::{Path, PathBuf};
 use std::sync::{Arc, Mutex};
 
-use mentra::{ModelSelector, Session, agent::AgentConfig, runtime::SessionOptions};
+use mentra::{
+    ModelSelector, Session, agent::AgentConfig, runtime::SessionOptions,
+    session::PermissionRuleScope,
+};
 
 use crate::tools::declared::DeclaredToolSpec;
 
@@ -395,6 +398,8 @@ impl Runtime {
     ) -> Result<Session, RunError> {
         let options = SessionOptions {
             config,
+            policy: None,
+            tool_audience: None,
             project_id: None,
             runtime_identifier: Some(Arc::from(persist_identifier)),
         };
@@ -407,7 +412,39 @@ impl Runtime {
     /// The one place a workspace's sessions are resumed; see
     /// [`mint`](Self::mint) for why it is a place at all.
     pub(crate) fn resume_minted(&self, agent_id: &str) -> Result<Session, RunError> {
-        Ok(self.mentra.resume_session(agent_id)?)
+        let session = self.mentra.resume_session(agent_id)?;
+
+        // basis's documented duration for a "…for this session" answer is the
+        // live session: it survives further runs in the process that holds it
+        // and dies at the next attach. mentra 0.26 disagrees — its session
+        // rule namespace is the stable agent id, persisted in the runtime
+        // store and replayed across every resume — so the attach is where
+        // basis restores its own contract: clear the session scope before the
+        // resumed session answers anything from it. A fresh mint has a fresh
+        // agent id and nothing to clear; project- and global-scope rules are
+        // durable by definition and stay.
+        //
+        // The `?` fails the whole resume, and the two ways the clear can fail
+        // deserve stating apart, because the refusal earns its keep on only
+        // one of them. A store that cannot be *read* (corrupt, truncated,
+        // newer schema) would fail closed at point of use anyway — mentra
+        // propagates the same read error from every rule lookup before
+        // applying anything — so refusing the resume there adds determinism,
+        // not protection. A store that reads but cannot be *rewritten*
+        // (permissions, disk full) is the case the refusal genuinely guards:
+        // point-of-use lookups succeed, so the stale session grants WOULD
+        // apply, silently. The cost — one bad rules.json fails every resume
+        // on the store until repaired — is documented on the error variant
+        // and on `Workspace::resume`.
+        session
+            .permission_handle()
+            .clear_scope(PermissionRuleScope::Session)
+            .map_err(|error| RunError::SessionRulesNotCleared {
+                agent_id: agent_id.to_owned(),
+                error,
+            })?;
+
+        Ok(session)
     }
 
     /// The fixed command environment, as the pairs a spawned program is given.

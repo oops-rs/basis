@@ -431,7 +431,10 @@ async fn drive<A: Approver>(workspace: &Path, script: Script, approver: A) -> Ru
     );
     let session = session(&runtime, workspace, model);
     for rule in script.rules {
-        session.rule_store().add_rule(rule);
+        session
+            .permission_handle()
+            .remember_rule(rule)
+            .expect("rule store accepts a remembered rule");
     }
 
     let seen = Arc::new(Mutex::new(Vec::new()));
