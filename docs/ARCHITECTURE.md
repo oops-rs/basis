@@ -665,6 +665,12 @@ else, exactly as before. That is a migration path with no deadline on it; the de
 trained on — and because `glob`, and `grep`'s `ignore_case`/`literal`/`context`/`multiline`
 knobs, exist only there.
 
+A host with no use for any file tool — `Split`, `Batched`, or `Both` — drops them from the
+registry entirely with `RuntimeBuilder::with_file_tools(FileToolProfile::None)`. That is a
+runtime-scoped decision, not a workspace one: a `ToolRoster::only` that omits the file tools
+stops *offering* them to one workspace, but only `with_file_tools(FileToolProfile::None)`
+keeps them off the registry every workspace and subagent on that runtime shares.
+
 ### Reuse: the consume/rebuild retirement
 
 Unlike the two hook migrations above, this one is loud: it stops compiling.
