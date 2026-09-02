@@ -683,6 +683,32 @@ Reuse returns when Mentra can mint a fresh provider session scope from an existi
 ([oops-rs/mentra#46](https://github.com/oops-rs/mentra/issues/46)); until then Basis makes no
 reuse claim it cannot prove.
 
+### Parsimony: an unadopted tree, a target setter, two hidden seams
+
+Three smaller removals from the same pass, none ADR-scale on its own, recorded together
+because a caller upgrading past this point needs the whole list at once.
+
+**Gone, and it stops compiling.** `basis::branch` in full: `TranscriptEntry`, `EntryKind`,
+`BranchError`, and the five `PreparedRun` methods the module added —
+`transcript`, `abandoned`, `leaf`, `children`, `branch_from`. Nothing in this workspace or in
+nous ever called any of them; mentra's transcript tree underneath is unaffected, basis simply
+stops surfacing it. Also gone: `RuntimeBuilder::with_command_target` (§ Command targets,
+below) — the one builder method that ever populated the command-target routing table,
+test-only, zero production callers.
+
+**Gone from the generated docs, not from the API.** `RuntimeBuilder::with_provider_instance`
+and `RuntimeBuilder::with_wire` gain `#[doc(hidden)]`, the same demotion
+`basis::run::prepare_with_session` already carries. Neither call compiles any differently and a
+caller that already had one keeps it unchanged; what changes is that neither appears in
+generated documentation or a new caller's autocomplete. Unlike `with_command_target`, whose own
+doc named no host still wanting it, both of these read as the intended seam for a host bringing
+its own provider or a custom Responses gateway — no production caller has needed one yet, but
+neither doc disclaims itself as legacy, so demotion rather than removal.
+
+Nothing here had an adopted caller to migrate, so there is no replacement to reach for. If a
+host ever needs the transcript tree or named command targets again, the next breaking release
+is the first place either could plausibly return.
+
 ### Command targets
 
 `!@<target> <command>` names an executor to run a command on by name, rather than where basis
