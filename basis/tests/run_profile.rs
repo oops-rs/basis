@@ -559,7 +559,7 @@ async fn a_profile_model_for_another_provider_is_typed_before_activity() {
 }
 
 #[tokio::test]
-async fn resume_applies_exact_model_metadata_without_guessing_the_system_snapshot() {
+async fn resume_applies_exact_model_metadata_and_reads_back_the_persisted_prompt() {
     let provider = CapturingProvider::default();
     let dir = tempfile::tempdir().expect("workspace");
     let workspace_default = "workspace-only-system".repeat(40);
@@ -569,14 +569,15 @@ async fn resume_applies_exact_model_metadata_without_guessing_the_system_snapsho
         .open()
         .await
         .expect("workspace opens");
-    let agent_id = {
+    let (agent_id, seeded_tokens) = {
         let run = workspace
             .prepare(RunSpec::new("seed").with_profile(
                 RunProfile::new().with_system_prompt(SystemPrompt::Replace(seed_system.clone())),
             ))
             .expect("seed mints with a per-run prompt");
-        assert!(run.estimated_context_tokens() > 100);
-        run.agent_id().to_string()
+        let tokens = run.estimated_context_tokens();
+        assert!(tokens > 100);
+        (run.agent_id().to_string(), tokens)
     };
 
     let mut resumed = workspace
@@ -586,9 +587,13 @@ async fn resume_applies_exact_model_metadata_without_guessing_the_system_snapsho
         )
         .expect("model-only is one supported persisted mutation");
     assert_eq!(resumed.context_window(), Some(262_144));
-    assert!(
-        resumed.estimated_context_tokens() < 10,
-        "resume must report an unknown prompt floor, not either known prompt"
+    // The persisted agent's own prompt, read back off the resumed session —
+    // the seed's per-run override, which is neither the workspace's current
+    // default nor the unknown floor a resume used to report.
+    assert_eq!(
+        resumed.estimated_context_tokens(),
+        seeded_tokens,
+        "a resume must estimate against the prompt the conversation actually carries"
     );
     assert!(matches!(
         resumed.header(),

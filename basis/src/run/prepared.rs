@@ -139,13 +139,13 @@ impl PreparedRun {
     /// Records the system prompt this run's mint opened with.
     ///
     /// [`Workspace::minted`](crate::workspace::Workspace) is the only caller.
-    /// A fresh prepare records the final per-run prompt Basis handed Mentra;
-    /// resume records `None`, because basis does not yet read the persisted
-    /// agent config back (mentra 0.26's `Session::config` exposes it —
-    /// mentra#41, unadopted here) and its prompt may differ from the
-    /// workspace's current default.
+    /// A fresh prepare records the final per-run prompt Basis handed Mentra; a
+    /// resume records the prompt the *persisted* agent carries, read back off
+    /// the resumed session, which may differ from what this workspace would
+    /// mint today and is the one the run will actually send.
     /// [`prepare_with_session`](super::prepare_with_session),
-    /// the path with no workspace, also leaves this unknown.
+    /// the path with no workspace, leaves this unknown: there is no workspace
+    /// to ask and no session config basis put there.
     pub(crate) fn with_context_snapshot(self, system_prompt: Option<String>) -> Self {
         Self {
             context_snapshot: ContextSnapshot::new(system_prompt),

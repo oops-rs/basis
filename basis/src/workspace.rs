@@ -312,13 +312,15 @@ impl Workspace {
 
         apply_effort(&mut session, effort)?;
 
-        // basis does not yet read the resumed AgentConfig back (mentra
-        // 0.26's `Session::config` exposes it — mentra#41, unadopted here).
-        // The persisted agent may carry a per-run system override that
-        // differs from this workspace's current default, so substituting
-        // `self.agent.system` would turn an unknown estimate into a
-        // confidently wrong one.
-        Ok(self.minted(session, spec, model, None))
+        // The resumed agent's own prompt, not this workspace's current
+        // default: the persisted agent may carry a per-run system override,
+        // and substituting what this workspace would have minted would make
+        // `PreparedRun::estimated_context_tokens` confidently wrong rather
+        // than merely approximate. `Session::config` reads the configuration
+        // the resume loaded, which is exactly the one this run will send.
+        let context_snapshot = session.config().system.clone();
+
+        Ok(self.minted(session, spec, model, context_snapshot))
     }
 
     /// A cheap stand-in for everything in this workspace a run could see.

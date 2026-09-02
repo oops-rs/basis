@@ -191,15 +191,16 @@ impl PreparedRun {
     /// ([`mentra::memory::estimated_request_tokens`]) — the same one mentra's
     /// auto-compaction threshold is compared against.
     ///
-    /// **A floor, not the real number.** On a freshly prepared workspace run,
-    /// Mentra may add a task-reminder banner and a skill-description block on
-    /// top of the system prompt Basis configured — additions that are
-    /// Mentra-private, so that gap is not basis's to close. On a resumed run
-    /// the floor also excludes the entire system prompt: basis does not yet
-    /// read the persisted `AgentConfig` back (mentra 0.26's
-    /// `Session::config` exposes it — mentra#41, an adoption still pending
-    /// here), and substituting the current workspace default would be wrong
-    /// when the original run carried a profile override. Useful beside
+    /// **A floor, not the real number.** Mentra may add a task-reminder banner
+    /// and a skill-description block on top of the system prompt Basis
+    /// configured — additions that are Mentra-private, so that gap is not
+    /// basis's to close. A resumed run is estimated against the prompt the
+    /// *persisted* agent carries, read back off the resumed session, rather
+    /// than the workspace's current default: the two differ whenever the
+    /// original run carried a profile override. A run built through
+    /// [`prepare_with_session`](crate::prepare_with_session) knows no prompt at
+    /// all — there is no workspace to ask — and its floor excludes one
+    /// entirely. Useful beside
     /// [`context_window`](Self::context_window) for a host deciding whether to
     /// compact or warn before mentra's own trigger would.
     pub fn estimated_context_tokens(&self) -> usize {
