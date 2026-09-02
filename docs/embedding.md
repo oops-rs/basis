@@ -153,7 +153,9 @@ workspace in hand.
 A strict embedding host can turn Basis's conventions into explicit inputs instead of
 depending on ambient repository or home files
 ([ADR-0024](adr/0024-host-defined-runtime-contracts.md)). The contract introduced in Basis 0.8;
-the current 0.11 workspace uses Mentra 0.25. For an ordinary one-shot private runtime, the builder
+the current workspace uses Mentra 0.25. Its consume/rebuild half is retired
+([ADR-0026](adr/0026-the-rebuild-half-of-reuse-is-deferred.md)), so a pooling host opens a fresh
+workspace per checkout with the posture below. For a one-shot private runtime, the builder
 accepts a provider-core implementation directly;
 a retained concrete Responses provider clone shares the registered session used for connection
 prewarm. `ToolResultPolicy::unlimited()` separately pins unlimited bytes and physical lines with no
@@ -185,69 +187,8 @@ minted through another holder, so it cannot prove either zero runtime-global ski
 one independent mint. `fresh_only` consumes its claim on the first `prepare` or `resume`
 attempt even if that attempt fails; follow-up turns on the returned `PreparedRun` remain
 attached and allowed. Direct calls through `mentra_runtime()` are the raw escape hatch and
-outside these Basis guarantees.
-
-### Consume/rebuild for pooled checkouts
-
-Safe reuse is a different construction path. `with_reusable_registered_provider(provider_id,
-make, warm)` records a repeatable provider recipe. Each build calls `make` once, takes an ordinary
-clone of the returned provider for `warm`, installs the other clone into Mentra, completes the
-runtime build, and only then invokes and awaits `warm`. Basis verifies identity and this call order;
-the host must make the provider generation fresh. A Responses factory should call
-`fresh_session_scope()` for every generation, and its `warm` closure must actually prewarm the
-session-sharing clone when connection prewarm is part of the host contract. The declared provider
-id is checked against the resolved model before factory or warm activity and against every generated
-provider before build:
-
-```rust
-let recipe = basis::Runtime::builder()
-    .with_reusable_registered_provider(provider_id, make_provider, warm_provider)
-    .with_tool_result_policy(basis::ToolResultPolicy::unlimited())
-    .with_ephemeral_history()
-    .into_reusable_recipe()?;
-
-let workspace = basis::Workspace::builder("/repo")
-    .with_runtime_recipe(recipe)
-    .without_discovery()
-    .fresh_only()
-    .with_resolved_model(resolved_model)
-    .with_tool_roster(basis::ToolRoster::only(["search", "finish"]))
-    .open()
-    .await?
-    .bind_host_tools(checkout_tools)?;
-
-// After the run, every observer guard and every event forwarder has exited:
-let workspace = workspace.rebuild_for_reuse().await?;
-let workspace = workspace.bind_host_tools(next_checkout_tools)?;
-```
-
-`into_reusable_recipe` requires explicit ephemeral history and refuses a one-shot registered or
-higher-level provider and every `RuntimeBuilder::with_tool` value. Checkout-specific tools enter
-only through the consuming `Workspace::bind_host_tools`; Basis preflights every supplied name and
-collision before registration, and an explicitly empty vector is the binding for a tool-free
-checkout. The host declares that vector complete. Basis does not infer semantic completeness or
-validate that the bound names and the exact allow-list correspond. Because binding consumes the
-workspace, any validation or registration failure returns no reusable entry. Every opened or
-rebuilt generation starts unbound, binds once, and permits one independent `prepare` or `resume`
-attempt; attached turns on that `PreparedRun` remain allowed.
-
-`Workspace::rebuild_for_reuse(self)` is async and consuming. It seals the old generation, drops
-workspace registrations and the uniquely owned runtime, calls the host factory, builds the
-replacement, and invokes and awaits its warm step. A live run, `AgentEventTapGuard`, or detached
-Basis event forwarder refuses rebuild and consumes the entry. Non-unique runtime ownership, provider
-factory/build failure, and warm failure likewise return no reusable entry. Calling
-`Workspace::mentra_runtime`, `PreparedRun::session`, `session_mut`, or `into_session` permanently
-disables reuse for that generation because Basis can no longer count the escaped handles. Dropping
-the workspace never invokes the recipe or builds a replacement.
-
-This is deliberately narrower than Mentra's complete execution surface. Team, background, and
-`spawn` execution are excluded, as is a custom tool that returns before its detached work finishes.
-Basis does not automatically reject those execution names or detect detached custom work. A
-reusable host omits those routes from its exact `ToolRoster::only` roster and makes every bound tool
-await its effects before returning. The library proves lifecycle for Basis-attached runs, observer
-guards, event forwarders, workspace registrations, the ephemeral store, and the provider factory /
-warm sequence; the host supplies provider-session freshness and does not ask Basis to infer cleanup
-for work it cannot track.
+outside these Basis guarantees. A host that needs a pooled checkout repeats this open per
+checkout: Basis has no scrub contract for a used runtime, so it does not offer one.
 
 `RunProfile` states the per-mint half without changing the workspace defaults. Omitted fields
 inherit; `with_max_output_tokens(None)`, `with_reasoning(None)`, and
@@ -299,8 +240,7 @@ events. The callback runs inline with the emitting operation, so it must return 
 not block or panic. It must not re-enter an event-emitting operation or drop a tap guard. The
 returned Basis-owned guard is opaque; keep it alive for the whole observation window. Dropping it
 waits for any invocation already in flight and then unregisters, so do not drop it while holding a
-lock or other resource that callback needs. On a reusable workspace the guard also holds a lifecycle
-lease, so rebuild cannot race a still-registered observer.
+lock or other resource that callback needs.
 
 ## What the repository says about its model
 
@@ -383,10 +323,6 @@ counts rather than arguments or environment values.
 `without_discovery()` skips all hook/tool file probes and parsing while retaining both supplied
 lists, just as it retains supplied MCP servers. This is the strict-host path for typed inputs, not a
 different precedence ladder.
-
-Reusable private-runtime recipes keep their complete-set protocol: checkout-specific native tools
-enter through the consuming `Workspace::bind_host_tools`, which validates the complete set before
-registration and returns no reusable entry on failure.
 
 ## What the host says on top of the workspace
 

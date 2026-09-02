@@ -37,7 +37,7 @@ use crate::{
     hooks::{self, HookRunner, HooksConfig},
     memory::{self, MemoryConfig},
     run::LoadedSkill,
-    runtime::{Runtime, RuntimeBuilder, RuntimeRecipe, dispatch},
+    runtime::{Runtime, RuntimeBuilder, dispatch},
     shell::ShellAccess,
     skills::{self, SkillRoots, SkillsConfig},
     store,
@@ -45,7 +45,7 @@ use crate::{
     tools::declared::{self, DeclaredTools, ToolsConfig},
 };
 
-use super::{Workspace, WorkspaceReuse, lifecycle::MintPosture, roster::ToolRoster};
+use super::{Workspace, lifecycle::MintPosture, roster::ToolRoster};
 
 /// How a workspace is opened.
 ///
@@ -109,7 +109,6 @@ enum WorkspaceModel {
 enum RuntimeSource {
     Shared(Arc<Runtime>),
     Private(Box<RuntimeBuilder>),
-    Reusable(Box<RuntimeRecipe>),
 }
 
 /// Hand-written for the reason [`RuntimeBuilder`]'s is: the private recipe can
@@ -123,7 +122,6 @@ impl std::fmt::Debug for WorkspaceBuilder {
                 match &self.runtime {
                     RuntimeSource::Shared(runtime) => runtime,
                     RuntimeSource::Private(recipe) => &**recipe,
-                    RuntimeSource::Reusable(recipe) => recipe,
                 },
             )
             .field("discovery_enabled", &self.discovery_enabled)
@@ -214,38 +212,13 @@ impl WorkspaceBuilder {
         }
     }
 
-    /// Supplies the repeatable private-runtime recipe for consume/rebuild.
-    ///
-    /// Opening this source is intentionally stricter than an ordinary private
-    /// builder: discovery must be disabled, fresh-only must be explicit, and
-    /// complete resolved model metadata must be supplied. The resulting
-    /// workspace starts unbound and cannot mint until
-    /// [`Workspace::bind_host_tools`](crate::Workspace::bind_host_tools)
-    /// consumes it with the checkout's complete host-tool set (including an
-    /// explicitly empty set).
-    ///
-    /// The supported reuse proof is intentionally narrower than everything
-    /// Mentra can run: a discovery-off host supplies an exact allow-list
-    /// roster and does not escape through raw Mentra APIs or execute team,
-    /// background, `spawn`, detached custom-tool, or other work whose lifetime
-    /// Basis cannot track. Such use poisons reuse where Basis can observe the
-    /// escape; the remaining execution limits are part of the host contract,
-    /// not inferred cleanup.
-    #[must_use]
-    pub fn with_runtime_recipe(self, recipe: RuntimeRecipe) -> Self {
-        Self {
-            runtime: RuntimeSource::Reusable(Box::new(recipe)),
-            ..self
-        }
-    }
-
     /// Allows exactly one independent [`Workspace::prepare`] or
     /// [`Workspace::resume`] attempt from the opened workspace.
     ///
     /// Subsequent turns on the returned [`crate::PreparedRun`] remain
     /// attached and unrestricted. The claim is irreversible even if the first
-    /// attempt fails: without Gate 1b's scrub contract, Basis cannot prove a
-    /// partly minted/resumed runtime is clean enough to retry.
+    /// attempt fails: Basis has no scrub contract for a partly minted or
+    /// resumed runtime, so it cannot prove one is clean enough to retry.
     ///
     /// Requires a private runtime recipe. A shared runtime could be minted by
     /// another workspace through a different `Arc`, bypassing this workspace's
@@ -537,28 +510,6 @@ impl WorkspaceBuilder {
     /// **not** travel even while both are open: every roster minted here hides
     /// the `mcp__*` tools of servers this workspace does not own.
     pub async fn open(self) -> Result<Workspace, RunError> {
-        if let RuntimeSource::Reusable(recipe) = &self.runtime {
-            if self.discovery_enabled {
-                return Err(RunError::ReusableWorkspaceRequiresDiscoveryOff);
-            }
-            if !self.fresh_only {
-                return Err(RunError::ReusableWorkspaceRequiresFreshOnly);
-            }
-            let WorkspaceModel::Resolved(model) = &self.model else {
-                return Err(RunError::ReusableWorkspaceRequiresResolvedModel);
-            };
-            if self.roster.as_profile().allowed_tools.is_none() {
-                return Err(RunError::ReusableWorkspaceRequiresExactRoster);
-            }
-            if model.provider.as_str() != recipe.provider().as_str() {
-                return Err(RunError::ResolvedModelProviderMismatch {
-                    model: model.id.clone(),
-                    model_provider: model.provider.as_str().to_string(),
-                    runtime_provider: recipe.provider().as_str().to_string(),
-                });
-            }
-        }
-
         // **The one resolution.** Everything below this line names the
         // workspace through `path` and nothing re-derives it: the dispatcher
         // key, the private runtime's policy roots, the agent's base directory,
@@ -573,9 +524,6 @@ impl WorkspaceBuilder {
         // merely absolute, for the reason
         // [`store::runtime_identifier`](crate::store::runtime_identifier)
         // gives: a symlinked spelling and its target are one workspace.
-        //
-        // Placed after the reusable-posture checks so a misconfigured builder
-        // is still refused before any filesystem question is asked of it.
         let path = crate::context::resolve_workspace(&self.path)?;
 
         let context = if self.discovery_enabled {
@@ -663,7 +611,6 @@ impl WorkspaceBuilder {
         let store_dir = match &self.runtime {
             RuntimeSource::Shared(_) => None,
             RuntimeSource::Private(recipe) => recipe.named_store_dir().map(Path::to_path_buf),
-            RuntimeSource::Reusable(_) => None,
         };
         // This wave's own I/O — `roots`, the per-file reads `load` does, and
         // the `canonicalize` inside `crate::paths::same_dir` — goes to a
@@ -692,7 +639,7 @@ impl WorkspaceBuilder {
             .collect();
 
         let shared = matches!(self.runtime, RuntimeSource::Shared(_));
-        let (runtime, reusable_recipe) = match self.runtime {
+        let runtime = match self.runtime {
             // A shared runtime's provider, credential and endpoint are the
             // host's process facts and were settled before this workspace
             // existed, so a file's `provider` and `base_url` have nothing to
@@ -700,19 +647,12 @@ impl WorkspaceBuilder {
             // decided the connection, and applies `RuntimeBuilder::with_config`
             // itself if it wants a file to speak for it. What still applies is
             // `model`, below, which ADR-0018 already makes a workspace override.
-            RuntimeSource::Shared(runtime) => (runtime, None),
-            RuntimeSource::Private(recipe) => (
-                Arc::new(recipe.with_config(&config).build_for(
-                    &path,
-                    self.shell,
-                    &memory_roots,
-                )?),
-                None,
-            ),
-            RuntimeSource::Reusable(recipe) => {
-                let runtime = Arc::new(recipe.build_for(&path, self.shell, &memory_roots).await?);
-                (runtime, Some(recipe))
-            }
+            RuntimeSource::Shared(runtime) => runtime,
+            RuntimeSource::Private(recipe) => Arc::new(recipe.with_config(&config).build_for(
+                &path,
+                self.shell,
+                &memory_roots,
+            )?),
         };
 
         // The workspace's own override first, then the file, then the runtime's
@@ -743,7 +683,7 @@ impl WorkspaceBuilder {
         let (skills_registration, skills) = if self.discovery_enabled {
             let registration = register_skills(Arc::clone(&runtime), &path, &self.skills)?;
             let loaded = runtime
-                .mentra_runtime_internal()
+                .mentra_runtime()
                 .skills()
                 .into_iter()
                 .map(|skill| LoadedSkill {
@@ -836,8 +776,6 @@ impl WorkspaceBuilder {
         #[cfg(not(feature = "mcp"))]
         let (mcp_files, mcp_servers): (Vec<ContextFile>, Vec<String>) = (Vec::new(), Vec::new());
 
-        let reuse = reusable_recipe.map(|recipe| WorkspaceReuse::new(recipe, self.shell));
-
         Ok(Workspace {
             // Compaction is two statements from two owners, joined here: the
             // numbers are this workspace's, the directory the snapshots land in
@@ -859,7 +797,6 @@ impl WorkspaceBuilder {
             root: path,
             provider: runtime.provider().to_string(),
             runtime,
-            reuse,
             mint_posture: MintPosture::new(fresh_only),
             model,
             // The last thing the file still has to say, and the one this

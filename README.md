@@ -77,40 +77,12 @@ path or re-expanding their contents. They remain active under `without_discovery
 files entirely. Hooks compose in host-supplied → global → workspace order (after runtime
 interceptors); tools shadow by name in supplied → workspace → global order.
 
-**A strict host can rebuild a private runtime between checkouts.** Basis 0.11 uses Mentra 0.25.0
-for the consume/rebuild path from ADR-0024. The provider is a repeatable factory plus an async warm
-step; the recipe requires ephemeral history and rejects one-shot provider or host-tool values. The
-host is responsible for returning a fresh provider/session scope from each factory call:
-
-```rust
-let recipe = basis::Runtime::builder()
-    .with_reusable_registered_provider(provider_id, make_provider, warm_provider)
-    .with_tool_result_policy(basis::ToolResultPolicy::unlimited())
-    .with_ephemeral_history()
-    .into_reusable_recipe()?;
-
-let workspace = basis::Workspace::builder("/repo")
-    .with_runtime_recipe(recipe)
-    .without_discovery()
-    .fresh_only()
-    .with_resolved_model(resolved_model)
-    .with_tool_roster(basis::ToolRoster::only(["search", "finish"]))
-    .open()
-    .await?
-    .bind_host_tools(checkout_tools)?;
-```
-
-Every generation starts unbound, including the value returned by the consuming async
-`Workspace::rebuild_for_reuse`. The host must call the consuming `bind_host_tools` with the set it
-declares complete for that checkout, even when the set is empty. Basis validates supplied names and
-collisions, not semantic completeness or correspondence with the allow-list; a failed consuming
-bind returns no entry. Rebuild refuses and consumes an entry with a live run,
-`AgentEventTapGuard`, or detached Basis event forwarder; provider build or warm failure also returns
-no entry. Any raw Mentra access permanently disables reuse for that generation. Mentra
-team/background/`spawn` execution and custom tools that detach their own
-work are outside the proof; the host must omit those routes from its exact roster. The full boundary
-and pooling sequence are in
-[the embedding guide](docs/embedding.md#a-host-can-pin-the-whole-run-contract).
+**A strict host states the whole run contract instead of inheriting one.** `without_discovery` +
+`fresh_only` + `with_resolved_model` + an exact `ToolRoster::only` is the supported strict posture,
+and it is what [the embedding guide](docs/embedding.md#a-host-can-pin-the-whole-run-contract)
+describes. A pooling host opens a fresh workspace per checkout: the consume/rebuild half of
+ADR-0024 is retired until Mentra can mint a fresh provider session scope
+([ADR-0026](docs/adr/0026-the-rebuild-half-of-reuse-is-deferred.md)).
 
 Keep the run and send again for a conversation — `run.send("and which of those is riskiest?", sink,
 AllowAll)` — because the session survives the turn, and `run.agent_id()` is the handle
@@ -491,8 +463,10 @@ resume; durable `spawn`/`send`/`ask`/`wait`/`cancel`/`watch`/`inbox` over the fi
 bridge; branching; compaction, whose defaults are basis's own — every tool result the model was
 shown stays in front of it — and whose knobs are `WorkspaceBuilder::with_compaction`; and the SDK
 proper — and since 0.7, conversations as plain files, a child a delegating parent can shape, and
-`basis-tasks` for a Rust host that wants durable handles; since 0.8, a lossless in-process event tap
-and strict private-runtime consume/rebuild for host-defined checkouts; and now `basis-host`, with
+`basis-tasks` for a Rust host that wants durable handles; since 0.8, a lossless in-process event tap —
+the strict private-runtime consume/rebuild for host-defined checkouts that shipped beside it is
+retired, pending a Mentra fresh-session-scope primitive
+([ADR-0026](docs/adr/0026-the-rebuild-half-of-reuse-is-deferred.md)); and now `basis-host`, with
 the shared approval policy, served-session source, workspace pool, and turn/cancellation discipline
 that a third frontend otherwise had to recover from ACP, plus typed supplied hook/tool lists for
 programmatic hosts. Named honestly, still open:
@@ -512,7 +486,7 @@ for `--effort`, custom endpoints, and the hooks `shell`→`spawn` migration) ·
 [conventions.md](docs/conventions.md) (every file and variable basis reads, in precedence order) ·
 [embedding.md](docs/embedding.md) (the SDK in detail) · [targets.md](docs/targets.md) (running a
 command somewhere else) · [REDESIGN.md](docs/REDESIGN.md) (ledger) ·
-[adr/](docs/adr/) (25 locked decisions) · [proposals/](docs/proposals/) (deferred ideas).
+[adr/](docs/adr/) (26 locked decisions) · [proposals/](docs/proposals/) (deferred ideas).
 
 ## License
 

@@ -34,7 +34,7 @@ use crate::{
     event::{ContextFile, EVENT_SCHEMA_VERSION, Event, RunOutcome, SkillSummary, TemplateSummary},
     runtime::Role,
     templates::Template,
-    workspace::{Workspace, lifecycle::ReuseLease},
+    workspace::Workspace,
 };
 
 mod compact;
@@ -94,9 +94,6 @@ pub struct PreparedRun {
     /// deliberately: the two answer different questions and a shared name
     /// would blur them at every call site.
     context_snapshot: ContextSnapshot,
-    /// Keeps one reusable runtime generation unavailable for rebuild until
-    /// this run and every observer/forwarder derived from it are gone.
-    reuse_lease: Option<ReuseLease>,
 }
 
 /// Hand-written because mentra's `Session` is not `Debug`, and because the
@@ -127,7 +124,6 @@ impl PreparedRun {
             provider_retry: ProviderRetry::default(),
             retry_budget: RunOptions::default().retry_budget,
             context_snapshot: ContextSnapshot::default(),
-            reuse_lease: None,
         }
     }
 
@@ -173,13 +169,6 @@ impl PreparedRun {
         Self {
             provider_retry,
             retry_budget,
-            ..self
-        }
-    }
-
-    pub(crate) fn with_reuse_lease(self, reuse_lease: Option<ReuseLease>) -> Self {
-        Self {
-            reuse_lease,
             ..self
         }
     }
@@ -246,13 +235,7 @@ impl PreparedRun {
 
     /// The session this run drives, for a host that wants mentra's own surface
     /// — branching, the transcript tree, subagents — alongside basis's.
-    ///
-    /// On a reusable workspace, calling this method permanently prevents the
-    /// current generation from returning to the pool. Even a shared reference
-    /// can create Mentra-owned handles whose lifetime Basis cannot count; use
-    /// Basis transcript and branch helpers when reuse must remain possible.
     pub fn session(&self) -> &Session {
-        self.poison_reuse();
         &self.session
     }
 
@@ -277,18 +260,11 @@ impl PreparedRun {
         &self,
         tap: impl Fn(&AgentEvent) + Send + Sync + 'static,
     ) -> AgentEventTapGuard {
-        AgentEventTapGuard::new(
-            self.session.register_agent_event_tap(tap),
-            self.reuse_lease.clone(),
-        )
+        AgentEventTapGuard::new(self.session.register_agent_event_tap(tap))
     }
 
     /// Mutably exposes Mentra's session.
-    ///
-    /// On a reusable workspace this permanently prevents reuse of the current
-    /// generation, for the same ownership reason as [`session`](Self::session).
     pub fn session_mut(&mut self) -> &mut Session {
-        self.poison_reuse();
         &mut self.session
     }
 
@@ -306,18 +282,8 @@ impl PreparedRun {
     /// ([`with_workspace`](Self::with_workspace)) is dropped here with the
     /// rest of the run, and its hooks and MCP connections end with it — the
     /// session that comes back is mentra's alone.
-    ///
-    /// Taking the session permanently prevents a reusable generation from
-    /// being rebuilt, even if the returned session is dropped before release.
     pub fn into_session(self) -> Session {
-        self.poison_reuse();
         self.session
-    }
-
-    fn poison_reuse(&self) {
-        if let Some(lease) = &self.reuse_lease {
-            lease.poison();
-        }
     }
 
     /// The session's id, which changes every time a session is created —
@@ -804,9 +770,7 @@ impl PreparedRun {
         sink.emit(header_for(&session_id, &self.run))?;
 
         let (done, done_rx) = oneshot::channel();
-        let reuse_lease = self.reuse_lease.clone();
         let forwarder = tokio::spawn(async move {
-            let _reuse_lease = reuse_lease;
             forward_events(receiver, sink, done_rx, approver, permissions).await
         });
 

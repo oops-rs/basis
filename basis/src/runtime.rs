@@ -36,7 +36,6 @@ pub(crate) mod builder;
 mod credential;
 pub(crate) mod dispatch;
 mod executor;
-mod reuse;
 mod tool_results;
 
 use std::collections::HashMap;
@@ -48,7 +47,6 @@ use mentra::{ModelSelector, Session, agent::AgentConfig, runtime::SessionOptions
 use crate::tools::declared::DeclaredToolSpec;
 
 pub use builder::RuntimeBuilder;
-pub use reuse::RuntimeRecipe;
 pub use tool_results::ToolResultPolicy;
 
 /// The types a **command target's executor** is written against.
@@ -296,14 +294,6 @@ impl Runtime {
     /// basis does not hide mentra, and reaching past basis's surface is a
     /// supported thing to do rather than a workaround.
     pub fn mentra_runtime(&self) -> &mentra::Runtime {
-        &self.mentra
-    }
-
-    /// Basis-internal access that does not cross the reusable lifecycle
-    /// boundary. Public callers reach [`mentra_runtime`](Self::mentra_runtime);
-    /// a reusable [`Workspace`](crate::Workspace) poisons its generation before
-    /// handing that same reference out.
-    pub(crate) fn mentra_runtime_internal(&self) -> &mentra::Runtime {
         &self.mentra
     }
 
