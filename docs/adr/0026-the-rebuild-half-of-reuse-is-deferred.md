@@ -62,12 +62,15 @@ from an existing provider. Gate 1a stays exactly as shipped.**
    triggered by mentra#46 closing, and reopens *this decision* rather than
    restoring this code: a fresh-scope primitive upstream would make the recipe,
    the deferred warm step, and the hand-written replay unnecessary, so the
-   contract would be rebuilt against it rather than resurrected.
+   contract would be rebuilt against it rather than resurrected. That
+   primitive has since landed on mentra's main (mentra#46), unreleased as of
+   this writing; once it ships, a pooling host consumes it from mentra
+   directly — the retirement here stands either way.
 
 ## Consequences
 
-- **Breaking, in 0.12.0.** Six public items and 17 `RunError` variants are
-  removed. `#[non_exhaustive]` does not soften this: a downstream `match` or
+- **Breaking, in the next breaking release.** Six public items and 17
+  `RunError` variants are removed. `#[non_exhaustive]` does not soften this: a downstream `match` or
   `matches!` arm naming a removed variant fails to compile. This is ADR-0024's
   own "downstream public-API/package probe" consequence coming due a second
   time.

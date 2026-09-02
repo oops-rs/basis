@@ -81,7 +81,7 @@ interceptors); tools shadow by name in supplied → workspace → global order.
 `fresh_only` + `with_resolved_model` + an exact `ToolRoster::only` is the supported strict posture,
 and it is what [the embedding guide](docs/embedding.md#a-host-can-pin-the-whole-run-contract)
 describes. A pooling host opens a fresh workspace per checkout: the consume/rebuild half of
-ADR-0024 is retired in 0.12 until Mentra can mint a fresh provider session scope
+ADR-0024 is retired until Mentra can mint a fresh provider session scope
 ([ADR-0026](docs/adr/0026-the-rebuild-half-of-reuse-is-deferred.md)).
 
 Keep the run and send again for a conversation — `run.send("and which of those is riskiest?", sink,
@@ -463,9 +463,9 @@ resume; durable `spawn`/`send`/`ask`/`wait`/`cancel`/`watch`/`inbox` over the fi
 bridge; branching; compaction, whose defaults are basis's own — every tool result the model was
 shown stays in front of it — and whose knobs are `WorkspaceBuilder::with_compaction`; and the SDK
 proper — and since 0.7, conversations as plain files, a child a delegating parent can shape, and
-`basis-tasks` for a Rust host that wants durable handles; since 0.8, a lossless in-process event tap
-for host-defined checkouts — the strict private-runtime consume/rebuild that shipped beside it is
-retired in 0.12, pending a Mentra fresh-session-scope primitive
+`basis-tasks` for a Rust host that wants durable handles; since 0.8, a lossless in-process event tap —
+the strict private-runtime consume/rebuild for host-defined checkouts that shipped beside it is
+retired, pending a Mentra fresh-session-scope primitive
 ([ADR-0026](docs/adr/0026-the-rebuild-half-of-reuse-is-deferred.md)); and now `basis-host`, with
 the shared approval policy, served-session source, workspace pool, and turn/cancellation discipline
 that a third frontend otherwise had to recover from ACP, plus typed supplied hook/tool lists for

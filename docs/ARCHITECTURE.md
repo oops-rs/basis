@@ -658,7 +658,7 @@ knobs, exist only there.
 
 Unlike the two hook migrations above, this one is loud: it stops compiling.
 [ADR-0026](adr/0026-the-rebuild-half-of-reuse-is-deferred.md) retires the rebuild half of
-ADR-0024 in 0.12, so six public items are gone — `basis::RuntimeRecipe`,
+ADR-0024, so six public items are gone — `basis::RuntimeRecipe`,
 `RuntimeBuilder::with_reusable_registered_provider`, `RuntimeBuilder::into_reusable_recipe`,
 `WorkspaceBuilder::with_runtime_recipe`, `Workspace::bind_host_tools`, and the async
 `Workspace::rebuild_for_reuse` — along with the 17 `RunError` variants only they raised

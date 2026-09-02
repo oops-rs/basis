@@ -153,7 +153,7 @@ workspace in hand.
 A strict embedding host can turn Basis's conventions into explicit inputs instead of
 depending on ambient repository or home files
 ([ADR-0024](adr/0024-host-defined-runtime-contracts.md)). The contract introduced in Basis 0.8;
-the current 0.12 workspace uses Mentra 0.25. Its consume/rebuild half is retired
+the current workspace uses Mentra 0.25. Its consume/rebuild half is retired
 ([ADR-0026](adr/0026-the-rebuild-half-of-reuse-is-deferred.md)), so a pooling host opens a fresh
 workspace per checkout with the posture below. For a one-shot private runtime, the builder
 accepts a provider-core implementation directly;
