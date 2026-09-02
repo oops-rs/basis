@@ -16,7 +16,7 @@
 //!
 //! 1. **A remembered rule answers first**, without the approver being asked at
 //!    all. Because the command rides inside `spawn`'s input, a
-//!    `RuleKey { tool_name: "spawn", pattern }` globbed against the parsed call
+//!    `RuleKey { tool_name: "spawn", pattern }` matched against the parsed call
 //!    *is* a command allowlist expressible as data.
 //! 2. **The reviewer sees the residue** — the calls no rule covers — and
 //!    answers with a reason.
@@ -306,14 +306,27 @@ fn answer(verdict: Verdict) -> ApprovalAnswer {
 /// rule through mentra directly, at the cost of naming mentra in its own
 /// manifest, pinned to whatever version basis resolved.
 ///
-/// Three details are traps rather than API:
+/// Four details are traps rather than API:
 ///
-/// - **Two stars, not one.** mentra globs with `glob-match`, where a single
-///   `*` does not cross `/`. The serialized input carries `cwd`, which is a
-///   path, so a one-star pattern silently matches nothing — and an operator
-///   sees a reviewer they thought they had bypassed rather than an error.
-/// - **The pattern globs the serialized JSON**, so it is written against
-///   `"body":"…"` — the field name and the quoting are part of the rule.
+/// - **The pattern is matched by mentra's own rule matcher, not a path
+///   globber.** Its syntax is deliberately small and separator-free: `*`
+///   matches any run of characters — `/` included, so the `cwd` path in the
+///   serialized input does not stop it — `?` matches exactly one character,
+///   `**` means the same as `*`, and everything else, JSON punctuation
+///   included, is literal. Matching is anchored, which is why a substring
+///   rule is written `*needle*` (mentra `session/permission/pattern.rs`).
+/// - **The pattern is matched against the serialized JSON**, so it is written
+///   against `"body":"…"` — the field name and the quoting are part of the
+///   rule.
+/// - **Interpolating an unchecked command is an injection.** A `*` or `?`
+///   inside the command becomes matcher syntax: `ls *`'s star crosses the
+///   closing quote, auto-approving every later `spawn` whose serialized
+///   input happens to contain `"body":"ls ` — review bypassed for commands
+///   nobody allowlisted. And a `"` or `\` is serde-escaped in the serialized
+///   input, so a raw interpolation of it silently never matches: the command
+///   is reviewed forever, with no error saying why. [`allowlist`] therefore
+///   refuses those four characters outright rather than seed a rule that is
+///   wider or deader than the command that was reviewed.
 /// - **A rule on a read-only tool never applies — a deny included.** A
 ///   remembered rule can only resolve the authorizer's `Prompt`, and basis's
 ///   `ApprovalGate` answers `Allow` outright for a call with no side effects,
@@ -321,18 +334,33 @@ fn answer(verdict: Verdict) -> ApprovalAnswer {
 ///   runs, no error, no event. Seed rules for consequential tools only —
 ///   `spawn` here is one, which is why this rung works at all. The full rule
 ///   is on [`ApprovalGate`](basis::approval::ApprovalGate).
-fn allowlist(run: &PreparedRun, command: &str) -> Result<(), mentra::error::RuntimeError> {
+fn allowlist(run: &PreparedRun, command: &str) -> Result<(), Box<dyn Error>> {
+    // The refusal that keeps rung one honest — the third trap above, made
+    // unrepresentable instead of merely documented.
+    if command
+        .chars()
+        .any(|character| matches!(character, '*' | '?' | '"' | '\\'))
+    {
+        return Err(format!(
+            "refusing to allowlist {command:?}: `*`, `?`, `\"` and `\\` become matcher \
+             syntax or serde escapes inside the rule pattern, so the rule would be \
+             wider or deader than the command that was reviewed"
+        )
+        .into());
+    }
+
     run.session()
         .permission_handle()
         .remember_rule(RememberedRule {
             key: RuleKey {
                 tool_name: SPAWN.to_string(),
-                pattern: Some(format!("**\"body\":\"{command}\"**")),
+                pattern: Some(format!("*\"body\":\"{command}\"*")),
             },
             allow: true,
             scope: PermissionRuleScope::Session,
             reason: None,
-        })
+        })?;
+    Ok(())
 }
 
 /// What the run is asked to do.
