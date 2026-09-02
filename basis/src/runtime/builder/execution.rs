@@ -138,6 +138,35 @@ pub(super) fn validate_target_names(targets: &CommandTargets) -> Result<(), RunE
 /// both the read and the write lists. Stated whether or not a directory
 /// exists yet: the first memory is written by exactly the run that finds none
 /// to read.
+///
+/// # The shell posture is enforced *inside* the call, and that has a cost
+///
+/// `allow_shell_commands(shell.is_granted())` is where a workspace's answer
+/// about commands stops being a guard of basis's own and becomes a statement
+/// in mentra's policy — which is the whole point of this recipe, because a
+/// policy is the only thing a shared runtime can carry per session. Mentra's
+/// admission order is hooks, then the schema, then the
+/// [`ToolAuthorizer`](mentra::tool::ToolAuthorizer); the shell check fires
+/// later still, inside the tool's own execution. So on a
+/// [`ShellAccess::Denied`] workspace a command reaches
+/// [`Approver`](crate::Approver) **first** and is refused **after** it is
+/// answered.
+///
+/// For a `Prompt`-mode approver that is a real cost, and it is not a bug to be
+/// fixed here: the person is shown `!curl … | sh` and asked whether to allow
+/// it, their yes is recorded, and the model is then told commands are
+/// disabled — a prompt about something that could never have run. Nothing is
+/// weakened by it (the command does not run either way, and a *deny* is still
+/// a deny), and the alternative is worse: refusing before the authorizer takes
+/// a second implementation of the shell posture — the pre-hook guard the
+/// dispatcher used to carry — which is exactly the duplicate this recipe
+/// removed, and which a shared runtime could only apply by routing on a
+/// directory. A host that wants the prompt suppressed can read the posture
+/// itself and answer [`ApprovalDecision::Deny`](crate::ApprovalDecision)
+/// without asking, or refuse in an
+/// [`Interceptor`](crate::hooks::Interceptor), which does run before the
+/// authorizer. Pinned by `a_denied_command_is_put_to_the_approver_before_the
+/// _policy_refuses_it` in `basis/tests/hooks/guarded.rs`.
 pub(crate) fn workspace_policy(
     workspace: &Path,
     shell: ShellAccess,

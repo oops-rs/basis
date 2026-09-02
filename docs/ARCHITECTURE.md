@@ -856,7 +856,12 @@ exactly as it always has on a private runtime, instead of from basis's guard —
 of a *hook-rewritten* call no longer names the hook that rewrote it, because it is the tool's
 policy answering rather than basis's chain. A `--no-shell` workspace's command is likewise
 refused inside the call rather than ahead of it, which means the approver is asked first: the
-private path's behaviour, now on both. Two side effects worth naming: a shared runtime's
+private path's behaviour, now on both — and it has a UX cost worth naming, because a
+`Prompt`-mode approver is shown a command that can never run, the person's yes is recorded,
+and the model is then told commands are disabled. Nothing is weakened by it, and the
+alternative is a second implementation of the shell posture ahead of the authorizer, which is
+exactly the duplicate this removes; a host that wants the prompt suppressed reads the posture
+itself, or refuses in an `Interceptor`, which does run before the authorizer. Two side effects worth naming: a shared runtime's
 workspace can write its **memories** now, since the roots ride in its own policy where a
 runtime-wide one could never carry them; and `with_command_timeout` and
 `with_tool_result_policy` are re-applied to each workspace's policy, because Mentra replaces a
