@@ -78,15 +78,7 @@ use crate::{
 /// [`RunOptions::child`](mentra::runtime::RunOptions::child), which carries the
 /// *same* accounting handle — this pool's counter — and the same bound, so a
 /// fan-out whose runs delegate draws on one figure at every depth rather than
-/// spending beside it. What the two doors do NOT share is the tally: `task`
-/// relays its child's usage reports onto the parent's stream, so [`RunUsage`]
-/// agrees with what stopped the turn — but the relay is `pub(crate)` in
-/// mentra, `spawn` cannot reach it, and a `spawn`-delegating run's `RunUsage`
-/// under-reports what the pool honestly charged. The bound is airtight; the
-/// receipt is not. Named as an open upstream candidate in the REDESIGN ledger.
-/// Before mentra `0436bae` none of the bounding held either: `task` ran its
-/// child on fresh options, and a delegating fan-out spent more than this pool
-/// would ever admit to.
+/// spending beside it.
 ///
 /// The edge that survives is a refusal rather than an overrun. A delegation
 /// issued once the pool is already crossed inherits an allowance with nothing
