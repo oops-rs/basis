@@ -710,6 +710,54 @@ Nothing here had an adopted caller to migrate, so there is no replacement to rea
 host ever needs the transcript tree or named command targets again, the next breaking release
 is the first place either could plausibly return.
 
+### Parsimony: four spellings of a turn, two spellings of reasoning
+
+The same pass, one layer down. Where the removals above took surfaces nobody had adopted, these
+take *second* spellings of things basis already said once — so each has a replacement, and the
+replacement is the spelling every production caller was already using.
+
+**Three turn entry points, gone.** `PreparedRun::execute`, `execute_with_options` and `send`
+were each a two-line forward onto a neighbour with a default argument spelled out. Every real
+caller — basis-cli, basis-tasks, basis-acp, nous — already named its approver or its options, so
+what these saved was a word in tests and doc examples. The survivors take the argument:
+
+| gone | write instead |
+|---|---|
+| `run.execute(sink)` | `run.execute_with_approver(sink, AllowAll)` |
+| `run.execute_with_options(sink, options)` | `run.execute_with_approver_and_options(sink, AllowAll, options)` |
+| `run.send(prompt, sink, approver)` | `run.send_with_options(prompt, sink, approver, TurnOptions::default())` |
+
+`execute_with_approver`, `execute_with_approver_and_options`, `send_parts` and
+`send_with_options` are unchanged, and four entry points is what a turn now has: prompt or
+parts, configured prompt or a new one.
+
+**`RunProfile::with_reasoning`, gone.** A profile had two ways to decide reasoning — the
+dedicated override and the `reasoning` field inside `with_provider_request_options` — with
+builder order arbitrating between them. Nothing ever used the dedicated one: basis-cli and
+basis-tasks reach for
+`RunSpec::with_effort`, nous sets `ProviderRequestOptions::reasoning`, and basis-acp changes a
+live session through `PreparedRun::set_reasoning`. A host that called `with_reasoning(r)` writes:
+
+```rust
+profile.with_provider_request_options(ProviderRequestOptions {
+    reasoning: r,
+    ..Default::default()
+})
+```
+
+The precedence that mattered is unchanged: a profile that states its provider request options
+has answered the reasoning question, and outranks `RunSpec::with_effort` and the config file's
+`effort` no matter which builder method was called later. What is gone is the third rule, about
+which of *two* profile-level spellings won.
+
+**Unchanged, and worth saying so.** The config-file `effort` key, `RunSpec::with_effort` and
+`.effort`, `PreparedRun::set_reasoning`/`set_effort`/`set_model`, and every retry setter —
+`RuntimeBuilder::with_provider_retry`, `with_provider_retry_budget`,
+`TurnOptions::with_provider_retry`, `with_retry_budget`, and `TurnOptions`' two public retry
+fields. The retry pair travels internally as one value now, but a host sets and overrides the
+waits and the count separately, exactly as before, because they are two questions and Mentra
+keeps them apart.
+
 ### Command targets
 
 `!@<target> <command>` names an executor to run a command on by name, rather than where basis

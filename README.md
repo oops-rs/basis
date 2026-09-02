@@ -87,8 +87,8 @@ ADR-0024 is retired until Mentra can mint a fresh provider session scope
 ([ADR-0026](docs/adr/0026-the-rebuild-half-of-reuse-is-deferred.md)).
 
 Keep the run and send again for a conversation — `run.send_with_options("and which of those is
-riskiest?", sink, AllowAll, TurnOptions::default())` — because the session survives the turn, and `run.agent_id()` is the handle
-`Workspace::resume` takes in a later process.
+riskiest?", sink, AllowAll, TurnOptions::default())` — because the session survives the turn, and
+`run.agent_id()` is the handle `Workspace::resume` takes in a later process.
 
 Bounds are builders on `RunSpec` — one shape, however the run is made — and every bound ends the
 run *gracefully*: the stream closes the way it
