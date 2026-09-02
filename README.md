@@ -51,7 +51,7 @@ exported — is spoken to with no `Authorization` header at all; one that wanted
   `.mcp.json` discovery, no `McpConfig` on a run, no servers registered
   ([ADR-0012](docs/adr/0012-one-contract-many-bindings.md)). Custom tools remain, because MCP was
   only ever one of the ways to reach them.
-- **~10 MB release binary** (10.7 MB measured at 0.6.0), down from cargo's 24 MB default. Each of the four profile settings that
+- **~10 MB release binary** (10.0 MB measured on the current tree), down from cargo's 24 MB default. Each of the four profile settings that
   gets there is argued in the workspace manifest, including the one deliberately absent:
   `panic = "abort"` turns any panic into a dead process, which is what an embedded harness and a
   long-lived server exist to avoid.
