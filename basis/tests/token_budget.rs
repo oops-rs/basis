@@ -25,7 +25,7 @@ use std::{
 
 use async_trait::async_trait;
 use basis::{
-    Bound, CollectingSink, TurnOptions, approval::ApprovalGate, run::prepare_with_session,
+    AllowAll, Bound, CollectingSink, TurnOptions, approval::ApprovalGate, run::prepare_with_session,
 };
 use mentra::{
     BuiltinProvider, ContentBlock, ModelInfo, Role, Runtime, RuntimePolicy, Session, TokenUsage,
@@ -184,8 +184,9 @@ async fn a_run_stopped_by_its_token_budget_names_the_budget() {
 
     let report = tokio::time::timeout(
         PROMPTLY,
-        prepared.execute_with_options(
+        prepared.execute_with_approver_and_options(
             CollectingSink::new(),
+            AllowAll,
             // One token: crossed by the first round's report, and by nothing
             // before it, so the boundary after that round is where this stops.
             TurnOptions::default().with_token_budget(1),
@@ -247,8 +248,9 @@ async fn a_run_that_finishes_inside_its_budget_names_no_bound() {
 
     let report = tokio::time::timeout(
         PROMPTLY,
-        prepared.execute_with_options(
+        prepared.execute_with_approver_and_options(
             CollectingSink::new(),
+            AllowAll,
             TurnOptions::default().with_token_budget(10 * ROUND_COST),
         ),
     )
@@ -292,8 +294,9 @@ async fn a_shared_allowance_drawn_dry_stops_the_run_the_same_way() {
 
     let report = tokio::time::timeout(
         PROMPTLY,
-        prepared.execute_with_options(
+        prepared.execute_with_approver_and_options(
             CollectingSink::new(),
+            AllowAll,
             TurnOptions::default().with_budget(pool.clone()),
         ),
     )

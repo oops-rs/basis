@@ -151,8 +151,8 @@ use crate::{
 /// let mut first = workspace.prepare(pool.spec("review the tests"))?;
 /// let mut second = workspace.prepare(pool.spec("review the docs"))?;
 /// let (a, b) = tokio::join!(
-///     first.execute(CollectingSink::default()),
-///     second.execute(CollectingSink::default()),
+///     first.execute_with_approver(CollectingSink::default(), AllowAll),
+///     second.execute_with_approver(CollectingSink::default(), AllowAll),
 /// );
 /// # let _ = (a?, b?);
 ///

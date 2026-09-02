@@ -30,7 +30,7 @@ use std::{
 };
 
 use basis::{
-    CollectingSink, ContextConfig, HookSpec, MemoryConfig, RunError, RunOutcome, Runtime,
+    AllowAll, CollectingSink, ContextConfig, HookSpec, MemoryConfig, RunError, RunOutcome, Runtime,
     Workspace, WorkspaceBuilder, hooks::HooksConfig, skills::SkillsConfig, store,
     templates::TemplatesConfig, tools::declared::ToolsConfig,
 };
@@ -126,8 +126,8 @@ async fn two_workspaces_minted_from_one_runtime_share_it() {
     let mut run_a = a.prepare("one").expect("mints");
     let mut run_b = b.prepare("two").expect("mints");
     let (left, right) = tokio::join!(
-        run_a.execute(CollectingSink::default()),
-        run_b.execute(CollectingSink::default()),
+        run_a.execute_with_approver(CollectingSink::default(), AllowAll),
+        run_b.execute_with_approver(CollectingSink::default(), AllowAll),
     );
     assert!(matches!(left.expect("completes").outcome, RunOutcome::Ok));
     assert!(matches!(right.expect("completes").outcome, RunOutcome::Ok));
@@ -170,12 +170,12 @@ async fn a_shared_runtimes_conversations_list_under_their_own_workspaces() {
     let mut run_a = a.prepare("one").expect("mints");
     let agent_a = run_a.agent_id().to_string();
     run_a
-        .execute(CollectingSink::default())
+        .execute_with_approver(CollectingSink::default(), AllowAll)
         .await
         .expect("completes");
     b.prepare("two")
         .expect("mints")
-        .execute(CollectingSink::default())
+        .execute_with_approver(CollectingSink::default(), AllowAll)
         .await
         .expect("completes");
 
@@ -234,7 +234,7 @@ mod roster {
         let report = workspace
             .prepare("go")
             .expect("mints")
-            .execute(CollectingSink::default())
+            .execute_with_approver(CollectingSink::default(), AllowAll)
             .await
             .expect("completes");
         assert!(matches!(report.outcome, RunOutcome::Ok));
@@ -334,7 +334,7 @@ mod declared_roster {
             let report = workspace
                 .prepare("go")
                 .expect("mints")
-                .execute(CollectingSink::default())
+                .execute_with_approver(CollectingSink::default(), AllowAll)
                 .await
                 .expect("completes");
             assert!(matches!(report.outcome, RunOutcome::Ok));
@@ -475,7 +475,7 @@ async fn a_workspaces_hooks_guard_its_runs_on_a_shared_runtime() {
     first
         .prepare("write a file")
         .expect("mints")
-        .execute(CollectingSink::default())
+        .execute_with_approver(CollectingSink::default(), AllowAll)
         .await
         .expect("the guarded run completes — a denial is an answer, not an error");
     assert!(
@@ -486,7 +486,7 @@ async fn a_workspaces_hooks_guard_its_runs_on_a_shared_runtime() {
     second
         .prepare("write a file")
         .expect("mints")
-        .execute(CollectingSink::default())
+        .execute_with_approver(CollectingSink::default(), AllowAll)
         .await
         .expect("the free run completes");
     assert!(
@@ -545,7 +545,7 @@ async fn same_root_hooks_must_match_and_survive_until_the_last_holder() {
     identical
         .prepare("write a file")
         .expect("mints")
-        .execute(CollectingSink::default())
+        .execute_with_approver(CollectingSink::default(), AllowAll)
         .await
         .expect("a hook denial is an answer, not a run failure");
     assert!(

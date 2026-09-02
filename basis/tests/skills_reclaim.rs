@@ -34,8 +34,8 @@ use std::{
 };
 
 use basis::{
-    CollectingSink, ContextConfig, MemoryConfig, ModelInfo, Provider, RunOutcome, Runtime,
-    RuntimeBuilder, Workspace, WorkspaceBuilder, async_trait,
+    AllowAll, CollectingSink, ContextConfig, MemoryConfig, ModelInfo, Provider, RunOutcome,
+    Runtime, RuntimeBuilder, Workspace, WorkspaceBuilder, async_trait,
     hooks::HooksConfig,
     runtime::{
         ContentBlock, ProviderCapabilities, ProviderDescriptor, ProviderError, ProviderEventStream,
@@ -396,7 +396,7 @@ async fn a_sibling_skill_is_loadable_while_its_workspace_is_open_and_not_after()
     let report = neighbour
         .prepare("load the sibling's skill")
         .expect("mints")
-        .execute(CollectingSink::default())
+        .execute_with_approver(CollectingSink::default(), AllowAll)
         .await
         .expect("the run completes");
     assert!(matches!(report.outcome, RunOutcome::Ok));
@@ -414,7 +414,7 @@ async fn a_sibling_skill_is_loadable_while_its_workspace_is_open_and_not_after()
     let report = neighbour
         .prepare("load the sibling's skill again")
         .expect("mints")
-        .execute(CollectingSink::default())
+        .execute_with_approver(CollectingSink::default(), AllowAll)
         .await
         .expect("the run completes");
     assert!(matches!(report.outcome, RunOutcome::Ok));

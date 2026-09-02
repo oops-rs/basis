@@ -12,7 +12,7 @@
 
 use std::sync::{Arc, Mutex};
 
-use basis::{Event, FnSink, RunOutcome, Workspace};
+use basis::{AllowAll, Event, FnSink, RunOutcome, Workspace};
 use mentra::ModelSelector;
 
 #[tokio::main]
@@ -35,32 +35,35 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
 
     let report = workspace
         .prepare(prompt)?
-        .execute(FnSink::new(move |event| {
-            match event {
-                Event::RunStarted {
-                    model,
-                    context_files,
-                    skills,
-                    ..
-                } => {
-                    println!("model: {model}");
-                    for file in &context_files {
-                        println!("context: {} ({})", file.path.display(), file.scope);
+        .execute_with_approver(
+            FnSink::new(move |event| {
+                match event {
+                    Event::RunStarted {
+                        model,
+                        context_files,
+                        skills,
+                        ..
+                    } => {
+                        println!("model: {model}");
+                        for file in &context_files {
+                            println!("context: {} ({})", file.path.display(), file.scope);
+                        }
+                        for skill in &skills {
+                            println!("skill: {} — {}", skill.name, skill.description);
+                        }
+                        println!("---");
                     }
-                    for skill in &skills {
-                        println!("skill: {} — {}", skill.name, skill.description);
+                    Event::AssistantDelta { text } => print!("{text}"),
+                    Event::ToolQueued { tool_name, .. } => {
+                        seen.lock().expect("not poisoned").push(tool_name);
                     }
-                    println!("---");
+                    Event::RunFinished { .. } => println!(),
+                    _ => {}
                 }
-                Event::AssistantDelta { text } => print!("{text}"),
-                Event::ToolQueued { tool_name, .. } => {
-                    seen.lock().expect("not poisoned").push(tool_name);
-                }
-                Event::RunFinished { .. } => println!(),
-                _ => {}
-            }
-            Ok(())
-        }))
+                Ok(())
+            }),
+            AllowAll,
+        )
         .await?;
 
     println!("---");

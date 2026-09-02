@@ -21,9 +21,9 @@ use std::{
 
 use async_trait::async_trait;
 use basis::{
-    ApprovalAnswer, ApprovalDecision, ApprovalRequest, Approver, Bound, CancellationToken,
-    CollectingSink, Event, RunFailure, RunFailureCategory, RunOutcome, TurnOptions,
-    approval::ApprovalGate, run::prepare_with_session,
+    AllowAll, ApprovalAnswer, ApprovalDecision, ApprovalRequest, Approver, Bound,
+    CancellationToken, CollectingSink, Event, RunFailure, RunFailureCategory, RunOutcome,
+    TurnOptions, approval::ApprovalGate, run::prepare_with_session,
 };
 use mentra::{
     BuiltinProvider, ContentBlock, ModelInfo, Role, Runtime, RuntimePolicy, Session,
@@ -248,7 +248,7 @@ async fn a_token_already_tripped_stops_the_turn_before_it_starts() {
 
     let report = tokio::time::timeout(
         PROMPTLY,
-        prepared.execute_with_options(CollectingSink::new(), options),
+        prepared.execute_with_approver_and_options(CollectingSink::new(), AllowAll, options),
     )
     .await
     .expect("an already-cancelled turn must return at once")
@@ -281,8 +281,9 @@ async fn a_tool_budget_failure_retains_its_exact_typed_count() {
     .expect("prepared");
 
     let report = prepared
-        .execute_with_options(
+        .execute_with_approver_and_options(
             CollectingSink::new(),
+            AllowAll,
             TurnOptions::default().with_tool_budget(0),
         )
         .await
@@ -320,7 +321,7 @@ async fn a_second_turn_is_unaffected_by_the_first_turns_token() {
     token.cancel();
     let cancelled = tokio::time::timeout(
         PROMPTLY,
-        prepared.execute_with_options(CollectingSink::new(), options),
+        prepared.execute_with_approver_and_options(CollectingSink::new(), AllowAll, options),
     )
     .await
     .expect("returns at once")
@@ -329,7 +330,12 @@ async fn a_second_turn_is_unaffected_by_the_first_turns_token() {
 
     let second = tokio::time::timeout(
         PROMPTLY,
-        prepared.send("try again", CollectingSink::new(), basis::AllowAll),
+        prepared.send_with_options(
+            "try again",
+            CollectingSink::new(),
+            basis::AllowAll,
+            TurnOptions::default(),
+        ),
     )
     .await
     .expect("the second turn must not inherit the first turn's stop button")

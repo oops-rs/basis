@@ -21,9 +21,9 @@ use std::{
 
 use async_trait::async_trait;
 use basis::{
-    Bound, CollectingSink, ContentBlock, Effort, ModelInfo, ReasoningChange, ReasoningOptions,
-    RoundAdjustment, RoundBoundary, RoundContext, RoundDecision, RoundStrategy, RunOutcome,
-    TurnOptions, approval::ApprovalGate, run::prepare_with_session,
+    AllowAll, Bound, CollectingSink, ContentBlock, Effort, ModelInfo, ReasoningChange,
+    ReasoningOptions, RoundAdjustment, RoundBoundary, RoundContext, RoundDecision, RoundStrategy,
+    RunOutcome, TurnOptions, approval::ApprovalGate, run::prepare_with_session,
 };
 use mentra::{
     BuiltinProvider, Role, Runtime, RuntimePolicy, Session, TokenUsage,
@@ -258,8 +258,9 @@ async fn a_strategy_can_demand_another_round_and_then_stop_satisfied() {
     let strategy = Scripted::new(vec![Play::Inject("not enough — go again"), Play::Stop]);
     let report = tokio::time::timeout(
         PROMPTLY,
-        prepared.execute_with_options(
+        prepared.execute_with_approver_and_options(
             CollectingSink::new(),
+            AllowAll,
             TurnOptions::default().with_round_strategy(strategy.clone()),
         ),
     )
@@ -328,8 +329,9 @@ async fn a_strategy_stop_after_a_tool_round_keeps_the_work_and_names_no_bound() 
     let strategy = Scripted::new(vec![Play::Stop]);
     let report = tokio::time::timeout(
         PROMPTLY,
-        prepared.execute_with_options(
+        prepared.execute_with_approver_and_options(
             CollectingSink::new(),
+            AllowAll,
             TurnOptions::default().with_round_strategy(strategy.clone()),
         ),
     )
@@ -389,8 +391,9 @@ async fn a_strategy_that_proceeds_does_not_unbind_the_budget() {
     let strategy = Scripted::new(vec![]);
     let report = tokio::time::timeout(
         PROMPTLY,
-        prepared.execute_with_options(
+        prepared.execute_with_approver_and_options(
             CollectingSink::new(),
+            AllowAll,
             // One token: crossed by the first round's report, so the boundary
             // after the tool round is where the runner refuses to continue.
             TurnOptions::default()
@@ -443,8 +446,9 @@ async fn a_strategy_can_raise_the_effort_mid_run() {
     let strategy = Scripted::new(vec![Play::RaiseEffort]);
     let report = tokio::time::timeout(
         PROMPTLY,
-        prepared.execute_with_options(
+        prepared.execute_with_approver_and_options(
             CollectingSink::new(),
+            AllowAll,
             TurnOptions::default().with_round_strategy(strategy.clone()),
         ),
     )

@@ -77,13 +77,18 @@ async fn a_second_turn_sees_the_first() {
     .expect("prepared");
 
     let first = prepared
-        .execute(CollectingSink::new())
+        .execute_with_approver(CollectingSink::new(), AllowAll)
         .await
         .expect("the first turn completes");
     assert_eq!(first.final_message.as_deref(), Some("Nice to meet you."));
 
     let second = prepared
-        .send("what did I say?", CollectingSink::new(), AllowAll)
+        .send_with_options(
+            "what did I say?",
+            CollectingSink::new(),
+            AllowAll,
+            TurnOptions::default(),
+        )
         .await
         .expect("the second turn completes");
     assert_eq!(second.final_message.as_deref(), Some("You said hello."));
@@ -119,11 +124,16 @@ async fn each_turn_gets_its_own_bookends() {
     .expect("prepared");
 
     let first = prepared
-        .execute(CollectingSink::new())
+        .execute_with_approver(CollectingSink::new(), AllowAll)
         .await
         .expect("first turn");
     let second = prepared
-        .send("second", CollectingSink::new(), AllowAll)
+        .send_with_options(
+            "second",
+            CollectingSink::new(),
+            AllowAll,
+            TurnOptions::default(),
+        )
         .await
         .expect("second turn");
 
@@ -183,11 +193,16 @@ async fn the_session_survives_and_reports_its_history() {
     let agent_id = prepared.agent_id().to_string();
 
     prepared
-        .execute(CollectingSink::new())
+        .execute_with_approver(CollectingSink::new(), AllowAll)
         .await
         .expect("first turn");
     prepared
-        .send("second", CollectingSink::new(), AllowAll)
+        .send_with_options(
+            "second",
+            CollectingSink::new(),
+            AllowAll,
+            TurnOptions::default(),
+        )
         .await
         .expect("second turn");
 
@@ -235,13 +250,18 @@ async fn answered_turns_counts_the_assistant_messages_only() {
     );
 
     prepared
-        .execute(CollectingSink::new())
+        .execute_with_approver(CollectingSink::new(), AllowAll)
         .await
         .expect("first turn");
     assert_eq!(prepared.answered_turns(), 1);
 
     prepared
-        .send("second", CollectingSink::new(), AllowAll)
+        .send_with_options(
+            "second",
+            CollectingSink::new(),
+            AllowAll,
+            TurnOptions::default(),
+        )
         .await
         .expect("second turn");
     assert_eq!(
@@ -282,13 +302,18 @@ async fn last_assistant_text_is_the_newest_committed_answer() {
     );
 
     prepared
-        .execute(CollectingSink::new())
+        .execute_with_approver(CollectingSink::new(), AllowAll)
         .await
         .expect("first turn");
     assert_eq!(prepared.last_assistant_text().as_deref(), Some("one"));
 
     prepared
-        .send("second", CollectingSink::new(), AllowAll)
+        .send_with_options(
+            "second",
+            CollectingSink::new(),
+            AllowAll,
+            TurnOptions::default(),
+        )
         .await
         .expect("second turn");
     assert_eq!(
@@ -319,12 +344,17 @@ async fn an_empty_follow_up_prompt_is_refused() {
     .expect("prepared");
 
     prepared
-        .execute(CollectingSink::new())
+        .execute_with_approver(CollectingSink::new(), AllowAll)
         .await
         .expect("first turn");
 
     let error = prepared
-        .send("  \n\t ", CollectingSink::new(), AllowAll)
+        .send_with_options(
+            "  \n\t ",
+            CollectingSink::new(),
+            AllowAll,
+            TurnOptions::default(),
+        )
         .await
         .expect_err("an empty follow-up is rejected");
 
@@ -360,13 +390,18 @@ async fn a_failed_turn_does_not_end_the_conversation() {
     .expect("prepared");
 
     let failed = prepared
-        .execute(CollectingSink::new())
+        .execute_with_approver(CollectingSink::new(), AllowAll)
         .await
         .expect("the run reports rather than erroring");
     assert!(!failed.succeeded());
 
     let recovered = prepared
-        .send("try again", CollectingSink::new(), AllowAll)
+        .send_with_options(
+            "try again",
+            CollectingSink::new(),
+            AllowAll,
+            TurnOptions::default(),
+        )
         .await
         .expect("the session still takes a turn after a failure");
 
@@ -457,11 +492,16 @@ async fn tool_calls_from_an_earlier_turn_stay_in_the_conversation() {
     .expect("prepared");
 
     prepared
-        .execute(CollectingSink::new())
+        .execute_with_approver(CollectingSink::new(), AllowAll)
         .await
         .expect("first turn");
     prepared
-        .send("what did you do?", CollectingSink::new(), AllowAll)
+        .send_with_options(
+            "what did you do?",
+            CollectingSink::new(),
+            AllowAll,
+            TurnOptions::default(),
+        )
         .await
         .expect("second turn");
 

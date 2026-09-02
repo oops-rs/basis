@@ -11,8 +11,8 @@
 use std::path::PathBuf;
 
 use basis::{
-    Bound, CollectingSink, Event, JsonlWriter, RunFailure, RunFailureCategory, RunOutcome, RunSpec,
-    run::prepare_with_session,
+    AllowAll, Bound, CollectingSink, Event, JsonlWriter, RunFailure, RunFailureCategory,
+    RunOutcome, RunSpec, run::prepare_with_session,
 };
 use mentra::{
     RuntimePolicy,
@@ -66,7 +66,7 @@ async fn a_run_streams_deltas_between_the_bookends() {
     .expect("prepared");
 
     let report = prepared
-        .execute(CollectingSink::new())
+        .execute_with_approver(CollectingSink::new(), AllowAll)
         .await
         .expect("run completes");
 
@@ -126,7 +126,7 @@ async fn the_header_reports_the_context_that_was_loaded() {
     )
     .expect("prepared");
     let report = prepared
-        .execute(CollectingSink::new())
+        .execute_with_approver(CollectingSink::new(), AllowAll)
         .await
         .expect("run completes");
 
@@ -201,7 +201,7 @@ async fn workspace_context_reaches_the_model_as_the_system_prompt() {
     )
     .expect("prepared");
     prepared
-        .execute(CollectingSink::new())
+        .execute_with_approver(CollectingSink::new(), AllowAll)
         .await
         .expect("run completes");
 
@@ -257,7 +257,7 @@ async fn tool_calls_appear_on_the_stream_with_parsed_input() {
     )
     .expect("prepared");
     let report = prepared
-        .execute(CollectingSink::new())
+        .execute_with_approver(CollectingSink::new(), AllowAll)
         .await
         .expect("run completes");
 
@@ -318,7 +318,7 @@ async fn the_jsonl_rendering_is_one_parseable_object_per_line() {
     )
     .expect("prepared");
     let report = prepared
-        .execute(JsonlWriter::new(Vec::new()))
+        .execute_with_approver(JsonlWriter::new(Vec::new()), AllowAll)
         .await
         .expect("run completes");
 
@@ -370,7 +370,7 @@ async fn a_failing_turn_still_closes_the_stream() {
     )
     .expect("prepared");
     let report = prepared
-        .execute(CollectingSink::new())
+        .execute_with_approver(CollectingSink::new(), AllowAll)
         .await
         .expect("the run itself reports rather than erroring");
 
@@ -438,7 +438,7 @@ async fn a_failed_turns_message_is_unchanged_when_its_source_adds_nothing_new() 
     )
     .expect("prepared");
     let report = prepared
-        .execute(CollectingSink::new())
+        .execute_with_approver(CollectingSink::new(), AllowAll)
         .await
         .expect("the run itself reports rather than erroring");
 
@@ -470,7 +470,7 @@ async fn a_tripped_bound_is_reported_as_a_bound_not_just_a_failure() {
     .expect("prepared");
 
     let report = prepared
-        .execute(CollectingSink::new())
+        .execute_with_approver(CollectingSink::new(), AllowAll)
         .await
         .expect("a bound ends the run, it does not break it");
 
@@ -517,7 +517,7 @@ async fn a_healthy_run_ran_into_no_bound() {
     .expect("prepared");
 
     let report = prepared
-        .execute(CollectingSink::new())
+        .execute_with_approver(CollectingSink::new(), AllowAll)
         .await
         .expect("run completes");
 
@@ -546,7 +546,12 @@ async fn an_empty_prompt_is_refused_when_it_would_be_sent() {
     )
     .expect("prepared");
 
-    assert!(prepared.execute(CollectingSink::new()).await.is_err());
+    assert!(
+        prepared
+            .execute_with_approver(CollectingSink::new(), AllowAll)
+            .await
+            .is_err()
+    );
 }
 
 #[tokio::test]
@@ -627,7 +632,7 @@ async fn a_write_into_git_hooks_is_refused() {
         "mock-model",
     )
     .expect("prepared")
-    .execute(CollectingSink::new())
+    .execute_with_approver(CollectingSink::new(), AllowAll)
     .await
     .expect("the run reports rather than erroring");
 

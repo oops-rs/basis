@@ -31,7 +31,7 @@
 //! # async fn example() -> Result<(), basis::RunError> {
 //! let workspace = basis::Workspace::open("/repo").await?;
 //! let mut run = workspace.prepare("what does this repo do?")?;
-//! let report = run.execute(basis::CollectingSink::default()).await?;
+//! let report = run.execute_with_approver(basis::CollectingSink::default(), AllowAll).await?;
 //! # let _ = report;
 //! # Ok(())
 //! # }

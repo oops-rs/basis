@@ -212,7 +212,7 @@ async fn observer_preserves_complete_tool_payloads_and_occurrence_order() {
     let _guard: AgentEventTapGuard = run.register_agent_event_tap(tap);
 
     let report = run
-        .execute(CollectingSink::new())
+        .execute_with_approver(CollectingSink::new(), AllowAll)
         .await
         .expect("run completes");
     assert!(report.succeeded());
@@ -343,7 +343,7 @@ async fn parallel_result_is_retained_before_sibling_cancellation() {
 
     let report = timeout(
         Duration::from_secs(5),
-        run.execute_with_options(CollectingSink::new(), options),
+        run.execute_with_approver_and_options(CollectingSink::new(), AllowAll, options),
     )
     .await
     .expect("parallel cancellation must not leave the sibling pending")
@@ -413,7 +413,7 @@ async fn cancellation_is_the_terminal_observer_event() {
     cancellation.cancel();
 
     let report = run
-        .execute_with_options(CollectingSink::new(), options)
+        .execute_with_approver_and_options(CollectingSink::new(), AllowAll, options)
         .await
         .expect("Basis reports the cancelled turn");
     assert!(matches!(report.failure, Some(RunFailure::Cancelled)));
@@ -443,15 +443,20 @@ async fn dropping_the_basis_guard_unregisters_the_observer() {
         observed_for_tap.fetch_add(1, Ordering::SeqCst);
     });
 
-    run.execute(CollectingSink::new())
+    run.execute_with_approver(CollectingSink::new(), AllowAll)
         .await
         .expect("first turn completes");
     let after_first_turn = observed.load(Ordering::SeqCst);
     assert!(after_first_turn > 0);
 
     drop(guard);
-    run.send("second", CollectingSink::new(), AllowAll)
-        .await
-        .expect("second turn completes");
+    run.send_with_options(
+        "second",
+        CollectingSink::new(),
+        AllowAll,
+        TurnOptions::default(),
+    )
+    .await
+    .expect("second turn completes");
     assert_eq!(observed.load(Ordering::SeqCst), after_first_turn);
 }

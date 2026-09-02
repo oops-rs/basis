@@ -34,9 +34,9 @@ use std::{
 };
 
 use basis::{
-    CollectingSink, ContextConfig, MemoryConfig, RunOutcome, Runtime, RuntimeBuilder, Snapshot,
-    Workspace, WorkspaceBuilder, hooks::HooksConfig, runtime::Wire, skills::SkillsConfig, store,
-    templates::TemplatesConfig, tools::declared::ToolsConfig,
+    AllowAll, CollectingSink, ContextConfig, MemoryConfig, RunOutcome, Runtime, RuntimeBuilder,
+    Snapshot, Workspace, WorkspaceBuilder, hooks::HooksConfig, runtime::Wire, skills::SkillsConfig,
+    store, templates::TemplatesConfig, tools::declared::ToolsConfig,
 };
 use mentra::{
     BuiltinProvider, ContentBlock, ModelSelector, agent::AgentConfig, runtime::FileRuntimeStore,
@@ -325,7 +325,7 @@ async fn an_ephemeral_workspace_runs_a_turn_and_resumes_its_own_conversation() {
         let mut run = workspace.prepare("go").expect("mints");
         let agent_id = run.agent_id().to_string();
         let report = run
-            .execute(CollectingSink::default())
+            .execute_with_approver(CollectingSink::default(), AllowAll)
             .await
             .expect("the run completes");
 
@@ -614,7 +614,7 @@ async fn a_conversation_tagged_before_workspaces_were_is_resumable_and_files_its
     let report = workspace
         .resume(&agent_id, "again")
         .expect("an old conversation is still resumable")
-        .execute(CollectingSink::default())
+        .execute_with_approver(CollectingSink::default(), AllowAll)
         .await
         .expect("the resumed run completes");
 
@@ -704,8 +704,8 @@ async fn two_runs_from_one_workspace_are_driven_concurrently() {
     let mut second = workspace.prepare("two").expect("mints");
 
     let (left, right) = tokio::join!(
-        first.execute(CollectingSink::default()),
-        second.execute(CollectingSink::default()),
+        first.execute_with_approver(CollectingSink::default(), AllowAll),
+        second.execute_with_approver(CollectingSink::default(), AllowAll),
     );
     let left = left.expect("the first run completes");
     let right = right.expect("the second run completes");
@@ -752,7 +752,7 @@ async fn a_custom_endpoint_is_addressed_on_the_chat_completions_wire() {
     let report = workspace
         .prepare("go")
         .expect("mints")
-        .execute(CollectingSink::default())
+        .execute_with_approver(CollectingSink::default(), AllowAll)
         .await
         .expect("the run completes");
 
@@ -785,7 +785,7 @@ async fn a_responses_speaking_endpoint_is_reached_by_asking_for_it() {
     let report = workspace
         .prepare("go")
         .expect("mints")
-        .execute(CollectingSink::default())
+        .execute_with_approver(CollectingSink::default(), AllowAll)
         .await
         .expect("the run completes");
 
@@ -815,7 +815,7 @@ async fn a_published_url_ending_in_v1_is_not_doubled() {
     workspace
         .prepare("go")
         .expect("mints")
-        .execute(CollectingSink::default())
+        .execute_with_approver(CollectingSink::default(), AllowAll)
         .await
         .expect("the run completes");
 
@@ -847,7 +847,7 @@ async fn a_base_url_is_asked_with_the_key_resolution_found_or_no_header_at_all()
     workspace
         .prepare("go")
         .expect("mints")
-        .execute(CollectingSink::default())
+        .execute_with_approver(CollectingSink::default(), AllowAll)
         .await
         .expect("the run completes");
 

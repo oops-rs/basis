@@ -19,7 +19,7 @@
 use std::{path::Path, time::Duration};
 
 use basis::{
-    ContextConfig, Event, EventFanIn, PreparedRun, RunOutcome, TaggedEvent,
+    AllowAll, ContextConfig, Event, EventFanIn, PreparedRun, RunOutcome, TaggedEvent,
     run::prepare_with_session,
 };
 use mentra::{RuntimePolicy, test::MockRuntime};
@@ -98,8 +98,10 @@ async fn two_runs_merge_into_one_stream_and_keep_their_own_order() {
     let mut merged = fan.into_events();
 
     let runs = async move {
-        let (survey, coverage) =
-            tokio::join!(survey.execute(survey_sink), coverage.execute(coverage_sink));
+        let (survey, coverage) = tokio::join!(
+            survey.execute_with_approver(survey_sink, AllowAll),
+            coverage.execute_with_approver(coverage_sink, AllowAll)
+        );
 
         // Taking the answers out of the reports drops the sinks with them,
         // which is what lets the consumer below finish. A version of this that
@@ -162,7 +164,7 @@ async fn a_held_report_holds_its_branch_of_the_stream_open() {
     let sink = fan.sink("only");
     let mut merged = fan.into_events();
 
-    let report = tokio::time::timeout(PATIENCE, run.execute(sink))
+    let report = tokio::time::timeout(PATIENCE, run.execute_with_approver(sink, AllowAll))
         .await
         .expect("the run completes")
         .expect("the run succeeds");

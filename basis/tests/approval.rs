@@ -368,10 +368,13 @@ async fn a_run_with_no_approver_of_its_own_allows_what_it_cannot_ask_about() {
     )
     .expect("prepared");
 
-    let report = tokio::time::timeout(NOT_STUCK, prepared.execute(CollectingSink::new()))
-        .await
-        .expect("the run must not hang waiting on an unanswered approval")
-        .expect("the run completes");
+    let report = tokio::time::timeout(
+        NOT_STUCK,
+        prepared.execute_with_approver(CollectingSink::new(), AllowAll),
+    )
+    .await
+    .expect("the run must not hang waiting on an unanswered approval")
+    .expect("the run completes");
 
     assert_eq!(
         tool_failed(&report.sink.into_events(), "files"),

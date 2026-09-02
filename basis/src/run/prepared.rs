@@ -29,7 +29,7 @@ use super::{
     turn::{bounded, drawable},
 };
 use crate::{
-    approval::{AllowAll, Approver},
+    approval::Approver,
     context::WorkspaceContext,
     event::{ContextFile, EVENT_SCHEMA_VERSION, Event, RunOutcome, SkillSummary, TemplateSummary},
     runtime::Role,
@@ -545,30 +545,23 @@ impl PreparedRun {
             .and_then(|effort| Effort::try_from(effort).ok())
     }
 
-    /// Sends the configured prompt and streams the turn into `sink`.
-    ///
-    /// Consequential calls are approved by [`AllowAll`], the default for a run
-    /// that was given no approver of its own;
-    /// [`execute_with_approver`](Self::execute_with_approver) is where anything
-    /// stricter goes.
-    ///
-    /// The stream always opens with [`Event::RunStarted`] and always closes
-    /// with [`Event::RunFinished`], including when the turn fails: by then the
-    /// stream has content a client needs to be able to finish reading.
-    ///
-    /// The session survives, so this can be called again — see
-    /// [`send`](Self::send) for a turn with a different prompt.
-    pub async fn execute<S: EventSink>(&mut self, sink: S) -> Result<RunReport<S>, RunError> {
-        self.execute_with_approver(sink, AllowAll).await
-    }
-
     /// Sends the configured prompt, streaming into `sink` and putting every
     /// consequential call to `approver`.
+    ///
+    /// Pass [`AllowAll`](crate::AllowAll) for a run that has no approver of its
+    /// own. The stream
+    /// always opens with [`Event::RunStarted`] and always closes with
+    /// [`Event::RunFinished`], including when the turn fails: by then the
+    /// stream has content a client needs to be able to finish reading.
     ///
     /// The approver runs on the forwarding task while the turn is blocked
     /// waiting on it, which is what makes an interactive answer possible at
     /// all — and what means an approver must answer rather than defer. One that
     /// cannot answer denies; see [`Approver`].
+    ///
+    /// The session survives, so this can be called again — see
+    /// [`send_with_options`](Self::send_with_options) for a turn with a
+    /// different prompt.
     pub async fn execute_with_approver<S: EventSink, A: Approver>(
         &mut self,
         sink: S,
@@ -578,24 +571,14 @@ impl PreparedRun {
             .await
     }
 
-    /// Sends the configured prompt with explicit run options — a cancellation
-    /// token, a deadline, a tool budget.
+    /// Sends the configured prompt with both an approver and explicit run
+    /// options — a cancellation token, a deadline, a tool budget.
     ///
     /// The one-shot path is bounded by its config but had no way to be
     /// *stopped*: a token belongs to one call, so it cannot travel in a config
     /// that mints many. This is where it arrives, and it is what a host driving
     /// a one-prompt run behind a UI needs, exactly as
     /// [`send_with_options`](Self::send_with_options) serves a conversation.
-    pub async fn execute_with_options<S: EventSink>(
-        &mut self,
-        sink: S,
-        options: TurnOptions,
-    ) -> Result<RunReport<S>, RunError> {
-        self.execute_with_approver_and_options(sink, AllowAll, options)
-            .await
-    }
-
-    /// Sends the configured prompt with both an approver and explicit options.
     pub async fn execute_with_approver_and_options<S: EventSink, A: Approver>(
         &mut self,
         sink: S,
@@ -607,32 +590,13 @@ impl PreparedRun {
             .await
     }
 
-    /// Sends a further prompt on the same conversation.
-    ///
-    /// This is what separates a session from a one-shot: the model sees every
-    /// earlier turn, because the session was never thrown away.
-    pub async fn send<S: EventSink, A: Approver>(
-        &mut self,
-        prompt: impl Into<String>,
-        sink: S,
-        approver: A,
-    ) -> Result<RunReport<S>, RunError> {
-        self.turn(
-            vec![PromptPart::Text(prompt.into())],
-            sink,
-            approver,
-            TurnOptions::default(),
-        )
-        .await
-    }
-
     /// Sends a prompt that is not only text — a screenshot, a diagram, a photo
     /// of a whiteboard — on the same conversation.
     ///
-    /// Additive to [`send`](Self::send) rather than replacing it, because the
-    /// overwhelming majority of turns are a line of text and should not have to
-    /// build a vector to say so. `send` is this with one
-    /// [`PromptPart::Text`].
+    /// Additive to [`send_with_options`](Self::send_with_options) rather than
+    /// replacing it, because the overwhelming majority of turns are a line of
+    /// text and should not have to build a vector to say so. `send_with_options`
+    /// is this with one [`PromptPart::Text`].
     ///
     /// The parts reach the model in the order they are given, which is
     /// load-bearing: "look at this, and tell me what changed" reads differently

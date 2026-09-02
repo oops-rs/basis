@@ -30,7 +30,9 @@ Minting a run from it is then synchronous, because nothing is left to await
 let workspace = basis::Workspace::open("/repo").await?;
 
 let mut run = workspace.prepare("what does this repo do?")?;
-let report = run.execute(basis::CollectingSink::default()).await?;
+let report = run
+    .execute_with_approver(basis::CollectingSink::default(), basis::AllowAll)
+    .await?;
 ```
 
 That is the shape to reach for whenever a host sends more than one prompt at a repository:
@@ -41,7 +43,13 @@ For a conversation rather than a one-shot, keep the run and send again — the s
 survives the turn, so the model sees everything said so far:
 
 ```rust
-run.send("and which of those is riskiest?", sink, basis::AllowAll).await?;
+run.send_with_options(
+    "and which of those is riskiest?",
+    sink,
+    basis::AllowAll,
+    basis::TurnOptions::default(),
+)
+.await?;
 ```
 
 `run.agent_id()` is the handle `Workspace::resume` takes, so a later process can pick the
@@ -410,7 +418,9 @@ let options = TurnOptions::default()
     })
     .with_retry_budget(2)
     .with_model_budget(3);
-let report = run.execute_with_options(CollectingSink::default(), options).await?;
+let report = run
+    .execute_with_approver_and_options(CollectingSink::default(), AllowAll, options)
+    .await?;
 ```
 
 Two knobs because mentra keeps the two questions apart, and both are usually needed: widening
@@ -604,7 +614,10 @@ let (a, b) = (fan.sink("tests"), fan.sink("docs"));
 let mut merged = fan.into_events();          // minting closes here
 
 let runs = async move {
-    let (tests, docs) = tokio::join!(tests.execute(a), docs.execute(b));
+    let (tests, docs) = tokio::join!(
+        tests.execute_with_approver(a, AllowAll),
+        docs.execute_with_approver(b, AllowAll)
+    );
     // Taking the answers out drops the reports, and their sinks with them —
     // which is what tells `merged` the stream is over.
     Ok::<_, basis::RunError>((tests?.final_message, docs?.final_message))
@@ -633,7 +646,9 @@ next round boundary and keeps everything the model committed:
 let (options, stop) = basis::TurnOptions::stoppable();
 tokio::spawn(async move { on_stop_pressed().await; stop.cancel(); });
 
-let report = run.execute_with_options(sink, options).await?;
+let report = run
+    .execute_with_approver_and_options(sink, AllowAll, options)
+    .await?;
 ```
 
 One caveat worth stating: a graceful stop landing after a tool round comes back as a failed

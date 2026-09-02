@@ -9,8 +9,8 @@ use std::{
 };
 
 use basis::{
-    CollectingSink, Event, ModelInfo, Provider, RunFailure, RunFailureCategory, RunOutcome,
-    Runtime, TurnOptions, Workspace, async_trait,
+    AllowAll, CollectingSink, Event, ModelInfo, Provider, RunFailure, RunFailureCategory,
+    RunOutcome, Runtime, TurnOptions, Workspace, async_trait,
     runtime::{
         ProviderCapabilities, ProviderDescriptor, ProviderError, ProviderEventStream,
         ProviderRetry, Request,
@@ -82,7 +82,7 @@ async fn model_budget_counts_retry_attempts_and_preserves_the_wire_outcome() {
         });
 
     let report = run
-        .execute_with_options(CollectingSink::default(), options)
+        .execute_with_approver_and_options(CollectingSink::default(), AllowAll, options)
         .await
         .expect("a terminal turn failure is a completed Basis report");
     let expected = RunOutcome::Error {
@@ -131,8 +131,9 @@ async fn retryable_provider_category_and_source_survive_without_string_parsing()
     let mut run = workspace.prepare("fail once").expect("mints");
 
     let report = run
-        .execute_with_options(
+        .execute_with_approver_and_options(
             CollectingSink::default(),
+            AllowAll,
             TurnOptions::default().with_retry_budget(0),
         )
         .await

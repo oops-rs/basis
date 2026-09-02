@@ -15,8 +15,8 @@ use std::{
 #[cfg(feature = "mcp")]
 use basis::McpConfig;
 use basis::{
-    CollectingSink, Compaction, ContextConfig, Effort, Event, MemoryConfig, ModelInfo, Provider,
-    ProviderRequestOptions, ReasoningOptions, RunError, RunProfile, RunSpec, Runtime,
+    AllowAll, CollectingSink, Compaction, ContextConfig, Effort, Event, MemoryConfig, ModelInfo,
+    Provider, ProviderRequestOptions, ReasoningOptions, RunError, RunProfile, RunSpec, Runtime,
     RuntimeBuilder, SystemPrompt, ToolResultPagingConfig, ToolRoster, Workspace, WorkspaceBuilder,
     async_trait,
     hooks::HooksConfig,
@@ -325,7 +325,7 @@ async fn a_profile_reaches_the_provider_field_for_field() {
         Event::RunStarted { ref model, .. } if model == PROFILE_MODEL
     ));
     let report = run
-        .execute(CollectingSink::default())
+        .execute_with_approver(CollectingSink::default(), AllowAll)
         .await
         .expect("the scripted provider completes");
 
@@ -431,7 +431,7 @@ async fn explicit_clears_win_and_omitted_fields_inherit() {
                 ),
         )
         .expect("clear profile mints")
-        .execute(CollectingSink::default())
+        .execute_with_approver(CollectingSink::default(), AllowAll)
         .await
         .expect("clear profile runs");
 
@@ -442,7 +442,7 @@ async fn explicit_clears_win_and_omitted_fields_inherit() {
                 .with_effort(Effort::High),
         )
         .expect("late legacy effort cannot override the profile")
-        .execute(CollectingSink::default())
+        .execute_with_approver(CollectingSink::default(), AllowAll)
         .await
         .expect("reverse builder order runs");
 
@@ -453,7 +453,7 @@ async fn explicit_clears_win_and_omitted_fields_inherit() {
                 .with_profile(RunProfile::new()),
         )
         .expect("empty profile mints")
-        .execute(CollectingSink::default())
+        .execute_with_approver(CollectingSink::default(), AllowAll)
         .await
         .expect("empty profile runs");
 
@@ -485,7 +485,7 @@ async fn the_later_reasoning_api_is_the_deterministic_winner() {
             ),
         )
         .expect("first run mints")
-        .execute(CollectingSink::default())
+        .execute_with_approver(CollectingSink::default(), AllowAll)
         .await
         .expect("first run completes");
     workspace
@@ -499,7 +499,7 @@ async fn the_later_reasoning_api_is_the_deterministic_winner() {
                 .with_effort(Effort::High),
         )
         .expect("second run mints")
-        .execute(CollectingSink::default())
+        .execute_with_approver(CollectingSink::default(), AllowAll)
         .await
         .expect("second run completes");
 
@@ -523,7 +523,7 @@ async fn an_exact_profile_roster_is_still_narrowed_by_foreign_tools() {
             RunProfile::new().with_tool_roster(ToolRoster::only([VISIBLE_TOOL, FOREIGN_TOOL])),
         ))
         .expect("run mints")
-        .execute(CollectingSink::default())
+        .execute_with_approver(CollectingSink::default(), AllowAll)
         .await
         .expect("run completes");
 
@@ -595,7 +595,7 @@ async fn resume_applies_exact_model_metadata_without_guessing_the_system_snapsho
         Event::RunStarted { ref model, .. } if model == PROFILE_MODEL
     ));
     let report = resumed
-        .execute(CollectingSink::default())
+        .execute_with_approver(CollectingSink::default(), AllowAll)
         .await
         .expect("resumed run completes");
 
@@ -631,7 +631,7 @@ async fn reasoning_only_resume_performs_one_mutation_and_leaves_the_window_unkno
         "restoring the workspace model too would be a second persisted write"
     );
     resumed
-        .execute(CollectingSink::default())
+        .execute_with_approver(CollectingSink::default(), AllowAll)
         .await
         .expect("resumed turn completes");
 

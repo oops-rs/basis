@@ -220,7 +220,7 @@ async fn review(
 
     // Turn one: read the code. The prompt is the spec's, so what a reviewer is
     // and what it was asked stay one value.
-    let report = run.execute(sink).await?;
+    let report = run.execute_with_approver(sink, AllowAll).await?;
     if let RunOutcome::Error { message } = report.outcome {
         // Nothing for the next turn to shape. A reviewer answering from an
         // empty conversation answers "no findings", which is the one wrong

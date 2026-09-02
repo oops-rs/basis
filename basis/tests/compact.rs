@@ -22,9 +22,10 @@ use std::{
 };
 
 use basis::{
-    Bound, CancellationToken, CollectingSink, Compaction, ContextConfig, Event, MemoryConfig,
-    RunError, RunFailure, Runtime, TurnOptions, Workspace, WorkspaceBuilder, hooks::HooksConfig,
-    skills::SkillsConfig, store, templates::TemplatesConfig, tools::declared::ToolsConfig,
+    AllowAll, Bound, CancellationToken, CollectingSink, Compaction, ContextConfig, Event,
+    MemoryConfig, RunError, RunFailure, Runtime, TurnOptions, Workspace, WorkspaceBuilder,
+    hooks::HooksConfig, skills::SkillsConfig, store, templates::TemplatesConfig,
+    tools::declared::ToolsConfig,
 };
 use mentra::{BuiltinProvider, ModelSelector};
 
@@ -41,7 +42,7 @@ async fn compacting_a_conversation_reports_what_it_replaced_on_the_stream() {
         .expect("opens");
 
     let mut run = workspace.prepare("go").expect("mints");
-    run.execute(CollectingSink::default())
+    run.execute_with_approver(CollectingSink::default(), AllowAll)
         .await
         .expect("the scripted turn runs");
 
@@ -104,7 +105,7 @@ async fn the_instruction_is_added_to_what_the_summarizer_is_already_told() {
         .expect("opens");
 
     let mut run = workspace.prepare("go").expect("mints");
-    run.execute(CollectingSink::default())
+    run.execute_with_approver(CollectingSink::default(), AllowAll)
         .await
         .expect("the scripted turn runs");
 
@@ -145,7 +146,7 @@ async fn a_compaction_that_fails_says_so_on_the_stream() {
         .expect("opens");
 
     let mut run = workspace.prepare("go").expect("mints");
-    run.execute(CollectingSink::default())
+    run.execute_with_approver(CollectingSink::default(), AllowAll)
         .await
         .expect("the ordinary turn is still answered");
 
@@ -184,7 +185,7 @@ async fn a_compaction_past_its_deadline_never_reaches_the_summarizer() {
         .expect("opens");
 
     let mut run = workspace.prepare("go").expect("mints");
-    run.execute(CollectingSink::default())
+    run.execute_with_approver(CollectingSink::default(), AllowAll)
         .await
         .expect("the scripted turn runs");
 
@@ -255,7 +256,7 @@ async fn a_cancelled_compaction_reports_the_cancel_rather_than_a_summarizer_fail
         .expect("opens");
 
     let mut run = workspace.prepare("go").expect("mints");
-    run.execute(CollectingSink::default())
+    run.execute_with_approver(CollectingSink::default(), AllowAll)
         .await
         .expect("the scripted turn runs");
 
@@ -311,7 +312,7 @@ async fn an_unbounded_pass_is_what_compact_still_asks_for() {
         .expect("opens");
 
     let mut run = workspace.prepare("go").expect("mints");
-    run.execute(CollectingSink::default())
+    run.execute_with_approver(CollectingSink::default(), AllowAll)
         .await
         .expect("the scripted turn runs");
 
@@ -346,7 +347,7 @@ async fn the_older_verb_inherits_the_deadline_the_run_was_configured_with() {
     // Configured *after* the turn, because a deadline already in the past
     // would have refused the turn that gives the pass something to summarize.
     let mut run = workspace.prepare("go").expect("mints");
-    run.execute(CollectingSink::default())
+    run.execute_with_approver(CollectingSink::default(), AllowAll)
         .await
         .expect("the scripted turn runs");
     let mut run = run.with_bounds(
@@ -411,7 +412,7 @@ async fn a_deadline_reached_inside_an_automatic_pass_is_the_runs_own_bound() {
         .expect("opens");
 
     let mut run = workspace.prepare("go").expect("mints");
-    run.execute(CollectingSink::default())
+    run.execute_with_approver(CollectingSink::default(), AllowAll)
         .await
         .expect("the first turn has nothing older to summarize and is answered");
 
@@ -470,7 +471,7 @@ async fn a_cancel_during_an_automatic_pass_ends_the_run_as_a_cancellation() {
         .expect("opens");
 
     let mut run = workspace.prepare("go").expect("mints");
-    run.execute(CollectingSink::default())
+    run.execute_with_approver(CollectingSink::default(), AllowAll)
         .await
         .expect("the first turn has nothing older to summarize and is answered");
 

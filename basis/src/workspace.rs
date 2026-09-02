@@ -32,8 +32,8 @@
 //! let mut first = workspace.prepare("what does this repo do?")?;
 //! let mut second = workspace.prepare("what is not tested?")?;
 //! let (a, b) = tokio::join!(
-//!     first.execute(CollectingSink::default()),
-//!     second.execute(CollectingSink::default()),
+//!     first.execute_with_approver(CollectingSink::default(), AllowAll),
+//!     second.execute_with_approver(CollectingSink::default(), AllowAll),
 //! );
 //! # let _ = (a?, b?);
 //! # Ok(())

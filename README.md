@@ -15,7 +15,9 @@ protocol and command shells.
 // [dependencies] basis = "0.11"
 let workspace = basis::Workspace::open("/repo").await?;
 let mut run = workspace.prepare("what does this repo do?")?;
-let report = run.execute(basis::CollectingSink::default()).await?;
+let report = run
+    .execute_with_approver(basis::CollectingSink::default(), basis::AllowAll)
+    .await?;
 ```
 
 To try it as a command, set a provider key — `ANTHROPIC_API_KEY`, `OPENAI_API_KEY`, `GEMINI_API_KEY`,
@@ -84,8 +86,8 @@ describes. A pooling host opens a fresh workspace per checkout: the consume/rebu
 ADR-0024 is retired until Mentra can mint a fresh provider session scope
 ([ADR-0026](docs/adr/0026-the-rebuild-half-of-reuse-is-deferred.md)).
 
-Keep the run and send again for a conversation — `run.send("and which of those is riskiest?", sink,
-AllowAll)` — because the session survives the turn, and `run.agent_id()` is the handle
+Keep the run and send again for a conversation — `run.send_with_options("and which of those is
+riskiest?", sink, AllowAll, TurnOptions::default())` — because the session survives the turn, and `run.agent_id()` is the handle
 `Workspace::resume` takes in a later process.
 
 Bounds are builders on `RunSpec` — one shape, however the run is made — and every bound ends the

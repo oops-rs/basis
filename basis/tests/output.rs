@@ -808,7 +808,7 @@ async fn a_plain_turn_reports_what_it_spent_too() {
 
     // No forced tool, so this provider answers in prose — an ordinary turn.
     let report = run
-        .execute(CollectingSink::new())
+        .execute_with_approver(CollectingSink::new(), AllowAll)
         .await
         .expect("run completes");
 

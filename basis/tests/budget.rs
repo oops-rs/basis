@@ -32,9 +32,9 @@ use std::{
 };
 
 use basis::{
-    BudgetPool, CollectingSink, ContextConfig, MemoryConfig, RunError, RunOutcome, RunSpec,
-    Runtime, TurnOptions, Workspace, WorkspaceBuilder, hooks::HooksConfig, skills::SkillsConfig,
-    templates::TemplatesConfig,
+    AllowAll, BudgetPool, CollectingSink, ContextConfig, MemoryConfig, RunError, RunOutcome,
+    RunSpec, Runtime, TurnOptions, Workspace, WorkspaceBuilder, hooks::HooksConfig,
+    skills::SkillsConfig, templates::TemplatesConfig,
 };
 use mentra::ModelSelector;
 
@@ -104,8 +104,8 @@ async fn a_fan_out_draws_on_one_figure_rather_than_one_each() {
         .expect("mints");
 
     let (left, right) = tokio::join!(
-        first.execute(CollectingSink::default()),
-        second.execute(CollectingSink::default()),
+        first.execute_with_approver(CollectingSink::default(), AllowAll),
+        second.execute_with_approver(CollectingSink::default(), AllowAll),
     );
     let left = left.expect("the first run completes");
     let right = right.expect("the second run completes");
@@ -135,7 +135,7 @@ async fn a_pooled_run_and_its_own_report_agree_on_what_it_spent() {
 
     let mut run = workspace.prepare(pool.spec("go")).expect("mints");
     let report = run
-        .execute(CollectingSink::default())
+        .execute_with_approver(CollectingSink::default(), AllowAll)
         .await
         .expect("completes");
 
@@ -156,7 +156,7 @@ async fn a_pool_that_runs_dry_ends_the_remaining_runs_minting() {
         .prepare(pool.spec("the one that runs"))
         .expect("mints");
     first
-        .execute(CollectingSink::default())
+        .execute_with_approver(CollectingSink::default(), AllowAll)
         .await
         .expect("completes");
 
@@ -167,7 +167,7 @@ async fn a_pool_that_runs_dry_ends_the_remaining_runs_minting() {
         .prepare(pool.spec("the one that does not"))
         .expect("minting is still free — spending is what is refused");
     let refused = second
-        .execute(CollectingSink::default())
+        .execute_with_approver(CollectingSink::default(), AllowAll)
         .await
         .expect_err("a spent pool refuses the turn");
 
@@ -212,8 +212,9 @@ async fn a_zero_token_budget_is_what_refusing_avoids() {
 
     let mut run = workspace.prepare("go").expect("mints");
     let report = run
-        .execute_with_options(
+        .execute_with_approver_and_options(
             CollectingSink::default(),
+            AllowAll,
             TurnOptions::default().with_token_budget(0),
         )
         .await
@@ -250,14 +251,19 @@ async fn a_second_prompt_on_one_conversation_draws_on_the_same_pool() {
     let mut run = workspace
         .prepare(RunSpec::new("first").with_budget(pool.clone()))
         .expect("mints");
-    run.execute(CollectingSink::default())
+    run.execute_with_approver(CollectingSink::default(), AllowAll)
         .await
         .expect("the first turn completes");
 
     assert_eq!(pool.remaining(), 1, "one token short of another round");
 
     let taken = run
-        .send("second", CollectingSink::default(), basis::AllowAll)
+        .send_with_options(
+            "second",
+            CollectingSink::default(),
+            basis::AllowAll,
+            TurnOptions::default(),
+        )
         .await;
     assert!(
         taken.is_ok(),
@@ -274,7 +280,12 @@ async fn a_second_prompt_on_one_conversation_draws_on_the_same_pool() {
     assert_eq!(pool.limit(), ROUND_COST + 1);
 
     let third = run
-        .send("third", CollectingSink::default(), basis::AllowAll)
+        .send_with_options(
+            "third",
+            CollectingSink::default(),
+            basis::AllowAll,
+            TurnOptions::default(),
+        )
         .await
         .expect_err("and refuses once it has nothing");
     assert!(matches!(third, RunError::BudgetExhausted { .. }));
@@ -296,7 +307,7 @@ async fn spending_recorded_by_hand_draws_the_same_pool_down() {
 
     let mut run = workspace.prepare(pool.spec("go")).expect("mints");
     let refused = run
-        .execute(CollectingSink::default())
+        .execute_with_approver(CollectingSink::default(), AllowAll)
         .await
         .expect_err("the pool was spent before any run touched it");
 
