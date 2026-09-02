@@ -450,6 +450,21 @@ impl McpClaim {
     }
 }
 
+/// Permission to register one declared tool, granted by
+/// [`Runtime::claim_declared_tool`] and spent by
+/// [`Runtime::install_declared_tool`].
+///
+/// A value rather than a `bool` so the association between *which name, under
+/// which root* and *may register* cannot come apart: the two used to agree only
+/// because the caller passed the same two strings to both calls, and nothing in
+/// the type system said they had to.
+#[derive(Debug)]
+#[must_use = "a claimed name with nothing registered under it is a tool the model cannot call"]
+pub(crate) struct DeclaredToolClaim {
+    name: String,
+    root: PathBuf,
+}
+
 #[derive(Debug, Clone, Copy)]
 pub(crate) enum DeclaredToolOrigin {
     File,
@@ -807,18 +822,25 @@ impl Runtime {
     /// declare a tool called `spawn` and take over the name basis's own tool —
     /// and every rule an operator ever wrote about it — answers to.
     ///
-    /// `Ok(true)` means this caller is the name's *first* live holder and owes
-    /// the runtime a registration; `Ok(false)` means a sibling open of the same
-    /// root already registered it, and the tool on the runtime is the one that
-    /// open is serving. One name is one program, so the second open of a
-    /// repository joins the registration rather than replacing it under the
-    /// first open's running agents.
+    /// `Ok(Some(claim))` means this caller is the name's *first* live holder and
+    /// owes the runtime a registration, which
+    /// [`install_declared_tool`](Self::install_declared_tool) takes the claim to
+    /// perform. `Ok(None)` means a sibling open of the same root already
+    /// registered it, and the tool on the runtime is the one that open is
+    /// serving. One name is one program, so the second open of a repository
+    /// joins the registration rather than replacing it under the first open's
+    /// running agents.
+    ///
+    /// The claim is a value rather than a `bool` so that "which name, under
+    /// which root" travels with the permission to register instead of being
+    /// re-derived at the install: the two used to agree only because the caller
+    /// passed the same strings twice.
     pub(crate) fn claim_declared_tool(
         &self,
         root: &Path,
         spec: &DeclaredToolSpec,
         origin: DeclaredToolOrigin,
-    ) -> Result<bool, String> {
+    ) -> Result<Option<DeclaredToolClaim>, String> {
         let name = &spec.name;
         let mut claims = self
             .declared_claims
@@ -846,7 +868,7 @@ impl Runtime {
                 if matches!(origin, DeclaredToolOrigin::Supplied) {
                     claim.supplied_holders += 1;
                 }
-                Ok(false)
+                Ok(None)
             }
             None if self.registers_tool(name) => {
                 Err("this runtime already offers a tool by that name".to_string())
@@ -865,7 +887,10 @@ impl Runtime {
                         registration: None,
                     },
                 );
-                Ok(true)
+                Ok(Some(DeclaredToolClaim {
+                    name: name.to_string(),
+                    root: root.to_path_buf(),
+                }))
             }
         }
     }
@@ -883,34 +908,53 @@ impl Runtime {
     /// The guard goes into the claim, which is the thing that knows how many
     /// workspaces are holding this name; dropping the claim drops the guard and
     /// takes the tool off the registry in the same breath.
+    ///
+    /// **Which claim is not a question this has to ask.** It takes the
+    /// [`DeclaredToolClaim`] the claim granted and does the whole of the work
+    /// under the claim lock: the entry is found *before* anything is
+    /// registered, so there is no window in which a guard exists that nothing
+    /// holds, and no re-lookup by a string the caller had to pass twice. A
+    /// claim that is gone by the time it is spent is an `Err` and not a silent
+    /// success: the alternative reports a live declared tool that nothing on
+    /// the runtime answers to.
     pub(crate) fn install_declared_tool<T>(
         &self,
         audience: &ToolAudience,
-        name: &str,
-        root: &Path,
+        claim: DeclaredToolClaim,
         tool: T,
-    ) -> Result<(), ToolNameCollision>
+    ) -> Result<(), String>
     where
         T: mentra::tool::ExecutableTool + 'static,
     {
-        let registration = self
-            .mentra
-            .try_register_tool_for_audience(audience.clone(), tool)?;
-
         let mut claims = self
             .declared_claims
             .lock()
             .expect("declared tool claim map poisoned");
+
         // Unreachable in practice — the claim map serializes every opener on
         // this runtime and nothing between the claim and here releases one.
-        // Dropping the guard rather than storing it is still the right answer
-        // if it ever happened: a registration nobody holds is a tool nobody
-        // would take back off.
-        if let Some(claim) = claims.get_mut(name)
-            && claim.root == root
-        {
-            claim.registration = Some(registration);
-        }
+        // Said out loud anyway, because the failure it would otherwise become
+        // is a name the workspace reports as live with no program behind it.
+        let Some(entry) = claims
+            .get_mut(&claim.name)
+            .filter(|entry| entry.root == claim.root)
+        else {
+            return Err(
+                "the claim on that name was released while this workspace was opening".to_string(),
+            );
+        };
+
+        entry.registration = Some(
+            self.mentra
+                .try_register_tool_for_audience(audience.clone(), tool)
+                .map_err(|collision: ToolNameCollision| {
+                    format!(
+                        "something registered a tool called '{}' on this runtime while this \
+                         workspace was opening",
+                        collision.name
+                    )
+                })?,
+        );
         Ok(())
     }
 

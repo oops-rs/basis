@@ -88,7 +88,7 @@ impl DeclaredTools {
             names: Vec::new(),
             origins: Vec::new(),
         };
-        let mut first_holder = Vec::new();
+        let mut permissions = Vec::new();
 
         for (path, spec) in &declared {
             // On failure `claimed` drops, releasing whatever it had taken, so a
@@ -97,36 +97,30 @@ impl DeclaredTools {
                 Some(_) => DeclaredToolOrigin::File,
                 None => DeclaredToolOrigin::Supplied,
             };
-            let fresh = claimed
+            let claim = claimed
                 .runtime
                 .claim_declared_tool(root, spec, origin)
                 .map_err(|reason| name_taken(path.as_deref(), &spec.name, reason))?;
             claimed.names.push(spec.name.clone());
             claimed.origins.push(origin);
-            first_holder.push(fresh);
+            permissions.push(claim);
         }
 
-        for ((path, spec), fresh) in declared.into_iter().zip(first_holder) {
-            // A sibling open of this same root already registered it, and one
-            // name is one program: joining that registration is what keeps the
-            // sibling's running agents on the program they started with.
-            if !fresh {
+        for ((path, spec), claim) in declared.into_iter().zip(permissions) {
+            // `None` is a sibling open of this same root that already
+            // registered it, and one name is one program: joining that
+            // registration is what keeps the sibling's running agents on the
+            // program they started with.
+            let Some(claim) = claim else {
                 continue;
-            }
+            };
 
             let name = spec.name.clone();
+            let tool = wrapped(&claimed.runtime, spec, root);
             claimed
                 .runtime
-                .install_declared_tool(audience, &name, root, wrapped(&claimed.runtime, spec, root))
-                .map_err(|collision| {
-                    name_taken(
-                        path.as_deref(),
-                        &collision.name,
-                        "something registered a tool by that name on this runtime while this \
-                         workspace was opening"
-                            .to_string(),
-                    )
-                })?;
+                .install_declared_tool(audience, claim, tool)
+                .map_err(|reason| name_taken(path.as_deref(), &name, reason))?;
         }
 
         Ok(claimed)
