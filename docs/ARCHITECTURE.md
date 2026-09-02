@@ -218,16 +218,21 @@ however a roster is written.
 Interception is not a subsystem parallel to anything either. `hooks::contract` holds the request
 and outcome types both bindings speak, one `Chain` decides what an answer *means* — first
 refusal wins, modifications compose, nothing is smuggled past a later guard — and each
-workspace registers that one folded `HookRunner` live on the runtime, for its own
-`ToolAudience`, so a shared runtime built before any workspace opened still runs each
-repository's guards over its own runs and nobody else's (ADR-0018). One registration rather
-than one per participant: the ordering and the short-circuit are basis's rather than the
-runtime's, and splitting the chain in two would lose the attribution a refusal carries.
+workspace registers its `HookRunner` live on the runtime, for its own `ToolAudience`, so a
+shared runtime built before any workspace opened still runs each repository's guards over its
+own runs and nobody else's (ADR-0018). The host's own `Interceptor`s are registered once and
+globally beside them, because host scope *is* runtime scope: an audience-scoped registration
+would skip every session a host creates for itself. Each is one `ExecutionHookParticipant`
+batch rather than one registration per participant and per seam, so the ordering and the
+short-circuit inside a runner stay basis's, a call's participants are snapshotted once and
+retained across both seams, and a rewrite's attribution survives into the refusal it earns.
 Participants speak in-process interceptors first (registration
 order), then typed supplied hooks, global hooks, then workspace hooks, on the rule that **the
 further a participant is from the workspace's own data, the earlier it speaks**: a host's compiled
 guard can then refuse before a program that arrived with a five-minute-old clone is spawned
-at all. Anything that cannot answer denies.
+at all. Mentra composes that order across the two batches — global before audience, in
+registration order — where basis's single folded runner used to. Anything that cannot answer
+denies.
 
 Since mentra 0.24 the chain runs *before* authorization, on both execution lanes: hooks,
 then the tool's `input_schema` against what they left, then the `ToolAuthorizer`. Two things
@@ -799,7 +804,9 @@ is not a run, has no report and no run counter, so its samples reach only the si
 A shared runtime used to be the shape basis had to work around. Mentra fixed a runtime's
 policy, its hooks and its tool registry at build time, and a runtime is built before any
 workspace opens — so basis kept three pieces of machinery whose only job was to make one
-runtime behave like several. All three are gone, and what replaced each is upstream's own.
+runtime behave like several. Two are gone outright and the third is reduced to the sliver
+upstream's own mechanism cannot express; what replaced each is upstream's, and what is left
+of the third says exactly why it is left.
 
 **The hook dispatcher is gone.** `basis/src/runtime/dispatch.rs` in full: one hook registered
 on each of Mentra's two seams, a registry of workspaces keyed by canonicalized root, and the
@@ -854,7 +861,11 @@ and a shared runtime enforces the same rules a private one always did. On a shar
 wording of a refusal therefore changes: it arrives from Mentra's policy, in Mentra's words,
 exactly as it always has on a private runtime, instead of from basis's guard — and a refusal
 of a *hook-rewritten* call no longer names the hook that rewrote it, because it is the tool's
-policy answering rather than basis's chain. A `--no-shell` workspace's command is likewise
+policy answering rather than basis's chain. Mentra's mixed chain does carry a rewrite's
+attribution into the refusals *it* raises — invalid JSON, a schema violation, a parallel-lane
+category flip — but not into a policy or authorizer denial, which is a gap upstream owns
+([mentra#57](https://github.com/oops-rs/mentra/issues/57)) and not one basis can close from
+here. A `--no-shell` workspace's command is likewise
 refused inside the call rather than ahead of it, which means the approver is asked first: the
 private path's behaviour, now on both — and it has a UX cost worth naming, because a
 `Prompt`-mode approver is shown a command that can never run, the person's yes is recorded,
@@ -898,10 +909,11 @@ stated onto the conversation. `store::forget` still keys on the id alone, and de
 deletion states nothing.
 
 **One gap this does not close, and it is upstream's.** A *resumed* session carries no runtime
-identifier — Mentra's resume options have no field for one — so a resumed conversation
-re-files under the runtime's own tag when it next persists, which on a shared runtime takes it
-out of that workspace's `session/list`. The conversation is still resumable by id.
-`basis::store`'s module docs have the whole of it.
+identifier — Mentra's resume options have no field for one
+([mentra#54](https://github.com/oops-rs/mentra/issues/54)) — so a resumed conversation re-files
+under the runtime's own tag when it next persists, which on a shared runtime takes it out of
+that workspace's `session/list`. The conversation is still resumable by id. `basis::store`'s
+module docs have the whole of it.
 
 ### Command targets
 

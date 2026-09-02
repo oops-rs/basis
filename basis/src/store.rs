@@ -39,7 +39,8 @@
 //! conversations apart.
 //!
 //! **One gap, and it is upstream's.** A *resumed* session carries no
-//! identifier: mentra's `SessionResumeOptions` has no field for one, so a
+//! identifier: mentra's `SessionResumeOptions` has no field for one
+//! ([mentra#54](https://github.com/oops-rs/mentra/issues/54)), so a
 //! resumed conversation persists under the runtime's own tag — its workspace's
 //! on a private runtime, and `"basis:runtime"` on a shared one. On a shared
 //! runtime, therefore, resuming a conversation and running it takes its row
