@@ -1,6 +1,6 @@
 # basis — Architecture
 
-> rev 14 · 2026-09-01 · **basis** — the minimal set everything else is built from
+> rev 15 · 2026-09-02 · **basis** — the minimal set everything else is built from
 > The *how*. For the *why* — problem, idea, bets — see [`PROPOSAL.md`](PROPOSAL.md);
 > locked decisions live in [`adr/`](adr/); deferred ideas in [`proposals/`](proposals/);
 > research grounding in [`p0-groundwork.md`](p0-groundwork.md).
