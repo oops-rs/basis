@@ -314,16 +314,18 @@ fn answer(verdict: Verdict) -> ApprovalAnswer {
 ///   sees a reviewer they thought they had bypassed rather than an error.
 /// - **The pattern globs the serialized JSON**, so it is written against
 ///   `"body":"…"` — the field name and the quoting are part of the rule.
-fn allowlist(run: &PreparedRun, command: &str) {
-    run.session().rule_store().add_rule(RememberedRule {
-        key: RuleKey {
-            tool_name: SPAWN.to_string(),
-            pattern: Some(format!("**\"body\":\"{command}\"**")),
-        },
-        allow: true,
-        scope: PermissionRuleScope::Session,
-        reason: None,
-    });
+fn allowlist(run: &PreparedRun, command: &str) -> Result<(), mentra::error::RuntimeError> {
+    run.session()
+        .permission_handle()
+        .remember_rule(RememberedRule {
+            key: RuleKey {
+                tool_name: SPAWN.to_string(),
+                pattern: Some(format!("**\"body\":\"{command}\"**")),
+            },
+            allow: true,
+            scope: PermissionRuleScope::Session,
+            reason: None,
+        })
 }
 
 /// What the run is asked to do.
@@ -368,7 +370,7 @@ async fn main() -> Result<(), Box<dyn Error>> {
     // Rung one, seeded before the run starts. A cold session has no rules in
     // it, which is why the first `cargo test` of every session is otherwise
     // reviewed.
-    allowlist(&run, ALLOWLISTED);
+    allowlist(&run, ALLOWLISTED)?;
 
     // The reviewer's allowance is held here as well as in the reviewer: a
     // `BudgetPool` clone is another handle on the same figure, never another
