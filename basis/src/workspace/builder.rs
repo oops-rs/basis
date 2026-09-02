@@ -683,7 +683,7 @@ impl WorkspaceBuilder {
         let (skills_registration, skills) = if self.discovery_enabled {
             let registration = register_skills(Arc::clone(&runtime), &path, &self.skills)?;
             let loaded = runtime
-                .mentra_runtime_internal()
+                .mentra_runtime()
                 .skills()
                 .into_iter()
                 .map(|skill| LoadedSkill {

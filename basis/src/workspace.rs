@@ -446,7 +446,7 @@ impl Workspace {
     /// a workaround. Renamed from `runtime()` when ADR-0018 gave basis a
     /// `Runtime` of its own, so the name says whose surface comes back.
     pub fn mentra_runtime(&self) -> &mentra::Runtime {
-        self.runtime.mentra_runtime_internal()
+        self.runtime.mentra_runtime()
     }
 
     /// The agent config this mint offers the model: the one built at open, with
@@ -486,7 +486,7 @@ impl Workspace {
         }
 
         #[cfg(feature = "mcp")]
-        for descriptor in self.runtime.mentra_runtime_internal().tools() {
+        for descriptor in self.runtime.mentra_runtime().tools() {
             let name = &descriptor.provider.name;
             if let Some((server, _)) = mentra::mcp::parse_mcp_tool_name(name)
                 && !self.mcp_servers.iter().any(|own| own == server)

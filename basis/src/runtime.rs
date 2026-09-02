@@ -297,14 +297,6 @@ impl Runtime {
         &self.mentra
     }
 
-    /// Basis-internal access that does not cross the reusable lifecycle
-    /// boundary. Public callers reach [`mentra_runtime`](Self::mentra_runtime);
-    /// a reusable [`Workspace`](crate::Workspace) poisons its generation before
-    /// handing that same reference out.
-    pub(crate) fn mentra_runtime_internal(&self) -> &mentra::Runtime {
-        &self.mentra
-    }
-
     /// The provider this runtime resolves models against, as its `ProviderId`
     /// string — what every run from every workspace on it reports.
     pub fn provider(&self) -> &str {
