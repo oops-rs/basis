@@ -86,7 +86,8 @@ use std::{
 
 use mentra::{
     BuiltinProvider, Runtime,
-    runtime::{FileRuntimeStore, VolatileRuntimeStore},
+    runtime::{FileRuntimeStore, PermissionRuleContext, PermissionRuleStore, VolatileRuntimeStore},
+    session::PermissionRuleScope,
 };
 
 use crate::error::RunError;
@@ -184,7 +185,7 @@ pub fn list(workspace: &Path) -> Result<Vec<PersistedSession>, RunError> {
 pub fn list_in(dir: &Path, workspace: &Path) -> Result<Vec<PersistedSession>, RunError> {
     let identifier = runtime_identifier(workspace);
 
-    let mut sessions: Vec<PersistedSession> = enumerating_runtime(&identifier, dir)?
+    let mut sessions: Vec<PersistedSession> = enumerating_runtime(&identifier, store_in(dir)?)?
         .list_persisted_agents(&identifier)?
         .into_iter()
         .filter(|agent| !agent.is_teammate)
@@ -263,11 +264,35 @@ pub fn forget(agent_id: &str) -> Result<(), RunError> {
 /// [`list_in`]: a conversation is deleted from the file it was listed out of,
 /// and nothing here can guess which one a caller chose.
 pub fn forget_in(dir: &Path, agent_id: &str) -> Result<(), RunError> {
+    let store = store_in(dir)?;
+    // A clone of one file store shares its in-process lock, so the clear
+    // below mutates through the same concurrency boundary the runtime's
+    // deletion does — a second independently-constructed store on the same
+    // root would sit outside it.
+    let rules = store.clone();
+
     // The identifier tags rows on write and filters them on `list_agents_by_
     // runtime`; deletion is keyed by id alone, so what is passed here cannot
     // change which conversation goes. It is still derived rather than invented,
     // so nothing in this module opens a store under a tag no workspace uses.
-    Ok(enumerating_runtime(&runtime_identifier(dir), dir)?.delete_agent(agent_id)?)
+    enumerating_runtime(&runtime_identifier(dir), store)?.delete_agent(agent_id)?;
+
+    // mentra's `delete_agent` removes `agents/<id>/` and nothing else, so the
+    // conversation's remembered permission rules — command patterns included
+    // — would sit in the store root's `rules.json` forever, keyed to a dead
+    // agent id nothing can match again: a privacy leftover and unbounded
+    // growth. Forgetting means the rules too. (Upstream cleaning its own
+    // rules on delete is asked for; this stays correct either way, because
+    // clearing an already-empty scope removes nothing.)
+    rules.clear_scope(
+        &PermissionRuleContext {
+            session_id: agent_id.to_owned(),
+            project_id: None,
+        },
+        PermissionRuleScope::Session,
+    )?;
+
+    Ok(())
 }
 
 /// A runtime that exists only to reach the store.
@@ -281,14 +306,17 @@ pub fn forget_in(dir: &Path, agent_id: &str) -> Result<(), RunError> {
 /// records would make `session/list` and `session/delete` fail for a reason
 /// that has nothing to do with either.
 ///
-/// The store is built from `dir` rather than left at mentra's default, so that
-/// this and [`RuntimeBuilder::with_store_dir`](crate::RuntimeBuilder::with_store_dir)
-/// read and write one file. The identifier is the other thing that has to
-/// agree, and it comes from [`runtime_identifier`] on both sides.
-fn enumerating_runtime(identifier: &str, dir: &Path) -> Result<Runtime, RunError> {
+/// The store is passed in — built by the caller through [`store_in`], so this
+/// and [`RuntimeBuilder::with_store_dir`](crate::RuntimeBuilder::with_store_dir)
+/// read and write one file, and a caller that also mutates the store directly
+/// ([`forget_in`]'s rule clear) can clone the same instance rather than
+/// constructing a second one outside the backend's concurrency boundary. The
+/// identifier is the other thing that has to agree, and it comes from
+/// [`runtime_identifier`] on both sides.
+fn enumerating_runtime(identifier: &str, store: FileRuntimeStore) -> Result<Runtime, RunError> {
     Ok(Runtime::empty_builder()
         .with_runtime_identifier(identifier.to_string())
-        .with_store(store_in(dir)?)
+        .with_store(store)
         .with_provider(BuiltinProvider::OpenAI, "unused-for-listing")
         .build()?)
 }

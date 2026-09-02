@@ -668,6 +668,68 @@ async fn a_forgotten_conversation_is_neither_listed_nor_resumable() {
 }
 
 #[tokio::test]
+async fn forgetting_a_conversation_takes_its_remembered_rules_with_it() {
+    // mentra's `delete_agent` removes `agents/<id>/` and nothing else, so the
+    // conversation's remembered allow/deny rules — command patterns included
+    // — would otherwise sit in the store root's `rules.json` forever, keyed
+    // to a dead agent id: a privacy leftover a "forget" must not leave.
+    use mentra::{
+        runtime::{FileRuntimeStore, PermissionRuleContext, PermissionRuleStore},
+        session::{PermissionRuleScope, RememberedRule, RuleKey},
+    };
+
+    let dir = tempfile::tempdir().expect("tempdir");
+    let store_dir = tempfile::tempdir().expect("tempdir");
+
+    let workspace = offline(dir.path())
+        .with_runtime(closed_port(store_dir.path()))
+        .open()
+        .await
+        .expect("opens");
+
+    let agent_id = {
+        let run = workspace.prepare("forget me").expect("mints");
+        run.session()
+            .permission_handle()
+            .remember_rule(RememberedRule {
+                key: RuleKey {
+                    tool_name: "spawn".to_string(),
+                    pattern: Some("**\"body\":\"cargo test\"**".to_string()),
+                },
+                allow: true,
+                scope: PermissionRuleScope::Session,
+                reason: None,
+            })
+            .expect("remembers");
+        run.agent_id().to_string()
+    };
+
+    let context = PermissionRuleContext {
+        session_id: agent_id.clone(),
+        project_id: None,
+    };
+    let rules = FileRuntimeStore::new(store_dir.path());
+    assert_eq!(
+        rules
+            .load_applicable_rules(&context)
+            .expect("reads the store")
+            .len(),
+        1,
+        "the rule must be durable before the forget, or this test proves nothing"
+    );
+
+    store::forget_in(store_dir.path(), &agent_id).expect("deletes");
+
+    assert_eq!(
+        rules
+            .load_applicable_rules(&context)
+            .expect("reads the store"),
+        Vec::new(),
+        "a forgotten conversation's rules must not accumulate in rules.json forever"
+    );
+}
+
+#[tokio::test]
 async fn forgetting_a_conversation_that_was_never_there_is_not_an_error() {
     // A caller deleting by an id it read from a list is racing anyone else
     // holding the same store, and "it is gone" is the outcome both wanted.
