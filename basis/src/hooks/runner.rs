@@ -123,6 +123,17 @@ impl HookRunner {
         self.hooks.is_empty() && self.interceptors.is_empty()
     }
 
+    /// The subprocess hooks this runner would consult, in order.
+    ///
+    /// What a same-root open is compared against before it joins a live
+    /// registration rather than making a second one
+    /// ([`Runtime::register_hook_chain`](crate::runtime::Runtime::register_hook_chain)).
+    /// The specs, not a digest of them: a [`HookSpec`] is small, `Eq`, and
+    /// already the complete statement of what a participant will do.
+    pub(crate) fn hooks(&self) -> &[HookSpec] {
+        &self.hooks
+    }
+
     /// Consults every applicable **subprocess hook**, in order, until one
     /// refuses.
     ///

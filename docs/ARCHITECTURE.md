@@ -831,9 +831,19 @@ What a host that wants a guard over *every* call on its runtime writes instead i
 apply drives that repository through `Workspace::prepare`/`resume` rather than minting its own
 session.
 
-Two live opens of one directory used to be refused when their hooks differed
-(`RunError::WorkspaceGuardConflict`) and now both register: every guard runs and the first
-refusal still wins, but a repository's hook programs are spawned once per live open.
+**One directory is one chain, and it is counted rather than owned.** A tool audience is
+derived from the workspace root, so two live opens of one directory — what `basis-host`
+produces on purpose, one workspace per set of client-supplied MCP servers — resolve in one
+audience. Registering both would put two complete chains behind it and Mentra would walk both
+for either open's calls: every subprocess hook spawned twice per call, an audit hook logging
+each call twice, and a rewrite that is not idempotent fed its own output. So the second open
+**joins** the first's registration and the chain comes off when the last holder goes — the same
+join-and-count ledger `declared_claims` and `skill_root_holders` already are, and the same
+behaviour the deleted directory-keyed registry had. Joining needs the two chains to be the
+same, and a same-root open presenting a different one is refused by name, as it was before:
+`RunError::WorkspaceGuardConflict` survives the removal of the guard layer that named it, with
+its message rewritten to describe interception chains rather than guards. A host that genuinely
+needs two hook configurations for one directory needs two runtimes.
 
 **Basis's own guards are gone, and the rules are not.** The `.git/hooks` and `.git/config`
 carve-out and the `ShellAccess::Denied` posture used to be enforced twice — baked into policy

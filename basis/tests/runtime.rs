@@ -592,16 +592,18 @@ async fn a_workspaces_hooks_guard_its_runs_on_a_shared_runtime() {
     );
 }
 
+/// One directory is one tool audience, so one directory is one chain.
+///
+/// A second live open of a root — the shape `basis-host` produces on purpose,
+/// one workspace per set of client-supplied MCP servers — joins the
+/// registration already there instead of putting a second complete chain behind
+/// the same audience. Both halves are asserted, because a rule that registered
+/// nothing at all would pass the first: the hook still runs, and it runs
+/// *once*, which is what keeps a rewrite that is not idempotent from being fed
+/// its own output.
 #[cfg(unix)]
 #[tokio::test]
-async fn a_second_open_of_one_root_cannot_weaken_the_first_ones_hooks() {
-    // Two live opens of one repository share a tool audience, so both their
-    // chains are consulted for either one's runs. That is the shape that
-    // matters: a later open with a permissive guard joins the first rather
-    // than replacing it, and the first refusal still wins — the property the
-    // old same-root registry enforced by refusing the second open outright.
-    // When the first goes, its registration goes with it, and what is left is
-    // the second's own answer.
+async fn a_second_open_of_one_root_joins_the_first_ones_chain_rather_than_doubling_it() {
     use std::os::unix::fs::PermissionsExt;
 
     let endpoint = ScriptedEndpoint::start(vec![
@@ -610,6 +612,84 @@ async fn a_second_open_of_one_root_cannot_weaken_the_first_ones_hooks() {
         Reply::write_file("same-root.txt"),
         Reply::Text,
     ]);
+    let runtime = shared_runtime(&endpoint);
+    let root = workspace_dir();
+    let ledger = root.path().join("consulted");
+
+    let path = root.path().join("count.sh");
+    std::fs::write(
+        &path,
+        format!(
+            "#!/bin/sh\necho ran >> '{}'\necho '{{\"decision\":\"allow\"}}'\n",
+            ledger.display()
+        ),
+    )
+    .expect("script");
+    std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o755)).expect("chmod");
+    let counting = HookSpec::new("count", vec![path.to_string_lossy().into_owned()]);
+    let config = || HooksConfig {
+        workspace_file: PathBuf::from(".basis/hooks.json"),
+        global_dir: None,
+        supplied: vec![counting.clone()],
+    };
+    let consultations = || {
+        std::fs::read_to_string(&ledger)
+            .map(|body| body.lines().count())
+            .unwrap_or_default()
+    };
+
+    let first = pinned(root.path(), Arc::clone(&runtime))
+        .with_hooks(config())
+        .open()
+        .await
+        .expect("the chain registers");
+    let second = pinned(root.path(), runtime)
+        .with_hooks(config())
+        .open()
+        .await
+        .expect("an identical second open of one root joins it");
+
+    second
+        .prepare("write a file")
+        .expect("mints")
+        .execute_with_approver(CollectingSink::default(), AllowAll)
+        .await
+        .expect("completes");
+    assert_eq!(
+        consultations(),
+        1,
+        "one directory carries one chain, however many times it is open"
+    );
+
+    // The first holder going does not take the chain with it: the second is
+    // still serving.
+    drop(first);
+    second
+        .prepare("write a file")
+        .expect("mints")
+        .execute_with_approver(CollectingSink::default(), AllowAll)
+        .await
+        .expect("completes");
+    assert_eq!(
+        consultations(),
+        2,
+        "and the surviving open's runs are still guarded"
+    );
+}
+
+/// The other answer, because there is no third one.
+///
+/// Two live opens of a root either share one chain — which needs them to
+/// configure the same chain — or would have two behind one audience, and mentra
+/// would walk both for either one's calls: every hook spawned twice, and the
+/// first open's sessions judged by a chain their caller never wrote. Refused by
+/// name, as it was before hooks went live.
+#[cfg(unix)]
+#[tokio::test]
+async fn a_second_open_of_one_root_with_a_different_chain_is_refused() {
+    use std::os::unix::fs::PermissionsExt;
+
+    let endpoint = ScriptedEndpoint::start(Vec::new());
     let runtime = shared_runtime(&endpoint);
     let root = workspace_dir();
 
@@ -634,36 +714,26 @@ async fn a_second_open_of_one_root_cannot_weaken_the_first_ones_hooks() {
         .with_hooks(config(vec![deny]))
         .open()
         .await
-        .expect("the first guard registers");
-    let permissive = pinned(root.path(), runtime)
+        .expect("the first chain registers");
+
+    let refused = pinned(root.path(), Arc::clone(&runtime))
+        .with_hooks(config(vec![allow.clone()]))
+        .open()
+        .await
+        .expect_err("a second open must not be able to install a second chain");
+    assert!(
+        matches!(refused, basis::RunError::WorkspaceGuardConflict { .. }),
+        "the refusal has to be the typed one a host can react to: {refused}"
+    );
+
+    // And the refusal is about the conflict, not about the root: once the
+    // first open goes, the same configuration opens.
+    drop(first);
+    pinned(root.path(), runtime)
         .with_hooks(config(vec![allow]))
         .open()
         .await
-        .expect("a second open of one root is not a conflict");
-
-    permissive
-        .prepare("write a file")
-        .expect("mints")
-        .execute_with_approver(CollectingSink::default(), AllowAll)
-        .await
-        .expect("a hook denial is an answer, not a run failure");
-    assert!(
-        !root.path().join("same-root.txt").exists(),
-        "the second open must not be able to lift the first open's refusal"
-    );
-
-    drop(first);
-
-    permissive
-        .prepare("write a file")
-        .expect("mints")
-        .execute_with_approver(CollectingSink::default(), AllowAll)
-        .await
-        .expect("completes");
-    assert!(
-        root.path().join("same-root.txt").exists(),
-        "and the refusal leaves with the open that declared it"
-    );
+        .expect("a root nobody holds is free to configure");
 }
 
 /// The host's own guards reach a session basis never minted.

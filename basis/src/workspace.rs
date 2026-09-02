@@ -54,10 +54,7 @@ mod spec;
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
 
-use mentra::{
-    ModelInfo, Session, agent::AgentConfig, provider::ReasoningOptions,
-    runtime::ExecutionHookRegistration,
-};
+use mentra::{ModelInfo, Session, agent::AgentConfig, provider::ReasoningOptions};
 
 pub use builder::WorkspaceBuilder;
 pub use profile::RunProfile;
@@ -78,7 +75,7 @@ use crate::{
     fingerprint::{self, Snapshot},
     memory::Memory,
     run::{Effort, LoadedSkill, PreparedRun, RunContext},
-    runtime::{Runtime, SessionScope},
+    runtime::{HookChainHold, Runtime, SessionScope},
     skills::SkillRoots,
     templates::Template,
     tools::declared::DeclaredTools,
@@ -178,16 +175,21 @@ pub struct Workspace {
     /// registry and registered for its own audience; releases both on drop.
     #[allow(dead_code, reason = "held for its Drop")]
     declared_registration: DeclaredTools,
-    /// mentra's hold on this workspace's own interception chain, registered for
-    /// this workspace's tool audience. Dropping it is what stops a dropped
-    /// workspace being consulted.
+    /// This workspace's share of the interception chain live for its tool
+    /// audience. Dropping it is what stops a dropped workspace being consulted
+    /// — and, when it was the last holder, what takes the chain off the
+    /// runtime.
     ///
     /// One hold for both seams: mentra 0.26 takes a chain as
     /// `ExecutionHookParticipant`s and hands back one registration whose
     /// snapshot is retained across a whole call, so a workspace cannot be
-    /// consulted before a tool and gone after it.
+    /// consulted before a tool and gone after it. And a *share* rather than
+    /// the registration itself, because one directory is one audience and a
+    /// second live open of this root joins this chain rather than adding a
+    /// second one behind the same audience
+    /// ([`Runtime::register_hook_chain`](crate::runtime::Runtime::register_hook_chain)).
     #[allow(dead_code, reason = "held for its Drop")]
-    hooks: ExecutionHookRegistration,
+    hooks: HookChainHold,
     #[cfg(feature = "mcp")]
     #[allow(dead_code, reason = "held for its Drop")]
     mcp_connections: McpConnections,

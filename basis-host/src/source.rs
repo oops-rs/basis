@@ -310,16 +310,16 @@ impl SessionSource for ConfiguredSource {
 /// only in their supplied servers, so they discover the same hooks and carry
 /// the same command posture.
 ///
-/// They now cost more than they used to, and it is worth stating. A workspace
-/// registers its hook chain live, for its own tool audience, and two opens of
-/// one directory share that audience — so both chains are consulted for either
-/// one's calls, where basis's old registry recognised the second open as
-/// identical to the first and counted a holder instead. Every guard still
-/// runs and the stricter answer still wins, so nothing is weakened; what a
-/// repository's `.basis/hooks.json` pays is one extra subprocess per call
-/// while two such sessions are live, and a hook whose rewrite is not
-/// idempotent sees its own output. Mentra's live registration has no way to
-/// say "this is the registration I already have" (an upstream candidate).
+/// That equality is load-bearing now, and worth stating. A workspace registers
+/// its interception chain live, for its own tool audience, and two opens of one
+/// directory share that audience — so basis counts holders of one chain rather
+/// than registering two, and refuses a same-root open whose chain differs
+/// (`RunError::WorkspaceGuardConflict`). This source can never provoke that
+/// refusal: hooks come from one `SessionTemplate`'s discovery configuration and
+/// are equal for every session, and the servers a key varies on are not part of
+/// a chain. What two live opens of one directory cost is what they always cost
+/// — a second set of MCP connections and a second discovery — and not a second
+/// pass through the repository's hook programs on every call.
 #[derive(Debug, PartialEq, Eq, Hash)]
 struct WorkspaceKey {
     workspace: PathBuf,

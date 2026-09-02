@@ -775,9 +775,13 @@ impl WorkspaceBuilder {
         // about a *result* is knowable here, but a runner with nothing to say
         // costs one map walk and the alternative is a workspace that silently
         // could not be given a post hook.
-        let hooks = runtime
-            .mentra_runtime()
-            .register_execution_hook_for_audience(audience.clone(), runner);
+        //
+        // Through the runtime's ledger rather than straight at mentra, because
+        // one root may be open twice and one audience must carry one chain:
+        // an identical second open joins, a differing one is refused. The `?`
+        // is the refusal, and it comes after the registrations above only
+        // because those release themselves on the way out.
+        let hooks = runtime.register_hook_chain(&audience, &path, runner)?;
 
         // Both lists reach the header whether or not this build has MCP in it:
         // what a run reports is a schema clients parse, and a field that

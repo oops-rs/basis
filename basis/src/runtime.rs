@@ -298,6 +298,68 @@ pub struct Runtime {
     /// How many open workspaces hold each skills root on this runtime's single
     /// skill registry. See [`Runtime::register_skill_roots`].
     skill_root_holders: Mutex<HashMap<PathBuf, usize>>,
+    /// One live interception chain per tool audience, holder-counted. See
+    /// [`Runtime::register_hook_chain`].
+    hook_chains: Mutex<HashMap<String, HookChainClaim>>,
+}
+
+/// One workspace's interception chain, registered live for its audience.
+///
+/// The third join-and-count ledger on this runtime, and it exists for the
+/// reason the other two do: a *root* may be open twice — the shape
+/// `basis-host` produces deliberately, one workspace per set of
+/// client-supplied MCP servers — while the thing being registered is one per
+/// root. An audience is derived from the root, so two such opens would
+/// otherwise put two complete chains behind one audience and mentra would walk
+/// both for either one's calls: every subprocess hook spawned twice per call,
+/// an audit hook logging each call twice, and a rewrite that is not idempotent
+/// fed its own output.
+///
+/// So the second open of a root **joins** the first's registration, and the
+/// chain comes off when the last holder goes — exactly as a declared tool's
+/// claim behaves. The price of joining is that both opens must agree about
+/// what the chain *is*: see [`Runtime::register_hook_chain`].
+#[derive(Debug)]
+struct HookChainClaim {
+    /// The workspace root behind the audience, for the refusal's message.
+    root: PathBuf,
+    holders: usize,
+    /// The chain the live registration is running. A same-root open presenting
+    /// a different one is refused rather than silently subjected to this.
+    hooks: Vec<crate::hooks::HookSpec>,
+    /// mentra's own hold, kept beside the claim rather than by a workspace
+    /// because the claim is what counts holders: the chain has to outlive the
+    /// first of them to drop. Removing the claim drops this, and dropping it
+    /// is the unregister.
+    #[allow(dead_code, reason = "held for its Drop")]
+    registration: mentra::runtime::ExecutionHookRegistration,
+}
+
+/// One holder's share of a live interception chain, released on drop.
+///
+/// The sibling of [`DeclaredTools`](crate::tools::declared::DeclaredTools) and
+/// [`SkillRoots`](crate::skills::SkillRoots), and held by the
+/// [`Workspace`](crate::Workspace) for the same reason: dropping it is what
+/// stops a dropped workspace being consulted.
+pub(crate) struct HookChainHold {
+    runtime: Arc<Runtime>,
+    /// The audience this chain answers for — the key, and the only thing the
+    /// release needs.
+    audience: String,
+}
+
+impl std::fmt::Debug for HookChainHold {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("HookChainHold")
+            .field("audience", &self.audience)
+            .finish_non_exhaustive()
+    }
+}
+
+impl Drop for HookChainHold {
+    fn drop(&mut self) {
+        self.runtime.release_hook_chain(&self.audience);
+    }
 }
 
 /// The live scope one workspace's sessions run in: what they may do, and whose
@@ -887,6 +949,92 @@ impl Runtime {
             // while the tool is still registered: the removed claim owns the
             // registration guard, and dropping it here is the unregister.
             claims.remove(name);
+        }
+    }
+
+    /// Puts a workspace's interception chain on the runtime for its audience,
+    /// or joins the identical one already there.
+    ///
+    /// `Ok` on two shapes and refuses a third:
+    ///
+    /// - **Nobody holds this audience.** The runner is registered as one
+    ///   atomic [`ExecutionHookParticipant`](mentra::runtime::ExecutionHookParticipant)
+    ///   batch and the guard goes into the claim.
+    /// - **A live open of this same root presents the same chain.** It joins:
+    ///   one registration, one holder more. That is what keeps a repository's
+    ///   hook programs spawned once per call rather than once per call per
+    ///   live open, and what keeps a non-idempotent rewrite from being fed its
+    ///   own output — the thing the deleted directory-keyed registry counted
+    ///   holders for.
+    /// - **A live open of this root presents a *different* chain.** Refused
+    ///   with [`RunError::WorkspaceGuardConflict`]. Joining would subject the
+    ///   first open's sessions to a chain their caller never configured, and
+    ///   registering a second batch would run both for either — so the honest
+    ///   answers are "the same chain" or "no". A host that genuinely needs two
+    ///   hook configurations for one directory needs two runtimes.
+    ///
+    /// Compared on the chain itself rather than on a digest of it, because a
+    /// [`HookSpec`](crate::hooks::HookSpec) is small, `Eq`, and already the
+    /// complete statement of what a participant will do.
+    pub(crate) fn register_hook_chain(
+        self: &Arc<Self>,
+        audience: &ToolAudience,
+        root: &Path,
+        runner: crate::hooks::HookRunner,
+    ) -> Result<HookChainHold, RunError> {
+        let key = audience.as_str().to_string();
+        let mut chains = self.hook_chains.lock().expect("hook chain map poisoned");
+
+        match chains.get_mut(&key) {
+            Some(claim) if claim.hooks != *runner.hooks() => {
+                return Err(RunError::WorkspaceGuardConflict {
+                    root: claim.root.clone(),
+                });
+            }
+            Some(claim) => claim.holders += 1,
+            None => {
+                let hooks = runner.hooks().to_vec();
+                // Under the claim lock, so nothing can observe an audience
+                // counted but unregistered, or free one between the register
+                // and the count.
+                let registration = self
+                    .mentra
+                    .register_execution_hook_for_audience(audience.clone(), runner);
+                chains.insert(
+                    key.clone(),
+                    HookChainClaim {
+                        root: root.to_path_buf(),
+                        holders: 1,
+                        hooks,
+                        registration,
+                    },
+                );
+            }
+        }
+        drop(chains);
+
+        Ok(HookChainHold {
+            runtime: Arc::clone(self),
+            audience: key,
+        })
+    }
+
+    /// Releases one holder's share, taking the chain off the runtime when the
+    /// last of them goes.
+    ///
+    /// Under the claim lock, like the declared-tool and skills-root releases
+    /// below, so no other opener can see an audience free while its chain is
+    /// still registered: the removed claim owns mentra's guard, and dropping it
+    /// here is the unregister.
+    fn release_hook_chain(&self, audience: &str) {
+        let mut chains = self.hook_chains.lock().expect("hook chain map poisoned");
+
+        let Some(claim) = chains.get_mut(audience) else {
+            return;
+        };
+        claim.holders = claim.holders.saturating_sub(1);
+        if claim.holders == 0 {
+            chains.remove(audience);
         }
     }
 

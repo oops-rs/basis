@@ -271,6 +271,31 @@ pub enum RunError {
     #[error("failed to load hooks: {0}")]
     Hooks(#[from] crate::hooks::HookConfigError),
 
+    /// Two live opens of one workspace present different interception chains.
+    ///
+    /// One directory is one tool audience, and a workspace registers its
+    /// chain for that audience — so a second live open of the same root either
+    /// **joins** the registration already there, which needs the two chains to
+    /// be the same, or would put a second complete chain behind one audience.
+    /// The second is not a middle ground: mentra would walk both for either
+    /// open's calls, spawning every subprocess hook twice per call and feeding
+    /// a non-idempotent rewrite its own output, and the first open's sessions
+    /// would be judged by a chain their caller never configured. So identical
+    /// chains join and different ones are refused here.
+    ///
+    /// A host that genuinely needs two hook configurations for one directory
+    /// needs two [`Runtime`](crate::Runtime)s. A host whose two opens differ
+    /// only in their supplied MCP servers — `basis-host`'s deliberate shape —
+    /// never meets this: the hooks come from one discovery configuration and
+    /// are equal.
+    #[error(
+        "the workspace at '{}' is already open on this runtime with a different hook \
+         configuration; two live opens of one directory share one interception chain, so they \
+         must configure the same one",
+        root.display()
+    )]
+    WorkspaceGuardConflict { root: std::path::PathBuf },
+
     #[error("failed to load declared tools: {0}")]
     Tools(#[from] crate::tools::declared::DeclaredToolError),
 
