@@ -672,7 +672,11 @@ async fn forgetting_a_conversation_takes_its_remembered_rules_with_it() {
     // mentra's `delete_agent` removes `agents/<id>/` and nothing else, so the
     // conversation's remembered allow/deny rules — command patterns included
     // — would otherwise sit in the store root's `rules.json` forever, keyed
-    // to a dead agent id: a privacy leftover a "forget" must not leave.
+    // to a dead agent id: a privacy leftover a "forget" must not leave. Both
+    // scopes matter: a dead Session row is inert clutter, but a Global row
+    // this conversation wrote keeps answering prompts store-wide after its
+    // writer is gone, so forgetting removes every row the conversation
+    // wrote, whatever its scope.
     use mentra::{
         runtime::{FileRuntimeStore, PermissionRuleContext, PermissionRuleStore},
         session::{PermissionRuleScope, RememberedRule, RuleKey},
@@ -689,18 +693,29 @@ async fn forgetting_a_conversation_takes_its_remembered_rules_with_it() {
 
     let agent_id = {
         let run = workspace.prepare("forget me").expect("mints");
-        run.session()
-            .permission_handle()
+        let permissions = run.session().permission_handle();
+        permissions
             .remember_rule(RememberedRule {
                 key: RuleKey {
                     tool_name: "spawn".to_string(),
-                    pattern: Some("**\"body\":\"cargo test\"**".to_string()),
+                    pattern: Some("*\"body\":\"cargo test\"*".to_string()),
                 },
                 allow: true,
                 scope: PermissionRuleScope::Session,
                 reason: None,
             })
-            .expect("remembers");
+            .expect("remembers a session rule");
+        permissions
+            .remember_rule(RememberedRule {
+                key: RuleKey {
+                    tool_name: "files".to_string(),
+                    pattern: None,
+                },
+                allow: false,
+                scope: PermissionRuleScope::Global,
+                reason: Some("no writes on this machine".to_string()),
+            })
+            .expect("remembers a global rule");
         run.agent_id().to_string()
     };
 
@@ -714,19 +729,28 @@ async fn forgetting_a_conversation_takes_its_remembered_rules_with_it() {
             .load_applicable_rules(&context)
             .expect("reads the store")
             .len(),
-        1,
-        "the rule must be durable before the forget, or this test proves nothing"
+        2,
+        "both rules must be durable before the forget, or this test proves nothing"
     );
 
     store::forget_in(store_dir.path(), &agent_id).expect("deletes");
 
-    assert_eq!(
-        rules
-            .load_applicable_rules(&context)
-            .expect("reads the store"),
-        Vec::new(),
-        "a forgotten conversation's rules must not accumulate in rules.json forever"
-    );
+    // Read back under a *different* conversation's context too: a global row
+    // matches every context, so an empty answer for the dead id alone would
+    // not prove the store-wide rule is gone.
+    let elsewhere = PermissionRuleContext {
+        session_id: "some-other-agent".to_string(),
+        project_id: None,
+    };
+    for context in [&context, &elsewhere] {
+        assert_eq!(
+            rules
+                .load_applicable_rules(context)
+                .expect("reads the store"),
+            Vec::new(),
+            "a forgotten conversation's rules must be gone at every scope"
+        );
+    }
 }
 
 #[tokio::test]

@@ -86,8 +86,7 @@ use std::{
 
 use mentra::{
     BuiltinProvider, Runtime,
-    runtime::{FileRuntimeStore, PermissionRuleContext, PermissionRuleStore, VolatileRuntimeStore},
-    session::PermissionRuleScope,
+    runtime::{FileRuntimeStore, PermissionRuleStore, VolatileRuntimeStore},
 };
 
 use crate::error::RunError;
@@ -267,8 +266,13 @@ pub fn forget_in(dir: &Path, agent_id: &str) -> Result<(), RunError> {
     let store = store_in(dir)?;
     // A clone of one file store shares its in-process lock, so the clear
     // below mutates through the same concurrency boundary the runtime's
-    // deletion does — a second independently-constructed store on the same
-    // root would sit outside it.
+    // deletion does. That boundary is this function's own store pair and
+    // nothing wider: a *live workspace* on the same root holds its own
+    // independently constructed store, and mentra places two independent
+    // stores on one root outside its concurrency contract — so a forget
+    // racing a live session's remembered answer can lose one side's write
+    // (mentra#50). basis does not add locking of its own over a boundary
+    // upstream owns; the race window is one rules.json rewrite.
     let rules = store.clone();
 
     // The identifier tags rows on write and filters them on `list_agents_by_
@@ -279,18 +283,16 @@ pub fn forget_in(dir: &Path, agent_id: &str) -> Result<(), RunError> {
 
     // mentra's `delete_agent` removes `agents/<id>/` and nothing else, so the
     // conversation's remembered permission rules — command patterns included
-    // — would sit in the store root's `rules.json` forever, keyed to a dead
-    // agent id nothing can match again: a privacy leftover and unbounded
-    // growth. Forgetting means the rules too. (Upstream cleaning its own
-    // rules on delete is mentra#51; this stays correct either way, because
-    // clearing an already-empty scope removes nothing.)
-    rules.clear_scope(
-        &PermissionRuleContext {
-            session_id: agent_id.to_owned(),
-            project_id: None,
-        },
-        PermissionRuleScope::Session,
-    )?;
+    // — would sit in the store root's `rules.json` forever: a privacy
+    // leftover and unbounded growth. Forgetting means the rules too, and it
+    // means every row this conversation *wrote*, whatever its scope — a
+    // host-seeded Global rule keeps answering prompts store-wide after its
+    // writer is gone, which is worse than the dead Session rows. mentra's
+    // creator-oriented `clear_rules` deletes by writer id regardless of
+    // scope, which is exactly that reading. (Upstream cleaning its own rules
+    // on delete is mentra#51; this stays correct either way, because
+    // clearing rows that are already gone removes nothing.)
+    rules.clear_rules(agent_id)?;
 
     Ok(())
 }
