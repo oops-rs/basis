@@ -306,7 +306,7 @@ fn answer(verdict: Verdict) -> ApprovalAnswer {
 /// rule through mentra directly, at the cost of naming mentra in its own
 /// manifest, pinned to whatever version basis resolved.
 ///
-/// Two details are traps rather than API:
+/// Three details are traps rather than API:
 ///
 /// - **Two stars, not one.** mentra globs with `glob-match`, where a single
 ///   `*` does not cross `/`. The serialized input carries `cwd`, which is a
@@ -314,6 +314,13 @@ fn answer(verdict: Verdict) -> ApprovalAnswer {
 ///   sees a reviewer they thought they had bypassed rather than an error.
 /// - **The pattern globs the serialized JSON**, so it is written against
 ///   `"body":"…"` — the field name and the quoting are part of the rule.
+/// - **A rule on a read-only tool never applies — a deny included.** A
+///   remembered rule can only resolve the authorizer's `Prompt`, and basis's
+///   `ApprovalGate` answers `Allow` outright for a call with no side effects,
+///   so a seeded deny on a read-only tool is silently passed over: the tool
+///   runs, no error, no event. Seed rules for consequential tools only —
+///   `spawn` here is one, which is why this rung works at all. The full rule
+///   is on [`ApprovalGate`](basis::approval::ApprovalGate).
 fn allowlist(run: &PreparedRun, command: &str) -> Result<(), mentra::error::RuntimeError> {
     run.session()
         .permission_handle()
@@ -411,8 +418,9 @@ async fn main() -> Result<(), Box<dyn Error>> {
 /// Everything below is read off the public stream rather than recorded by the
 /// approver on the way past, because what the stream says is what a host
 /// actually gets to see — and the load-bearing fact is an *absence*. A call a
-/// remembered rule answered raises no `PermissionRequested` at all, since the
-/// rule store answers before the authorizer is consulted. So "was this
+/// remembered rule answered raises no `PermissionRequested` at all: mentra
+/// 0.26 asks the authorizer first, and a matching rule resolves the gate's
+/// `Prompt` before any request is put to the reviewer. So "was this
 /// reviewed" is legible without trusting this file's own bookkeeping.
 struct Call {
     tool_call_id: String,

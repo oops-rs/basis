@@ -297,12 +297,33 @@ pub fn is_consequential(level: ToolSideEffectLevel) -> bool {
 /// answer, which is what turns a call into a `PermissionRequested` event and
 /// blocks the turn until someone resolves it.
 ///
-/// Installed even by a run that approves everything, and that is the point. An
-/// authorizer is fixed when the runtime is built and mentra never hands it
-/// back; without one it allows every call unconditionally and no permission
-/// request can ever be raised. Surfacing unconditionally is what lets the
-/// answer be chosen per turn — or changed mid-session, which is how an ACP
-/// client's mode picker works at all.
+/// Installed even by a run that approves everything, and that is the point.
+/// basis installs it when the runtime is built, and a runtime with no
+/// authorizer at all allows every call unconditionally — no permission
+/// request can ever be raised, and since mentra 0.26 not even a remembered
+/// rule is read first. Surfacing unconditionally is what lets the answer be
+/// chosen per turn — or changed mid-session, which is how an ACP client's
+/// mode picker works at all. (mentra 0.26 can also swap a live session's
+/// authorizer, `Session::with_tool_authorizer`; basis does not, because the
+/// gate never answers and so never needs replacing.)
+///
+/// # The gate answers first, and its answers are final
+///
+/// mentra 0.26 samples the current authorizer once per call and treats
+/// `Allow` and `Deny` as terminal; only a `Prompt` may be answered by a
+/// remembered rule or forwarded to the approver. That is a deliberate
+/// upstream security fix — a remembered allow can no longer bypass a session
+/// switched to a stricter authorizer — and basis adopts it as documented
+/// order: **rules and approver decide only what this gate surfaces.**
+///
+/// The corollary is loud because it is easy to miss: this gate answers
+/// `Allow` — not `Prompt` — for a call with no side effects
+/// ([`is_consequential`]), so **a rule remembered against a read-only tool is
+/// never consulted, a seeded deny included**. The tool runs, with no error
+/// and no event saying the rule was passed over. A host seeding rules through
+/// the session permission handle must seed them for consequential tools only;
+/// nothing basis documents promises deny-to-win on a non-consequential call,
+/// and reads are deliberately never put to anyone (see [`is_consequential`]).
 #[derive(Debug, Default, Clone)]
 pub struct ApprovalGate {
     timeout: Option<Duration>,
