@@ -233,25 +233,15 @@ mod tests {
 
     /// A workspace's audience, keyed on its root the way an open keys it.
     fn audience_for(root: &str) -> ToolAudience {
-        ToolAudience::new(crate::store::runtime_identifier(Path::new(root)))
+        crate::runtime::probe::audience_for(Path::new(root))
     }
 
     /// Whether mentra's registry answers to `name` for `root`'s audience — the
     /// only honest answer to "is this tool on the runtime", since basis's claim
-    /// map is a separate ledger that could disagree.
-    ///
-    /// A collision probe rather than a listing: mentra exposes no reader for
-    /// one audience's registrations (`Runtime::tools` lists globals only — an
-    /// upstream candidate), and a registration that collides is a name already
-    /// held. The probe's own registration drops on the spot.
+    /// map is a separate ledger that could disagree. See
+    /// [`crate::runtime::probe`] for why a read is written as a write.
     fn registers(runtime: &Runtime, root: &str, name: &str) -> bool {
-        runtime
-            .mentra_runtime()
-            .try_register_tool_for_audience(
-                audience_for(root),
-                DeclaredTool::new(spec(name), Path::new(root)),
-            )
-            .is_err()
+        crate::runtime::probe::answers(runtime, Path::new(root), name)
     }
 
     #[test]

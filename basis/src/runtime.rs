@@ -36,6 +36,8 @@ pub(crate) mod builder;
 mod credential;
 mod executor;
 mod interception;
+#[cfg(test)]
+pub(crate) mod probe;
 mod tool_results;
 
 use std::collections::HashMap;

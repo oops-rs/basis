@@ -292,8 +292,15 @@ mod tests {
         )
     }
 
+    /// The one root every workspace in this module is rooted at, and the
+    /// audience it resolves in — derived, never spelled, so nothing here
+    /// depends on the identifier's own shape.
+    fn root() -> &'static Path {
+        Path::new("/repo")
+    }
+
     fn audience() -> ToolAudience {
-        ToolAudience::new("basis:/repo")
+        crate::runtime::probe::audience_for(root())
     }
 
     /// The names a batch of registrations put on the registry, in order.
@@ -304,18 +311,10 @@ mod tests {
             .collect()
     }
 
-    /// Whether `audience` already answers to `name`.
-    ///
-    /// mentra exposes no reader for one audience's registrations —
-    /// `Runtime::tools` lists globals only (an upstream candidate) — so this
-    /// asks the question the surface does answer: a registration that collides
-    /// is a name already held, globally or in this audience. The probe's own
-    /// registration drops on the spot, so asking changes nothing.
-    fn answers(runtime: &Runtime, name: &'static str) -> bool {
-        runtime
-            .mentra_runtime()
-            .try_register_tool_for_audience(audience(), Bridged(name))
-            .is_err()
+    /// Whether this workspace's audience already answers to `name`. See
+    /// [`crate::runtime::probe`] for why a read is written as a write.
+    fn answers(runtime: &Runtime, name: &str) -> bool {
+        crate::runtime::probe::answers(runtime, root(), name)
     }
 
     #[test]
