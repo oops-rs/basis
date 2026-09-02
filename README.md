@@ -265,10 +265,11 @@ config — never through code in `basis`:
 [docs/conventions.md](docs/conventions.md) is the one-page reference: every file, every directory,
 every `BASIS_*` variable, and which wins when two say the same thing.
 
-- **Command targets** — a host can register executors by name, and a command can say which one
-  it wants: `!@mac xcodebuild -list` where `!cargo test` runs where basis is running. For the
-  container-on-a-Mac case. basis routes; the host writes the executor; nothing about it is
-  confinement ([ADR-0021](docs/adr/0021-a-command-names-where-it-runs.md),
+- **Command targets** — a command can say which named executor it wants: `!@mac xcodebuild -list`
+  where `!cargo test` runs where basis is running. For the container-on-a-Mac case. basis routes;
+  the host writes the executor; nothing about it is confinement. The builder method that
+  registered one is withdrawn, unadopted — the parsing and routing it fed remain
+  ([ADR-0021](docs/adr/0021-a-command-names-where-it-runs.md),
   [docs/targets.md](docs/targets.md)).
 
 Details of each, and of the one `spawn` tool carrying both commands and delegation
@@ -460,7 +461,7 @@ This README describes only what is built, and all of the above is: P0–P4 and t
 through Phase E — the ACP server with modes, session listing and history replay; conversation and
 resume; durable `spawn`/`send`/`ask`/`wait`/`cancel`/`watch`/`inbox` over the filesystem; MCP from
 `.mcp.json` and from the client; templates as commands; hooks and interceptors; the websocket
-bridge; branching; compaction, whose defaults are basis's own — every tool result the model was
+bridge; compaction, whose defaults are basis's own — every tool result the model was
 shown stays in front of it — and whose knobs are `WorkspaceBuilder::with_compaction`; and the SDK
 proper — and since 0.7, conversations as plain files, a child a delegating parent can shape, and
 `basis-tasks` for a Rust host that wants durable handles; since 0.8, a lossless in-process event tap —

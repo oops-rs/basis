@@ -27,8 +27,8 @@ use std::{
 use async_trait::async_trait;
 use basis::{
     AllowAll, ApprovalAnswer, ApprovalDecision, ApprovalRequest, Approver, Bound, CollectingSink,
-    EntryKind, Event, RunUsage, SpawnTool, TranscriptEntry, TurnOptions, approval::ApprovalGate,
-    run::prepare_with_session, tools::SPAWN,
+    Event, RunUsage, SpawnTool, TurnOptions, approval::ApprovalGate, run::prepare_with_session,
+    tools::SPAWN,
 };
 use mentra::{
     BuiltinProvider, ContentBlock, ModelInfo, Role, Runtime, RuntimePolicy, Session, TokenUsage,
@@ -391,9 +391,6 @@ struct Run {
     requests: Requests,
     stopped_by: Option<Bound>,
     usage: RunUsage,
-    /// The parent's conversation as it stands after the turn — where a
-    /// delegation leaves its record.
-    transcript: Vec<TranscriptEntry>,
 }
 
 impl Run {
@@ -470,7 +467,6 @@ async fn drive<A: Approver>(workspace: &Path, script: Script, approver: A) -> Ru
         requests,
         stopped_by: report.stopped_by,
         usage: report.usage,
-        transcript: prepared.transcript(),
     }
 }
 
@@ -721,43 +717,6 @@ async fn delegation_hands_work_over_and_reads_the_answer_back() {
     assert_eq!(
         answer, "the README describes a harness",
         "the subagent's final answer is the tool's result"
-    );
-
-    // And the parent's transcript says where that answer came from. A reader
-    // follows delegation edges to reconstruct who asked whom; without these
-    // two entries `spawn`'s delegations read as work the parent did itself,
-    // and `EntryKind::DelegationRequest` would be a kind basis models and
-    // never writes.
-    let delegation: Vec<&TranscriptEntry> = run
-        .transcript
-        .iter()
-        .filter(|entry| {
-            matches!(
-                entry.kind,
-                EntryKind::DelegationRequest | EntryKind::DelegationResult
-            )
-        })
-        .collect();
-
-    assert_eq!(
-        delegation
-            .iter()
-            .map(|entry| entry.kind.clone())
-            .collect::<Vec<_>>(),
-        [EntryKind::DelegationRequest, EntryKind::DelegationResult],
-        "the request is recorded before the child runs and the result after it"
-    );
-    assert!(
-        delegation[0].text.contains("summarise the README"),
-        "the request carries what was asked: {}",
-        delegation[0].text
-    );
-    assert!(
-        delegation[1]
-            .text
-            .contains("the README describes a harness"),
-        "and the result what came back: {}",
-        delegation[1].text
     );
 }
 

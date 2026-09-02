@@ -13,12 +13,6 @@ use std::thread;
 use mentra::{Provider, provider_core::AuthScheme};
 
 use super::*;
-use crate::tools::spawn::LOCAL_TARGET;
-// Spelled the way a downstream that depends only on `basis` has to spell it,
-// which is what makes the stubs below a real check on the re-exports.
-use crate::runtime::{
-    CommandOutput, CommandRequest, CommandSpec, LocalRuntimeExecutor, RuntimeExecutor,
-};
 use crate::tools::SPAWN;
 use crate::{provider, runtime::credential::Credential};
 // `provider_settlement` is private to `builder.rs`, visible here for the same
@@ -689,142 +683,11 @@ fn a_supplied_instance_is_named_in_the_debug_view() {
     assert!(printed.contains("stub"), "{printed}");
 }
 
-/// An executor that reaches nothing, standing in for whatever a host actually
-/// writes: what is under test is the routing table, not the transport.
-///
-/// Written against `crate::…` paths and nothing else, deliberately. That is
-/// exactly what a downstream depending only on `basis` can write, so if a
-/// mentra type ever stops being re-exported this stops compiling — which is
-/// the whole point of the rule on [`crate::CancellationToken`], enforced here
-/// rather than promised in a doc comment.
-struct Nowhere;
-
-#[crate::async_trait]
-impl RuntimeExecutor for Nowhere {
-    async fn run(&self, _request: CommandRequest) -> Result<CommandOutput, String> {
-        Err("this executor reaches nothing".to_string())
-    }
-}
-
-/// The same, using every re-exported type an executor's body actually touches:
-/// the request, the spec inside it, the output it answers with, and the local
-/// executor a wrapper delegates the ordinary case to.
-struct Echoes;
-
-#[crate::async_trait]
-impl RuntimeExecutor for Echoes {
-    async fn run(&self, request: CommandRequest) -> Result<CommandOutput, String> {
-        if request.target.is_none() {
-            return LocalRuntimeExecutor.run(request).await;
-        }
-        let CommandSpec::Shell { command } = &request.spec;
-
-        Ok(CommandOutput {
-            stdout: command.clone(),
-            stderr: String::new(),
-            success: true,
-            status_code: Some(0),
-            timed_out: false,
-            stdout_truncated: false,
-            stderr_truncated: false,
-        })
-    }
-}
-
-#[test]
-fn an_executor_can_be_written_against_basis_alone() {
-    // A host that depends only on `basis` must be able to satisfy the bound
-    // `with_command_target` asks for. This compiles and registers, which is
-    // the assertion; `Echoes` above is where the type coverage lives.
-    let runtime = offline()
-        .with_command_target("echo", Echoes)
-        .build()
-        .expect("builds offline");
-
-    assert_eq!(runtime.provider(), "openai");
-}
-
 fn offline() -> RuntimeBuilder {
     RuntimeBuilder::default()
         .with_base_url("http://127.0.0.1:1/v1")
         .with_api_key("test-key")
         .with_ephemeral_history()
-}
-
-#[test]
-fn command_targets_are_scoped_and_the_last_registration_wins() {
-    let builder = RuntimeBuilder::default()
-        .with_command_target("mac", Nowhere)
-        .with_command_target("mac", Nowhere)
-        .with_command_target("builder", Nowhere);
-
-    assert_eq!(
-        builder.command_targets.keys().collect::<Vec<_>>(),
-        vec!["builder", "mac"],
-        "one name is one destination, and the last word about it counts"
-    );
-}
-
-#[test]
-fn a_registered_target_is_named_in_the_debug_view_and_its_executor_is_not() {
-    // The Debug impl is hand-written to keep a credential out of a log, so
-    // each new field has to be added to it deliberately — and an executor
-    // closes over whatever reaches its machine.
-    let printed = format!(
-        "{:?}",
-        RuntimeBuilder::default().with_command_target("mac", Nowhere)
-    );
-
-    assert!(printed.contains("command_targets"), "{printed}");
-    assert!(printed.contains("mac"), "{printed}");
-    assert!(!printed.contains("Nowhere"), "{printed}");
-}
-
-#[test]
-fn a_name_that_cannot_be_routed_on_is_refused_by_build_rather_than_by_a_panic() {
-    // Every other piece of bad input on this builder is answered here — an
-    // unattributed credential is refused by `provider::resolve_with` at the
-    // same moment — so a host reading its targets out of its own configuration
-    // can report a bad one instead of losing the process to it.
-    for (name, expected) in [
-        ("my target", "letters, digits"),
-        ("mac/os", "letters, digits"),
-        ("", "letters, digits"),
-        (LOCAL_TARGET, "names no target"),
-    ] {
-        let error = offline()
-            .with_command_target(name, Nowhere)
-            .build()
-            .expect_err("this name cannot be routed on");
-
-        assert!(
-            matches!(&error, RunError::CommandTarget { name: refused, .. } if refused == name),
-            "{name}: {error}"
-        );
-        assert!(error.to_string().contains(expected), "{name}: {error}");
-    }
-}
-
-#[test]
-fn a_usable_name_builds_and_the_model_is_told_the_prefix() {
-    // The end of the wiring: the names the builder collected reach the one
-    // tool that has to know them, and the description a model reads gains the
-    // `!@` prefix exactly when there is somewhere to route to (ADR-0021).
-    let runtime = offline()
-        .with_command_target("mac", Nowhere)
-        .build()
-        .expect("builds offline");
-
-    let described = runtime
-        .mentra_runtime()
-        .tools()
-        .into_iter()
-        .find(|tool| tool.provider.name == SPAWN)
-        .and_then(|tool| tool.provider.description)
-        .expect("spawn is registered and described");
-
-    assert!(described.contains("!@<target> <command>"), "{described}");
-    assert!(described.contains("`mac`"), "{described}");
 }
 
 #[test]

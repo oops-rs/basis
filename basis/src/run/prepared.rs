@@ -268,14 +268,6 @@ impl PreparedRun {
         &mut self.session
     }
 
-    pub(crate) fn session_internal(&self) -> &Session {
-        &self.session
-    }
-
-    pub(crate) fn session_mut_internal(&mut self) -> &mut Session {
-        &mut self.session
-    }
-
     /// Gives the session back, ending basis's involvement.
     ///
     /// A workspace this run was keeping alive

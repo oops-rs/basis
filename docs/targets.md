@@ -6,6 +6,16 @@
 > ([ADR-0013](adr/0013-the-host-owns-the-boundary.md)): the honest thing here is
 > a pattern rather than an implementation, so basis documents one and ships
 > none.
+>
+> **2026-09-02 · No public way to register a target today.**
+> `RuntimeBuilder::with_command_target` — the only builder method that ever
+> populated the routing table — is gone: zero hosts, in this
+> workspace or in nous, had registered one (see ARCHITECTURE.md
+> § Parsimony). `RuntimeExecutor`, `!@<target>` parsing, and the routing this
+> document describes all still exist and still compile; a host that needs
+> this reaches for a released version carrying the setter, or waits for it
+> to return with an adopted caller. §§2–4 below are kept as the shape to
+> write against either way.
 
 ## 1. What a target is
 
@@ -31,6 +41,9 @@ target can reach is whatever that code can reach, and §5 is the paragraph you
 should read before you decide that sentence is a formality.
 
 ## 2. Registering one
+
+Withdrawn — see the dateline note above. The shape it took, when it
+existed:
 
 ```rust
 use basis::Runtime;

@@ -13,10 +13,7 @@
 //! parser applies, and the policies are where a command timeout and a shell
 //! posture actually land.
 
-use std::{
-    path::{Path, PathBuf},
-    sync::Arc,
-};
+use std::path::{Path, PathBuf};
 
 use mentra::RuntimePolicy;
 
@@ -26,7 +23,7 @@ use crate::{
     tools::spawn::{LOCAL_TARGET, is_target_name},
 };
 
-use super::{CommandTargets, RuntimeBuilder, RuntimeExecutor};
+use super::{CommandTargets, RuntimeBuilder};
 
 impl RuntimeBuilder {
     /// How long a command may run before it is killed.
@@ -78,56 +75,6 @@ impl RuntimeBuilder {
         self.command_environment.insert(name.into(), value.into());
         self
     }
-
-    /// Registers an executor this runtime's commands can be routed to by name.
-    ///
-    /// ADR-0021. `spawn` is still the model's one door, and *where a command
-    /// runs* is a dimension of a call through it rather than a second tool:
-    /// `!@<name> <command>` reaches the executor registered here under `name`,
-    /// and a command with no `@` reaches the local one exactly as before. The
-    /// case this exists for is basis running inside a Linux container on a
-    /// macOS build machine, where `cargo test` belongs in the container and
-    /// `xcodebuild` does not exist there at all.
-    ///
-    /// **basis ships no executors and claims nothing about what one reaches.**
-    /// The host writes it — SSH to a forced command, `docker exec`, an agent
-    /// on a build box — and a target is exactly as trusted as that code.
-    /// `docs/targets.md` has the worked pattern, what the executor receives,
-    /// and the honesty this cannot be written without: routing a command
-    /// elsewhere is not confinement, and nothing here may be described as a
-    /// sandbox (ADR-0013).
-    ///
-    /// What the executor is handed is a `CommandRequest` with this runtime's
-    /// fixed command environment already merged, a timeout mentra has already
-    /// clamped, and the `target` name still on it, so one executor registered
-    /// under two names can tell which it was called as. The `cwd` is
-    /// **advisory**: it is a path in *this* process's filesystem, and what it
-    /// means on the far side is the executor's to decide.
-    ///
-    /// The trait and everything an implementation of it names are re-exported
-    /// as [`crate::runtime`]'s executor types, so a host writes one against
-    /// `basis` alone and never adds mentra to its own manifest.
-    ///
-    /// A later call with the same name replaces the earlier one, the same rule
-    /// [`with_command_environment`](Self::with_command_environment) follows.
-    /// Names are `[A-Za-z0-9_-]+` and may not be `local`, which is the wire
-    /// word for *here*; a name that breaks either rule is a
-    /// [`RunError::CommandTarget`] from [`build`](Self::build) rather than a
-    /// panic here, because a host reading its targets out of its own
-    /// configuration should be able to report a bad one the way it reports
-    /// every other bad setting.
-    ///
-    /// Runtime-scoped, for ADR-0018's reason and one of its own: a target that
-    /// changed per repository would be a different machine per repository,
-    /// which is not a thing a repository knows.
-    pub fn with_command_target(
-        mut self,
-        name: impl Into<String>,
-        executor: impl RuntimeExecutor + 'static,
-    ) -> Self {
-        self.command_targets.insert(name.into(), Arc::new(executor));
-        self
-    }
 }
 
 /// Refuses a target name basis cannot route on, before a runtime is built
@@ -142,6 +89,10 @@ impl RuntimeBuilder {
 /// names exist. And `local` is the wire word for *here*
 /// ([`LOCAL_TARGET`]), so a target answering to it would make
 /// `"target":"local"` mean two things in one field.
+///
+/// Dormant while nothing can register a target — `with_command_target` was
+/// withdrawn unadopted — kept beside the table it validates for the day a
+/// registration seam returns.
 pub(super) fn validate_target_names(targets: &CommandTargets) -> Result<(), RunError> {
     for name in targets.keys() {
         if !is_target_name(name) {

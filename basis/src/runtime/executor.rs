@@ -15,11 +15,11 @@
 //! **Then the destination.** ADR-0021 made *where a command runs* a dimension
 //! of a `spawn` call rather than a second tool, and this is the one place that
 //! dimension is acted on: `None` is mentra's local executor, and a name is the
-//! executor the host registered under it
-//! ([`RuntimeBuilder::with_command_target`](crate::RuntimeBuilder::with_command_target)).
-//! basis ships no executors and writes none — what a target can reach is
-//! whatever the host's own code can reach, and basis never describes it as
-//! anything else (ADR-0013, and `docs/targets.md`).
+//! executor registered under it — though nothing currently registers one; see
+//! `docs/targets.md`'s dateline note. basis ships no executors and writes
+//! none — what a target can reach is whatever the host's own code can reach,
+//! and basis never describes it as anything else (ADR-0013, and
+//! `docs/targets.md`).
 //!
 //! A request whose target nothing serves is an error and never a local run.
 //! That direction is not a preference: a command a host addressed to a build

@@ -69,6 +69,14 @@ impl RuntimeBuilder {
     /// The trait is re-exported at the crate root, and everything an
     /// implementation touches as [`crate::runtime`]'s provider-authoring
     /// re-exports, so a host writes one against `basis` alone.
+    ///
+    /// **`#[doc(hidden)]`, not private.** No production host has needed a
+    /// custom `Provider` yet, in this workspace or in nous — this stays the
+    /// seam for the one that does. What keeps it `pub` rather than
+    /// `pub(crate)`: `basis-acp/tests/acp/source.rs` calls it across the
+    /// crate boundary, and this crate's own integration tests do the same,
+    /// neither of which `pub(crate)` or `cfg(test)` can reach.
+    #[doc(hidden)]
     #[must_use]
     pub fn with_provider_instance<P>(self, provider: P) -> Self
     where
@@ -387,6 +395,13 @@ impl RuntimeBuilder {
     /// wire its vendor speaks, so calling this without
     /// [`with_base_url`](Self::with_base_url) says nothing: basis will not
     /// talk `chat/completions` to Anthropic because a builder asked.
+    ///
+    /// **`#[doc(hidden)]`, not private.** Same reasoning as
+    /// [`with_provider_instance`](Self::with_provider_instance): no
+    /// production caller has reached for a custom Responses-speaking gateway
+    /// yet, and this crate's own cross-crate test suites call it directly,
+    /// which is what keeps it `pub`.
+    #[doc(hidden)]
     #[must_use]
     pub fn with_wire(self, wire: Wire) -> Self {
         Self { wire, ..self }

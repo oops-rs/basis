@@ -61,7 +61,7 @@ hot-reloadable extensions. Two pi decisions independently validate ours:
 | Multi-provider LLM API | mentra-provider: OpenAI, Anthropic, Gemini, OpenRouter, Ollama, LM Studio — and any `chat/completions` endpoint by base URL, keyed or not (§8) ✅ | mentra |
 | Session persistence + resume | File-backed sessions (plain files under the store dir since 0.7, ADR-0023 — basis links no database), snapshots | mentra |
 | Compaction | mentra's compaction, configured by basis (`Compaction`) ✅ — every tool result the model was shown is kept, elision is opt-in by number, the trigger is a share of the model's window when the provider reports one — clearing the absolute token threshold leaves that share as the whole trigger rather than turning the feature off — and snapshots follow the store; `PreparedRun::compact` and ACP `/compact` run a pass on demand, bounded by the run's cancel and deadline (`compact_with_options`) | built |
-| Session branching / tree | mentra's transcript tree, exposed on `PreparedRun` ✅ | built |
+| Session branching / tree | mentra's transcript tree — retired unadopted, zero hosts used it (§ Parsimony) | mentra |
 | Lossless host observation | `PreparedRun::register_agent_event_tap` forwards complete Mentra `AgentEvent`s in occurrence order behind an opaque Basis guard; JSONL remains summary-only ✅ | mentra + built |
 | Strict private-runtime reuse | Repeatable registered-provider recipe, discovery-off/fresh-only/resolved-model/exact-roster workspace, explicit per-generation host-tool bind, consuming async rebuild ✅ | built |
 | Builtin tools (files, shell, background exec, tasks) | Mentra builtins, with the roster basis's: `read`, `ls`, `grep`, `glob`, `write`, `edit` (mentra's split file tools, `RuntimeBuilder::with_file_tools`), `compact`, `load_skill`, and `spawn` for commands and delegation. `shell`, `background_run`, `check_background`, `task`, `task_*`, `team_*`, `idle` and — since D2 switched mentra's memory engine off — `memory_pin`/`memory_forget`/`memory_search` are registered but not offered ✅ | mentra + built |
@@ -269,7 +269,7 @@ flowchart LR
     ctx["context: AGENTS.md · skills · templates"]
     ext["declared tools · interception (2 bindings) · MCP client (mcp feature)"]
     runs["runs — minted cheaply: typed output · bounds · cancel · fan-in"]
-    sess["sessions · branching · compaction"]
+    sess["sessions · compaction"]
     rt["Mentra runtime"]
   end
   subgraph box["host OS — isolation, if any, is the operator's"]
@@ -462,7 +462,7 @@ flowchart LR
 | **P2 ACP server** ✅ | `agent-client-protocol` crate; session mapping, permission surfacing, modes, listing, history replay. Sessions survive turns, so conversation and resume work independent of protocol | done |
 | **P3 Extension points** ✅ | MCP client honoring `.mcp.json` *and* the servers an ACP client sends; subprocess hooks (allow/deny/modify); prompt templates surfaced as ACP commands; ws↔stdio bridge for acp-ui | done |
 | **P4 Loop + Docker** ✅ | `watch` scheduler with skip-if-unchanged — retired by ADR-0014, its bounds and fingerprint kept; Dockerfile, state volume, shell grant — withdrawn by ADR-0013 for [`containerization.md`](containerization.md) | done |
-| P5 Depth | Branching ✅ — two-way since mentra 0.16, so an abandoned line of work can be returned to; compaction tuning ✅ — `Compaction` on `WorkspaceBuilder`, with context-window awareness still open; packages convention, provider OAuth remain | ongoing |
+| P5 Depth | Branching ✅ — two-way since mentra 0.16, later retired unadopted (§ Parsimony); compaction tuning ✅ — `Compaction` on `WorkspaceBuilder`, with context-window awareness still open; packages convention, provider OAuth remain | ongoing |
 
 This table is the record of how basis was built, not the current plan. What follows P5 is the
 SDK-first transition of ADR-0010…0015, phased in [`REDESIGN.md`](REDESIGN.md) §3: Phase A
@@ -683,17 +683,46 @@ Reuse returns when Mentra can mint a fresh provider session scope from an existi
 ([oops-rs/mentra#46](https://github.com/oops-rs/mentra/issues/46)); until then Basis makes no
 reuse claim it cannot prove.
 
+### Parsimony: an unadopted tree, a target setter, two hidden seams
+
+Three smaller removals from the same pass, none ADR-scale on its own, recorded together
+because a caller upgrading past this point needs the whole list at once.
+
+**Gone, and it stops compiling.** `basis::branch` in full: `TranscriptEntry`, `EntryKind`,
+`BranchError`, and the five `PreparedRun` methods the module added —
+`transcript`, `abandoned`, `leaf`, `children`, `branch_from`. Nothing in this workspace or in
+nous ever called any of them; mentra's transcript tree underneath is unaffected, basis simply
+stops surfacing it. Also gone: `RuntimeBuilder::with_command_target` (§ Command targets,
+below) — the one builder method that ever populated the command-target routing table,
+test-only, zero production callers. `RunError::CommandTarget` and the name validation
+behind it stay, dormant, until a registration seam returns.
+
+**Gone from the generated docs, not from the API.** `RuntimeBuilder::with_provider_instance`
+and `RuntimeBuilder::with_wire` gain `#[doc(hidden)]`, the same demotion
+`basis::run::prepare_with_session` already carries. Neither call compiles any differently and a
+caller that already had one keeps it unchanged; what changes is that neither appears in
+generated documentation or a new caller's autocomplete. Unlike `with_command_target`, whose own
+doc named no host still wanting it, both of these read as the intended seam for a host bringing
+its own provider or a custom Responses gateway — no production caller has needed one yet, but
+neither doc disclaims itself as legacy, so demotion rather than removal.
+
+Nothing here had an adopted caller to migrate, so there is no replacement to reach for. If a
+host ever needs the transcript tree or named command targets again, the next breaking release
+is the first place either could plausibly return.
+
 ### Command targets
 
-`!@<target> <command>` runs a command on an executor the host registered by name, rather
-than where basis is running — the container-on-a-Mac case, where `cargo test` belongs in the
-container and `xcodebuild` is not in it at all. `spawn` stays the one door: *where* became a
-dimension of the call, because a second tool would have been a second name at the approval
-gate and a second namespace of remembered rules for one question. Targets are registered on
-the runtime (`RuntimeBuilder::with_command_target`), a name nothing registered is refused
-before the approver is asked, and the parsed call an approver reads gains a fourth key —
-`{mode, body, cwd, target}`, reading `"local"` when no target was named, so every rule
-already written keeps matching. **basis ships no executors**: what a target reaches is
+`!@<target> <command>` names an executor to run a command on by name, rather than where basis
+is running — the container-on-a-Mac case, where `cargo test` belongs in the container and
+`xcodebuild` is not in it at all. `spawn` stays the one door: *where* became a dimension of the
+call, because a second tool would have been a second name at the approval gate and a second
+namespace of remembered rules for one question. The parser, `RuntimeExecutor`, and the routing
+table stay; `RuntimeBuilder::with_command_target`, the only builder method that ever populated
+that table, is gone — zero hosts had registered one — so today no
+name is ever registered and every `!@<target>` call is refused before the approver is asked, the
+same as a name nothing registered always was. The parsed call an approver reads still gains a
+fourth key — `{mode, body, cwd, target}`, reading `"local"` when no target was named, so every
+rule already written keeps matching. **basis ships no executors**: what a target would reach is
 whatever the host's own code reaches, and none of it is confinement
 ([ADR-0013](adr/0013-the-host-owns-the-boundary.md)). [docs/targets.md](targets.md) has the
 worked SSH forced-command pattern, what the executor receives, and what the arrangement does
