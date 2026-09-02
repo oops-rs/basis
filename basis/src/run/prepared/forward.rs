@@ -50,8 +50,11 @@ pub(super) async fn forward_events<S: EventSink, A: Approver>(
             received = receiver.recv() => {
                 match received {
                     Ok(event) => {
-                        resolve_if_permission(&event, &mut approver, &permissions).await;
+                        let followup = resolve_if_permission(&event, &mut approver, &permissions).await;
                         writing = writing && emit_session_event(&mut sink, &event);
+                        if let Some(notice) = followup {
+                            writing = writing && emit(&mut sink, notice);
+                        }
                     }
                     // Lagging is recoverable — the receiver keeps working, it
                     // just skipped ahead. Say so and carry on. The lossless
@@ -90,8 +93,11 @@ async fn drain<S: EventSink, A: Approver>(
     loop {
         match receiver.try_recv() {
             Ok(event) => {
-                resolve_if_permission(&event, approver, permissions).await;
+                let followup = resolve_if_permission(&event, approver, permissions).await;
                 writing = writing && emit_session_event(sink, &event);
+                if let Some(notice) = followup {
+                    writing = writing && emit(sink, notice);
+                }
             }
             Err(TryRecvError::Lagged(dropped)) => {
                 writing = writing && emit(sink, lag_notice(dropped));
@@ -101,7 +107,8 @@ async fn drain<S: EventSink, A: Approver>(
     }
 }
 
-/// Answers a pending permission request.
+/// Answers a pending permission request, and reports when the answer had to be
+/// downgraded to a denial.
 ///
 /// The turn is blocked inside mentra waiting for this, so failing to resolve
 /// would hang the run — which is what happened before basis answered at all.
@@ -109,7 +116,7 @@ async fn resolve_if_permission<A: Approver>(
     event: &SessionEvent,
     approver: &mut A,
     permissions: &SessionPermissionHandle,
-) {
+) -> Option<Event> {
     let SessionEvent::PermissionRequested {
         request_id,
         tool_call_id,
@@ -119,7 +126,7 @@ async fn resolve_if_permission<A: Approver>(
         classification,
     } = event
     else {
-        return;
+        return None;
     };
 
     let answer = approver
@@ -139,9 +146,38 @@ async fn resolve_if_permission<A: Approver>(
         })
         .await;
 
-    // A failure here means the request was already resolved or withdrawn;
-    // there is nothing useful left to do about it.
-    let _ = permissions.resolve_permission(request_id, permission_decision(answer));
+    // Fallible since mentra 0.26, and in two different ways. A remembered
+    // answer is persisted to the live rule store *before* the request is
+    // resolved, and on a store failure mentra puts the pending request back
+    // unanswered — so ignoring the error here would leave the turn blocked on
+    // a oneshot nobody will ever answer. The other failure is the old one: the
+    // request was already resolved or withdrawn (a timeout, a cancellation),
+    // and there is nothing left to answer.
+    //
+    // The retry below tells the two apart by what it finds. A restored request
+    // accepts a plain denial — nothing to persist, so it cannot fail the same
+    // way — which is the fail-closed reading of an answer that could not be
+    // recorded: the person's consent was conditional on being remembered, and
+    // a run must end deterministically rather than hang on the store. A
+    // request that is simply gone refuses the retry too, and silence is right
+    // for that half: mentra already resolved it.
+    let recorded = permissions.resolve_permission(request_id, permission_decision(answer));
+    let Err(error) = recorded else {
+        return None;
+    };
+
+    let denied = PermissionDecision::deny().with_reason(format!(
+        "the approval for {tool_name} could not be recorded ({error}), so the call was denied"
+    ));
+    permissions
+        .resolve_permission(request_id, denied)
+        .is_ok()
+        .then(|| Event::Notice {
+            severity: NoticeSeverity::Warning,
+            message: format!(
+                "the answer for {tool_name} could not be recorded ({error}); the call was denied"
+            ),
+        })
 }
 
 /// Restates an approver's answer in the terms mentra resolves with.

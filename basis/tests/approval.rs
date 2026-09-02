@@ -330,6 +330,124 @@ async fn a_refusal_with_nothing_to_say_still_refuses() {
     );
 }
 
+/// mentra 0.26 made resolving a remembered answer fallible: the rule is
+/// persisted to the live store *before* the oneshot is answered, and a store
+/// failure restores the pending request unanswered. Swallowing that error is a
+/// turn blocked forever on a request nobody will answer again — so basis
+/// denies the restored request instead, tells the model why in the tool
+/// result, and says on the stream that the answer was downgraded.
+#[cfg(unix)]
+#[tokio::test]
+async fn an_answer_that_cannot_be_recorded_denies_rather_than_hanging() {
+    use std::os::unix::fs::PermissionsExt;
+
+    use basis::event::NoticeSeverity;
+    use mentra::runtime::FileRuntimeStore;
+
+    struct AlwaysForSession;
+
+    #[async_trait]
+    impl Approver for AlwaysForSession {
+        async fn approve(&mut self, _request: &ApprovalRequest) -> ApprovalAnswer {
+            ApprovalDecision::AllowForSession.into()
+        }
+    }
+
+    let workspace = tempfile::tempdir().expect("tempdir");
+    let store_dir = tempfile::tempdir().expect("tempdir");
+
+    let model = ModelInfo::new("scripted-model", BuiltinProvider::OpenAI);
+    let provider = ScriptedProvider::new(
+        model.clone(),
+        vec![
+            // A plain first turn, so every store file the turn machinery
+            // touches — the agent's rows, `runs.jsonl` — exists before the
+            // root goes read-only below.
+            vec![ContentBlock::text("warmed")],
+            vec![ContentBlock::ToolUse {
+                id: "call-1".to_string(),
+                name: "files".to_string(),
+                input: json!({
+                    "operations": [
+                        { "op": "create", "path": "made.txt", "content": "hi" }
+                    ]
+                }),
+            }],
+            vec![ContentBlock::text("done")],
+        ],
+    );
+    let runtime = Runtime::builder()
+        .with_provider_instance(provider)
+        .with_store(FileRuntimeStore::new(store_dir.path()))
+        .with_policy(RuntimePolicy::workspace_bounded(workspace.path()))
+        .with_tool_authorizer(ApprovalGate::new())
+        .build()
+        .expect("runtime builds");
+    let session = session(&runtime, workspace.path(), model);
+
+    let mut prepared = prepare_with_session(
+        session,
+        workspace.path(),
+        "warm the store",
+        &context(),
+        "openai",
+        "scripted-model",
+    )
+    .expect("prepared");
+    prepared
+        .execute_with_approver(CollectingSink::new(), AllowAll)
+        .await
+        .expect("the warming turn runs");
+
+    // Remembering a rule rewrites `rules.json` atomically — a fresh temp file
+    // in the store root — so a read-only root is exactly a store that can
+    // still read its rules (there are none) and cannot record a new one.
+    std::fs::set_permissions(store_dir.path(), std::fs::Permissions::from_mode(0o555))
+        .expect("make the store root read-only");
+
+    let report = tokio::time::timeout(
+        NOT_STUCK,
+        prepared.send_with_options(
+            "make a file",
+            CollectingSink::new(),
+            AlwaysForSession,
+            basis::TurnOptions::default(),
+        ),
+    )
+    .await
+    .expect("an answer the store cannot record must deny, not hang the turn")
+    .expect("the run completes");
+
+    // So the tempdir can clean itself up whatever the assertions below say.
+    let _ = std::fs::set_permissions(store_dir.path(), std::fs::Permissions::from_mode(0o755));
+
+    let events = report.sink.into_events();
+    assert_eq!(
+        tool_failed(&events, "files"),
+        Some(true),
+        "the downgraded answer is a denial: {events:?}"
+    );
+    let refusal = tool_result(&events, "files").expect("the refused call still completes");
+    assert!(
+        refusal.contains("could not be recorded"),
+        "the model must read why its approval became a refusal: {refusal}"
+    );
+    assert!(
+        !workspace.path().join("made.txt").exists(),
+        "a write whose approval could not be recorded must not happen"
+    );
+    assert!(
+        events.iter().any(|event| matches!(
+            event,
+            Event::Notice {
+                severity: NoticeSeverity::Warning,
+                message,
+            } if message.contains("could not be recorded")
+        )),
+        "the stream must say the answer was downgraded: {events:?}"
+    );
+}
+
 #[tokio::test]
 async fn a_read_only_call_is_never_put_to_the_approver() {
     let workspace = tempfile::tempdir().expect("tempdir");
