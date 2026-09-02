@@ -1,8 +1,8 @@
 # Embedding basis — the `basis` SDK
 
 > The reference for the surface the [README](../README.md) summarizes. Design rationale is in
-> [`ARCHITECTURE.md`](ARCHITECTURE.md); the decisions are in [`adr/`](adr/); the ledger of the
-> SDK-first transition is [`REDESIGN.md`](REDESIGN.md).
+> [`ARCHITECTURE.md`](ARCHITECTURE.md); the decisions are in [`adr/`](adr/); the closed ledger of the
+> SDK-first transition is [`archive/REDESIGN.md`](archive/REDESIGN.md).
 
 In-process, the harness is **`basis`** — the run lifecycle, workspace discovery, the
 event stream, and the seams, with no protocol, no transport, and no terminal code in the
@@ -599,7 +599,7 @@ is inside the **bound** and inside the **tally** alike: the subagent runs on the
 accounting handle, so what it spends is what a `BudgetPool` meters and what a
 `--token-budget` stops the parent on — and since mentra `5f303b8` and basis `e22aa63` the
 child's usage is relayed onto the parent's stream too, so `RunReport::usage` agrees with
-the figure the bound stops on. [REDESIGN.md](REDESIGN.md) records the gap as closed.
+the figure the bound stops on. [REDESIGN.md](archive/REDESIGN.md) records the gap as closed.
 
 ## One stream for many runs
 

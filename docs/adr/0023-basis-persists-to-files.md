@@ -15,7 +15,7 @@ Task state — `meta.json`, `inbox.json`, `events.jsonl`, `terminal.json`
 (ADR-0019) — is files under a documented directory convention, chosen
 deliberately when the daemon was retired: no database to manage, readable
 with ordinary tools, one atomic-replace write per update. Memory (0.6.0,
-`docs/REDESIGN.md`'s D2 row) followed the same shape by the same reasoning:
+`docs/archive/REDESIGN.md`'s D2 row) followed the same shape by the same reasoning:
 one `.md` file per memory, frontmatter for the three fields basis reads
 (`name`, `description`, `type`), body free, under two roots basis resolves
 and a host can override — no database, no tool, discovery folded into the

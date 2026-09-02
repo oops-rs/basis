@@ -1,7 +1,7 @@
 # 0016 — One delegation surface: `spawn` is the only door
 
 > Status: Accepted · 2026-08-11 · **built** — `spawn` shipped in `74ef59f`;
-> [`REDESIGN.md`](../REDESIGN.md) §2's *One delegation surface (`spawn`)* row
+> [`REDESIGN.md`](../archive/REDESIGN.md) §2's *One delegation surface (`spawn`)* row
 > records the surface, and the *Delegated spend is tallied and the delegation
 > recorded* row the accounting §3 asked for. Amended below, 2026-08-29.
 > Amends [`0013-the-host-owns-the-boundary.md`](0013-the-host-owns-the-boundary.md)

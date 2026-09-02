@@ -1,5 +1,12 @@
 # Structured agent concurrency implementation plan
 
+> Status: **Superseded by
+> [`../adr/0019-the-filesystem-is-the-coordination-surface.md`](../adr/0019-the-filesystem-is-the-coordination-surface.md)**,
+> which replaced this plan's daemon-based architecture with the filesystem
+> coordination surface. The evidence files this plan's "Shipped" slices cite
+> (commit-linked daemon/registry/wait-graph code) were deleted when ADR-0019
+> landed.
+
 Spec: [docs/spec/2026-08-13-structured-agent-concurrency.md](../spec/2026-08-13-structured-agent-concurrency.md)
 
 ## Implementation plan

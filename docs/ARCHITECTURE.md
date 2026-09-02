@@ -1,6 +1,6 @@
 # basis — Architecture
 
-> rev 14 · 2026-09-01 · **basis** — the minimal set everything else is built from
+> rev 15 · 2026-09-02 · **basis** — the minimal set everything else is built from
 > The *how*. For the *why* — problem, idea, bets — see [`PROPOSAL.md`](PROPOSAL.md);
 > locked decisions live in [`adr/`](adr/); deferred ideas in [`proposals/`](proposals/);
 > research grounding in [`p0-groundwork.md`](p0-groundwork.md).
@@ -30,8 +30,8 @@
 > adapter-neutral approval policy, served-session source, runtime/workspace
 > pool, and turn discipline have since moved out of ACP into `basis-host`, with
 > ACP retaining only protocol translation (ADR-0025). Programmatic hosts can
-> now supply typed hooks and declared tools without file discovery. The ledger and phases are
-> in [`REDESIGN.md`](REDESIGN.md).
+> now supply typed hooks and declared tools without file discovery. The closed ledger and
+> phases are in [`archive/REDESIGN.md`](archive/REDESIGN.md).
 > Reference bar: [pi](https://github.com/earendil-works/pi) (earendil-works) — minimal core, complete harness.
 > General-purpose: no domain assumptions. Periodic bug-checking is one use case, never a design input.
 
@@ -465,7 +465,7 @@ flowchart LR
 | P5 Depth | Branching ✅ — two-way since mentra 0.16, later retired unadopted (§ Parsimony); compaction tuning ✅ — `Compaction` on `WorkspaceBuilder`, with context-window awareness still open; packages convention, provider OAuth remain | ongoing |
 
 This table is the record of how basis was built, not the current plan. What follows P5 is the
-SDK-first transition of ADR-0010…0015, phased in [`REDESIGN.md`](REDESIGN.md) §3: Phase A
+SDK-first transition of ADR-0010…0015, phased in [`archive/REDESIGN.md`](archive/REDESIGN.md) §3: Phase A
 (posture and pruning), Phase B (structure — the crate split, the `mcp` feature, approval
 as a trait), Phase C (the SDK — the `Workspace` / run split, typed output, cancellation,
 the shared budget, event fan-in) and Phase D (bindings — interception's second binding,
@@ -496,7 +496,7 @@ periodic check — so no single use case bends the API toward itself.
   workarounds. The discipline is direction, not permission — capabilities generic enough for
   any harness land in mentra; basis keeps only harness-specific glue. Track each gap as a mentra
   issue even when fixing it immediately, so the API story stays legible to other mentra users.
-  Nine stand named in [`REDESIGN.md`](REDESIGN.md) §2's footnotes across Phases B–D, and as
+  Nine stand named in [`archive/REDESIGN.md`](archive/REDESIGN.md) §2's footnotes across Phases B–D, and as
   of the wave after Phase D **all nine are closed** — eight fixed upstream, one built in basis
   where it belonged. That is the first clean tally the ledger has had, and it measures the
   discipline rather than mentra's completeness: three further candidates were named on the
