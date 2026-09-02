@@ -20,19 +20,22 @@ use serde::{Deserialize, Serialize};
 /// zero. Basis records the reports through the run's synchronous observer, so
 /// a lagging presentation stream cannot make the in-process tally undercount.
 ///
-/// It counts the rounds of a *turn*, and a summarizing pass is not one. The
-/// model call a compaction makes — automatic, the model's own `compact`
-/// intrinsic, or [`PreparedRun::compact`](crate::PreparedRun::compact) — is
-/// billed by the provider and absent here, because mentra reports no usage
-/// for it: its compaction engine reads the response's content and drops its
-/// `usage` (mentra 0.24.0 `src/compaction.rs`, `summarize_locally`), and the
-/// provider-native remote path returns a response type with no usage on it at
-/// all. No `UsageReport` is emitted, so nothing reaches this tally, mentra's
-/// own `token_budget` counter, or a [`BudgetPool`](crate::BudgetPool). A
-/// long-running conversation therefore under-reports by roughly one
-/// summarizing request per compaction. Basis does not estimate the shortfall:
-/// this field's whole contract is that it is what the provider said, and the
-/// missing report is upstream's to add (ADR-0005).
+/// It counts every model call the run reported, summarizing passes included.
+/// A compaction that happens inside a run — automatic, context-overflow
+/// recovery, or the model's own `compact` intrinsic — is a provider request
+/// like any other, and since mentra 0.26 it reports like one: one
+/// `UsageReport` per provider sample, emitted after the compaction's own
+/// events, folded in here through the same observer, and added to mentra's
+/// own `token_budget` counter — and so to any
+/// [`BudgetPool`](crate::BudgetPool) — at the same point. That is real spend
+/// truthfully accounted, not inflation: the summarizing request was always
+/// billed, it just used to be invisible here (the pre-0.26 engine dropped
+/// the response's `usage` on the floor). The one summarizing pass this
+/// figure never carries is the standalone
+/// [`PreparedRun::compact`](crate::PreparedRun::compact), which is not a run
+/// and returns no report — its samples reach the caller as
+/// [`Event::Usage`](crate::Event) lines on the sink the pass borrows, and
+/// the stream is the account for that verb.
 ///
 /// It counts the rounds of the run's own agent *and* of the work that agent
 /// delegates. A delegating tool — basis's [`spawn`](crate::tools::spawn), or

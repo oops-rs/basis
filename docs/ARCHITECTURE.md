@@ -767,6 +767,27 @@ shared-runtime refusals (`DiscoveryDisabledSharedRuntime`, `FreshOnlySharedRunti
 at the very top of `open()`, before workspace-path resolution, so a build with both problems
 reports the runtime-shape refusal first and performs no filesystem work to do it.
 
+### Compaction usage: real spend, now counted
+
+A summarizing pass was always a billed provider request; it used to be invisible to basis's
+accounting because the runtime dropped the response's usage while extracting summary text. It
+no longer is. A compaction inside a run — automatic, context-overflow recovery, the model's
+own `compact` intrinsic — reports one ordinary `usage` event per provider sample after its
+announcement pair, and that usage lands in `RunReport::usage`, in `RunFinished`'s figure, in
+the run's token budget, and in any shared `BudgetPool`, at the same point.
+
+Two consequences to plan for. Usage figures grow: a long conversation's totals now include
+roughly one summarizing request per compaction that older streams silently omitted, so a
+consumer comparing runs across the boundary is comparing a corrected meter against a broken
+one. And budgets are now charged for compaction: a run near its token allowance can end
+earlier than it used to, on the same work, because the allowance now pays for the summary
+too. Both are correct accounting — the spend was always real — and basis still estimates
+nothing: a provider that reports no usage emits no usage line and charges nothing.
+
+The standalone `PreparedRun::compact` verb is the one summarizing pass outside that rule: it
+is not a run, has no report and no run counter, so its samples reach only the sink it borrows
+— the stream is the account for `/compact`, and a spent budget still does not refuse it.
+
 ### Command targets
 
 `!@<target> <command>` names an executor to run a command on by name, rather than where basis

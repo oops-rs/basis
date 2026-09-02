@@ -6,11 +6,12 @@
 //! here runs against a loopback endpoint that answers one and records what it
 //! was asked.
 //!
-//! The interesting claim is about the *stream*. mentra installs the tap that
-//! carries an agent event onto a session's event stream only for the duration
-//! of a turn (`Session::begin_turn`/`finish_turn`), so a compaction invoked
-//! outside one reaches no subscriber at all. basis emits both events itself,
-//! from what mentra returned — see `PreparedRun::compact`.
+//! The interesting claim is about the *stream*. mentra installs its
+//! agent-event forwarder for the duration of the pass (`Session::compact`),
+//! so the compaction's announcement pair — and, since mentra 0.26, one usage
+//! report per provider sample — reach the session's stream exactly as they do
+//! when a threshold fires; basis subscribes first and drains after — see
+//! `PreparedRun::compact`.
 
 use std::{
     io::{Read, Write},
@@ -85,7 +86,76 @@ async fn compacting_a_conversation_reports_what_it_replaced_on_the_stream() {
         }
         other => panic!("expected a completed compaction, got {other:?}"),
     }
-    assert_eq!(events.len(), 2, "and nothing else: {events:?}");
+    // This endpoint's summarizing response carries no `usage` field, and a
+    // provider that reports no usage emits no usage line: absence stays
+    // absence, never a guessed zero. The reporting half of the contract is
+    // `a_summarizing_pass_reports_its_provider_usage_on_the_stream`.
+    assert_eq!(
+        events.len(),
+        2,
+        "no usage was reported, so nothing else may appear: {events:?}"
+    );
+}
+
+#[tokio::test]
+async fn a_summarizing_pass_reports_its_provider_usage_on_the_stream() {
+    // The pass is a billed model call, and since mentra 0.26 its exact
+    // provider usage follows the announcement pair as an ordinary usage
+    // event — one per provider sample, which on this local summarizing path
+    // is exactly one. The stream is the account for a standalone pass: there
+    // is no RunReport on this verb to carry a figure, so a caller metering
+    // `/compact` sums these lines.
+    let endpoint = ScriptedEndpoint::start_reporting_usage();
+    let dir = tempfile::tempdir().expect("tempdir");
+    let store_dir = tempfile::tempdir().expect("tempdir");
+
+    let workspace = offline(dir.path())
+        .with_runtime(endpoint.runtime(store_dir.path()))
+        .open()
+        .await
+        .expect("opens");
+
+    let mut run = workspace.prepare("go").expect("mints");
+    run.execute_with_approver(CollectingSink::default(), AllowAll)
+        .await
+        .expect("the scripted turn runs");
+
+    let mut sink = CollectingSink::default();
+    run.compact(None, &mut sink)
+        .await
+        .expect("the compacting pass runs")
+        .expect("there is older history to summarize");
+
+    let events = sink.into_events();
+    assert!(
+        matches!(&events[0], Event::CompactionStarted { .. }),
+        "{events:?}"
+    );
+    assert!(
+        matches!(&events[1], Event::CompactionCompleted { .. }),
+        "{events:?}"
+    );
+    match &events[2] {
+        // No agent-id assertion: mentra's usage report deliberately carries
+        // none to attribute by (see `RunUsage`'s aggregate-accounting note).
+        Event::Usage {
+            input_tokens,
+            output_tokens,
+            ..
+        } => {
+            assert_eq!(
+                (*input_tokens, *output_tokens),
+                (SUMMARY_PROMPT_TOKENS, SUMMARY_COMPLETION_TOKENS),
+                "the usage line carries what the provider said, verbatim"
+            );
+        }
+        other => panic!("expected the pass's own usage after its pair, got {other:?}"),
+    }
+    assert_eq!(
+        events.len(),
+        3,
+        "one sample was reported, so exactly one usage line: {events:?}"
+    );
 }
 
 #[tokio::test]
@@ -724,6 +794,15 @@ impl ScriptedEndpoint {
         })
     }
 
+    /// Answers the summarizing call with a `usage`-carrying final chunk, the
+    /// way a real chat/completions endpoint asked for `include_usage` does.
+    fn start_reporting_usage() -> Self {
+        Self::start_with(WhenSummarizing {
+            report_usage: true,
+            ..WhenSummarizing::default()
+        })
+    }
+
     /// Never answers the summarizing call, so a pass is provably still in
     /// flight when whatever is supposed to stop it does.
     fn start_stalling_compaction() -> Self {
@@ -806,6 +885,8 @@ struct WhenSummarizing {
     stall: bool,
     /// Trip this the moment the request lands, before stalling on it.
     cancels: Option<CancellationToken>,
+    /// Carry a `usage` object on the summary's final chunk.
+    report_usage: bool,
 }
 
 /// How long a stalled summarizing request is held before the thread lets go.
@@ -846,7 +927,7 @@ fn answer(mut stream: TcpStream, recorded: &Mutex<Vec<String>>, when: &WhenSumma
             body.len()
         )
     } else {
-        let body = sse_body();
+        let body = sse_body(summarizing && when.report_usage);
         format!(
             "HTTP/1.1 200 OK\r\nconnection: close\r\ncontent-type: text/event-stream\r\ncontent-length: {}\r\n\r\n{body}",
             body.len()
@@ -855,21 +936,40 @@ fn answer(mut stream: TcpStream, recorded: &Mutex<Vec<String>>, when: &WhenSumma
     let _ = stream.write_all(response.as_bytes());
 }
 
+/// What the usage-reporting endpoint says the summary cost, pinned so the
+/// stream assertion reads the same numbers off `Event::Usage`.
+const SUMMARY_PROMPT_TOKENS: u64 = 1200;
+const SUMMARY_COMPLETION_TOKENS: u64 = 60;
+
 /// The smallest chat/completions stream that is a finished assistant turn.
 ///
 /// A custom `base_url` speaks chat/completions, which is also why compaction
 /// here takes mentra's *local* summarizing path: the wire declares
 /// `supports_history_compaction: false`, so there is no remote `compact` call
 /// to answer and the summary is asked for as an ordinary completion.
-fn sse_body() -> String {
-    [
-        r#"{"id":"chatcmpl_1","model":"test-model","choices":[{"index":0,"delta":{"role":"assistant","content":"done"}}]}"#,
-        r#"{"id":"chatcmpl_1","choices":[{"index":0,"delta":{},"finish_reason":"stop"}]}"#,
-        "[DONE]",
-    ]
-    .iter()
-    .map(|event| format!("data: {event}\n\n"))
-    .collect()
+///
+/// `with_usage` appends the final `usage`-carrying chunk `include_usage` asks
+/// a real endpoint for; without it the stream reports no usage at all, which
+/// is its own case worth pinning.
+fn sse_body(with_usage: bool) -> String {
+    let usage_chunk = format!(
+        r#"{{"id":"chatcmpl_1","choices":[],"usage":{{"prompt_tokens":{SUMMARY_PROMPT_TOKENS},"completion_tokens":{SUMMARY_COMPLETION_TOKENS},"total_tokens":{}}}}}"#,
+        SUMMARY_PROMPT_TOKENS + SUMMARY_COMPLETION_TOKENS
+    );
+    let mut events = vec![
+        r#"{"id":"chatcmpl_1","model":"test-model","choices":[{"index":0,"delta":{"role":"assistant","content":"done"}}]}"#.to_string(),
+        r#"{"id":"chatcmpl_1","choices":[{"index":0,"delta":{},"finish_reason":"stop"}]}"#
+            .to_string(),
+    ];
+    if with_usage {
+        events.push(usage_chunk);
+    }
+    events.push("[DONE]".to_string());
+
+    events
+        .iter()
+        .map(|event| format!("data: {event}\n\n"))
+        .collect()
 }
 
 /// Reads a request up to the end of its declared body. Reading to
