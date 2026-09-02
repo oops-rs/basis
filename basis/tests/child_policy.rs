@@ -877,6 +877,156 @@ async fn a_delegated_child_cannot_call_a_later_siblings_bridged_tool_either() {
     );
 }
 
+/// What a resume can bring up to date about a child's hides, and what it
+/// cannot about its parent's.
+///
+/// mentra persists the tool profile and `SessionResumeOptions` carries no
+/// replacement, so a resumed conversation's own roster is the one its first
+/// mint froze — the parent below really is offered a name that appeared while
+/// its conversation sat on disk, and that is asserted, because it is what makes
+/// the rest load-bearing rather than incidental.
+///
+/// The agent ledger is the half basis *can* restate. `Workspace::resume`
+/// records what is foreign **now**, so a child delegated from the resumed
+/// session inherits a hidden set computed now rather than then — and a
+/// `ChildSpec` roster, which replaces the child's cloned profile wholesale,
+/// cannot hand a narrowed child the server its parent's own workspace never
+/// configured. Without that record the ledger would still be answering with
+/// what the mint saw, which is a set that predates the name entirely.
+///
+/// The name is registered as a runtime **global**, for the reason
+/// `a_narrowed_child_keeps_every_hide_its_parent_was_minted_with` gives: mentra
+/// exposes no way to enumerate one audience's registrations (upstream
+/// `mentra#55`), so a same-directory sibling's *bridged* names cannot be put on
+/// the registry from out here without a live MCP server. Both limbs feed one
+/// set through the one `hidden.extend(…)` line of `Workspace::resumed_tools`,
+/// which is the line under test.
+#[cfg(feature = "mcp")]
+#[tokio::test]
+async fn a_child_of_a_resumed_parent_inherits_the_hides_the_resume_computed() {
+    const PROD_DB_QUERY: &str = "mcp__prod-db__query";
+
+    struct ProdDbQuery;
+
+    impl mentra::tool::ToolDefinition for ProdDbQuery {
+        fn descriptor(&self) -> mentra::tool::RuntimeToolDescriptor {
+            mentra::tool::RuntimeToolDescriptor::builder(PROD_DB_QUERY)
+                .description("query the production database")
+                .input_schema(json!({"type": "object"}))
+                .build()
+        }
+    }
+
+    #[async_trait]
+    impl mentra::tool::ToolExecutor for ProdDbQuery {
+        async fn execute(
+            &self,
+            _ctx: mentra::tool::ParallelToolContext,
+            _input: serde_json::Value,
+        ) -> mentra::tool::ToolResult {
+            Ok("every row".to_string())
+        }
+    }
+
+    let root = tempfile::tempdir().expect("tempdir");
+    let (provider, asked) = ScriptedProvider::new(
+        BuiltinProvider::OpenAI,
+        vec![parent_model()],
+        vec![
+            Turn::saying("minted"),
+            Turn::calling("call-0", "triage: is this real?"),
+            Turn::saying("child done"),
+            Turn::saying("parent done"),
+        ],
+    );
+    let shared = Arc::new(
+        basis::Runtime::builder()
+            .with_provider_instance(provider)
+            .with_ephemeral_history()
+            .with_child_policy(|child: &ChildContext<'_>| {
+                if child.prompt().starts_with("triage:") {
+                    ChildSpec::inherit().with_roster(ToolRoster::hide(["write"]))
+                } else {
+                    ChildSpec::inherit()
+                }
+            })
+            .build()
+            .expect("builds offline"),
+    );
+
+    let stranger = offline_workspace(root.path(), shared)
+        .with_mcp(basis::McpConfig {
+            workspace_file: std::path::PathBuf::new(),
+            global_dir: None,
+            supplied: Vec::new(),
+        })
+        .open()
+        .await
+        .expect("opens");
+
+    let mut minted = stranger
+        .prepare(basis::RunSpec::new("do the thing"))
+        .expect("mints");
+    let agent_id = minted.agent_id().to_string();
+    minted
+        .execute_with_approver(CollectingSink::new(), AllowAll)
+        .await
+        .expect("the run completes");
+    // The live run holds the agent's lease, and a resume is what a later
+    // process does.
+    drop(minted);
+
+    // Between the two: a name under a server this workspace never configured,
+    // appearing while the conversation sat on disk.
+    stranger
+        .mentra_runtime()
+        .try_register_tool(ProdDbQuery)
+        .expect("nothing answers to that name yet");
+
+    stranger
+        .resume(&agent_id, basis::RunSpec::new("keep going"))
+        .expect("its own workspace resumes it")
+        .execute_with_approver(CollectingSink::new(), AllowAll)
+        .await
+        .expect("the run completes");
+
+    let rosters: Vec<Vec<String>> = asked
+        .lock()
+        .expect("not poisoned")
+        .iter()
+        .map(|request| request.tools.clone())
+        .collect();
+    assert_eq!(
+        rosters.len(),
+        4,
+        "mint, resumed parent, child, resumed parent"
+    );
+
+    assert!(
+        !rosters[0].contains(&PROD_DB_QUERY.to_string()),
+        "nothing answered to that name when the conversation was minted: {:?}",
+        rosters[0]
+    );
+    assert!(
+        rosters[1].contains(&PROD_DB_QUERY.to_string()),
+        "a resume restates no tool profile onto the agent, so the parent keeps the roster \
+         its first mint froze — which is why the child's answer has to come from the \
+         ledger: {:?}",
+        rosters[1]
+    );
+    assert!(
+        !rosters[2].contains(&PROD_DB_QUERY.to_string()),
+        "the narrowed child of a resumed parent must be judged by what is foreign now, \
+         not by what the mint saw: {:?}",
+        rosters[2]
+    );
+    assert!(
+        rosters[2].contains(&SPAWN.to_string()) && !rosters[2].contains(&"write".to_string()),
+        "and it still keeps everything its parent had except what the policy hid: {:?}",
+        rosters[2]
+    );
+}
+
 /// A workspace that looks nowhere except where the test put something.
 fn offline_workspace(path: &Path, runtime: Arc<basis::Runtime>) -> basis::WorkspaceBuilder {
     basis::Workspace::builder(path)
