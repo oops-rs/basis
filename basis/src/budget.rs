@@ -141,7 +141,7 @@ use crate::{
 ///
 /// ```no_run
 /// # async fn example() -> Result<(), basis::RunError> {
-/// use basis::{BudgetPool, CollectingSink, Workspace};
+/// use basis::{AllowAll, BudgetPool, CollectingSink, Workspace};
 ///
 /// let workspace = Workspace::open("/repo").await?;
 /// let pool = BudgetPool::new(500_000);

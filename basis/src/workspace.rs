@@ -24,7 +24,7 @@
 //!
 //! ```no_run
 //! # async fn example() -> Result<(), basis::RunError> {
-//! use basis::{CollectingSink, Workspace};
+//! use basis::{AllowAll, CollectingSink, Workspace};
 //!
 //! let workspace = Workspace::open("/repo").await?;
 //!
@@ -273,8 +273,8 @@ impl Workspace {
         if let Some(field) = spec.profile.unsupported_on_resume() {
             return Err(RunError::UnsupportedResumeProfile { field });
         }
-        let legacy_effort = spec.effort.or(self.effort);
-        let changes_reasoning = spec.profile.reasoning().is_some() || legacy_effort.is_some();
+        let effort = spec.effort.or(self.effort);
+        let changes_reasoning = effort.is_some();
         if spec.profile.resolved_model().is_some() && changes_reasoning {
             return Err(RunError::NonAtomicResumeProfile);
         }
@@ -290,11 +290,7 @@ impl Workspace {
             session.metadata().model.clone()
         };
 
-        if let Some(reasoning) = spec.profile.reasoning() {
-            session.set_reasoning(reasoning.clone())?;
-        } else {
-            apply_effort(&mut session, legacy_effort)?;
-        }
+        apply_effort(&mut session, effort)?;
 
         // Mentra 0.23 exposes no resumed AgentConfig reader. The persisted
         // agent may carry a per-run system override that differs from this

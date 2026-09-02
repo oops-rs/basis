@@ -199,15 +199,15 @@ outside these Basis guarantees. A host that needs a pooled checkout repeats this
 checkout: Basis has no scrub contract for a used runtime, so it does not offer one.
 
 `RunProfile` states the per-mint half without changing the workspace defaults. Omitted fields
-inherit; `with_max_output_tokens(None)`, `with_reasoning(None)`, and
-`with_tool_result_paging(None)` are explicit clears:
+inherit; `with_max_output_tokens(None)` and `with_tool_result_paging(None)` are explicit clears.
+Reasoning travels inside `with_provider_request_options`, which is the last word on it for the
+run:
 
 ```rust
 let profile = basis::RunProfile::new()
     .with_resolved_model(gather_model)
     .with_tool_roster(basis::ToolRoster::only(["search", "finish"]))
     .with_provider_request_options(request_options)
-    .with_reasoning(Some(reasoning))
     .with_max_output_tokens(Some(4_096))
     .with_compaction(compaction)
     .with_tool_result_paging(None)
