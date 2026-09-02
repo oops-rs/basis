@@ -17,11 +17,11 @@
 //!
 //! A command may also say *where*: `!@<target> <command>` names an executor to
 //! run it on (ADR-0021) — though nothing currently registers one; see
-//! `docs/targets.md`. One more fact on the same act rather than a second tool, because
-//! a second tool would be a second name at the gate and a second rule
-//! namespace — the two doors ADR-0016 closed, rebuilt by hand. The prefix is
-//! read by the same parser, in the same pass, and the target it leaves behind
-//! is a typed field like the mode beside it.
+//! `docs/targets.md`. One more fact on the same act rather than a second
+//! tool, because a second tool would be a second name at the gate and a
+//! second rule namespace — the two doors ADR-0016 closed, rebuilt by hand.
+//! The prefix is read by the same parser, in the same pass, and the target it
+//! leaves behind is a typed field like the mode beside it.
 //!
 //! # What the approver sees
 //!

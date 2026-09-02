@@ -9,9 +9,9 @@
 >
 > **2026-09-02 · No public way to register a target today.**
 > `RuntimeBuilder::with_command_target` — the only builder method that ever
-> populated the routing table — is gone as of basis 0.12: zero hosts, in this
-> workspace or in nous, had registered one (see ARCHITECTURE.md's migration
-> notes). `RuntimeExecutor`, `!@<target>` parsing, and the routing this
+> populated the routing table — is gone: zero hosts, in this
+> workspace or in nous, had registered one (see ARCHITECTURE.md
+> § Parsimony). `RuntimeExecutor`, `!@<target>` parsing, and the routing this
 > document describes all still exist and still compile; a host that needs
 > this reaches for a released version carrying the setter, or waits for it
 > to return with an adopted caller. §§2–4 below are kept as the shape to
@@ -42,7 +42,7 @@ should read before you decide that sentence is a formality.
 
 ## 2. Registering one
 
-Withdrawn in 0.12 — see the dateline note above. The shape it took, when it
+Withdrawn — see the dateline note above. The shape it took, when it
 existed:
 
 ```rust

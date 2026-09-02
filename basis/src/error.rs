@@ -226,12 +226,10 @@ pub enum RunError {
 
     /// A command target name that cannot be routed on (ADR-0021).
     ///
-    /// Raised by `build` rather than by a panic at the registering call,
-    /// because that is where this builder answers every other piece of bad
-    /// input — an unattributed credential is refused by `provider::resolve_with`
-    /// at exactly the same moment. A host reading its targets out of its own
-    /// configuration can then report a bad name the way it reports every other
-    /// bad setting, instead of losing the process to it.
+    /// Dormant: with `with_command_target` withdrawn, nothing can put a name
+    /// in front of the validation that raises this, so `build` currently has
+    /// no target to refuse. The variant keeps its slot in this
+    /// `#[non_exhaustive]` enum for the day a registration seam returns.
     #[error("`{name}` cannot be a command target name: {reason}")]
     CommandTarget { name: String, reason: String },
 

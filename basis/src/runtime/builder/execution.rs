@@ -89,6 +89,10 @@ impl RuntimeBuilder {
 /// names exist. And `local` is the wire word for *here*
 /// ([`LOCAL_TARGET`]), so a target answering to it would make
 /// `"target":"local"` mean two things in one field.
+///
+/// Dormant while nothing can register a target — `with_command_target` was
+/// withdrawn unadopted — kept beside the table it validates for the day a
+/// registration seam returns.
 pub(super) fn validate_target_names(targets: &CommandTargets) -> Result<(), RunError> {
     for name in targets.keys() {
         if !is_target_name(name) {

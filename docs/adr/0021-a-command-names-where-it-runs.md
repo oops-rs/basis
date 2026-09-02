@@ -83,10 +83,10 @@ host supplies the executor; basis claims nothing about what is on the far side.*
    the same name replaces the earlier one, the same rule
    `with_command_environment` follows.
 
-   `with_command_target` itself is withdrawn in Basis 0.12, unadopted — zero
+   `with_command_target` itself is withdrawn in the next breaking release, unadopted — zero
    hosts had registered a target. The parser, `RuntimeExecutor`, and the
    routing table this point describes are unaffected; there is currently no
-   public way to populate that table (see ARCHITECTURE.md's migration notes).
+   public way to populate that table (see ARCHITECTURE.md § Parsimony).
 
 4. **An unregistered name is refused before the approver.** It reaches the
    model as `Tool execution denied: …`, naming the targets that do exist, and

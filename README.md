@@ -268,7 +268,7 @@ every `BASIS_*` variable, and which wins when two say the same thing.
 - **Command targets** — a command can say which named executor it wants: `!@mac xcodebuild -list`
   where `!cargo test` runs where basis is running. For the container-on-a-Mac case. basis routes;
   the host writes the executor; nothing about it is confinement. The builder method that
-  registered one is withdrawn as of 0.12, unadopted — the parsing and routing it fed remain
+  registered one is withdrawn, unadopted — the parsing and routing it fed remain
   ([ADR-0021](docs/adr/0021-a-command-names-where-it-runs.md),
   [docs/targets.md](docs/targets.md)).
 
