@@ -50,6 +50,33 @@ impl PreparedRun {
         &mut self.session
     }
 
+    /// Forgets every "…for this session" approval answer this conversation
+    /// holds, now instead of at its next attach.
+    ///
+    /// The documented duration of a
+    /// [`…ForSession`](crate::ApprovalDecision::AllowForSession) answer is the
+    /// live session: it dies when the conversation is next attached
+    /// ([`Workspace::resume`](crate::Workspace) clears it). That boundary
+    /// never arrives for a conversation nobody resumes — a one-shot run's,
+    /// say — whose answers would otherwise sit in the runtime store's
+    /// `rules.json` indefinitely, reasons included. A host whose run ends
+    /// with the process calls this when the conversation is done; the
+    /// answers' effect is unchanged either way, because nothing consults
+    /// them between the last run and the attach that would have cleared
+    /// them. Project- and global-scope rules are durable by definition and
+    /// stay.
+    ///
+    /// Best-effort by construction at the call site, not in the signature:
+    /// this returns the store's own error so the caller decides whether
+    /// cleanup failure may mask the run's result — the CLI warns and exits
+    /// with the run's code.
+    pub fn forget_session_answers(&self) -> Result<(), RunError> {
+        self.session
+            .permission_handle()
+            .clear_scope(mentra::session::PermissionRuleScope::Session)?;
+        Ok(())
+    }
+
     /// Gives the session back, ending basis's involvement.
     ///
     /// A workspace this run was keeping alive
