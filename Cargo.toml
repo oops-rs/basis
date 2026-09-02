@@ -26,34 +26,50 @@ basis-tasks = { version = "0.11", path = "basis-tasks" }
 
 # The 0.26 floor's reasons are two host-observable runtime contract changes
 # basis's code does not compile against unmodified in either direction, so the
-# floor is hard both ways. First, `CompactionResponse` gained an optional
-# `usage` (`TokenUsage`) and `CompactionOutcome` gained `provider_usage`, a
-# `Vec` in provider-call order: the standard compaction engine now carries
-# every provider-reported token-usage sample forward instead of dropping it
-# while extracting summary text, emitting one ordinary `UsageReport` per
-# sample after its existing `ContextCompacted` event. Every exhaustive struct
-# literal or match basis holds against either type needs the new field.
+# floor is hard both ways. First, `SessionOptions` gained `policy` and
+# `tool_audience`: basis's exhaustive struct literal in `Runtime::mint`
+# (`basis/src/runtime.rs`) must initialize both, and does so with `None` —
+# the prior runtime-inherited, global-only behavior — deliberately.
 # Second, `Session` now binds its runtime's live permission store
 # automatically — the session namespace is the stable persisted agent id, not
 # the ephemeral UI `SessionId`, so session rules survive a real resume — and
 # manual `Session::set_permission_store`, `load_persisted_rules`, and cached
 # `rule_store` access were removed because each could hold a stale
-# authorization overlay against that live binding. `Session::remembered_rules`
+# authorization overlay against that live binding; basis's event forwarder
+# and rule seeding now go through `SessionPermissionHandle` instead, whose
+# `resolve_permission` is fallible (a store failure restores the pending
+# request, and basis fails it closed). `Session::remembered_rules`
 # now returns `Result<Vec<_>, RuntimeError>` because every call reads the live
 # backend, and a session's current `ToolAuthorizer` is now sampled once per
 # call and is authoritative over remembered rules: only its `Prompt` answer
 # may be resolved by a matching rule or forwarded to the live permission flow,
 # so a remembered allow can no longer bypass a session switched to a stricter
 # authorizer, nor can a remembered denial override a current explicit allow.
+# basis keeps its own two-rule approval layer on top and records the deltas
+# where they are observable: for-this-session answers are cleared at the next
+# attach (`Runtime::resume_minted`), and a forgotten conversation's rules are
+# cleared beside its deletion (`store::forget_in`).
+#
+# One more 0.26 surface is depended on outright: compaction usage. The
+# standard compaction engine now carries every provider-reported token-usage
+# sample forward (`CompactionResponse::usage`,
+# `CompactionOutcome::provider_usage`) instead of dropping it while
+# extracting summary text, emits one ordinary `UsageReport` per sample after
+# its existing `ContextCompacted` event, and charges an in-run pass to the
+# run's shared token counter at the same point. basis's documented accounting
+# is built on exactly that behavior — `RunUsage`/`RunReport` totals, token
+# budgets and `BudgetPool` draw-down, and the per-sample `usage` lines on the
+# stream, pinned by `basis/tests/compact.rs` — so an older runtime would
+# silently break the accounting contract with nothing here to notice (#44).
 #
 # The adoption waves landing on this floor consume several more of its
 # surfaces basis has not taken up yet. `Runtime::fresh_provider_session_scope`
 # mints an independent provider session scope — fresh turn, response-chain,
 # WebSocket, and in-flight state, same provider identity and configuration —
-# without network I/O, a colder seam than basis's own `WarmOnce` prewarm path
-# that does not yet replace it (#46). `CompactionOutcome::provider_usage` and
-# the per-sample `UsageReport`s above exist to be accounted for, not merely
-# matched into `None` and ignored; real usage reporting is future work (#44).
+# without network I/O. A cold mint, so it does not yet replace the prewarm
+# basis documents today: the retained `ResponsesProvider` clone a host keeps
+# beside `with_registered_provider` (`basis/src/runtime/builder/provider.rs`),
+# whose shared session state a WebSocket opened through it warms (#46).
 # `ExecutionHookParticipant` gives pre- and post-execution one ordered, named,
 # object-safe participant chain, run forward on both sides, in place of
 # today's two separate legacy hook lists (#49). `Runtime::register_pre_hook`
@@ -78,9 +94,10 @@ basis-tasks = { version = "0.11", path = "basis-tasks" }
 # `FileToolProfile::None` closes the gap `ToolProfile::only`'s docs already
 # name as a caveat: a roster that offers no file tool still finds one sitting
 # on a shared runtime's registry, because no profile could unregister them
-# (#42). This wave adopts none of them; a later wave consumes what basis
-# actually uses, and a follow-up will re-align this comment with the shipped
-# surfaces, as 0ab68de did for 0.25.
+# (#42). Of the 0.26 surfaces, this branch adopts the permission machinery
+# and the compaction-usage accounting above; the rest await the wave that
+# consumes what basis actually uses, and a follow-up will re-align this
+# comment with the shipped surfaces, as 0ab68de did for 0.25.
 #
 # The 0.25 floor's reasons still hold beneath it. The primary provider stream
 # observes the run's cancellation token and deadline while the provider
