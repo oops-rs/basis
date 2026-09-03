@@ -1,8 +1,11 @@
 # 0004 — An agent ledger row should outlive the workspace that recorded it
 
-> Status: Deferred — a live defect with a known shape, deferred because the fix
+> Status: Deferred — a real defect with a known shape, latent in the shipped
+> adapters and confined to unreleased 0.12.0 material. Deferred because the fix
 > changes the lifetime of a core type and the wave that found it was scoped to
-> something else.
+> something else; it should be closed before 0.12.0 ships.
+> Trigger: anyone adding eviction to `basis_host::ConfiguredSource`'s workspace
+> pool — see "How reachable it is".
 > Created: 2026-09-03
 > Related: [ADR-0018](../adr/0018-the-runtime-owns-the-process.md) (one runtime,
 > many workspaces), `basis/src/runtime/agents.rs`.
@@ -90,13 +93,49 @@ deliberately protects.
 6. Hiding and refusing stay separate concerns: a roster decides what the model is
    told, the guard decides what may run, and neither is asked to be the other.
 
-## Open question this proposal does not answer
+## How reachable it is, and by whom
 
-Whether the same exposure is reachable in a **published** basis. `ForeignToolGuard`
-and the agent ledger are unreleased 0.12.0 material, so the probe above does not
-describe any release. Released `v0.11.0` protected a same-root sibling by
-mint-time hiding alone, with no execution guard — reading that code suggests a
-sibling that mints *before* another open bridges is exposed without needing any
-workspace drop, which would be broader than what is probed here. That reading is
-**not verified by execution** and must be before it is reported as affecting a
-published version.
+**Latent. It needs a host to go out of its way, and neither shipped adapter
+does.** `basis_host::ConfiguredSource`'s workspace pool is insert-only — no
+eviction path exists in the file — and `basis-acp` keeps no pool of its own, so
+in both adapters every `Arc<Workspace>` lives for the process and a workspace is
+never dropped while a run is live. The exposed shape is an SDK host writing
+`let run = ws.prepare(..)?; drop(ws); run.execute(..)`, which is supported
+(`PreparedRun::workspace` is `None` on that path precisely because the caller is
+assumed to be holding the workspace) and warned against nowhere.
+
+**The trigger condition is what makes this worth writing down.** The invariant
+that saves `basis-host` today is deliberate, but it is load bearing for entirely
+different reasons than this one — the pool refuses to evict so that a live
+session cannot lose its MCP connections or its `.basis/hooks.json` registrations
+mid-turn. Anyone who later adds eviction, for memory or for a real
+`session/close`, will close *those* two hazards consciously and reopen this one
+without ever learning it existed. Whoever does that is this proposal's reader.
+
+## Release reach
+
+**Not in any tagged release.** Both halves of the mechanism postdate `v0.11.0`
+(`c7de759`): `ForeignToolGuard` and `runtime/agents.rs` are not ancestors of the
+tag, and a released basis has neither the guard nor the ledger nor
+`foreign_mcp_tools`. Probed on a clean `v0.11.0` checkout against its own mentra
+0.25, a bridged tool registered after the mint is provably on the registry and
+still neither offered nor callable:
+
+```
+PROBE V registry after register_tool = ["mcp__prod-db__query"]
+PROBE V full roster                  = ["write","compact","read","grep","glob","ls","edit","spawn"]
+PROBE V req1 tool result             = "Tool not found"
+```
+
+So this is unreleased 0.12.0 material: it should be fixed before 0.12.0 ships,
+not handled as an incident against a published crate.
+
+Two limits on that, stated because they bound what may be claimed. The probe
+established v0.11.0's **outcome**, not its **mechanism** — mentra 0.25's
+`Agent::can_use_tool` consults an agent-level hidden set separate from the
+config's tool profile, and who populates it was not traced, so whether v0.11.0
+blocks this by design or by accident is unknown. That is the difference between
+"0.12.0 regressed something" and "0.12.0 exposed something new", and it is worth
+the one archaeological pass before anyone repeats either claim. And only
+`v0.11.0` was tested; 0.8.2 and earlier were not, and this area moved enough
+across the 0.12 waves that extrapolating backwards would be guessing.

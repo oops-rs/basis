@@ -491,6 +491,15 @@ impl WorkspaceBuilder {
     /// refused rather than silently served the first's closure. Nothing is
     /// registered when any name in the set is refused.
     ///
+    /// **A host tool's `Drop` must not block.** Its registration is released
+    /// while basis holds the lock over the runtime's tool-name ledger, so a
+    /// handler that waits on a lock, a channel or a network round trip on its
+    /// way out stalls every other workspace opening or closing on that
+    /// runtime. mentra drops its own handlers outside its registry lock and
+    /// basis cannot: the claim and the registration have to go together or a
+    /// name is briefly free with a tool still answering to it. Detached work
+    /// owned only by the tool is outside what a workspace's lifetime covers.
+    ///
     /// Call it once per tool; order is the order they are claimed in.
     pub fn with_tool<T>(self, tool: T) -> Self
     where

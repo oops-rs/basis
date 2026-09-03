@@ -61,7 +61,8 @@ exported — is spoken to with no `Authorization` header at all; one that wanted
 
 **A workspace opens once and mints runs.** Opening settles everything that belongs to the repository
 rather than to the prompt — context documents, the resolved model, skills, templates, hooks,
-declared tools, MCP connections — so `prepare` is *synchronous*, and a twenty-way fan-out reads
+declared tools, the host's own tools for this workspace, MCP connections — so `prepare` is
+*synchronous*, and a twenty-way fan-out reads
 `AGENTS.md` once
 ([ADR-0010](docs/adr/0010-the-crate-is-the-workflow-surface.md)). `Workspace` is `Send + Sync`, so
 those runs can be spawned tasks.

@@ -587,9 +587,13 @@ pub(crate) fn check_name(name: &str) -> Result<(), String> {
         return Err("has an empty name".to_string());
     }
 
+    // Bytes, said as bytes. `str::len` counts them, the limit is in them, and
+    // this runs before the charset check below — so a name outside ASCII
+    // reaches here and would otherwise be told it has three times the
+    // characters it has.
     if name.len() > MAX_NAME_LENGTH {
         return Err(format!(
-            "has a name of {} characters, and a provider takes at most {MAX_NAME_LENGTH}",
+            "has a name of {} bytes, and a provider takes at most {MAX_NAME_LENGTH}",
             name.len()
         ));
     }
