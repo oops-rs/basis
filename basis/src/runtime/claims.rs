@@ -19,6 +19,7 @@
 //! audience — lives beside the rest of interception, in
 //! [`super::interception`].
 
+use std::collections::HashMap;
 use std::path::{Path, PathBuf};
 
 // `skill_root_key` is the identity mentra's own registry matches a skills root
@@ -57,6 +58,14 @@ pub(super) struct McpClaim {
 
 /// One tool name registered on this runtime by a workspace still open.
 ///
+/// Both of the bindings a *workspace* registers share this entry, because they
+/// share one name space: a repository's declaration
+/// ([`crate::tools::declared`]) and a native tool the host handed this open
+/// ([`WorkspaceBuilder::with_tool`](crate::WorkspaceBuilder::with_tool)) are
+/// two programs competing for one string on one registry, and a ledger per
+/// binding would let them both take it — with only mentra's same-audience
+/// collision left to report it, at install time, in words about neither.
+///
 /// `holders` rather than a bare owner because one root may be open twice — a
 /// host that opens the same repository for two concurrent callers — and the
 /// first of those to drop must not free a name the second is still serving.
@@ -65,10 +74,9 @@ pub(super) struct McpClaim {
 pub(super) struct ToolNameClaim {
     root: PathBuf,
     holders: usize,
-    supplied_holders: usize,
-    /// The complete resolved declaration the live registration executes.
-    /// Supplied same-root holders compare against it before joining.
-    spec: DeclaredToolSpec,
+    /// What is answering to the name, and therefore what a second live open of
+    /// the same root has to match before it may join.
+    program: ClaimedProgram,
     /// mentra's own hold on the audience registration, which is what keeps
     /// the tool answering. Kept beside the claim rather than by the workspace
     /// because the claim is what counts holders: the second open of a root
@@ -76,6 +84,38 @@ pub(super) struct ToolNameClaim {
     /// outlive the first of them to drop. `None` between the claim and the
     /// registration, and for every holder after the first.
     registration: Option<AudienceToolRegistration>,
+}
+
+/// Which of a workspace's two tool bindings holds a claimed name.
+///
+/// The variants exist to answer one question — *may a second live open of this
+/// same root join the registration already here?* — and they answer it
+/// differently because only one of them is data.
+#[derive(Debug)]
+enum ClaimedProgram {
+    /// A declaration: a manifest entry, or a spec the host supplied. Fully
+    /// resolved data, so a sibling open declaring the same thing is provably
+    /// asking for the same program and joins.
+    Declared {
+        /// The complete resolved declaration the live registration executes.
+        /// Supplied same-root holders compare against it before joining.
+        ///
+        /// Boxed so a [`Native`](Self::Native) claim — which has nothing to
+        /// compare and nothing to store — does not carry room for a
+        /// declaration it will never hold.
+        spec: Box<DeclaredToolSpec>,
+        /// How many holders supplied this declaration rather than reading it
+        /// from a file — the count that decides whether a difference between
+        /// two same-root opens is worth refusing.
+        supplied_holders: usize,
+    },
+    /// A native tool the host handed *this* open. Nothing about it is
+    /// comparable — a `dyn ExecutableTool` is compiled code closing over
+    /// whatever the host had at the call site, which is the whole reason to
+    /// use one over a declaration — so no sibling open ever joins it. Serving
+    /// open B the closure open A supplied is precisely the leak the binding
+    /// exists to avoid.
+    Native,
 }
 
 #[cfg(feature = "mcp")]
@@ -101,6 +141,49 @@ impl McpClaim {
 pub(crate) struct ToolNamePermit {
     name: String,
     root: PathBuf,
+}
+
+impl ToolNamePermit {
+    /// Records a first holder and hands back the permission it owes a
+    /// registration for. Called with the claim map already locked, which is
+    /// what makes "nobody holds this name" and "this caller now does" one
+    /// step.
+    fn issue(
+        claims: &mut HashMap<String, ToolNameClaim>,
+        name: &str,
+        root: &Path,
+        program: ClaimedProgram,
+    ) -> Self {
+        claims.insert(
+            name.to_string(),
+            ToolNameClaim {
+                root: root.to_path_buf(),
+                holders: 1,
+                program,
+                registration: None,
+            },
+        );
+        Self {
+            name: name.to_string(),
+            root: root.to_path_buf(),
+        }
+    }
+}
+
+impl ToolNameClaim {
+    /// Why another repository's live open owns this name, in the words of
+    /// whichever binding took it — a reader who has to free the name needs to
+    /// know which of the two files or call sites to look at.
+    fn taken_elsewhere(&self) -> String {
+        let binding = match self.program {
+            ClaimedProgram::Declared { .. } => "declares a tool",
+            ClaimedProgram::Native => "supplies a native tool",
+        };
+        format!(
+            "the workspace at {} is open on this runtime and {binding} by that name",
+            self.root.display()
+        )
+    }
 }
 
 #[derive(Debug, Clone, Copy)]
@@ -259,62 +342,100 @@ impl Runtime {
         let mut claims = self.tool_claims.lock().expect("tool claim map poisoned");
 
         match claims.get_mut(name) {
-            Some(claim) if claim.root != root => Err(format!(
-                "the workspace at {} is open on this runtime and declares a tool by that name",
-                claim.root.display()
-            )),
-            Some(claim)
-                if claim.spec != *spec
-                    && (claim.supplied_holders > 0
-                        || matches!(origin, DeclaredToolOrigin::Supplied)) =>
-            {
-                Err(
-                    "another live open of this workspace supplied different configuration under \
-                     that name"
+            Some(claim) if claim.root != root => Err(claim.taken_elsewhere()),
+            Some(claim) => match &mut claim.program {
+                // A native tool is nobody's to join; see [`ClaimedProgram`].
+                ClaimedProgram::Native => Err(
+                    "another live open of this workspace supplied a native tool under that name"
                         .to_string(),
-                )
-            }
-            Some(claim) => {
-                claim.holders += 1;
-                if matches!(origin, DeclaredToolOrigin::Supplied) {
-                    claim.supplied_holders += 1;
+                ),
+                ClaimedProgram::Declared {
+                    spec: held,
+                    supplied_holders,
+                } if **held != *spec
+                    && (*supplied_holders > 0
+                        || matches!(origin, DeclaredToolOrigin::Supplied)) =>
+                {
+                    Err(
+                        "another live open of this workspace supplied different configuration \
+                         under that name"
+                            .to_string(),
+                    )
                 }
-                Ok(None)
+                ClaimedProgram::Declared {
+                    supplied_holders, ..
+                } => {
+                    if matches!(origin, DeclaredToolOrigin::Supplied) {
+                        *supplied_holders += 1;
+                    }
+                    claim.holders += 1;
+                    Ok(None)
+                }
+            },
+            None if self.registers_tool(name) => {
+                Err("this runtime already offers a tool by that name".to_string())
+            }
+            None => Ok(Some(ToolNamePermit::issue(
+                &mut claims,
+                name,
+                root,
+                ClaimedProgram::Declared {
+                    spec: Box::new(spec.clone()),
+                    supplied_holders: usize::from(matches!(origin, DeclaredToolOrigin::Supplied)),
+                },
+            ))),
+        }
+    }
+
+    /// Claims a name for a native tool the host supplied to the workspace at
+    /// `root`, or says who holds it.
+    ///
+    /// The declared claim above with one rule changed and the reason stated on
+    /// [`ClaimedProgram::Native`]: there is no `Ok(None)` here, because there
+    /// is no joining a native tool. Every other refusal is the same refusal —
+    /// a name this runtime already answers to globally (`spawn`, a mentra
+    /// builtin, a [`RuntimeBuilder::with_tool`](crate::RuntimeBuilder::with_tool)
+    /// global) is not a name a workspace may take, and neither is one another
+    /// repository open on this runtime is already serving.
+    pub(crate) fn claim_native_tool(
+        &self,
+        root: &Path,
+        name: &str,
+    ) -> Result<ToolNamePermit, String> {
+        let mut claims = self.tool_claims.lock().expect("tool claim map poisoned");
+
+        match claims.get(name) {
+            Some(claim) if claim.root != root => Err(claim.taken_elsewhere()),
+            Some(_) => {
+                Err("another live open of this workspace already answers to that name".to_string())
             }
             None if self.registers_tool(name) => {
                 Err("this runtime already offers a tool by that name".to_string())
             }
-            None => {
-                claims.insert(
-                    name.to_string(),
-                    ToolNameClaim {
-                        root: root.to_path_buf(),
-                        holders: 1,
-                        supplied_holders: usize::from(matches!(
-                            origin,
-                            DeclaredToolOrigin::Supplied
-                        )),
-                        spec: spec.clone(),
-                        registration: None,
-                    },
-                );
-                Ok(Some(ToolNamePermit {
-                    name: name.to_string(),
-                    root: root.to_path_buf(),
-                }))
-            }
+            None => Ok(ToolNamePermit::issue(
+                &mut claims,
+                name,
+                root,
+                ClaimedProgram::Native,
+            )),
         }
     }
 
-    /// Puts a claimed declared tool on the registry, for the claiming
-    /// workspace's audience alone.
+    /// Puts a claimed tool on the registry, for the claiming workspace's
+    /// audience alone.
     ///
-    /// Audience-scoped rather than global because a declaration is a
-    /// *repository's* statement about a program: on a runtime serving five
-    /// repositories, a global registration would offer one repository's tool
-    /// to the other four's models. mentra's resolution ladder answers that for
-    /// basis now — a name held only by another audience resolves to `Hidden`,
-    /// so it is neither listed nor reachable by guessing it.
+    /// Audience-scoped rather than global because both bindings that come here
+    /// are a *workspace's*: a declaration is a repository's statement about a
+    /// program, and a native tool is what one host open handed one workspace.
+    /// On a runtime serving five repositories, a global registration would
+    /// offer either to the other four's models. mentra's resolution ladder
+    /// answers that for basis now — a name held only by another audience
+    /// resolves to `Hidden`, so it is neither listed nor reachable by guessing
+    /// it. Nothing here freezes a roster to get that: mentra rebuilds a
+    /// visible set per round from the live registry, so a tool registered
+    /// after an agent was minted is offered to that agent's own audience and
+    /// to no other, and the exact-agent rung above it — where `read_tool_result`
+    /// registers itself — keeps answering either way.
     ///
     /// The guard goes into the claim, which is the thing that knows how many
     /// workspaces are holding this name; dropping the claim drops the guard and
@@ -343,6 +464,8 @@ impl Runtime {
         // this runtime and nothing between the claim and here releases one.
         // Said out loud anyway, because the failure it would otherwise become
         // is a name the workspace reports as live with no program behind it.
+        // The permit is `#[must_use]`, so the other half of that failure — a
+        // claimed name nobody ever registers under — cannot pass review either.
         let Some(entry) = claims
             .get_mut(&claim.name)
             .filter(|entry| entry.root == claim.root)
@@ -368,18 +491,29 @@ impl Runtime {
 
     /// Releases a claim [`claim_declared_tool`](Self::claim_declared_tool)
     /// granted, taking the tool off the runtime when the last holder goes.
-    ///
-    /// Only the owning root can release, so one workspace's drop cannot free a
-    /// name another still serves. Removing the claim is what makes the claim
-    /// map and mentra's registry say the same thing: the registration guard
-    /// goes with it, so a released name is free because nothing answers to it
-    /// any more, rather than free-with-a-stale-entry-behind-it.
     pub(crate) fn release_declared_tool(
         &self,
         name: &str,
         root: &Path,
         origin: DeclaredToolOrigin,
     ) {
+        self.release_tool_claim(name, root, matches!(origin, DeclaredToolOrigin::Supplied));
+    }
+
+    /// Releases a claim [`claim_native_tool`](Self::claim_native_tool)
+    /// granted. Always the last holder, because nothing joins a native claim.
+    pub(crate) fn release_native_tool(&self, name: &str, root: &Path) {
+        self.release_tool_claim(name, root, false);
+    }
+
+    /// The one release both bindings share.
+    ///
+    /// Only the owning root can release, so one workspace's drop cannot free a
+    /// name another still serves. Removing the claim is what makes the claim
+    /// map and mentra's registry say the same thing: the registration guard
+    /// goes with it, so a released name is free because nothing answers to it
+    /// any more, rather than free-with-a-stale-entry-behind-it.
+    fn release_tool_claim(&self, name: &str, root: &Path, supplied: bool) {
         let mut claims = self.tool_claims.lock().expect("tool claim map poisoned");
 
         let Some(claim) = claims.get_mut(name) else {
@@ -390,8 +524,12 @@ impl Runtime {
         }
 
         claim.holders = claim.holders.saturating_sub(1);
-        if matches!(origin, DeclaredToolOrigin::Supplied) {
-            claim.supplied_holders = claim.supplied_holders.saturating_sub(1);
+        if let ClaimedProgram::Declared {
+            supplied_holders, ..
+        } = &mut claim.program
+            && supplied
+        {
+            *supplied_holders = supplied_holders.saturating_sub(1);
         }
         if claim.holders == 0 {
             // Under the claim lock, so no other claimant can see the name free

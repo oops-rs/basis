@@ -308,6 +308,30 @@ pub enum RunError {
     #[error("`{name}` cannot be a command target name: {reason}")]
     CommandTarget { name: String, reason: String },
 
+    /// A host tool a *workspace* was given
+    /// ([`WorkspaceBuilder::with_tool`](crate::WorkspaceBuilder::with_tool))
+    /// that cannot take the name it asked for.
+    ///
+    /// Two reasons reach here, and both refuse the open rather than register
+    /// part of a set. The name may be one no tool may wear — empty, longer
+    /// than a provider accepts, outside the charset, or `mcp__`-prefixed,
+    /// which is how mentra names a bridged server's tool. Or it may be taken:
+    /// by something this runtime already answers to globally (`spawn`, a
+    /// mentra builtin, a [`RuntimeBuilder::with_tool`](crate::RuntimeBuilder::with_tool)
+    /// global), by another repository open on the same runtime, or by another
+    /// live open of *this* directory.
+    ///
+    /// That last one is the case worth stating, because it is the one a host
+    /// meets by accident. One directory is one tool audience, so two live
+    /// opens of it share a namespace, and a native tool is compiled code
+    /// closing over whatever the host had when it supplied it — there is no
+    /// way to tell two of them apart, and joining would serve the second open
+    /// the first one's closure. A host that genuinely needs its own native
+    /// tools per open of one directory needs one [`Runtime`](crate::Runtime)
+    /// per open; a declaration, which is data, joins instead.
+    #[error("the host tool `{name}` cannot be registered for this workspace: it {reason}")]
+    WorkspaceHostTool { name: String, reason: String },
+
     /// A host tool ([`RuntimeBuilder::with_tool`](crate::RuntimeBuilder::with_tool))
     /// whose name collides with one basis already registered — `spawn`, a
     /// mentra builtin, or an earlier host tool on the same builder (decision

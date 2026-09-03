@@ -81,7 +81,7 @@ use crate::{
     },
     skills::SkillRoots,
     templates::Template,
-    tools::declared::DeclaredTools,
+    tools::{declared::DeclaredTools, host::WorkspaceHostTools},
 };
 
 /// One workspace, resolved: the runtime it borrows, the model, and everything
@@ -178,6 +178,13 @@ pub struct Workspace {
     /// registry and registered for its own audience; releases both on drop.
     #[allow(dead_code, reason = "held for its Drop")]
     declared_registration: DeclaredTools,
+    /// The native tools the host supplied for this workspace, by name, in the
+    /// order it supplied them.
+    host_tools: Vec<String>,
+    /// Keeps those tools claimed on that same ledger and registered for that
+    /// same audience; releases both on drop.
+    #[allow(dead_code, reason = "held for its Drop")]
+    host_tool_registration: WorkspaceHostTools,
     /// This workspace's share of the interception chain live for its tool
     /// audience. Dropping it is what stops a dropped workspace being consulted
     /// — and, when it was the last holder, what takes the chain off the
@@ -222,6 +229,7 @@ impl std::fmt::Debug for Workspace {
             .field("templates", &self.templates.len())
             .field("mcp_servers", &self.mcp_servers)
             .field("declared_tools", &self.declared_tools)
+            .field("host_tools", &self.host_tools)
             .finish_non_exhaustive()
     }
 }
@@ -491,6 +499,20 @@ impl Workspace {
     /// here echoes a command or a credential.
     pub fn declared_tools(&self) -> &[String] {
         &self.declared_tools
+    }
+
+    /// The native tools the host supplied for this workspace
+    /// ([`WorkspaceBuilder::with_tool`](crate::WorkspaceBuilder::with_tool)),
+    /// by name, in the order it supplied them.
+    ///
+    /// Names only, for [`mcp_servers`](Self::mcp_servers)'s reason. Reported
+    /// beside [`declared_tools`](Self::declared_tools) because the two are one
+    /// question for anything looking at a run — *what did this open put within
+    /// the model's reach that basis did not?* — and the answer is not
+    /// otherwise readable: these are registered for this workspace's audience,
+    /// which mentra's own registry readers do not walk.
+    pub fn host_tools(&self) -> &[String] {
+        &self.host_tools
     }
 
     /// What `config.json` said about this workspace, and which file said it.
