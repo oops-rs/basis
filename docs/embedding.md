@@ -372,6 +372,10 @@ the second open supplying a native tool under a name the first already took is r
 silently served the first one's closure. A host that needs its own native tools per open of one
 directory needs one `Runtime` per open; a declared tool, being data, joins instead.
 
+The second open that supplies *nothing* is refused nothing, and does not reach the first one's
+tool either: the name is hidden from its roster at the mint and its call is refused by the guard
+in its own chain, so a sibling open sees only the native tools it supplied itself.
+
 **A host tool's `Drop` must not block.** The registration is released while basis holds the lock
 over its tool-name ledger, so a handler that waits on a lock, a channel, or a network round trip on
 its way out stalls every other workspace opening or closing on that runtime. Detached work owned
