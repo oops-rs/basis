@@ -82,6 +82,13 @@ from an existing provider. Gate 1a stays exactly as shipped.**
 - `Workspace::mentra_runtime` and `PreparedRun::session` / `session_mut` /
   `into_session` no longer poison a generation. Their signatures are unchanged;
   the withdrawn promise was about a reuse entry that no longer exists.
+
+  > **Addendum, 2026-09-03.** `PreparedRun::into_session` has since been
+  > withdrawn outright, for an unrelated reason: it was the only way to hold a
+  > live session past its run, and an agent's ledger row is held by the run.
+  > See [proposal
+  > 0004](../proposals/0004-agent-ledger-rows-outlive-their-workspace.md). The
+  > decision recorded above is unaffected — this ADR is left as written.
 - `RunError` goes from 45 variants to 28 (27 without the `mcp` feature), and the
   crate loses ~2,200 lines.
 - The `responses-websocket` feature keeps in-crate coverage. Its only test was a

@@ -944,10 +944,20 @@ between two opens of one root: a resume checks the conversation's *root*, and sa
 have the identical one by construction, so either may pick up an id the other minted. Whoever
 recorded last owns the row, which is right on its own terms — Mentra hands out one live session
 per agent id, so the open holding the lease is the open that wrote last. Each row therefore
-carries a stamp naming the handle that wrote it, and a workspace releases on drop only the rows
-it still owns. An unconditional release would have taken a live sibling's row away for as long
-as that session ran, and a missing row is *allowed*: this guard reads it as a session basis
-never minted, and `spawn` reads it as no inherited hides. The same ledger carries the parent's
+carries a stamp naming the *write* that made it, and a hold releases only the row its own write
+is still standing on. An unconditional release would have taken a live sibling's row away for as
+long as that session ran, and a missing row is *allowed* on the bridged arm: this guard reads it
+as a session basis never minted, and `spawn` reads it as no inherited hides.
+
+**A row lives for the run, not for the workspace** ([proposal
+0004](proposals/0004-agent-ledger-rows-outlive-their-workspace.md)). A run outlives the
+workspace that minted it — `prepare` attaches nothing — so a row released with the workspace
+vanished under a live session, which for a bridged name meant one client's session reaching
+another client's authenticated server. `PreparedRun` holds the row; the workspace holds none;
+and `PreparedRun::into_session`, the only surface that could have handed a live session past its
+run, was withdrawn rather than documented as a limit. The native arm additionally *denies* an
+unattributable caller, because a name is in the tool-claim ledger as native only if a live basis
+workspace put it there — so unlike a bridged name it has no legitimate unjudged owner. The same ledger carries the parent's
 `hidden_tools` back into a delegated child whose `ChildSpec` roster replaced the profile —
 `with_tool_profile` replaces it wholesale and Mentra exposes no reader for a template's
 effective profile — and `spawn` adopts the child into the ledger for the length of the
