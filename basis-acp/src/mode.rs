@@ -90,7 +90,9 @@
 use agent_client_protocol::schema::v1::{SessionMode, SessionModeId, SessionModeState};
 use basis_host::SessionApproval;
 
-pub use basis_host::{ApprovalPolicy as ApprovalMode, PolicyApprover as ModedApprover};
+pub use basis_host::{
+    ApprovalPolicy as ApprovalMode, PolicyApprover as ModedApprover, PolicyGate as ModeGate,
+};
 
 /// Mode ids on the wire. basis chooses them, a client echoes them back, and
 /// [`mode_for`] reads them — a contract with ourselves, so it lives in one

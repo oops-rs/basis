@@ -166,6 +166,83 @@ async fn switching_to_read_only_refuses_without_asking() {
     );
 }
 
+/// Opens a session whose store already holds a durable allow for the write,
+/// puts it in `mode`, and asks for the write. Returns whether it happened, and
+/// whether the client was ever asked.
+///
+/// The rule is Global-scope and seeded before the session exists, so it is
+/// exactly the standing override a mode must survive: nothing in basis-acp
+/// clears it, and it resolves the gate's `Prompt` without a
+/// `PermissionRequested` ever reaching the client. `None` for the client's
+/// answer, because neither direction may ask: read-only has nothing to ask
+/// about, and a rule that answers is a rule that answered.
+async fn written_under(mode: &'static str) -> (bool, usize) {
+    let workspace = workspace();
+    let mock = Arc::new(writing_mock(&workspace));
+
+    let (stop_reason, observed) = connected(
+        MockSource::new(&mock, &workspace).durably_allowing("files"),
+        None,
+        move |connection| async move {
+            let session = open(&connection).await?;
+
+            connection
+                .send_request(SetSessionModeRequest::new(session.clone(), mode))
+                .block_task()
+                .await?;
+
+            say(&connection, &session, "make a file").await
+        },
+    )
+    .await;
+
+    assert_eq!(
+        stop_reason,
+        StopReason::EndTurn,
+        "a refusal is a normal turn, and so is an allowed write"
+    );
+
+    let asked = observed
+        .lock()
+        .expect("not poisoned")
+        .permission_requests
+        .len();
+
+    (workspace.path().join("made.txt").exists(), asked)
+}
+
+#[tokio::test]
+async fn a_durable_rule_cannot_allow_what_read_only_refuses() {
+    // The bypass this mechanism exists to close: a Global-scope allow, seeded
+    // through the session's permission handle before the session had a mode,
+    // used to answer the gate's `Prompt` ahead of the mode and let a read-only
+    // session write.
+    let (written, asked) = written_under("never").await;
+
+    assert!(
+        !written,
+        "a durable allow must not outlive the read-only mode that replaced it"
+    );
+    assert_eq!(
+        asked, 0,
+        "and the refusal must be the authorizer's own: a client asked at all \
+         would mean the rule was still being consulted"
+    );
+}
+
+#[tokio::test]
+async fn a_durable_rule_still_answers_where_the_session_would_have_asked() {
+    // The other half, unchanged: outside read-only the gate still surfaces the
+    // call, the remembered rule still resolves it, and the client is still not
+    // asked. Closing the bypass must not cost a host its standing allows.
+    for mode in ["always", "prompt"] {
+        let (written, asked) = written_under(mode).await;
+
+        assert!(written, "{mode} must still let the seeded rule answer");
+        assert_eq!(asked, 0, "{mode} answered without asking, as it always did");
+    }
+}
+
 /// A client that, asked permission, never answers and instead does `interrupt`
 /// to the session — presses stop, closes it, deletes it. What is pinned is that
 /// the turn ends anyway: the request to the client is abandoned, the write does
