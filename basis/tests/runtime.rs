@@ -507,6 +507,62 @@ mod roster {
         );
     }
 
+    #[tokio::test]
+    async fn dropping_the_stranger_workspace_does_not_hand_its_run_the_owners_server() {
+        // The same claim as the test above, with one line added in the middle:
+        // the stranger's workspace is dropped while its run is still live.
+        // `Workspace::prepare` does not attach the workspace to the run, so
+        // that is a supported shape — and it takes the agent ledger row the
+        // guard reads. Without a row the guard cannot attribute the caller,
+        // and a bridged name has a legitimate unattributable owner (a host
+        // driving `mentra_runtime` itself), so it allows. That is one ACP
+        // client's session reaching another client's authenticated server.
+        let endpoint = ScriptedEndpoint::start(vec![
+            Reply::ToolCall {
+                name: PROD_DB_QUERY.to_string(),
+                arguments: "{}".to_string(),
+            },
+            Reply::Text,
+        ]);
+        let runtime = shared_runtime(&endpoint);
+        let dir = workspace_dir();
+
+        let owner = pinned(dir.path(), Arc::clone(&runtime))
+            .with_mcp(no_mcp().with_supplied(vec![unreachable_server("prod-db")]))
+            .open()
+            .await
+            .expect("opens even though the server does not come up");
+        let stranger = pinned(dir.path(), runtime)
+            .with_mcp(no_mcp())
+            .open()
+            .await
+            .expect("the same directory opens again");
+
+        let ran = Arc::new(std::sync::atomic::AtomicBool::new(false));
+        let _bridged = stranger
+            .mentra_runtime()
+            .try_register_tool_for_audience(
+                ToolAudience::new(store::runtime_identifier(dir.path())),
+                ProdDbQuery(Arc::clone(&ran)),
+            )
+            .expect("nothing answers to that name yet");
+
+        let mut run = stranger.prepare("go").expect("mints");
+        // The whole test: the run outlives the workspace that made it.
+        drop(stranger);
+
+        run.execute_with_approver(CollectingSink::default(), AllowAll)
+            .await
+            .expect("the run completes — a denial is an answer, not an error");
+        assert!(
+            !ran.load(std::sync::atomic::Ordering::SeqCst),
+            "a run whose workspace has dropped must still not reach the other open's \
+             authenticated server"
+        );
+
+        drop(owner);
+    }
+
     /// The `tools` array of a recorded request: the roster the model was
     /// actually offered, read off the wire.
     fn tool_names(request: &str) -> Vec<String> {

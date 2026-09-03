@@ -70,6 +70,24 @@ pub struct PreparedRun {
     /// registration and MCP connections, and both end the moment the last
     /// handle to it goes.
     workspace: Option<Arc<Workspace>>,
+    /// This session's row on the runtime's agent ledger, held for exactly as
+    /// long as the run.
+    ///
+    /// **The row's lifetime is this run's, and it has to be.** A workspace
+    /// hands back a `PreparedRun` without attaching itself to it, so a host may
+    /// drop the workspace and keep running — and the guard that judges this
+    /// session's calls reads that ledger on every one of them. Released with
+    /// the workspace, the row would vanish under a live session and leave it
+    /// unattributable, which for a bridged name means *allowed*: one client's
+    /// session reaching another client's authenticated server
+    /// (`docs/proposals/0004`).
+    ///
+    /// `None` on the [`prepare_with_session`](super::prepare_with_session)
+    /// path, where basis minted no session and has no row to hold — the same
+    /// posture as `workspace` above, and the one the guards already describe as
+    /// unjudged.
+    #[allow(dead_code, reason = "held for its Drop")]
+    agent_row: Option<crate::runtime::agents::AgentRow>,
     /// The provider retry fallback copied from the [`Runtime`](crate::Runtime)
     /// that minted it.
     ///
@@ -116,9 +134,17 @@ impl PreparedRun {
             run,
             bounds: TurnOptions::default(),
             workspace: None,
+            agent_row: None,
             retry_policy: RetryPolicy::default(),
             context_snapshot: ContextSnapshot::default(),
         }
+    }
+
+    /// Hands this run the ledger row its session was recorded under, to hold
+    /// for its life. See the field.
+    pub(crate) fn with_agent_row(mut self, row: crate::runtime::agents::AgentRow) -> Self {
+        self.agent_row = Some(row);
+        self
     }
 
     fn observe_usage(&self) -> (Arc<Mutex<RunUsage>>, AgentEventTapGuard) {

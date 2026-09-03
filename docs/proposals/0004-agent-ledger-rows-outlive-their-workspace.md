@@ -8,7 +8,6 @@
 > was understood.
 > Trigger, had it stayed deferred: anyone adding eviction to
 > `basis_host::ConfiguredSource`'s workspace pool — see "How reachable it is".
-> Created: 2026-09-03
 > Related: [ADR-0018](../adr/0018-the-runtime-owns-the-process.md) (one runtime,
 > many workspaces), `basis/src/runtime/agents.rs`.
 

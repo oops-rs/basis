@@ -97,6 +97,7 @@ impl PreparedRun {
             run,
             bounds,
             workspace,
+            agent_row,
             retry_policy,
             context_snapshot,
         } = self;
@@ -106,6 +107,7 @@ impl PreparedRun {
             run,
             bounds,
             workspace,
+            agent_row,
             retry_policy,
             context_snapshot,
         }
