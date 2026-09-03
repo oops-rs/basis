@@ -119,7 +119,7 @@ impl DeclaredTools {
             let tool = wrapped(&claimed.runtime, spec, root);
             claimed
                 .runtime
-                .install_declared_tool(audience, claim, tool)
+                .install_claimed_tool(audience, claim, tool)
                 .map_err(|reason| name_taken(path.as_deref(), &name, reason))?;
         }
 
@@ -477,7 +477,7 @@ mod tests {
 
         assert_eq!(
             runtime
-                .declared_tool_descriptor("deploy")
+                .claimed_tool_descriptor("deploy")
                 .expect("registered")
                 .provider
                 .description

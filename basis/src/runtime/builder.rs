@@ -661,7 +661,7 @@ impl RuntimeBuilder {
             host_interceptors,
             #[cfg(feature = "mcp")]
             mcp_claims: Mutex::new(HashMap::new()),
-            declared_claims: Mutex::new(HashMap::new()),
+            tool_claims: Mutex::new(HashMap::new()),
             skill_root_holders: Mutex::new(HashMap::new()),
             hook_chains: Mutex::new(HashMap::new()),
             agents,

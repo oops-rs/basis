@@ -69,10 +69,10 @@ use mentra::ModelSelector;
 pub use builder::RuntimeBuilder;
 pub use tool_results::ToolResultPolicy;
 
-use claims::DeclaredClaim;
 pub(crate) use claims::DeclaredToolOrigin;
 #[cfg(feature = "mcp")]
 use claims::McpClaim;
+use claims::ToolNameClaim;
 use interception::HookChainClaim;
 pub(crate) use interception::HookChainHold;
 pub(crate) use scope::SessionScope;
@@ -310,9 +310,10 @@ pub struct Runtime {
     /// configuring one name must be told apart here.
     #[cfg(feature = "mcp")]
     mcp_claims: Mutex<HashMap<String, McpClaim>>,
-    /// Which workspace owns each declared tool name on the same single
-    /// registry. See [`Runtime::claim_declared_tool`] for why this exists.
-    declared_claims: Mutex<HashMap<String, DeclaredClaim>>,
+    /// Which workspace owns each tool name a workspace registered on the same
+    /// single registry. See [`Runtime::claim_declared_tool`] for why this
+    /// exists.
+    tool_claims: Mutex<HashMap<String, ToolNameClaim>>,
     /// How many open workspaces hold each skills root on this runtime's single
     /// skill registry. See [`Runtime::register_skill_roots`].
     skill_root_holders: Mutex<HashMap<PathBuf, usize>>,

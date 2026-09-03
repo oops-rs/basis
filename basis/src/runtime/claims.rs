@@ -55,14 +55,14 @@ pub(super) struct McpClaim {
     tools: Vec<String>,
 }
 
-/// A declared tool name registered on this runtime by a workspace still open.
+/// One tool name registered on this runtime by a workspace still open.
 ///
 /// `holders` rather than a bare owner because one root may be open twice — a
 /// host that opens the same repository for two concurrent callers — and the
 /// first of those to drop must not free a name the second is still serving.
 /// The entry goes when the count reaches zero, together with the tool itself.
 #[derive(Debug)]
-pub(super) struct DeclaredClaim {
+pub(super) struct ToolNameClaim {
     root: PathBuf,
     holders: usize,
     supplied_holders: usize,
@@ -88,9 +88,9 @@ impl McpClaim {
     }
 }
 
-/// Permission to register one declared tool, granted by
+/// Permission to register one workspace tool, granted by
 /// [`Runtime::claim_declared_tool`] and spent by
-/// [`Runtime::install_declared_tool`].
+/// [`Runtime::install_claimed_tool`].
 ///
 /// A value rather than a `bool` so the association between *which name, under
 /// which root* and *may register* cannot come apart: the two used to agree only
@@ -98,7 +98,7 @@ impl McpClaim {
 /// the type system said they had to.
 #[derive(Debug)]
 #[must_use = "a claimed name with nothing registered under it is a tool the model cannot call"]
-pub(crate) struct DeclaredToolClaim {
+pub(crate) struct ToolNamePermit {
     name: String,
     root: PathBuf,
 }
@@ -238,7 +238,7 @@ impl Runtime {
     ///
     /// `Ok(Some(claim))` means this caller is the name's *first* live holder and
     /// owes the runtime a registration, which
-    /// [`install_declared_tool`](Self::install_declared_tool) takes the claim to
+    /// [`install_claimed_tool`](Self::install_claimed_tool) takes the claim to
     /// perform. `Ok(None)` means a sibling open of the same root already
     /// registered it, and the tool on the runtime is the one that open is
     /// serving. One name is one program, so the second open of a repository
@@ -254,12 +254,9 @@ impl Runtime {
         root: &Path,
         spec: &DeclaredToolSpec,
         origin: DeclaredToolOrigin,
-    ) -> Result<Option<DeclaredToolClaim>, String> {
+    ) -> Result<Option<ToolNamePermit>, String> {
         let name = &spec.name;
-        let mut claims = self
-            .declared_claims
-            .lock()
-            .expect("declared tool claim map poisoned");
+        let mut claims = self.tool_claims.lock().expect("tool claim map poisoned");
 
         match claims.get_mut(name) {
             Some(claim) if claim.root != root => Err(format!(
@@ -290,7 +287,7 @@ impl Runtime {
             None => {
                 claims.insert(
                     name.to_string(),
-                    DeclaredClaim {
+                    ToolNameClaim {
                         root: root.to_path_buf(),
                         holders: 1,
                         supplied_holders: usize::from(matches!(
@@ -301,7 +298,7 @@ impl Runtime {
                         registration: None,
                     },
                 );
-                Ok(Some(DeclaredToolClaim {
+                Ok(Some(ToolNamePermit {
                     name: name.to_string(),
                     root: root.to_path_buf(),
                 }))
@@ -324,26 +321,23 @@ impl Runtime {
     /// takes the tool off the registry in the same breath.
     ///
     /// **Which claim is not a question this has to ask.** It takes the
-    /// [`DeclaredToolClaim`] the claim granted and does the whole of the work
+    /// [`ToolNamePermit`] the claim granted and does the whole of the work
     /// under the claim lock: the entry is found *before* anything is
     /// registered, so there is no window in which a guard exists that nothing
     /// holds, and no re-lookup by a string the caller had to pass twice. A
     /// claim that is gone by the time it is spent is an `Err` and not a silent
     /// success: the alternative reports a live declared tool that nothing on
     /// the runtime answers to.
-    pub(crate) fn install_declared_tool<T>(
+    pub(crate) fn install_claimed_tool<T>(
         &self,
         audience: &ToolAudience,
-        claim: DeclaredToolClaim,
+        claim: ToolNamePermit,
         tool: T,
     ) -> Result<(), String>
     where
         T: mentra::tool::ExecutableTool + 'static,
     {
-        let mut claims = self
-            .declared_claims
-            .lock()
-            .expect("declared tool claim map poisoned");
+        let mut claims = self.tool_claims.lock().expect("tool claim map poisoned");
 
         // Unreachable in practice — the claim map serializes every opener on
         // this runtime and nothing between the claim and here releases one.
@@ -386,10 +380,7 @@ impl Runtime {
         root: &Path,
         origin: DeclaredToolOrigin,
     ) {
-        let mut claims = self
-            .declared_claims
-            .lock()
-            .expect("declared tool claim map poisoned");
+        let mut claims = self.tool_claims.lock().expect("tool claim map poisoned");
 
         let Some(claim) = claims.get_mut(name) else {
             return;
@@ -476,7 +467,7 @@ impl Runtime {
         }
     }
 
-    /// The descriptor of the declared tool live under `name`.
+    /// The descriptor of the workspace tool live under `name`.
     ///
     /// Read off basis's own hold on the registration, because mentra exposes no
     /// reader for an audience's tools: `Runtime::tools` and
@@ -485,13 +476,13 @@ impl Runtime {
     /// `#[cfg(test)]` because the only caller is the test that pins *which*
     /// program a name is serving when one repository is open twice.
     #[cfg(test)]
-    pub(crate) fn declared_tool_descriptor(
+    pub(crate) fn claimed_tool_descriptor(
         &self,
         name: &str,
     ) -> Option<mentra::tool::RuntimeToolDescriptor> {
-        self.declared_claims
+        self.tool_claims
             .lock()
-            .expect("declared tool claim map poisoned")
+            .expect("tool claim map poisoned")
             .get(name)?
             .registration
             .as_ref()
