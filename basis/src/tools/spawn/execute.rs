@@ -287,11 +287,12 @@ async fn spawn_child(
         //
         // A second live open of *this* directory is the case the ladder cannot
         // express — one directory is one audience — so `Workspace::prepare`
-        // hides that sibling's `mcp__*` names by hand, and replacing the
-        // profile away would hand a *narrowed* child the very tools its parent
-        // is denied: `mcp__prod-db__query` belonging to the other client's
-        // authenticated server, reached through the child a policy wrote to
-        // restrict. So the parent's own hidden set goes back in here. It
+        // hides that sibling's names by hand: its bridged `mcp__*` tools, and
+        // the native tools its host supplied it. Replacing the profile away
+        // would hand a *narrowed* child the very tools its parent is denied:
+        // `mcp__prod-db__query` belonging to the other client's authenticated
+        // server, reached through the child a policy wrote to restrict. So the
+        // parent's own hidden set goes back in here. It
         // carries the rest of what the parent was minted with too — the doors
         // `spawn` replaced, the workspace's own roster — which is the same
         // rule said once instead of twice: a roster narrows a child, it never

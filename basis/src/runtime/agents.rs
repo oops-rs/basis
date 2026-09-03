@@ -361,18 +361,22 @@ impl crate::hooks::Interceptor for ForeignToolGuard {
         &self,
         call: &crate::hooks::HookRequest,
     ) -> Result<crate::hooks::HookOutcome, crate::hooks::InterceptorError> {
-        // An agent basis did not make is unjudged here, which is the posture
-        // `Workspace`'s own docs describe for a session driven straight
-        // through `Runtime::mentra_runtime`.
-        let Some(tools) = self.agents.of(&call.agent_id) else {
-            return Ok(crate::hooks::HookOutcome::Allow);
-        };
+        let tools = self.agents.of(&call.agent_id);
 
         // mentra's own parser, so a name a suffixed claim assembled
         // (`claim_mcp_server` resolves a collision with `-<hash>`, which holds
         // no `__`) splits here exactly as it was put together there.
+        //
+        // A missing row allows: an agent basis did not make is unjudged, which
+        // is the posture `Workspace`'s own docs describe for a session driven
+        // straight through `Runtime::mentra_runtime`. A host driving mentra
+        // itself can legitimately own a bridged server, so there is a real
+        // caller behind that default.
         #[cfg(feature = "mcp")]
         if let Some((server, _)) = mentra::mcp::parse_mcp_tool_name(&call.tool_name) {
+            let Some(tools) = tools.as_ref() else {
+                return Ok(crate::hooks::HookOutcome::Allow);
+            };
             return Ok(if tools.mcp_servers.iter().any(|own| own == server) {
                 crate::hooks::HookOutcome::Allow
             } else {
@@ -384,12 +388,28 @@ impl crate::hooks::Interceptor for ForeignToolGuard {
             });
         }
 
+        // **The native arm defaults the other way, and has to.** A ledger row
+        // lives for its workspace, while a run does not: `Workspace::prepare`
+        // does not attach the workspace to the run it returns, so
+        // `let run = ws.prepare(..)?; drop(ws); run.execute(..)` is a
+        // supported shape — and it takes the row away underneath a live
+        // session. Allowing an unrowed caller here would hand that session
+        // exactly what this guard exists to refuse, in exactly the ordering no
+        // hide can cover.
+        //
+        // Defaulting to deny costs nothing, because unlike a bridged name
+        // there is no legitimate unjudged caller for this one: a name is in
+        // the ledger as native only because a live basis workspace put it
+        // there, and a session with no audience cannot resolve it at all.
+        //
         // Asked of the ledger rather than of any snapshot, so a sibling that
         // opened after this session was minted is judged too. A name no live
         // open claimed natively is not this guard's business: it is a global,
         // a declaration, `spawn`, or a mentra builtin.
-        if !self.claims.holds_native(&call.tool_name) || tools.host_tools.contains(&call.tool_name)
-        {
+        let owns = tools
+            .as_ref()
+            .is_some_and(|tools| tools.host_tools.contains(&call.tool_name));
+        if owns || !self.claims.holds_native(&call.tool_name) {
             return Ok(crate::hooks::HookOutcome::Allow);
         }
 

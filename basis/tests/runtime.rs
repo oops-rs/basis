@@ -1116,6 +1116,51 @@ mod host_roster {
     }
 
     #[tokio::test]
+    async fn dropping_the_sibling_workspace_does_not_hand_its_run_the_others_tool() {
+        // `Workspace::prepare` does not attach the workspace to the run, so
+        // holding the run and dropping the workspace is a supported shape —
+        // and it takes the agent ledger row away underneath a live session.
+        // An unrowed caller is unjudged for a *bridged* name, where a host
+        // driving mentra itself is a real owner; for a native one there is no
+        // such caller, so the default is the other way round. Without that,
+        // this is the sibling leak again through a different door.
+        let endpoint = ScriptedEndpoint::start(vec![Reply::ToolCall {
+            name: "host_ask".to_string(),
+            arguments: "{}".to_string(),
+        }]);
+        let runtime = shared_runtime(&endpoint);
+        let dir = workspace_dir();
+
+        let sibling = pinned(dir.path(), Arc::clone(&runtime))
+            .open()
+            .await
+            .expect("opens");
+        let mut siblings_run = sibling.prepare("go").expect("mints");
+
+        let (tool, calls) = HostTool::counted("host_ask");
+        let owner = pinned(dir.path(), runtime)
+            .with_tool(tool)
+            .open()
+            .await
+            .expect("opens");
+
+        drop(sibling);
+
+        let report = siblings_run
+            .execute_with_approver(CollectingSink::default(), AllowAll)
+            .await
+            .expect("completes");
+        assert!(matches!(report.outcome, RunOutcome::Ok));
+        assert_eq!(
+            calls.load(Ordering::SeqCst),
+            0,
+            "a run whose workspace has dropped must not reach the other open's closure"
+        );
+
+        drop(owner);
+    }
+
+    #[tokio::test]
     async fn a_tool_that_renames_itself_between_the_claim_and_the_registration_is_refused() {
         // basis reads a descriptor to learn the name to claim and mentra reads
         // its own to learn the key to register under. Nothing makes those the
