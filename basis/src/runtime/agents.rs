@@ -54,7 +54,7 @@
 use std::{
     collections::{BTreeSet, HashMap},
     sync::{
-        Arc, RwLock,
+        Arc, Mutex, RwLock,
         atomic::{AtomicU64, Ordering},
     },
 };
@@ -178,11 +178,11 @@ impl AgentRegistry {
             .expect("agent registry poisoned")
             .insert(child.to_string(), Entry { owner, tools });
 
-        Some(AgentRow {
+        Some(AgentRow(Arc::new(RowGuard {
             registry: Arc::clone(self),
             owner,
             agent_id: child.to_string(),
-        })
+        })))
     }
 
     fn record(&self, owner: AgentOwner, agent_id: &str, tools: Arc<AgentTools>) {
@@ -220,11 +220,22 @@ impl AgentRegistry {
 #[derive(Debug)]
 pub(crate) struct WorkspaceAgents {
     registry: Arc<AgentRegistry>,
+    /// A hold on every row this workspace has recorded, keyed by agent id and
+    /// replaced when the same id is recorded again.
+    ///
+    /// The workspace's half of "the last of {workspace, live runs}". Bounded by
+    /// the distinct agent ids this open has recorded rather than by its mints,
+    /// and released wholesale when the workspace drops — at which point any row
+    /// a run is still standing on survives on that run's own clone.
+    rows: Mutex<HashMap<String, AgentRow>>,
 }
 
 impl WorkspaceAgents {
     pub(crate) fn new(registry: Arc<AgentRegistry>) -> Self {
-        Self { registry }
+        Self {
+            registry,
+            rows: Mutex::new(HashMap::new()),
+        }
     }
 
     /// States what this workspace's `agent_id` was minted with, replacing
@@ -250,11 +261,22 @@ impl WorkspaceAgents {
         // exactly that.
         let owner = self.registry.new_owner();
         self.registry.record(owner, agent_id, Arc::new(tools));
-        AgentRow {
+        let row = AgentRow(Arc::new(RowGuard {
             registry: Arc::clone(&self.registry),
             owner,
             agent_id: agent_id.to_string(),
-        }
+        }));
+
+        // One guard, two clones: this map's and the caller's. Replacing an
+        // earlier entry for the same id drops that write's hold here, which is
+        // a release only if no run still stands on it — and either way a
+        // no-op, because the write just made above is now the standing one and
+        // an older stamp cannot retract it.
+        self.rows
+            .lock()
+            .expect("workspace agent rows poisoned")
+            .insert(agent_id.to_string(), row.clone());
+        row
     }
 }
 
@@ -274,18 +296,30 @@ impl WorkspaceAgents {
 /// which lives from `spawn_subagent` to the answer it reads back and no longer.
 /// Both release the same way, and neither can release a row a sibling open has
 /// since taken over — whoever wrote the row last is whoever may take it away.
+/// **Shared, not exclusive.** One write makes one guard and hands out clones,
+/// because a row answers to more than one thing at once: the workspace that
+/// recorded it, and every run standing on it. The row leaves when the last of
+/// them goes — which is what `docs/proposals/0004` specifies, and neither half
+/// alone is enough. Released with the workspace, it vanishes under a run that
+/// outlived it; released with the run, it vanishes under a session handed back
+/// by [`into_session`](crate::PreparedRun::into_session), which is still in the
+/// workspace's audience and still judged by its guard.
+#[derive(Debug, Clone)]
+#[must_use = "dropping the last hold takes the agent's row off the ledger"]
+pub(crate) struct AgentRow(#[allow(dead_code, reason = "held for its Drop")] Arc<RowGuard>);
+
+/// The half that actually releases, so the count is what decides when.
 #[derive(Debug)]
-#[must_use = "dropping the hold takes the agent's row off the ledger"]
-pub(crate) struct AgentRow {
+struct RowGuard {
     registry: Arc<AgentRegistry>,
-    /// Stamped and released like a workspace's, for the same reason and with
-    /// no reliance on mentra minting a fresh id per delegation: whoever wrote
-    /// the row last is whoever may take it away.
+    /// Stamped per *write* and shared by that write's holders, so
+    /// last-writer-wins stays unambiguous: whoever wrote the row last is
+    /// whoever may take it away, however many things are standing on it.
     owner: AgentOwner,
     agent_id: String,
 }
 
-impl Drop for AgentRow {
+impl Drop for RowGuard {
     fn drop(&mut self) {
         self.registry.forget_if_owned(&self.agent_id, self.owner);
     }
@@ -503,17 +537,19 @@ mod tests {
     /// nothing attaches the two — while the guard reads this ledger on every
     /// call that run makes. A row released with the workspace left a live
     /// session unattributable, which for a bridged name means allowed.
+    /// A row leaves when the last of {workspace, live runs} goes, and both
+    /// halves are load bearing — each covers a door the other leaves open.
     #[test]
-    fn a_row_outlives_its_workspace_and_leaves_with_its_own_hold() {
+    fn a_row_leaves_when_the_last_of_its_workspace_and_its_runs_goes() {
         let registry = Arc::new(AgentRegistry::default());
         let workspace = WorkspaceAgents::new(Arc::clone(&registry));
 
         let one = workspace.record("agent-1", tools(&["mcp__prod-db__query"]));
         let two = workspace.record("agent-2", tools(&["mcp__prod-db__query"]));
-        assert!(registry.of("agent-1").is_some());
 
+        // The run half: a run outlives the workspace that minted it, and a row
+        // released with the workspace would vanish under a live session.
         drop(workspace);
-
         assert!(
             registry.of("agent-1").is_some() && registry.of("agent-2").is_some(),
             "a session whose workspace has gone is still a session, and still has to be \
@@ -523,12 +559,27 @@ mod tests {
         drop(one);
         assert!(
             registry.of("agent-1").is_none() && registry.of("agent-2").is_some(),
-            "each row leaves with its own hold and takes no other with it"
+            "each row leaves with the last hold on it and takes no other with it"
+        );
+        drop(two);
+        assert!(registry.of("agent-2").is_none());
+
+        // The workspace half: a run can hand its session back
+        // (`PreparedRun::into_session`) and drop everything else, while that
+        // session stays live in the workspace's audience. A row released with
+        // the run would vanish under it.
+        let workspace = WorkspaceAgents::new(Arc::clone(&registry));
+        let handed_back = workspace.record("agent-3", tools(&["mcp__prod-db__query"]));
+        drop(handed_back);
+        assert!(
+            registry.of("agent-3").is_some(),
+            "a session handed back by `into_session` is still in its workspace's audience \
+             and still judged by its guard, so it must still be attributable"
         );
 
-        drop(two);
+        drop(workspace);
         assert!(
-            registry.of("agent-2").is_none(),
+            registry.of("agent-3").is_none(),
             "and nothing outlives the last thing that needed it"
         );
     }
@@ -570,6 +621,7 @@ mod tests {
         let a_moved_again = a.record("moved", tools(&["mcp__a-only__query"]));
 
         drop(b_moved);
+        drop(b);
         drop(a_moved);
 
         assert_eq!(
@@ -582,10 +634,11 @@ mod tests {
 
         drop(a_moved_again);
         drop(a_own);
+        drop(a);
 
         assert!(
             registry.of("moved").is_none() && registry.of("a's own").is_none(),
-            "and the holds that do own their rows still release them"
+            "and a row goes once neither a run nor a workspace is standing on it"
         );
     }
 
@@ -603,6 +656,7 @@ mod tests {
 
         drop(a_moved);
         drop(a_stayed);
+        drop(a);
 
         assert_eq!(
             hides(&registry, "moved"),
@@ -615,10 +669,11 @@ mod tests {
         );
 
         drop(b_moved);
+        drop(b);
 
         assert!(
             registry.of("moved").is_none(),
-            "and the row still leaves with the hold that does own it"
+            "and the row still leaves with the holds that do own it"
         );
     }
 

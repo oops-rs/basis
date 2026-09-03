@@ -45,6 +45,17 @@ pins the intended behaviour; it simply never drops the workspace.
 so `let run = ws.prepare(..)?; drop(ws); run.execute(..)` is a supported shape
 rather than a misuse.
 
+**There is a second door, and it is why neither half of the lifetime is enough
+on its own.** [`PreparedRun::into_session`](crate::PreparedRun::into_session)
+hands the session back and drops the rest of the run. That session is still
+live, still in its workspace's tool audience, and still judged by the chain a
+sibling open of that directory installed — so a row released with the *run*
+vanishes under it exactly as a row released with the *workspace* vanishes under
+a run that outlived its workspace. The first shipped implementation of this
+proposal held only the run half and reopened the defect through this door; it
+was caught by an adversarial probe before merge, and both tests are in
+`basis/tests/runtime.rs`.
+
 **The native arm is not affected.** A native tool name is in the claim ledger
 only because a live basis workspace put it there, and a session with no audience
 cannot resolve one at all — so that arm defaults to refusing an unattributable
@@ -110,7 +121,14 @@ deliberately protects.
 
 1. A row outlives every live session minted or resumed against it, not only the
    workspace that recorded it.
-2. Rows stay removable — no unbounded growth on a long-lived runtime.
+2. Rows stay removable, and bounded by the distinct agent ids a live workspace
+   has recorded — not by its mints, and not by anything a dropped workspace once
+   held. A host that keeps one workspace for the process and mints a fresh agent
+   id per turn makes that a process-lifetime set; that is the host's choice, it
+   is what basis did before 0.12, and it is one map entry per turn rather than
+   per call. Read the property as forbidding growth *relative to that baseline*,
+   because holding the row for the workspace as well as the run is what closes
+   the `into_session` door and the literal reading would reject it.
 3. Same-root takeover keeps working (`forget_if_owned`), and the reason it is
    safe stays stated: mentra leases one live session per agent id, and both
    stores refuse a second acquire even to the same owner.
@@ -127,11 +145,14 @@ deliberately protects.
 8. **The hold must not be reachable from the ledger entry it keeps alive.** A
    self-pinning row is never freed, and looks exactly like correct behaviour
    until the process runs long enough.
-9. **`WorkspaceAgents.recorded` must not become a row set.** It is insert-only
-   today and says so — one `String` per mint and resume, for the process
-   lifetime, deliberately reasoned about and tiny. Implementing the hold by
-   making it carry `Arc`s would turn a bounded string set into an unbounded row
-   set, which is this proposal's own failure mode.
+9. **The workspace's own hold must not grow faster than what shipped.** Its
+   `recorded` set is insert-only today — one `String` per distinct id, for the
+   workspace's life — but the ledger *entry* beside it was already one full row
+   per distinct id for exactly as long. So replacing that set with a map of
+   holds costs one `String` and one pointer per id against a row that was there
+   anyway, and is not the failure this property guards against. What would be:
+   keying the holds by anything that grows faster than distinct agent ids, or
+   holding rows a workspace no longer has any claim on.
 
 ## How reachable it is, and by whom
 

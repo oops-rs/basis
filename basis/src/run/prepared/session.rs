@@ -140,12 +140,21 @@ impl PreparedRun {
         Ok(())
     }
 
-    /// Gives the session back, ending basis's involvement.
+    /// Gives the session back, ending this run's involvement.
     ///
     /// A workspace this run was keeping alive
     /// ([`with_workspace`](Self::with_workspace)) is dropped here with the
-    /// rest of the run, and its hooks and MCP connections end with it — the
-    /// session that comes back is mentra's alone.
+    /// rest of the run, and its hooks and MCP connections end with it.
+    ///
+    /// **"Mentra's alone" is not quite what comes back, and the difference
+    /// matters.** The session keeps the tool audience it was minted in, so
+    /// while any open of that directory is alive its calls are still composed
+    /// into that open's interception chain and still judged by
+    /// [`ForeignToolGuard`](crate::runtime::agents::ForeignToolGuard). What
+    /// keeps that honest is the agent ledger row, which is held by the
+    /// workspace as well as by this run — so handing the session back does not
+    /// make it unattributable, which for a bridged name would mean *allowed*
+    /// (`docs/proposals/0004`).
     pub fn into_session(self) -> Session {
         self.session
     }
