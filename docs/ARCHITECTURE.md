@@ -68,7 +68,7 @@ hot-reloadable extensions. Two pi decisions independently validate ours:
 | Context files (AGENTS.md) | Loader: workspace + global, parent-dir walk; `CLAUDE.md` per directory where there is no `AGENTS.md` | build |
 | Skills (on-demand) | SKILL.md discovery, description-first loading, four roots — `.basis/skills` and `.agents/skills` in the workspace, `skills/` in the global config dir and `~/.agents/skills`; each root registered at open and handed back when the workspace drops, so a shared runtime holds only the skills of the repositories still open ✅ | build |
 | Prompt templates (/commands) | Markdown templates with args, exposed over ACP as commands ✅ | built |
-| Extensions (custom tools, event interception) | MCP servers + typed/file-declared subprocess tools + runtime-scoped native tools + interception with two bindings — in-process `Interceptor`, subprocess hooks — before a call (allow/deny/modify) and after it (keep/replace) (§3) ✅ | built |
+| Extensions (custom tools, event interception) | MCP servers + typed/file-declared subprocess tools + runtime- and workspace-scoped native tools + interception with two bindings — in-process `Interceptor`, subprocess hooks — before a call (allow/deny/modify) and after it (keep/replace) (§3) ✅ | built |
 | Packages (shareable bundles) | Directory convention over skills/templates/hooks/MCP — defer | later |
 | RPC / headless mode | `spawn --json` event stream (`run` is a compatibility alias) + **ACP** (standard, not bespoke) ✅; durable task control over a global data directory, with no resident process of any kind ✅; the model and the reasoning effort are per-session config options a client sets over the protocol, where pi spends six RPC commands ✅ | built |
 | SDK | `basis`: a `Workspace` opened once, runs minted from it with typed output, bounds, cancellation ✅ — other languages use ACP | built |
@@ -177,7 +177,7 @@ Rust binary. Equivalent coverage, Rust-native:
 
 | pi extension capability | basis mechanism |
 |---|---|
-| Custom tools for the LLM | **One contract, three bindings** (ADR-0012): a native Rust tool registered process-wide on `RuntimeBuilder`, a command declared by typed input or `.basis/tools.json`, and an **MCP server** (`rmcp`) — all arriving as the same `ExecutableTool`; any language, process-isolated |
+| Custom tools for the LLM | **One contract, three bindings** (ADR-0012): a native Rust tool (process-wide on `RuntimeBuilder`, or scoped to one workspace on `WorkspaceBuilder`), a command declared by typed input or `.basis/tools.json`, and an **MCP server** (`rmcp`) — all arriving as the same `ExecutableTool`; any language, process-isolated |
 | Event interception (block/modify tool calls) | **One contract, two bindings** (ADR-0012): an in-process `Interceptor` a host implements, and subprocess hooks a workspace declares — same request, same allow/deny/modify vocabulary, one chain |
 | Custom commands | Prompt templates, surfaced as ACP commands |
 | Custom UI | ACP client's job (permission requests, input prompts are protocol messages) |
@@ -906,7 +906,11 @@ every audience on purpose. So a mint still hides every `mcp__<server>__<tool>` w
 this workspace did not configure, reading the bridged names off the claim ledger beside the
 server names (`Runtime::foreign_mcp_tools`). Host tools registered with
 `RuntimeBuilder::with_tool` stay global otherwise: they are the runtime's, and a global is
-visible to every audience. `ToolRoster` is unchanged in shape and in effect.
+visible to every audience. A host tool given to one workspace with
+`WorkspaceBuilder::with_tool` is not — it takes the same audience-scoped registration a
+declared tool does, on the same claim ledger, and is refused an `mcp__` name outright for
+exactly the reason the global case has to be hidden. `ToolRoster` is unchanged in shape and in
+effect.
 
 **And hiding at mint is not, by itself, the isolation.** A roster is a snapshot of the registry
 the mint saw, and three things outlive it: a sibling of the *same directory* that bridges its
