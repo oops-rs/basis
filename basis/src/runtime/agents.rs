@@ -260,6 +260,12 @@ impl WorkspaceAgents {
         // last is whoever may take it away, and only a per-write stamp says
         // exactly that.
         let owner = self.registry.new_owner();
+        // Recorded on the registry *before* the map insert below, and the order
+        // is load bearing: the insert may drop an earlier write's hold, whose
+        // `Drop` compares its stamp against whatever entry is standing. Doing
+        // the insert first would let that comparison meet the *old* entry,
+        // which the old stamp does match — and retract a row this call is in
+        // the middle of establishing.
         self.registry.record(owner, agent_id, Arc::new(tools));
         let row = AgentRow(Arc::new(RowGuard {
             registry: Arc::clone(&self.registry),

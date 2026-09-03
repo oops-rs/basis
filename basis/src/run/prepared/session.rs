@@ -155,6 +155,15 @@ impl PreparedRun {
     /// workspace as well as by this run — so handing the session back does not
     /// make it unattributable, which for a bridged name would mean *allowed*
     /// (`docs/proposals/0004`).
+    ///
+    /// **While its workspace is alive.** The row has exactly those two
+    /// holders, so a session handed back *after* its own workspace has been
+    /// dropped has neither, and falls back to the unjudged default a session
+    /// basis never minted gets. Dropping the workspace and then handing its
+    /// session back is the one ordering this does not cover; there is nowhere
+    /// in mentra to hang a third holder, and the proposal records it as a known
+    /// limit rather than pretending otherwise. Hold the workspace for as long
+    /// as you mean to keep the session.
     pub fn into_session(self) -> Session {
         self.session
     }

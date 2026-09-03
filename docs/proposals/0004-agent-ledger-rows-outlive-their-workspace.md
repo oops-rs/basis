@@ -56,6 +56,19 @@ proposal held only the run half and reopened the defect through this door; it
 was caught by an adversarial probe before merge, and both tests are in
 `basis/tests/runtime.rs`.
 
+**One ordering is not covered, and is recorded here rather than papered over.**
+The row has exactly two holders, so dropping the workspace *and then* handing
+the session back through `into_session` leaves neither, and the session falls
+back to the unjudged default. This fails identically on the code before this
+proposal was implemented — it is residual original defect rather than anything
+the fix introduced, and the fix is a strict improvement against it — but it is a
+known hole and should be read as one. Closing it needs a third holder with
+nowhere to live: a session with no workspace and no run has nothing left to hang
+a lifetime on, and parking the hold on the registry with no release event trades
+a bound that can be reasoned about for one that cannot. The honest options are
+to leave it documented, or to give the bridged arm the ledger fallback of shape
+B — which closes it at the cost of shape B's corner.
+
 **The native arm is not affected.** A native tool name is in the claim ledger
 only because a live basis workspace put it there, and a session with no audience
 cannot resolve one at all — so that arm defaults to refusing an unattributable
