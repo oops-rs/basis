@@ -662,7 +662,7 @@ impl RuntimeBuilder {
             host_interceptors,
             #[cfg(feature = "mcp")]
             mcp_claims: Mutex::new(HashMap::new()),
-            tool_claims: Mutex::new(HashMap::new()),
+            tool_claims: crate::runtime::ToolClaims::default(),
             skill_root_holders: Mutex::new(HashMap::new()),
             hook_chains: Mutex::new(HashMap::new()),
             agents,

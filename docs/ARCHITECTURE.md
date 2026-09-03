@@ -898,30 +898,41 @@ a name held only by a foreign audience as hidden rather than visible — so for 
 **another directory** the invariant holds whether the model was offered the name or guessed
 it, the cell and the `spawn` threading are gone, and a delegated child inherits its parent's
 audience with the handle it is spawned from. Two `mcp__*` cases stay basis's own, because an
-audience is derived from the directory and cannot tell them apart: a **second live open of one
-directory** shares the first's audience by construction — which is the pair `basis-host`
-produces when one repository is opened twice with different client-supplied `mcpServers` — and
-a **host tool registered globally under an `mcp__`-shaped name**, since a global is visible to
-every audience on purpose. So a mint still hides every `mcp__<server>__<tool>` whose `<server>`
-this workspace did not configure, reading the bridged names off the claim ledger beside the
-server names (`Runtime::foreign_mcp_tools`). Host tools registered with
-`RuntimeBuilder::with_tool` stay global otherwise: they are the runtime's, and a global is
-visible to every audience. A host tool given to one workspace with
-`WorkspaceBuilder::with_tool` is not — it takes the same audience-scoped registration a
-declared tool does, on the same claim ledger, and is refused an `mcp__` name outright for
-exactly the reason the global case has to be hidden. `ToolRoster` is unchanged in shape and in
-effect.
+audience is derived from the directory and cannot tell them apart. Two are `mcp__`-shaped: a
+**second live open of one directory** shares the first's audience by construction — which is
+the pair `basis-host` produces when one repository is opened twice with different
+client-supplied `mcpServers` — and a **host tool registered globally under an `mcp__`-shaped
+name**, since a global is visible to every audience on purpose. So a mint still hides every
+`mcp__<server>__<tool>` whose `<server>` this workspace did not configure, reading the bridged
+names off the claim ledger beside the server names (`Runtime::foreign_mcp_tools`). Host tools
+registered with `RuntimeBuilder::with_tool` stay global otherwise: they are the runtime's, and
+a global is visible to every audience.
+
+The third case is the same shape without the prefix, and it arrived with
+`WorkspaceBuilder::with_tool`: a **native tool a sibling open of this directory supplied**. It
+takes the audience-scoped registration a declared tool takes, on the same claim ledger, so it
+is invisible to every other *directory* — but the sibling open of its own directory resolves
+it like any of its own. A declaration is data and a same-root sibling declaring the same thing
+joins it; a native tool is compiled code closing over what the host had at the call site, so
+nothing joins one and the ledger refuses a second open that asks for the same name. The open
+that asks for *nothing* is refused nothing, so a mint hides what the ledger attributes to
+another open (`Runtime::foreign_native_tools`), and an `mcp__` name is refused it outright —
+that name would otherwise be the one `foreign_mcp_tools` could not catch, since it walks the
+global registry. `ToolRoster` is unchanged in shape and in effect.
 
 **And hiding at mint is not, by itself, the isolation.** A roster is a snapshot of the registry
 the mint saw, and three things outlive it: a sibling of the *same directory* that bridges its
 server after this session minted, a resumed conversation (Mentra persists the tool profile and
 `SessionResumeOptions` restates none of it, so the roster is the one the first mint froze), and
 the window inside a sibling's own open between `claim_mcp_server`, which reserves the name, and
-`record_bridged_tools`, which says what came back. So basis decides *execution* separately from
-*listing*: `runtime::agents::ForeignMcpGuard` joins every workspace's own interception chain and
-refuses any `mcp__<server>__<tool>` call whose `<server>` is not in the calling agent's
-workspace's own server list — a list settled at that workspace's open and restated onto the
-ledger by every mint and every resume, so the guard never reads the roster a past mint froze. It
+`record_bridged_tools`, which says what came back. A sibling that supplies a *native* tool after
+this session minted is the same hole in the same place. So basis decides *execution* separately
+from *listing*: `runtime::agents::ForeignToolGuard` joins every workspace's own interception
+chain and refuses two kinds of call — any `mcp__<server>__<tool>` whose `<server>` is not in the
+calling agent's workspace's own server list, and any name the claim ledger holds as another
+open's native tool. Both are read off what that workspace settled at its open and restated onto
+the ledger by every mint and every resume, so the guard never reads the roster a past mint
+froze. It
 reads the runtime's agent ledger (`runtime::agents`) rather than the workspace that installed
 it, which is what makes it right for the *other* open of the same directory: that open joins the
 first's chain rather than registering one, so one guard answers for both, by agent id.

@@ -329,6 +329,12 @@ pub enum RunError {
     /// the first one's closure. A host that genuinely needs its own native
     /// tools per open of one directory needs one [`Runtime`](crate::Runtime)
     /// per open; a declaration, which is data, joins instead.
+    ///
+    /// The sibling that supplies *nothing* meets no error at all, and must
+    /// not: it is refused nothing because it asked for nothing. What keeps it
+    /// out of the tool it never supplied is not this variant but the pair that
+    /// covers every shared-audience binding — hidden from its roster at the
+    /// mint, and refused at the call by the guard in its own chain.
     #[error("the host tool `{name}` cannot be registered for this workspace: it {reason}")]
     WorkspaceHostTool { name: String, reason: String },
 

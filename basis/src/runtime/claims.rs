@@ -21,6 +21,7 @@
 
 use std::collections::HashMap;
 use std::path::{Path, PathBuf};
+use std::sync::{Arc, Mutex, MutexGuard};
 
 // `skill_root_key` is the identity mentra's own registry matches a skills root
 // by, so the holder count below is keyed exactly the way upstream keys it —
@@ -112,10 +113,65 @@ enum ClaimedProgram {
     /// A native tool the host handed *this* open. Nothing about it is
     /// comparable — a `dyn ExecutableTool` is compiled code closing over
     /// whatever the host had at the call site, which is the whole reason to
-    /// use one over a declaration — so no sibling open ever joins it. Serving
-    /// open B the closure open A supplied is precisely the leak the binding
-    /// exists to avoid.
+    /// use one over a declaration — so no sibling open ever joins it.
+    ///
+    /// **This settles only who may register the name, not who may reach it.**
+    /// The two opens share one audience, so the sibling that asks for nothing
+    /// is refused nothing here and would still resolve what this one
+    /// registered. What answers that is the pair every binding in this
+    /// position needs: the name is hidden at the sibling's mint
+    /// ([`Runtime::foreign_native_tools`]) and its call is refused live by
+    /// [`ForeignToolGuard`](super::agents::ForeignToolGuard).
     Native,
+}
+
+/// The ledger itself, shareable.
+///
+/// An `Arc` for the reason [`super::agents::AgentRegistry`] is one: the live
+/// guard that judges a call reads it, and that guard hangs off a workspace's
+/// interception chain, which mentra's runtime holds — so a guard holding the
+/// [`Runtime`] would close a cycle through mentra's own registry and the
+/// runtime would never drop. Sharing the map alone closes nothing.
+#[derive(Debug, Clone, Default)]
+pub(crate) struct ToolClaims(Arc<Mutex<HashMap<String, ToolNameClaim>>>);
+
+impl ToolClaims {
+    fn lock(&self) -> MutexGuard<'_, HashMap<String, ToolNameClaim>> {
+        self.0.lock().expect("tool claim map poisoned")
+    }
+
+    /// Whether `name` is a native tool some live open supplied.
+    ///
+    /// The guard's whole question, asked per call rather than read off a
+    /// snapshot. Deliberately not qualified by root: a native claim under
+    /// *another* directory is in another audience and cannot reach a call here
+    /// at all, and if one ever did, denying it is still the right answer.
+    pub(crate) fn holds_native(&self, name: &str) -> bool {
+        self.lock()
+            .get(name)
+            .is_some_and(|claim| matches!(claim.program, ClaimedProgram::Native))
+    }
+
+    /// Every native tool name claimed on `root` that is not one of `own`.
+    ///
+    /// What a mint hides. Only this root's claims can matter: one directory is
+    /// one audience, so a sibling open of *this* root is the only holder whose
+    /// registration mentra will resolve for this workspace's sessions.
+    pub(crate) fn foreign_native_on(
+        &self,
+        root: &Path,
+        own: &[String],
+    ) -> std::collections::BTreeSet<String> {
+        self.lock()
+            .iter()
+            .filter(|(name, claim)| {
+                claim.root == root
+                    && matches!(claim.program, ClaimedProgram::Native)
+                    && !own.iter().any(|mine| mine == *name)
+            })
+            .map(|(name, _)| name.clone())
+            .collect()
+    }
 }
 
 #[cfg(feature = "mcp")]
@@ -339,7 +395,7 @@ impl Runtime {
         origin: DeclaredToolOrigin,
     ) -> Result<Option<ToolNamePermit>, String> {
         let name = &spec.name;
-        let mut claims = self.tool_claims.lock().expect("tool claim map poisoned");
+        let mut claims = self.tool_claims.lock();
 
         match claims.get_mut(name) {
             Some(claim) if claim.root != root => Err(claim.taken_elsewhere()),
@@ -402,7 +458,7 @@ impl Runtime {
         root: &Path,
         name: &str,
     ) -> Result<ToolNamePermit, String> {
-        let mut claims = self.tool_claims.lock().expect("tool claim map poisoned");
+        let mut claims = self.tool_claims.lock();
 
         match claims.get(name) {
             Some(claim) if claim.root != root => Err(claim.taken_elsewhere()),
@@ -458,7 +514,7 @@ impl Runtime {
     where
         T: mentra::tool::ExecutableTool + 'static,
     {
-        let mut claims = self.tool_claims.lock().expect("tool claim map poisoned");
+        let mut claims = self.tool_claims.lock();
 
         // Unreachable in practice — the claim map serializes every opener on
         // this runtime and nothing between the claim and here releases one.
@@ -514,7 +570,7 @@ impl Runtime {
     /// goes with it, so a released name is free because nothing answers to it
     /// any more, rather than free-with-a-stale-entry-behind-it.
     fn release_tool_claim(&self, name: &str, root: &Path, supplied: bool) {
-        let mut claims = self.tool_claims.lock().expect("tool claim map poisoned");
+        let mut claims = self.tool_claims.lock();
 
         let Some(claim) = claims.get_mut(name) else {
             return;
@@ -605,6 +661,26 @@ impl Runtime {
         }
     }
 
+    /// Every native tool name claimed on `root` that this open did not supply.
+    ///
+    /// What a mint hides, beside [`foreign_mcp_tools`](Self::foreign_mcp_tools)
+    /// and for the third case of the same problem: mentra's audience ladder
+    /// hides another *directory's* tools, and two live opens of one directory
+    /// share one audience by construction, so a native tool the other open
+    /// supplied resolves here as readily as its own.
+    pub(crate) fn foreign_native_tools(
+        &self,
+        root: &Path,
+        own: &[String],
+    ) -> std::collections::BTreeSet<String> {
+        self.tool_claims.foreign_native_on(root, own)
+    }
+
+    /// The ledger, for the live guard that judges a call by it.
+    pub(crate) fn tool_claims(&self) -> ToolClaims {
+        self.tool_claims.clone()
+    }
+
     /// The descriptor of the workspace tool live under `name`.
     ///
     /// Read off basis's own hold on the registration, because mentra exposes no
@@ -620,7 +696,6 @@ impl Runtime {
     ) -> Option<mentra::tool::RuntimeToolDescriptor> {
         self.tool_claims
             .lock()
-            .expect("tool claim map poisoned")
             .get(name)?
             .registration
             .as_ref()

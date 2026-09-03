@@ -20,12 +20,13 @@
 //!   own directory, which is the one hide no audience can restate. mentra
 //!   exposes no reader for an agent's or a template's effective profile (the
 //!   neighbour of upstream `mentra#55`), so basis carries the set itself.
-//! - **[`ForeignMcpGuard`]**, in every workspace's own interception chain,
-//!   answers *may this call run*. It reads [`AgentTools::mcp_servers`] — what
-//!   the calling agent's workspace actually configured — on every call, so it
-//!   is right however long ago the session was minted, whichever open of the
-//!   directory came first, and whether or not a sibling's bridge had finished
-//!   when the mint computed its roster.
+//! - **[`ForeignToolGuard`]**, in every workspace's own interception chain,
+//!   answers *may this call run*. It reads [`AgentTools::mcp_servers`] and
+//!   [`AgentTools::host_tools`] — what the calling agent's workspace actually
+//!   configured and was given — on every call, so it is right however long ago
+//!   the session was minted, whichever open of the directory came first, and
+//!   whether or not a sibling's bridge or native tool had arrived when the
+//!   mint computed its roster.
 //!
 //! Neither substitutes for the other: `hidden_tools` decides what the model is
 //! *told exists*, the guard decides what *executes*. A name the model was
@@ -77,11 +78,23 @@ pub(crate) struct AgentTools {
     /// The effective MCP server names this agent's workspace claimed — what
     /// [`Workspace::mcp_servers`](crate::Workspace::mcp_servers) reports.
     ///
-    /// [`ForeignMcpGuard`]'s whole input, and the reason it cannot go stale: a
+    /// [`ForeignToolGuard`]'s bridged-name input, and the reason it cannot go
+    /// stale: a
     /// workspace's server list is settled at its open, before any tool of any
     /// sibling is bridged, and it does not change while the workspace lives.
     #[cfg(feature = "mcp")]
     pub(crate) mcp_servers: Vec<String>,
+    /// The native tools this agent's workspace supplied
+    /// ([`WorkspaceBuilder::with_tool`](crate::WorkspaceBuilder::with_tool)) —
+    /// what [`Workspace::host_tools`](crate::Workspace::host_tools) reports.
+    ///
+    /// [`ForeignToolGuard`]'s native-name input, and unlike the servers beside it
+    /// this one is *not* about a name a workspace configured elsewhere: a
+    /// native tool is registered for the audience two same-root opens share,
+    /// so the open that supplied none can otherwise resolve — and run — the
+    /// closure the other one supplied. Settled at the open and unchanging, for
+    /// the same reason the server list is.
+    pub(crate) host_tools: Vec<String>,
 }
 
 /// Which handle a registry row belongs to *now*.
@@ -100,7 +113,7 @@ pub(crate) struct AgentTools {
 /// self-correcting: **a handle that is no longer the row's owner must not erase
 /// it on its way out.** A workspace that resumed a sibling's conversation once
 /// still has the id in its `recorded` set long after the sibling took it back,
-/// and an absent row is not a safe default — [`ForeignMcpGuard`] reads it as
+/// and an absent row is not a safe default — [`ForeignToolGuard`] reads it as
 /// "an agent basis did not make" and allows the call, `spawn` reads it as "no
 /// inherited hides" — so the erasure would reopen both holes for exactly as
 /// long as the victim's session stayed live.
@@ -285,8 +298,9 @@ impl Drop for AdoptedChild {
     }
 }
 
-/// Refuses a call to a bridged tool whose server the calling agent's workspace
-/// never configured.
+/// Refuses a call to a tool that belongs to another open of the calling
+/// agent's own directory: a bridged tool whose server this workspace never
+/// configured, or a native tool another open of this directory supplied.
 ///
 /// Registered in **every** workspace's own interception chain
 /// ([`WorkspaceBuilder::open`](crate::WorkspaceBuilder::open)), which is what
@@ -310,51 +324,77 @@ impl Drop for AdoptedChild {
 ///   *caller's* own server list instead, which is settled at its open and
 ///   never briefly empty by accident.
 ///
+/// The native half is the same three holes with one word changed, and it needs
+/// the guard for a reason the bridged half does not have: a
+/// [`WorkspaceBuilder::with_tool`](crate::WorkspaceBuilder::with_tool)
+/// registration is refused to a *second* open that asks for the same name, so
+/// the ledger tells the two apart — but the open that asks for nothing is
+/// refused nothing, and would otherwise both be offered and be able to run the
+/// closure its sibling supplied. What the name is judged against is the
+/// caller's own supplied list, which is settled at its open.
+///
 /// **Duplicate registrations are harmless, and that matters here.** Two opens
 /// of one directory join a single chain
 /// ([`Runtime::register_hook_chain`](super::Runtime::register_hook_chain)), so
 /// only the first open's guard is ever live — and it still answers correctly
 /// for the second open's sessions, because it decides from the ledger rather
 /// than from the workspace that happened to build it.
-#[cfg(feature = "mcp")]
 #[derive(Debug)]
-pub(crate) struct ForeignMcpGuard {
+pub(crate) struct ForeignToolGuard {
     agents: Arc<AgentRegistry>,
+    claims: crate::runtime::ToolClaims,
 }
 
-#[cfg(feature = "mcp")]
-impl ForeignMcpGuard {
-    pub(crate) fn new(agents: Arc<AgentRegistry>) -> Self {
-        Self { agents }
+impl ForeignToolGuard {
+    pub(crate) fn new(agents: Arc<AgentRegistry>, claims: crate::runtime::ToolClaims) -> Self {
+        Self { agents, claims }
     }
 }
 
-#[cfg(feature = "mcp")]
 #[async_trait::async_trait]
-impl crate::hooks::Interceptor for ForeignMcpGuard {
+impl crate::hooks::Interceptor for ForeignToolGuard {
     fn name(&self) -> &str {
-        "basis mcp ownership"
+        "basis tool ownership"
     }
 
     async fn intercept(
         &self,
         call: &crate::hooks::HookRequest,
     ) -> Result<crate::hooks::HookOutcome, crate::hooks::InterceptorError> {
-        // mentra's own parser, so a name a suffixed claim assembled
-        // (`claim_mcp_server` resolves a collision with `-<hash>`, which holds
-        // no `__`) splits here exactly as it was put together there.
-        let Some((server, _)) = mentra::mcp::parse_mcp_tool_name(&call.tool_name) else {
-            return Ok(crate::hooks::HookOutcome::Allow);
-        };
+        // An agent basis did not make is unjudged here, which is the posture
+        // `Workspace`'s own docs describe for a session driven straight
+        // through `Runtime::mentra_runtime`.
         let Some(tools) = self.agents.of(&call.agent_id) else {
             return Ok(crate::hooks::HookOutcome::Allow);
         };
-        if tools.mcp_servers.iter().any(|own| own == server) {
+
+        // mentra's own parser, so a name a suffixed claim assembled
+        // (`claim_mcp_server` resolves a collision with `-<hash>`, which holds
+        // no `__`) splits here exactly as it was put together there.
+        #[cfg(feature = "mcp")]
+        if let Some((server, _)) = mentra::mcp::parse_mcp_tool_name(&call.tool_name) {
+            return Ok(if tools.mcp_servers.iter().any(|own| own == server) {
+                crate::hooks::HookOutcome::Allow
+            } else {
+                crate::hooks::HookOutcome::Deny(format!(
+                    "'{}' belongs to the MCP server '{server}', which this workspace did not \
+                     configure",
+                    call.tool_name
+                ))
+            });
+        }
+
+        // Asked of the ledger rather than of any snapshot, so a sibling that
+        // opened after this session was minted is judged too. A name no live
+        // open claimed natively is not this guard's business: it is a global,
+        // a declaration, `spawn`, or a mentra builtin.
+        if !self.claims.holds_native(&call.tool_name) || tools.host_tools.contains(&call.tool_name)
+        {
             return Ok(crate::hooks::HookOutcome::Allow);
         }
 
         Ok(crate::hooks::HookOutcome::Deny(format!(
-            "'{}' belongs to the MCP server '{server}', which this workspace did not configure",
+            "'{}' is a native tool another open of this workspace supplied, and this one did not",
             call.tool_name
         )))
     }
@@ -369,6 +409,7 @@ mod tests {
             hidden: hidden.iter().map(|name| (*name).to_string()).collect(),
             #[cfg(feature = "mcp")]
             mcp_servers: Vec::new(),
+            host_tools: Vec::new(),
         }
     }
 
@@ -385,11 +426,12 @@ mod tests {
             AgentTools {
                 hidden: BTreeSet::new(),
                 mcp_servers: vec!["prod-db".to_string()],
+                host_tools: Vec::new(),
             },
         );
         workspace.record("stranger", tools(&[]));
 
-        let guard = ForeignMcpGuard::new(registry);
+        let guard = ForeignToolGuard::new(registry, crate::runtime::ToolClaims::default());
         let call = |agent: &str, tool: &str| HookRequest {
             hook_schema: 1,
             event: HookEvent::PreToolUse,

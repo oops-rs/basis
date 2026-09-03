@@ -844,8 +844,24 @@ mod host_roster {
         ParallelToolContext, RuntimeToolDescriptor, ToolDefinition, ToolExecutor, ToolResult,
     };
 
-    /// A host's own tool, under whatever name the test needs.
-    struct HostTool(&'static str);
+    /// A host's own tool, under whatever name the test needs, counting the
+    /// calls that actually reached its closure.
+    ///
+    /// The count is the claim that matters for a sibling open: a roster it was
+    /// left out of proves what the model was *told*, and only this proves the
+    /// host's own code did not run for a caller it was never given to.
+    struct HostTool(&'static str, Arc<AtomicUsize>);
+
+    impl HostTool {
+        fn named(name: &'static str) -> Self {
+            Self(name, Arc::new(AtomicUsize::new(0)))
+        }
+
+        fn counted(name: &'static str) -> (Self, Arc<AtomicUsize>) {
+            let calls = Arc::new(AtomicUsize::new(0));
+            (Self(name, Arc::clone(&calls)), calls)
+        }
+    }
 
     impl ToolDefinition for HostTool {
         fn descriptor(&self) -> RuntimeToolDescriptor {
@@ -863,6 +879,7 @@ mod host_roster {
             _ctx: ParallelToolContext,
             _input: serde_json::Value,
         ) -> ToolResult {
+            self.1.fetch_add(1, Ordering::SeqCst);
             Ok("done".to_string())
         }
     }
@@ -876,7 +893,12 @@ mod host_roster {
         // prepared still reached its roster. Nothing is frozen to prevent it —
         // mentra rebuilds a visible set from the live registry each round, and
         // a name held only by another audience is `Hidden`.
-        let endpoint = ScriptedEndpoint::start(Vec::new());
+        // The owner's first round calls the tool, so this pins that it is
+        // reachable and not merely listed.
+        let endpoint = ScriptedEndpoint::start(vec![Reply::ToolCall {
+            name: "host_ask".to_string(),
+            arguments: "{}".to_string(),
+        }]);
         let runtime = shared_runtime(&endpoint);
 
         let bystander_dir = workspace_dir();
@@ -889,19 +911,14 @@ mod host_roster {
         let mut bystanders_run = bystander.prepare("go").expect("mints");
 
         let owner_dir = workspace_dir();
+        let (tool, calls) = HostTool::counted("host_ask");
         let owner = pinned(owner_dir.path(), runtime)
-            .with_tool(HostTool("host_ask"))
+            .with_tool(tool)
             .open()
             .await
             .expect("opens");
         assert_eq!(owner.host_tools(), ["host_ask"]);
         assert!(bystander.host_tools().is_empty());
-
-        let report = bystanders_run
-            .execute_with_approver(CollectingSink::default(), AllowAll)
-            .await
-            .expect("completes");
-        assert!(matches!(report.outcome, RunOutcome::Ok));
 
         let report = owner
             .prepare("go")
@@ -911,7 +928,15 @@ mod host_roster {
             .expect("completes");
         assert!(matches!(report.outcome, RunOutcome::Ok));
 
-        let (bystanders, owners) = (roster(&endpoint, 0), roster(&endpoint, 1));
+        let report = bystanders_run
+            .execute_with_approver(CollectingSink::default(), AllowAll)
+            .await
+            .expect("completes");
+        assert!(matches!(report.outcome, RunOutcome::Ok));
+
+        // Connections 0 and 1 are the owner's call and its wrap-up; 2 is the
+        // bystander's one round.
+        let (owners, bystanders) = (roster(&endpoint, 0), roster(&endpoint, 2));
 
         assert!(
             owners.iter().any(|tool| tool == "spawn"),
@@ -920,6 +945,11 @@ mod host_roster {
         assert!(
             owners.iter().any(|tool| tool == "host_ask"),
             "the workspace the host gave it to must be offered it: {owners:?}"
+        );
+        assert_eq!(
+            calls.load(Ordering::SeqCst),
+            1,
+            "and must be able to run it — a tool nothing may call is not a seam"
         );
         assert!(
             !bystanders.iter().any(|tool| tool == "host_ask"),
@@ -939,8 +969,8 @@ mod host_roster {
         let dir = workspace_dir();
 
         let refused = pinned(dir.path(), Arc::clone(&runtime))
-            .with_tool(HostTool("host_ask"))
-            .with_tool(HostTool("spawn"))
+            .with_tool(HostTool::named("host_ask"))
+            .with_tool(HostTool::named("spawn"))
             .open()
             .await
             .expect_err("a host tool must not take over basis's own");
@@ -950,7 +980,7 @@ mod host_roster {
         );
 
         let workspace = pinned(dir.path(), runtime)
-            .with_tool(HostTool("host_ask"))
+            .with_tool(HostTool::named("host_ask"))
             .open()
             .await
             .expect("the refused set claimed nothing, so the name is free");
@@ -969,13 +999,13 @@ mod host_roster {
         let dir = workspace_dir();
 
         let first = pinned(dir.path(), Arc::clone(&runtime))
-            .with_tool(HostTool("host_ask"))
+            .with_tool(HostTool::named("host_ask"))
             .open()
             .await
             .expect("opens");
 
         let refused = pinned(dir.path(), Arc::clone(&runtime))
-            .with_tool(HostTool("host_ask"))
+            .with_tool(HostTool::named("host_ask"))
             .open()
             .await
             .expect_err("a second live open cannot supply its own tool under that name");
@@ -986,11 +1016,121 @@ mod host_roster {
 
         drop(first);
         let second = pinned(dir.path(), runtime)
-            .with_tool(HostTool("host_ask"))
+            .with_tool(HostTool::named("host_ask"))
             .open()
             .await
             .expect("the first open's drop took its tool off the runtime");
         assert_eq!(second.host_tools(), ["host_ask"]);
+    }
+
+    #[tokio::test]
+    async fn a_second_open_of_one_directory_is_not_offered_its_siblings_tool() {
+        // The claim refusal above only catches the open that asks for the
+        // *same name*. The open that asks for nothing is refused nothing —
+        // and it resolves the audience its sibling registered in, because one
+        // directory is one audience. So it is the case the ledger cannot
+        // close, and it gets the answer this file's `mcp__*` machinery has
+        // always given: hidden at the mint, and — the next test — refused at
+        // the call, because a name the model was never offered is still a name
+        // it can guess.
+        let endpoint = ScriptedEndpoint::start(vec![Reply::ToolCall {
+            name: "host_ask".to_string(),
+            arguments: "{}".to_string(),
+        }]);
+        let runtime = shared_runtime(&endpoint);
+        let dir = workspace_dir();
+
+        let (tool, calls) = HostTool::counted("host_ask");
+        let owner = pinned(dir.path(), Arc::clone(&runtime))
+            .with_tool(tool)
+            .open()
+            .await
+            .expect("opens");
+        let sibling = pinned(dir.path(), runtime)
+            .open()
+            .await
+            .expect("a second open that supplies nothing is not refused");
+        assert!(sibling.host_tools().is_empty());
+
+        let report = sibling
+            .prepare("go")
+            .expect("mints")
+            .execute_with_approver(CollectingSink::default(), AllowAll)
+            .await
+            .expect("completes");
+        assert!(matches!(report.outcome, RunOutcome::Ok));
+
+        let offered = roster(&endpoint, 0);
+        assert!(
+            offered.iter().any(|tool| tool == "spawn"),
+            "the roster parsed: basis's own tool must be in it: {offered:?}"
+        );
+        assert!(
+            !offered.iter().any(|tool| tool == "host_ask"),
+            "the open that supplied nothing must not be offered its sibling's tool: {offered:?}"
+        );
+        assert_eq!(
+            calls.load(Ordering::SeqCst),
+            0,
+            "and guessing the name must not reach the host's own closure"
+        );
+
+        drop(owner);
+    }
+
+    #[tokio::test]
+    async fn a_sibling_that_opens_later_is_refused_the_tool_its_roster_still_carries() {
+        // Hiding is a snapshot, and this is the ordering that defeats it: the
+        // sibling mints before the owner exists, so its mint had nothing to
+        // hide, and mentra rebuilds the roster from the live registry every
+        // round — so the name *is* offered. What refuses the call is the
+        // guard in this workspace's own chain, which reads what this open
+        // supplied rather than what some past mint computed. The same claim
+        // the bridged case pins for a resumed run, one binding over.
+        let endpoint = ScriptedEndpoint::start(vec![Reply::ToolCall {
+            name: "host_ask".to_string(),
+            arguments: "{}".to_string(),
+        }]);
+        let runtime = shared_runtime(&endpoint);
+        let dir = workspace_dir();
+
+        let sibling = pinned(dir.path(), Arc::clone(&runtime))
+            .open()
+            .await
+            .expect("opens");
+        let mut siblings_run = sibling.prepare("go").expect("mints");
+
+        let (tool, calls) = HostTool::counted("host_ask");
+        let owner = pinned(dir.path(), runtime)
+            .with_tool(tool)
+            .open()
+            .await
+            .expect("opens");
+
+        let report = siblings_run
+            .execute_with_approver(CollectingSink::default(), AllowAll)
+            .await
+            .expect("completes");
+        assert!(matches!(report.outcome, RunOutcome::Ok));
+
+        let offered = roster(&endpoint, 0);
+        assert!(
+            offered.iter().any(|tool| tool == "host_ask"),
+            "the roster still carries the name, which is why the refusal has to come from the \
+             guard rather than from a hide: {offered:?}"
+        );
+        assert_eq!(
+            calls.load(Ordering::SeqCst),
+            0,
+            "the sibling's call must not reach the closure the other open supplied"
+        );
+        let refused = endpoint.requests()[1].clone();
+        assert!(
+            refused.contains("another open of this workspace supplied"),
+            "and the model is told why, in the guard's own words: {refused}"
+        );
+
+        drop(owner);
     }
 }
 
