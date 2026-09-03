@@ -421,13 +421,16 @@ fn writing_mock(workspace: &std::path::Path) -> mentra::test::MockRuntime {
 
 /// Prepares the scripted run against `workspace`, seeds the durable allow no
 /// attach can clear, applies `mode` the way [`drive`] does, and runs it.
-/// Reports whether the write happened.
+/// Reports whether the write happened, and how many permission requests the
+/// run raised — the second is what tells the two tests below apart from a
+/// dead seed, since a live rule and a refusing gate both leave the write
+/// undone.
 ///
 /// The rule is **Global**-scope and written before the first turn, so it is the
 /// standing override a recorded mode has to survive: basis clears session scope
 /// at resume and nothing clears this, and it resolves the runtime gate's
 /// `Prompt` with no permission request ever raised.
-async fn wrote_a_file_under(mode: Approve, workspace: &std::path::Path) -> bool {
+async fn wrote_a_file_under(mode: Approve, workspace: &std::path::Path) -> (bool, usize) {
     let mock = writing_mock(workspace);
     let session = mock
         .runtime()
@@ -475,7 +478,7 @@ async fn wrote_a_file_under(mode: Approve, workspace: &std::path::Path) -> bool 
 
     let mut run = gated(run, mode);
     let approver = approver(mode, &DriveContext::default()).expect("no host is needed to refuse");
-    time::timeout(
+    let report = time::timeout(
         Duration::from_secs(10),
         run.execute_with_approver(basis::CollectingSink::new(), approver),
     )
@@ -483,7 +486,14 @@ async fn wrote_a_file_under(mode: Approve, workspace: &std::path::Path) -> bool 
     .expect("a refusal never waits on anyone, so this must not hang")
     .expect("the run completes");
 
-    workspace.join("made.txt").exists()
+    let asked = report
+        .sink
+        .events()
+        .iter()
+        .filter(|event| matches!(event, basis::Event::PermissionRequested { .. }))
+        .count();
+
+    (workspace.join("made.txt").exists(), asked)
 }
 
 #[tokio::test]
@@ -493,28 +503,38 @@ async fn a_durable_rule_cannot_allow_what_never_refuses() {
     // of `DenyAll`, so until the gate went on, a task recorded to refuse could
     // be talked out of it by a rule no attach of that task wrote.
     //
-    // Read with its mirror below, which fails if the seeded rule is inert: this
-    // one alone would pass just as happily against a dead rule, since `never`
-    // refuses at the approver too.
+    // Read with its mirror below: this one alone would pass just as happily
+    // against a dead rule, since `never` refuses at the approver too. The
+    // mirror's `asked == 0` assertion is what actually tells a live seed from
+    // an inert one — a refusal here proves nothing about whether the rule was
+    // ever consulted.
     let workspace = tempfile::tempdir().expect("tempdir");
+    let (written, _asked) = wrote_a_file_under(Approve::Never, workspace.path()).await;
 
     assert!(
-        !wrote_a_file_under(Approve::Never, workspace.path()).await,
+        !written,
         "a durable allow must not outlive the recorded mode that refuses it"
     );
 }
 
 #[tokio::test]
 async fn a_durable_rule_still_answers_where_the_task_would_have_allowed() {
-    // The other half, unchanged: `always` installs no authorizer of its own, so
-    // the runtime's gate still surfaces the call and the remembered rule still
-    // resolves it. Closing the bypass must not cost a host its standing allows
-    // — and this failing is what would tell us the seed above had stopped being
-    // a real rule.
+    // The other half, and the one that actually discriminates the pair:
+    // `always` installs no authorizer of its own, so the runtime's gate still
+    // surfaces the call and the remembered rule still resolves it with nobody
+    // asked. A dead seed would still let the write through here (nothing
+    // refuses `always`), but it would cost a permission request the live rule
+    // never raises — so `asked == 0` is what would catch the seed above going
+    // inert, not the write itself.
     let workspace = tempfile::tempdir().expect("tempdir");
+    let (written, asked) = wrote_a_file_under(Approve::Always, workspace.path()).await;
 
     assert!(
-        wrote_a_file_under(Approve::Always, workspace.path()).await,
+        written,
         "a seeded rule must still answer for a mode that permits the call"
+    );
+    assert_eq!(
+        asked, 0,
+        "and it must answer without asking, or the seed was never really live"
     );
 }

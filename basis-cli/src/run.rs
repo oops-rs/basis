@@ -367,13 +367,16 @@ mod tests {
 
     /// Prepares the scripted run against `workspace`, seeds the durable allow
     /// this route cannot clear, applies `policy` the way [`execute_run`] does,
-    /// and runs it. Reports whether the write happened.
+    /// and runs it. Reports whether the write happened, and how many
+    /// permission requests the run raised — the second is what tells the two
+    /// tests below apart from a dead seed, since a live rule and a refusing
+    /// gate both leave the write undone.
     ///
     /// The rule is **Global**-scope and written before the first turn, so it is
     /// the standing override a fixed policy has to survive: nothing here clears
     /// it, `forget_session_answers` reaches only session scope, and it resolves
     /// the runtime gate's `Prompt` with no permission request ever raised.
-    async fn wrote_a_file_under(policy: ApprovalPolicy, workspace: &Path) -> bool {
+    async fn wrote_a_file_under(policy: ApprovalPolicy, workspace: &Path) -> (bool, usize) {
         let mock = writing_mock(workspace);
         let session = mock
             .runtime()
@@ -420,7 +423,7 @@ mod tests {
             .expect("the rule is remembered");
 
         let mut run = gated(run, policy);
-        tokio::time::timeout(
+        let report = tokio::time::timeout(
             Duration::from_secs(10),
             run.execute_with_approver(basis::CollectingSink::new(), approver(policy)),
         )
@@ -428,7 +431,14 @@ mod tests {
         .expect("a refusal never waits on anyone, so this must not hang")
         .expect("the run completes");
 
-        workspace.join("made.txt").exists()
+        let asked = report
+            .sink
+            .events()
+            .iter()
+            .filter(|event| matches!(event, basis::Event::PermissionRequested { .. }))
+            .count();
+
+        (workspace.join("made.txt").exists(), asked)
     }
 
     #[tokio::test]
@@ -438,29 +448,39 @@ mod tests {
         // `DenyAll`, so until the gate went on, `--approve never` was a promise
         // a rule nobody in this run wrote could stand over.
         //
-        // Read with its mirror below, which fails if the seeded rule is inert:
-        // this one alone would pass just as happily against a dead rule, since
-        // `never` refuses at the approver too.
+        // Read with its mirror below: this one alone would pass just as
+        // happily against a dead rule, since `never` refuses at the approver
+        // too. The mirror's `asked == 0` assertion is what actually tells a
+        // live seed from an inert one — a refusal here proves nothing about
+        // whether the rule was ever consulted.
         let workspace = tempfile::tempdir().expect("tempdir");
+        let (written, _asked) = wrote_a_file_under(ApprovalPolicy::Never, workspace.path()).await;
 
         assert!(
-            !wrote_a_file_under(ApprovalPolicy::Never, workspace.path()).await,
+            !written,
             "a durable allow must not outlive the `--approve never` that refuses it"
         );
     }
 
     #[tokio::test]
     async fn a_durable_rule_still_answers_where_the_run_would_have_allowed() {
-        // The other half, unchanged: `always` installs no authorizer of its
-        // own, so the runtime's gate still surfaces the call and the remembered
-        // rule still resolves it. Closing the bypass must not cost a host its
-        // standing allows — and this failing is what would tell us the seed
-        // above had stopped being a real rule.
+        // The other half, and the one that actually discriminates the pair:
+        // `always` installs no authorizer of its own, so the runtime's gate
+        // still surfaces the call and the remembered rule still resolves it
+        // with nobody asked. A dead seed would still let the write through
+        // here (nothing refuses `always`), but it would cost a permission
+        // request the live rule never raises — so `asked == 0` is what would
+        // catch the seed above going inert, not the write itself.
         let workspace = tempfile::tempdir().expect("tempdir");
+        let (written, asked) = wrote_a_file_under(ApprovalPolicy::Always, workspace.path()).await;
 
         assert!(
-            wrote_a_file_under(ApprovalPolicy::Always, workspace.path()).await,
+            written,
             "a seeded rule must still answer for a policy that permits the call"
+        );
+        assert_eq!(
+            asked, 0,
+            "and it must answer without asking, or the seed was never really live"
         );
     }
 }
