@@ -342,8 +342,8 @@ flowchart LR
   becoming a server (ADR-0017).
 - **A workspace is opened once and mints runs** (ADR-0010). Everything that belongs to a
   repository rather than to a prompt — context documents, the resolved model, skills,
-  templates, hooks, declared tools, MCP connections — is settled by
-  `Workspace::open`, and `prepare` mints
+  templates, hooks, declared tools, the host's own tools for this workspace, MCP
+  connections — is settled by `Workspace::open`, and `prepare` mints
   a run from it *synchronously*, because nothing is left to await. A twenty-way fan-out
   therefore reads `AGENTS.md` once. What a run carries of its own is the honestly per-run
   half: the prompt, the session name, the effort, and the bounds. The free functions
@@ -706,6 +706,31 @@ posture the strict-host section above describes and the one every real caller al
 Reuse returns when Mentra can mint a fresh provider session scope from an existing provider
 ([oops-rs/mentra#46](https://github.com/oops-rs/mentra/issues/46)); until then Basis makes no
 reuse claim it cannot prove.
+
+### Isolation: `into_session` is withdrawn, and a native tool can be a workspace's
+
+Two changes from the same pass, both about which sessions may reach which tools.
+
+`PreparedRun::into_session` is **gone**, and it is the only removal here that is not a
+simplification. An agent's ledger row — what tells the ownership guard which open a call
+belongs to — is held by the `PreparedRun`, because a run is exactly how long its session
+lives. `into_session` was the one surface that could hand a live session past its run, and a
+session with no run and no workspace has nothing left to hang a row on: it would fall back to
+the unjudged default while a sibling open of its directory still judged it, which for a
+bridged `mcp__*` name means one client's session reaching another client's authenticated
+server. Withdrawing the call makes that unreachable rather than documented.
+
+**Migration:** a host that needs a session for longer than one run keeps the *workspace*
+alive for as long as it uses the session. That was always the supported shape and is now the
+only one. [Proposal 0004](proposals/0004-agent-ledger-rows-outlive-their-workspace.md)
+records what a redesigned escape hatch would have to solve before it could return.
+
+`WorkspaceBuilder::with_tool` is **new**, and needs no migration: it is the per-workspace half
+of `RuntimeBuilder::with_tool`. A host whose native tool belongs to one repository rather than
+to the process registers it for that workspace's tool audience, so the other repositories on a
+shared runtime are neither offered it nor able to reach it by name. Its name is claimed on the
+same ledger a declared tool's is, which is what makes the two refuse each other rather than
+silently overwrite.
 
 ### Parsimony: an unadopted tree, a target setter, two hidden seams
 
