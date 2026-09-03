@@ -531,17 +531,42 @@ impl Runtime {
             );
         };
 
-        entry.registration = Some(
-            self.mentra
-                .try_register_tool_for_audience(audience.clone(), tool)
-                .map_err(|collision: ToolNameCollision| {
-                    format!(
-                        "something registered a tool called '{}' on this runtime while this \
-                         workspace was opening",
-                        collision.name
-                    )
-                })?,
-        );
+        let registration = self
+            .mentra
+            .try_register_tool_for_audience(audience.clone(), tool)
+            .map_err(|collision: ToolNameCollision| {
+                format!(
+                    "something registered a tool called '{}' on this runtime while this \
+                     workspace was opening",
+                    collision.name
+                )
+            })?;
+
+        // **What was claimed and what was registered are checked against each
+        // other, not assumed equal.** basis reads a tool's descriptor to learn
+        // the name it must claim; mentra reads its own to learn the key it
+        // registers under. For an ordinary tool those are the same string
+        // twice, but `descriptor()` is a caller's method and nothing makes it
+        // pure — so a tool that answered differently the second time would
+        // otherwise sit on the registry under a name no claim covers, missing
+        // every rule this ledger exists to enforce, `mcp__` included.
+        //
+        // mentra 0.26 is what makes the check possible: the registration hands
+        // back the exact snapshot it used, so this compares the two rather
+        // than re-asking the tool a third time and trusting that answer.
+        // Dropping the registration unregisters precisely that generation.
+        let registered = &registration.descriptor().provider.name;
+        if *registered != claim.name {
+            let registered = registered.clone();
+            drop(registration);
+            return Err(format!(
+                "its descriptor named '{}' when the name was claimed and '{registered}' when it \
+                 was registered; a tool has to be the same tool both times",
+                claim.name
+            ));
+        }
+
+        entry.registration = Some(registration);
         Ok(())
     }
 

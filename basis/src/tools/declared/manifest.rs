@@ -43,10 +43,10 @@ pub const DEFAULT_TOOL_TIMEOUT: Duration = Duration::from_secs(120);
 /// The longest name a provider will carry. Every one of them rejects a longer
 /// tool name, and the rejection arrives as an opaque request failure at the
 /// first turn rather than as anything naming this file.
-const MAX_NAME_LENGTH: usize = 64;
+pub(crate) const MAX_NAME_LENGTH: usize = 64;
 
 /// The prefix mentra bridges MCP tools under, which nothing else may claim.
-const MCP_PREFIX: &str = "mcp__";
+pub(crate) const MCP_PREFIX: &str = "mcp__";
 
 /// How much of the world a declared tool may touch.
 ///
@@ -572,9 +572,17 @@ fn check_timeout(timeout_ms: Option<u64>) -> Result<(), String> {
 /// rather than discovered at the first turn.
 ///
 /// The charset is the one every provider accepts. `mcp__` is refused because
-/// mentra parses that prefix to find a bridged tool's server, so a declaration
-/// wearing it would be a workspace naming a server it does not own.
-fn check_name(name: &str) -> Result<(), String> {
+/// mentra parses that prefix to find a bridged tool's server, so a tool wearing
+/// it would be a workspace naming a server it does not own.
+///
+/// Shared with the native binding (`crate::tools::host`) rather than copied
+/// there, because the rules are one rule: what may be a tool name on this
+/// runtime does not depend on which of the two put it there, and two copies
+/// would answer differently the first time either is edited — the mistake
+/// `crate::runtime::probe` exists to remember. The `mcp__` refusal is load
+/// bearing for the native binding in a way it is not here, and
+/// [`crate::tools::host`] carries that argument.
+pub(crate) fn check_name(name: &str) -> Result<(), String> {
     if name.is_empty() {
         return Err("has an empty name".to_string());
     }

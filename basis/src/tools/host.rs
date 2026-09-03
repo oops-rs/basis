@@ -15,6 +15,22 @@
 //! one name cannot be compared and the second open is refused rather than
 //! silently served the first one's closure. `crate::runtime::claims` carries
 //! the whole argument.
+//!
+//! # The name rules are the declared binding's
+//!
+//! [`declared::manifest::check_name`](super::declared::manifest::check_name)
+//! is called rather than restated: what may be a tool name on this runtime
+//! does not depend on which binding put it there, and two copies of one rule
+//! answer differently the first time either is edited — the mistake
+//! [`crate::runtime::probe`] exists to remember.
+//!
+//! One of those rules is load bearing here in a way it is not there. A
+//! workspace-scoped registration is invisible to
+//! [`Runtime::foreign_mcp_tools`](crate::runtime::Runtime::foreign_mcp_tools),
+//! which walks the *global* registry to find names shaped like a bridged tool
+//! of a server nobody configured — so a host tool wearing `mcp__` would be the
+//! one such name basis could not catch after the fact, offered to this
+//! workspace's model as though a server it never configured were connected.
 
 use std::{
     path::{Path, PathBuf},
@@ -23,14 +39,11 @@ use std::{
 
 use mentra::tool::ToolAudience;
 
-use crate::{RunError, runtime::Runtime, tools::ExecutableTool};
-
-/// The longest name a provider takes, and the one
-/// [`declared`](super::declared) checks a manifest entry against.
-const MAX_NAME_LENGTH: usize = 64;
-
-/// mentra parses this prefix to find a bridged tool's server.
-const MCP_PREFIX: &str = "mcp__";
+use crate::{
+    RunError,
+    runtime::Runtime,
+    tools::{ExecutableTool, declared::manifest::check_name},
+};
 
 /// One workspace's host tools, registered on a runtime it may share.
 ///
@@ -85,14 +98,14 @@ impl WorkspaceHostTools {
         for (name, _) in &named {
             // On failure `held` drops, releasing whatever it had taken, so a
             // refused open leaves the runtime as it found it.
-            check_name(name).map_err(|reason| RunError::WorkspaceHostTool {
+            check_name(name).map_err(|reason| RunError::WorkspaceHostToolName {
                 name: name.clone(),
                 reason,
             })?;
             let permit = held
                 .runtime
                 .claim_native_tool(root, name)
-                .map_err(|reason| RunError::WorkspaceHostTool {
+                .map_err(|reason| RunError::WorkspaceHostToolNameTaken {
                     name: name.clone(),
                     reason,
                 })?;
@@ -103,7 +116,7 @@ impl WorkspaceHostTools {
         for ((name, tool), permit) in named.into_iter().zip(permissions) {
             held.runtime
                 .install_claimed_tool(audience, permit, tool)
-                .map_err(|reason| RunError::WorkspaceHostTool { name, reason })?;
+                .map_err(|reason| RunError::WorkspaceHostToolNameTaken { name, reason })?;
         }
 
         Ok(held)
@@ -121,47 +134,4 @@ impl Drop for WorkspaceHostTools {
             self.runtime.release_native_tool(&name, &self.root);
         }
     }
-}
-
-/// A name is the tool's identity everywhere it appears — the model's roster, a
-/// remembered rule, a hook's `tools` list — so what may be one is checked at the
-/// open rather than discovered at the first turn.
-///
-/// The same rules a declaration is held to
-/// (`crate::tools::declared::manifest`), and `mcp__` is refused for a sharper
-/// reason here than there. A workspace-scoped registration is invisible to
-/// `Runtime::foreign_mcp_tools`, which walks the *global* registry to find
-/// names shaped like a bridged tool of a server nobody configured — so a host
-/// tool wearing the prefix would be the one such name basis could not catch,
-/// offered to this workspace's model as though a server it never configured
-/// were connected.
-fn check_name(name: &str) -> Result<(), String> {
-    if name.is_empty() {
-        return Err("has an empty name".to_string());
-    }
-
-    if name.len() > MAX_NAME_LENGTH {
-        return Err(format!(
-            "has a name of {} characters, and a provider takes at most {MAX_NAME_LENGTH}",
-            name.len()
-        ));
-    }
-
-    if !name
-        .chars()
-        .all(|character| character.is_ascii_alphanumeric() || character == '_' || character == '-')
-    {
-        return Err(
-            "has a name outside the letters, digits, `_` and `-` a provider accepts".to_string(),
-        );
-    }
-
-    if name.starts_with(MCP_PREFIX) {
-        return Err(format!(
-            "has a name starting with `{MCP_PREFIX}`, which is how mentra names a bridged MCP \
-             server's tool"
-        ));
-    }
-
-    Ok(())
 }
