@@ -92,6 +92,44 @@ fn workspace_dir() -> tempfile::TempDir {
     dir
 }
 
+/// The tool names in the nth request's `tools` array — the roster the model was
+/// actually offered, which is the only honest observable for a registration
+/// scoped to an audience: mentra's own registry readers walk the global map,
+/// so nothing short of the wire distinguishes "registered for this workspace"
+/// from "not registered at all".
+fn roster(endpoint: &ScriptedEndpoint, index: usize) -> Vec<String> {
+    let requests = endpoint.requests();
+    let body: serde_json::Value = serde_json::from_str(
+        requests[index]
+            .split("\r\n\r\n")
+            .nth(1)
+            .expect("a request body"),
+    )
+    .expect("a JSON request");
+
+    // `chat/completions` nests the name under `function`, unlike the Responses
+    // wire, which puts it flat on the tool.
+    body["tools"]
+        .as_array()
+        .expect("a tools array")
+        .iter()
+        .filter_map(|tool| tool["function"]["name"].as_str().map(str::to_string))
+        .collect()
+}
+
+/// A shared runtime whose provider is a port nothing listens on — everything
+/// these tests assert happens at the open, before any run.
+fn offline_runtime() -> Arc<Runtime> {
+    Arc::new(
+        Runtime::builder()
+            .with_base_url("http://127.0.0.1:1/v1")
+            .with_api_key("test-key")
+            .with_ephemeral_history()
+            .build()
+            .expect("a shared runtime builds without touching the network"),
+    )
+}
+
 #[tokio::test]
 async fn two_workspaces_minted_from_one_runtime_share_it() {
     let endpoint = ScriptedEndpoint::start(Vec::new());
@@ -708,28 +746,6 @@ mod declared_roster {
         "jenkins_job"
     }
 
-    /// The tool names in the nth request's `tools` array — the roster the model
-    /// was actually offered, which is the only honest observable.
-    fn roster(endpoint: &ScriptedEndpoint, index: usize) -> Vec<String> {
-        let requests = endpoint.requests();
-        let body: serde_json::Value = serde_json::from_str(
-            requests[index]
-                .split("\r\n\r\n")
-                .nth(1)
-                .expect("a request body"),
-        )
-        .expect("a JSON request");
-
-        // `chat/completions` nests the name under `function`, unlike the
-        // Responses wire, which puts it flat on the tool.
-        body["tools"]
-            .as_array()
-            .expect("a tools array")
-            .iter()
-            .filter_map(|tool| tool["function"]["name"].as_str().map(str::to_string))
-            .collect()
-    }
-
     #[tokio::test]
     async fn a_declared_tool_is_offered_to_its_own_workspace_and_to_no_other() {
         // A declared tool carries no `mcp__` prefix, so nothing about its *name*
@@ -814,6 +830,167 @@ mod declared_roster {
             resumed.iter().any(|tool| tool == declared),
             "the resumed conversation must keep the tools its workspace declared: {resumed:?}"
         );
+    }
+}
+
+/// The same claim for ADR-0012's *native* binding, now that a workspace can
+/// hold one of its own: a host tool given to one workspace belongs to that
+/// workspace, and the name it took is held for exactly as long as the open
+/// that took it.
+mod host_roster {
+    use super::*;
+
+    use basis::tools::{
+        ParallelToolContext, RuntimeToolDescriptor, ToolDefinition, ToolExecutor, ToolResult,
+    };
+
+    /// A host's own tool, under whatever name the test needs.
+    struct HostTool(&'static str);
+
+    impl ToolDefinition for HostTool {
+        fn descriptor(&self) -> RuntimeToolDescriptor {
+            RuntimeToolDescriptor::builder(self.0)
+                .description("the host's own tool")
+                .input_schema(json!({"type": "object"}))
+                .build()
+        }
+    }
+
+    #[async_trait::async_trait]
+    impl ToolExecutor for HostTool {
+        async fn execute(
+            &self,
+            _ctx: ParallelToolContext,
+            _input: serde_json::Value,
+        ) -> ToolResult {
+            Ok("done".to_string())
+        }
+    }
+
+    #[tokio::test]
+    async fn a_host_tool_is_offered_to_the_workspace_it_was_given_to_and_to_no_other() {
+        // The bystander opens *first*, so the owner's registration is a late
+        // one against a runtime that already has a live workspace on it. That
+        // ordering is the whole test: the attempt this seam replaces leaked
+        // exactly here, because a tool registered after a workspace was
+        // prepared still reached its roster. Nothing is frozen to prevent it —
+        // mentra rebuilds a visible set from the live registry each round, and
+        // a name held only by another audience is `Hidden`.
+        let endpoint = ScriptedEndpoint::start(Vec::new());
+        let runtime = shared_runtime(&endpoint);
+
+        let bystander_dir = workspace_dir();
+        let bystander = pinned(bystander_dir.path(), Arc::clone(&runtime))
+            .open()
+            .await
+            .expect("opens");
+        // Minted before the owner exists, so the agent that must not see the
+        // tool predates its registration.
+        let mut bystanders_run = bystander.prepare("go").expect("mints");
+
+        let owner_dir = workspace_dir();
+        let owner = pinned(owner_dir.path(), runtime)
+            .with_tool(HostTool("host_ask"))
+            .open()
+            .await
+            .expect("opens");
+        assert_eq!(owner.host_tools(), ["host_ask"]);
+        assert!(bystander.host_tools().is_empty());
+
+        let report = bystanders_run
+            .execute_with_approver(CollectingSink::default(), AllowAll)
+            .await
+            .expect("completes");
+        assert!(matches!(report.outcome, RunOutcome::Ok));
+
+        let report = owner
+            .prepare("go")
+            .expect("mints")
+            .execute_with_approver(CollectingSink::default(), AllowAll)
+            .await
+            .expect("completes");
+        assert!(matches!(report.outcome, RunOutcome::Ok));
+
+        let (bystanders, owners) = (roster(&endpoint, 0), roster(&endpoint, 1));
+
+        assert!(
+            owners.iter().any(|tool| tool == "spawn"),
+            "the roster parsed: basis's own tool must be in it: {owners:?}"
+        );
+        assert!(
+            owners.iter().any(|tool| tool == "host_ask"),
+            "the workspace the host gave it to must be offered it: {owners:?}"
+        );
+        assert!(
+            !bystanders.iter().any(|tool| tool == "host_ask"),
+            "and an agent minted before it was registered must never gain it: {bystanders:?}"
+        );
+    }
+
+    #[tokio::test]
+    async fn a_refused_name_leaves_the_whole_set_unregistered() {
+        // `spawn` is the name worth trying: taking it over would inherit every
+        // rule an operator ever wrote about commands and delegation. The
+        // second half is the one a partial registration would fail — a set
+        // refused at its last tool must leave the runtime exactly as it found
+        // it, or the name its first tool took stays claimed by a workspace
+        // that never opened.
+        let runtime = offline_runtime();
+        let dir = workspace_dir();
+
+        let refused = pinned(dir.path(), Arc::clone(&runtime))
+            .with_tool(HostTool("host_ask"))
+            .with_tool(HostTool("spawn"))
+            .open()
+            .await
+            .expect_err("a host tool must not take over basis's own");
+        assert!(
+            matches!(&refused, basis::RunError::WorkspaceHostTool { name, .. } if name == "spawn"),
+            "the refusal names the tool that caused it: {refused}"
+        );
+
+        let workspace = pinned(dir.path(), runtime)
+            .with_tool(HostTool("host_ask"))
+            .open()
+            .await
+            .expect("the refused set claimed nothing, so the name is free");
+        assert_eq!(workspace.host_tools(), ["host_ask"]);
+    }
+
+    #[tokio::test]
+    async fn one_open_at_a_time_holds_a_directorys_host_tool_name() {
+        // One directory is one tool audience, so two live opens of it share a
+        // namespace — and a native tool is compiled code closing over whatever
+        // the host had when it supplied it, which two opens cannot be assumed
+        // to agree about. A declaration, being data, joins; this is refused
+        // instead of silently serving the second open the first one's closure.
+        // Held for exactly the first open's life: dropping it frees the name.
+        let runtime = offline_runtime();
+        let dir = workspace_dir();
+
+        let first = pinned(dir.path(), Arc::clone(&runtime))
+            .with_tool(HostTool("host_ask"))
+            .open()
+            .await
+            .expect("opens");
+
+        let refused = pinned(dir.path(), Arc::clone(&runtime))
+            .with_tool(HostTool("host_ask"))
+            .open()
+            .await
+            .expect_err("a second live open cannot supply its own tool under that name");
+        assert!(
+            matches!(&refused, basis::RunError::WorkspaceHostTool { name, .. } if name == "host_ask"),
+            "the refusal names the tool that caused it: {refused}"
+        );
+
+        drop(first);
+        let second = pinned(dir.path(), runtime)
+            .with_tool(HostTool("host_ask"))
+            .open()
+            .await
+            .expect("the first open's drop took its tool off the runtime");
+        assert_eq!(second.host_tools(), ["host_ask"]);
     }
 }
 
