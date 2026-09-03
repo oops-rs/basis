@@ -115,6 +115,16 @@
 //! to read-only with a dialog open governs the next call, from both ends of
 //! the pipeline at once.
 //!
+//! The durable-rule case is the same window seen from the other side, and is
+//! worth stating outright: a call the gate has already sampled as `Prompt`
+//! reaches the remembered rules next, so a switch to read-only landing in that
+//! narrow gap does not stop a **pre-seeded durable allow** from resolving that
+//! one call — the same "the mode in force when the request was put decides it"
+//! rule, applied to an answer that arrives before any dialog does. This is a
+//! strict improvement on what came before, not a new hole: previously the
+//! seeded rule won under read-only *always*, and now it wins only for a call
+//! already in flight at the instant of the switch.
+//!
 //! `tests/acp/permission.rs` pins both directions, and the read-only
 //! guarantee above against a rule seeded to break it.
 

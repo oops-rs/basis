@@ -217,6 +217,13 @@ async fn a_durable_rule_cannot_allow_what_read_only_refuses() {
     // through the session's permission handle before the session had a mode,
     // used to answer the gate's `Prompt` ahead of the mode and let a read-only
     // session write.
+    //
+    // Read with its mirror below rather than alone: read-only refuses at the
+    // approver too, so this test would pass just as happily against a seed that
+    // had gone inert — a renamed field, a scope that stopped matching, a
+    // `remember_rule` that quietly did nothing. What discriminates is the pair.
+    // The mirror fails the moment the seeded rule stops being a live one, which
+    // is what keeps *this* assertion about the gate.
     let (written, asked) = written_under("never").await;
 
     assert!(
