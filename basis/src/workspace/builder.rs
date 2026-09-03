@@ -802,8 +802,15 @@ impl WorkspaceBuilder {
         // for the same audience — the difference is only whose statement the
         // tool is. A declaration came out of the repository; these came from
         // the host, for this workspace and no other one this runtime carries.
-        // After the declarations, so a repository's own manifest keeps first
-        // call on a name it already uses.
+        //
+        // **After the declarations, and one refusal's wording depends on it.**
+        // A repository's own manifest keeps first call on a name it already
+        // uses, which is reason enough — but `Runtime::claim_declared_tool`
+        // also tells a declaration that a native tool under its name belongs
+        // to *another* live open, and that is only true because this open has
+        // made no native claim of its own by the time the declarations run.
+        // Registering host tools first would make that message quietly wrong,
+        // with nothing to catch it.
         let host_tools = WorkspaceHostTools::register(
             Arc::clone(&runtime),
             &audience,

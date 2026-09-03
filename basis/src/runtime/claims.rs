@@ -401,6 +401,10 @@ impl Runtime {
             Some(claim) if claim.root != root => Err(claim.taken_elsewhere()),
             Some(claim) => match &mut claim.program {
                 // A native tool is nobody's to join; see [`ClaimedProgram`].
+                // "Another" is exact, and rests on an order stated at the one
+                // call site: a workspace claims its declarations before its
+                // native tools, so this open has made none yet and the holder
+                // can only be an earlier open (`WorkspaceBuilder::open`).
                 ClaimedProgram::Native => Err(
                     "another live open of this workspace supplied a native tool under that name"
                         .to_string(),
