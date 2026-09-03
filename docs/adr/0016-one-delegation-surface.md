@@ -111,6 +111,17 @@ commands.**
    answer denies (`approval.rs:113-133`), and `ApprovalGate::with_timeout`
    bounds one that never does.
 
+   > **Correction · 2026-09-03 — `with_timeout` does not bound a silent
+   > approver.** Measured while settling `PolicyGate`'s own timeout question:
+   > an authorizer's timeout is mentra's bound on mentra's wait. When it fires,
+   > mentra denies that call and carries the turn on — but basis's event
+   > forwarder is still parked inside `Approver::approve` for the same request
+   > (`basis/src/run/prepared/forward.rs`), and nothing wakes it, so the run
+   > does not return. It bounds an approver that answers *late*, not one that
+   > never answers. An auto-mode approver must therefore bound *itself* rather
+   > than rely on the gate to do it; the rest of this decision's fail-closed
+   > argument (a decision defaults to deny) is unaffected.
+
 7. **No rewriting, deliberately.** The `Approver`'s vocabulary is allow/deny
    with a reason and a scope; it cannot hand back a *different* command.
    Rewriting — a sandbox wrapper, an injected `--dry-run` — is the

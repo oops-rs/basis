@@ -37,6 +37,18 @@ impl AcpSession {
     /// this returns. The gate holds the same [`SessionApproval`] the turn's
     /// approver reads, so one install follows every later `session/set_mode`.
     ///
+    /// # No bound on the wait, and that is settled rather than overlooked
+    ///
+    /// Installing the gate *replaces* whatever authorizer the source's runtime
+    /// carried, an [`ApprovalGate::with_timeout`](basis::ApprovalGate::with_timeout)
+    /// included, and this constructor offers no way to restate one. Deliberate:
+    /// a `ToolAuthorizer` timeout bounds mentra's wait, not the basis forwarder
+    /// parked in the approver, so it cannot rescue a turn from a client that
+    /// never answers — `PolicyGate`'s doc has the measurement. What can, and
+    /// what ACP requires of a client abandoning a `session/request_permission`,
+    /// is `session/cancel`; `tests/acp/permission.rs` pins that it ends the
+    /// turn, along with close and delete.
+    ///
     /// [`SessionApproval`]: basis_host::SessionApproval
     pub fn new(run: PreparedRun, initial_mode: ApprovalMode) -> Self {
         let modes = SessionModes::new(initial_mode);

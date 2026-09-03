@@ -455,11 +455,24 @@ impl ApprovalGate {
         }
     }
 
-    /// Gives up on an unanswered request after `timeout`, denying the call.
+    /// Gives up on an unanswered request after `timeout`, **denying that call**
+    /// — the fail-closed rule of [`Approver`], enforced from outside for an
+    /// approver that answers late.
     ///
-    /// mentra applies this to the whole wait, so it bounds an approver that
-    /// never answers as well as one that answers slowly — the fail-closed rule
-    /// of [`Approver`], enforced from outside for approvers that forget it.
+    /// # What it does not bound
+    ///
+    /// Not the run. This is mentra's bound on mentra's own wait: when it fires,
+    /// mentra drops the authorization, fails the call, and carries the turn on
+    /// — while basis's event forwarder is still parked inside
+    /// [`Approver::approve`] for that same request, and nothing here wakes it.
+    /// So an approver that answers *late* is bounded, and one that **never
+    /// answers leaves the run hanging with this set exactly as without it**.
+    ///
+    /// An approver that might never answer has to bound itself, or be woken by
+    /// whatever it is waiting on: `basis-acp`'s is woken by `session/cancel`,
+    /// which ACP requires of a client abandoning a permission request. Setting
+    /// this instead would leave that run hanging on a promise it reads as
+    /// having made.
     pub fn with_timeout(mut self, timeout: Duration) -> Self {
         self.timeout = Some(timeout);
         self

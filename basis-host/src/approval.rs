@@ -37,7 +37,6 @@
 use std::{
     collections::HashMap,
     sync::{Arc, Mutex},
-    time::Duration,
 };
 
 use basis::approval::{
@@ -185,6 +184,32 @@ fn read_only_refusal(tool_name: &str) -> String {
 /// call outright, exactly as `ApprovalGate` does, for the reason written on
 /// [`basis::approval::is_consequential`].
 ///
+/// # And why it carries no timeout
+///
+/// [`ApprovalGate`](basis::ApprovalGate) has a `with_timeout`, and installing
+/// this gate replaces the runtime's, so the obvious thing is to mirror the knob
+/// so a host can restate a bound it would otherwise lose. **That knob does not
+/// do what its name suggests, so this gate does not offer one.**
+///
+/// A `ToolAuthorizer`'s timeout is mentra's bound on mentra's own wait. When it
+/// fires, mentra drops the authorization, denies *that call*, and lets the turn
+/// carry on. It does not touch basis's side: `basis`'s event forwarder is
+/// parked inside `Approver::approve` for the same request
+/// (`basis/src/run/prepared/forward.rs`), and nothing wakes it, so a run whose
+/// approver never answers **never returns, bound or no bound** — measured, not
+/// assumed. What a bound really buys is an earlier refusal for an approver that
+/// answers *late*; what it is reached for is the approver that never answers,
+/// and there it buys nothing.
+///
+/// So the recourse for an unanswered request is the one that actually unparks
+/// the approver, and every host that installs this gate already needs it: over
+/// ACP the client sends `session/cancel` — which the protocol *requires* of a
+/// client abandoning a `session/request_permission`, and which `basis-acp`
+/// implements and pins (`tests/acp/permission.rs`) — and a host on another
+/// transport bounds its own approver, which is the layer that is genuinely
+/// waiting. Adding a knob here would have offered a guarantee that reads like
+/// that one and is not.
+///
 /// [`Always`]: ApprovalPolicy::Always
 /// [`Prompt`]: ApprovalPolicy::Prompt
 /// [`Never`]: ApprovalPolicy::Never
@@ -193,31 +218,12 @@ fn read_only_refusal(tool_name: &str) -> String {
 #[derive(Clone)]
 pub struct PolicyGate {
     approval: SessionApproval,
-    timeout: Option<Duration>,
 }
 
 impl PolicyGate {
     /// Gates a session on `approval`, reading it live.
     pub fn new(approval: SessionApproval) -> Self {
-        Self {
-            // No timeout, matching `ApprovalGate`: a person reading a diff
-            // should not lose the turn to a stopwatch.
-            approval,
-            timeout: None,
-        }
-    }
-
-    /// Gives up on an unanswered request after `timeout`, denying the call.
-    ///
-    /// The knob [`ApprovalGate`](basis::ApprovalGate) carries, kept because
-    /// installing this gate *replaces* the runtime's rather than layering over
-    /// it — a host that had bounded its own wait would otherwise lose the
-    /// bound without being told.
-    pub fn with_timeout(self, timeout: Duration) -> Self {
-        Self {
-            timeout: Some(timeout),
-            ..self
-        }
+        Self { approval }
     }
 }
 
@@ -244,10 +250,6 @@ impl ToolAuthorizer for PolicyGate {
                 ))
             }
         })
-    }
-
-    fn timeout(&self) -> Option<Duration> {
-        self.timeout
     }
 }
 
@@ -583,15 +585,15 @@ mod tests {
     }
 
     #[test]
-    fn a_gate_waits_as_long_as_it_takes_unless_told_otherwise() {
-        let approval = SessionApproval::new(ApprovalPolicy::Prompt);
-
-        assert_eq!(PolicyGate::new(approval.clone()).timeout(), None);
+    fn a_gate_waits_as_long_as_it_takes_and_offers_no_way_not_to() {
+        // Not an oversight: an authorizer's timeout bounds mentra's wait, not
+        // basis's forwarder parked in `Approver::approve`, so a knob here would
+        // read as protection against a client that never answers and give none.
+        // `PolicyGate`'s doc has the measurement; the recourse is
+        // `session/cancel`, which the interrupt tests in `basis-acp` pin.
         assert_eq!(
-            PolicyGate::new(approval)
-                .with_timeout(Duration::from_secs(60))
-                .timeout(),
-            Some(Duration::from_secs(60))
+            PolicyGate::new(SessionApproval::new(ApprovalPolicy::Prompt)).timeout(),
+            None
         );
     }
 
