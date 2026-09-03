@@ -34,4 +34,11 @@ tokio.workspace = true
 uuid = { workspace = true, features = ["v4", "serde"] }
 
 [dev-dependencies]
+# Tests only, and the runtime code above still names basis alone. Two things
+# have no basis spelling and cannot get one without basis re-exporting mentra's
+# whole permission vocabulary for a test's sake: a scripted runtime
+# (`mentra::test`), and the `RememberedRule` a test seeds to prove
+# `Approve::Never` outranks it. Every other crate in this workspace already
+# takes mentra's test utilities the same way.
+mentra = { workspace = true, features = ["test-utils"] }
 tokio = { workspace = true, features = ["time"] }
