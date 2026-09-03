@@ -1030,6 +1030,52 @@ mod host_roster {
     }
 
     #[tokio::test]
+    async fn a_workspace_host_tool_does_not_cost_a_paged_run_its_pager() {
+        // The second failure mode that killed the first attempt at this seam:
+        // it needed a frozen pre-mint allow-list to keep tools apart, and
+        // freezing one broke mentra's `read_tool_result`, which a paging agent
+        // registers on *itself* after the mint. Nothing here freezes anything
+        // — mentra rebuilds the visible set from the live registry each round,
+        // and an exact-agent registration resolves above an audience one — so
+        // a workspace that supplies a host tool still gets its pager. Pinned
+        // rather than argued, because the argument is what failed last time.
+        let endpoint = ScriptedEndpoint::start(Vec::new());
+        let runtime = shared_runtime(&endpoint);
+        let dir = workspace_dir();
+
+        let workspace = pinned(dir.path(), runtime)
+            .with_tool(HostTool::named("host_ask"))
+            .open()
+            .await
+            .expect("opens");
+
+        let report = workspace
+            .prepare(basis::RunSpec::new("go").with_profile(
+                basis::RunProfile::new().with_tool_result_paging(Some(
+                    basis::ToolResultPagingConfig {
+                        threshold_bytes: 64 * 1024,
+                        page_bytes: 32 * 1024,
+                    },
+                )),
+            ))
+            .expect("mints")
+            .execute_with_approver(CollectingSink::default(), AllowAll)
+            .await
+            .expect("completes");
+        assert!(matches!(report.outcome, RunOutcome::Ok));
+
+        let offered = roster(&endpoint, 0);
+        assert!(
+            offered.iter().any(|tool| tool == "read_tool_result"),
+            "a paged run must still be offered its pager: {offered:?}"
+        );
+        assert!(
+            offered.iter().any(|tool| tool == "host_ask"),
+            "and the workspace's own host tool beside it: {offered:?}"
+        );
+    }
+
+    #[tokio::test]
     async fn a_second_open_of_one_directory_is_not_offered_its_siblings_tool() {
         // The claim refusal above only catches the open that asks for the
         // *same name*. The open that asks for nothing is refused nothing —
