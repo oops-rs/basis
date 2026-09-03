@@ -24,13 +24,25 @@
 //! through instead gets basis's own duration for them — remembered on the
 //! live session, cleared at the next attach — which is documented on
 //! `basis::ApprovalDecision`.
+//!
+//! [`PolicyGate`] is the third piece, and the one that is not about what this
+//! layer writes. Both invariants above are enforced on the *approver*, and an
+//! approver only ever sees what the runtime gate surfaced and no remembered
+//! rule already answered. That is fine for a policy that decides between
+//! asking and allowing, and not fine for one that refuses: a durable rule
+//! seeded on the store would answer ahead of it. So
+//! [`ApprovalPolicy::Never`]'s refusal is stated as an authorizer, where
+//! mentra treats it as final.
 
 use std::{
     collections::HashMap,
     sync::{Arc, Mutex},
 };
 
-use basis::approval::{ApprovalAnswer, ApprovalDecision, ApprovalRequest, Approver};
+use basis::approval::{
+    ApprovalAnswer, ApprovalDecision, ApprovalRequest, Approver, RuntimeError,
+    ToolAuthorizationDecision, ToolAuthorizationRequest, ToolAuthorizer, is_consequential,
+};
 
 /// What a host does about a consequential call.
 ///
@@ -121,6 +133,126 @@ impl SessionApproval {
     }
 }
 
+/// Why a read-only session refused, in the words the model reads.
+///
+/// One function because two layers now refuse for the same reason —
+/// [`PolicyGate`] before the call is surfaced at all, [`PolicyApprover`] for a
+/// call some other authorizer surfaced anyway — and a model that got two
+/// different explanations of one prohibition would be reading a difference
+/// that is not there.
+fn read_only_refusal(tool_name: &str) -> String {
+    format!(
+        "{tool_name} changes state outside this process, and this session is set to refuse that"
+    )
+}
+
+/// The tool authorizer a long-lived host installs on each of its sessions:
+/// the same filter basis's [`ApprovalGate`](basis::ApprovalGate) applies, plus
+/// the one answer that has to be terminal.
+///
+/// # Why the refusal is here and the rest is not
+///
+/// `ApprovalGate` answers nothing — every consequential call comes back as a
+/// `Prompt` — and that is what lets the policy be read per call, one layer up,
+/// where `session/set_mode` arrives. mentra resolves a `Prompt` against the
+/// conversation's remembered rules *before* the approver is consulted, so a
+/// durable Global- or Project-scope allow seeded through the session's
+/// permission handle answers ahead of the policy. For [`Always`] and
+/// [`Prompt`] that is unremarkable: both permit consequential work, and a
+/// standing allow is a host saying so in advance. For [`Never`] it is a
+/// standing override of the one thing that mode promises.
+///
+/// So this gate answers [`Never`] itself, with a `Deny` mentra returns
+/// unchanged — no rule is read, no `PermissionRequested` is emitted, and the
+/// approver is never reached. Every other policy still surfaces the call
+/// exactly as `ApprovalGate` did, remembered rules and all.
+///
+/// The policy is read from the shared [`SessionApproval`] on each call, so one
+/// installed gate follows a session across every switch. It is deliberately
+/// read *per call* rather than per turn: a gate that cached the policy it was
+/// installed under would be the stale answer this whole module exists to
+/// prevent.
+///
+/// # What it does not close
+///
+/// A durable rule still answers ahead of the client under [`Always`] and
+/// [`Prompt`], because under those policies the gate still says `Prompt`.
+/// Revoking one is mentra's business
+/// ([mentra#43](https://github.com/oops-rs/mentra/issues/43)), not something a
+/// posture can express. And a rule remembered against a *read-only* tool is
+/// never consulted under any policy — this gate allows a non-consequential
+/// call outright, exactly as `ApprovalGate` does, for the reason written on
+/// [`basis::approval::is_consequential`].
+///
+/// # And why it carries no timeout
+///
+/// [`ApprovalGate`](basis::ApprovalGate) has a `with_timeout`, and installing
+/// this gate replaces the runtime's, so the obvious thing is to mirror the knob
+/// so a host can restate a bound it would otherwise lose. **That knob does not
+/// do what its name suggests, so this gate does not offer one.**
+///
+/// A `ToolAuthorizer`'s timeout is mentra's bound on mentra's own wait. When it
+/// fires, mentra drops the authorization, denies *that call*, and lets the turn
+/// carry on. It does not touch basis's side: `basis`'s event forwarder is
+/// parked inside `Approver::approve` for the same request
+/// (`basis/src/run/prepared/forward.rs`), and nothing wakes it, so a run whose
+/// approver never answers **never returns, bound or no bound** — measured, not
+/// assumed. What a bound really buys is an earlier refusal for an approver that
+/// answers *late*; what it is reached for is the approver that never answers,
+/// and there it buys nothing.
+///
+/// So the recourse for an unanswered request is the one that actually unparks
+/// the approver, and every host that installs this gate already needs it: over
+/// ACP the client sends `session/cancel` — which the protocol *requires* of a
+/// client abandoning a `session/request_permission`, and which `basis-acp`
+/// implements and pins (`tests/acp/permission.rs`) — and a host on another
+/// transport bounds its own approver, which is the layer that is genuinely
+/// waiting. Adding a knob here would have offered a guarantee that reads like
+/// that one and is not.
+///
+/// [`Always`]: ApprovalPolicy::Always
+/// [`Prompt`]: ApprovalPolicy::Prompt
+/// [`Never`]: ApprovalPolicy::Never
+/// Cloneable for the same reason [`SessionApproval`] is, and not `Debug` for
+/// the same reason either: what it holds is one session's live policy, shared.
+#[derive(Clone)]
+pub struct PolicyGate {
+    approval: SessionApproval,
+}
+
+impl PolicyGate {
+    /// Gates a session on `approval`, reading it live.
+    pub fn new(approval: SessionApproval) -> Self {
+        Self { approval }
+    }
+}
+
+#[async_trait::async_trait]
+impl ToolAuthorizer for PolicyGate {
+    async fn authorize(
+        &self,
+        request: &ToolAuthorizationRequest,
+    ) -> Result<ToolAuthorizationDecision, RuntimeError> {
+        if !is_consequential(request.preview.side_effect_level) {
+            return Ok(ToolAuthorizationDecision::allow());
+        }
+
+        Ok(match self.approval.current() {
+            ApprovalPolicy::Never => {
+                ToolAuthorizationDecision::deny(read_only_refusal(&request.tool_name))
+            }
+            // Unchanged from `ApprovalGate`, wording included: the reason
+            // becomes the description whoever is answering shows a person.
+            ApprovalPolicy::Always | ApprovalPolicy::Prompt => {
+                ToolAuthorizationDecision::prompt(format!(
+                    "{} wants to run and can change state outside this process",
+                    request.tool_name
+                ))
+            }
+        })
+    }
+}
+
 /// Applies a session's policy to each approval request, asking `inner` only
 /// when the policy says to ask.
 pub struct PolicyApprover<A> {
@@ -139,10 +271,11 @@ impl<A: Approver> Approver for PolicyApprover<A> {
     async fn approve(&mut self, request: &ApprovalRequest) -> ApprovalAnswer {
         match self.approval.current() {
             ApprovalPolicy::Always => ApprovalDecision::Allow.into(),
-            ApprovalPolicy::Never => ApprovalAnswer::new(ApprovalDecision::Deny).because(format!(
-                "{} changes state outside this process, and this session is set to refuse that",
-                request.tool_name
-            )),
+            // Reached only when something other than [`PolicyGate`] surfaced
+            // the call — a source that installed its own authorizer, or a run
+            // driven without one. The gate refuses first where it is installed.
+            ApprovalPolicy::Never => ApprovalAnswer::new(ApprovalDecision::Deny)
+                .because(read_only_refusal(&request.tool_name)),
             ApprovalPolicy::Prompt => self.ask(request).await,
         }
     }
@@ -186,6 +319,10 @@ impl<A: Approver> PolicyApprover<A> {
 mod tests {
     use super::*;
     use basis::ToolSideEffectLevel;
+    use mentra::tool::{
+        ToolApprovalCategory, ToolAuthorizationOutcome, ToolAuthorizationPreview, ToolCapability,
+        ToolDurability, ToolExecutionCategory,
+    };
     use serde_json::json;
     use std::sync::atomic::{AtomicUsize, Ordering};
 
@@ -333,6 +470,130 @@ mod tests {
             approver.approve(&request("shell")).await.decision,
             ApprovalDecision::Allow,
             "moving back to prompt must ask again rather than reviving a stale rule"
+        );
+    }
+
+    fn authorization(tool_name: &str, level: ToolSideEffectLevel) -> ToolAuthorizationRequest {
+        ToolAuthorizationRequest {
+            agent_id: "a1".to_string(),
+            agent_name: "test".to_string(),
+            model: "m".to_string(),
+            history_len: 1,
+            tool_call_id: "tc-1".to_string(),
+            tool_name: tool_name.to_string(),
+            preview: ToolAuthorizationPreview {
+                working_directory: std::path::PathBuf::from("/repo"),
+                capabilities: vec![ToolCapability::FilesystemWrite],
+                side_effect_level: level,
+                durability: ToolDurability::Ephemeral,
+                execution_category: ToolExecutionCategory::default(),
+                approval_category: ToolApprovalCategory::default(),
+                raw_input: json!({}),
+                structured_input: json!({}),
+            },
+        }
+    }
+
+    async fn gated(
+        approval: &SessionApproval,
+        level: ToolSideEffectLevel,
+    ) -> ToolAuthorizationDecision {
+        PolicyGate::new(approval.clone())
+            .authorize(&authorization("shell", level))
+            .await
+            .expect("authorization does not error")
+    }
+
+    #[tokio::test]
+    async fn a_read_only_session_refuses_at_the_gate_rather_than_surfacing() {
+        // The whole point: a `Deny` here is terminal, so no remembered rule is
+        // read and the approver is never reached. A `Prompt` would put the
+        // call back where a seeded durable allow can answer it.
+        let approval = SessionApproval::new(ApprovalPolicy::Never);
+        let decision = gated(&approval, ToolSideEffectLevel::Process).await;
+
+        assert_eq!(decision.outcome, ToolAuthorizationOutcome::Deny);
+        assert_eq!(
+            decision.reason.as_deref(),
+            Some(
+                "shell changes state outside this process, \
+                 and this session is set to refuse that"
+            ),
+            "and it refuses in the same words the approver would have used"
+        );
+    }
+
+    #[tokio::test]
+    async fn every_other_policy_still_surfaces_the_call() {
+        for policy in [ApprovalPolicy::Always, ApprovalPolicy::Prompt] {
+            let approval = SessionApproval::new(policy);
+
+            assert_eq!(
+                gated(&approval, ToolSideEffectLevel::Process).await.outcome,
+                ToolAuthorizationOutcome::Prompt,
+                "{policy:?} decides per turn, and a remembered rule may answer first"
+            );
+        }
+    }
+
+    #[tokio::test]
+    async fn a_read_is_allowed_whatever_the_policy_is() {
+        // The corollary basis documents: prompting for reads trains people to
+        // approve without reading, so not even read-only surfaces one.
+        for policy in [
+            ApprovalPolicy::Always,
+            ApprovalPolicy::Prompt,
+            ApprovalPolicy::Never,
+        ] {
+            let approval = SessionApproval::new(policy);
+
+            assert_eq!(
+                gated(&approval, ToolSideEffectLevel::None).await.outcome,
+                ToolAuthorizationOutcome::Allow,
+                "{policy:?} has nothing to ask about for a read"
+            );
+        }
+    }
+
+    #[tokio::test]
+    async fn the_gate_follows_the_session_it_was_installed_on() {
+        // Installed once, before the first turn, and never replaced: a gate
+        // that cached the policy would keep answering for a mode the client
+        // has already moved off.
+        let approval = SessionApproval::new(ApprovalPolicy::Prompt);
+        let gate = PolicyGate::new(approval.clone());
+        let request = authorization("shell", ToolSideEffectLevel::Process);
+
+        assert_eq!(
+            gate.authorize(&request).await.expect("no error").outcome,
+            ToolAuthorizationOutcome::Prompt
+        );
+
+        approval.set(ApprovalPolicy::Never);
+        assert_eq!(
+            gate.authorize(&request).await.expect("no error").outcome,
+            ToolAuthorizationOutcome::Deny,
+            "the same gate must read the mode the session is on now"
+        );
+
+        approval.set(ApprovalPolicy::Always);
+        assert_eq!(
+            gate.authorize(&request).await.expect("no error").outcome,
+            ToolAuthorizationOutcome::Prompt,
+            "and must stop refusing when the session moves back"
+        );
+    }
+
+    #[test]
+    fn a_gate_waits_as_long_as_it_takes_and_offers_no_way_not_to() {
+        // Not an oversight: an authorizer's timeout bounds mentra's wait, not
+        // basis's forwarder parked in `Approver::approve`, so a knob here would
+        // read as protection against a client that never answers and give none.
+        // `PolicyGate`'s doc has the measurement; the recourse is
+        // `session/cancel`, which the interrupt tests in `basis-acp` pin.
+        assert_eq!(
+            PolicyGate::new(SessionApproval::new(ApprovalPolicy::Prompt)).timeout(),
+            None
         );
     }
 

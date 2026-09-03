@@ -421,9 +421,16 @@ async fn mint_carrying_workspace(
 /// rules are read — so a rule seeded through
 /// `run.session().permission_handle()`, a deny included, is silently ignored
 /// here unless the caller put an authorizer on its own runtime
-/// (`with_tool_authorizer`, or mentra 0.26's `Session::with_tool_authorizer`
-/// on the live session). On 0.25 the rule store was consulted even with no
-/// authorizer; that ordering is gone, and this seam inherits mentra's.
+/// (`with_tool_authorizer`) or on the run
+/// ([`PreparedRun::with_tool_authorizer`](PreparedRun::with_tool_authorizer)).
+/// On 0.25 the rule store was consulted even with no authorizer; that ordering
+/// is gone, and this seam inherits mentra's.
+///
+/// A run handed to an adapter may not stay that way: `basis-acp` installs its
+/// own mode gate on every session it opens, so a source that reaches ACP
+/// through this path gets approval enforcement whether or not its runtime
+/// carries an authorizer — and a client that never answers a permission
+/// request is then a turn that never ends.
 ///
 /// **No workspace's hooks apply here either, whatever `workspace` says.** The
 /// path is discovered against for context and templates; it does not enrol the

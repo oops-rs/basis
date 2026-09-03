@@ -15,21 +15,28 @@
 //! with an id, a name and a description, and the client picks one by id. That
 //! list is a protocol binding, so it belongs with the protocol.
 //!
-//! # Where the mode is applied, and why not on the authorizer
+//! # Where the mode is applied, and in which of the two places
 //!
 //! mentra 0.26 samples a session's current authorizer once per call and
-//! treats its `Allow` and `Deny` as final — it could even host a stateful or
-//! live-swapped one (`Session::with_tool_authorizer`). basis still does not
-//! put the mode there, deliberately: the
-//! [`ApprovalGate`](basis::approval::ApprovalGate) is one fixed, stateless
-//! surface that answers nothing, so every consequential call is surfaced as
-//! a `Prompt` — and the mode decides *here*, beside the protocol session the
-//! client's `session/set_mode` actually arrives on, where it can change
-//! between one call and the next without reaching two layers down.
+//! treats its `Allow` and `Deny` as final; only a `Prompt` is passed on, first
+//! to the conversation's remembered rules and then to the approver. Both ends
+//! of that pipeline read this session's mode, and they read it for different
+//! reasons.
 //!
-//! That is why [`ModedApprover`] wraps the approver that asks the client rather
-//! than replacing it: `Always` and `Never` answer without asking, and `Prompt`
-//! asks.
+//! The mode's ordinary home is [`ModedApprover`], one layer above the
+//! authorizer, beside the protocol session the client's `session/set_mode`
+//! actually arrives on: `Always` and `Never` answer without asking, `Prompt`
+//! asks, and the mode can change between one call and the next without
+//! reaching two layers down. That is why it *wraps* the approver that asks the
+//! client rather than replacing it.
+//!
+//! [`ModeGate`] is the other end, installed on the session itself
+//! ([`AcpSession::new`](crate::AcpSession::new), over the
+//! [`ApprovalGate`](basis::approval::ApprovalGate) the runtime carries). It
+//! exists for the one thing an approver cannot enforce — see the bypass
+//! below — and it answers exactly one question of its own: under `Never` it
+//! refuses, terminally. Under `Always` and `Prompt` it surfaces the call as
+//! the runtime gate always did, and the mode decides above it as before.
 //!
 //! # Why basis remembers "for this session" itself
 //!
@@ -45,24 +52,41 @@
 //! approver really does see every surfaced call: this layer never writes a
 //! rule for mentra to answer from.
 //!
-//! # The bypass a seeded durable rule is
+//! # The bypass a seeded durable rule was, and what closed it
 //!
 //! That guarantee is about what *this layer writes*, not about the pipeline.
 //! A host that seeds a **Global- or Project-scope** rule through the
 //! session's permission handle (the seam `basis`'s `reviewed_shell` example
-//! teaches, at Session scope) has installed an answer that resolves the
-//! gate's `Prompt` with no `PermissionRequested` ever emitted — so the mode
-//! is never consulted, and the rule survives everything this module relies
-//! on: it outlives every mode switch (it is not in [`SessionApproval`]'s
-//! memory) and outlives the attach-time clear too (that clear is
-//! session-scope only). A seeded durable allow on a store whose sessions
-//! offer a read-only mode is therefore a standing override of that mode.
-//! The sound fix path is upstream and adopted later: mentra 0.26's
-//! session-scoped authorizer replacement (mentra#38) over its revocable,
-//! scope-addressed rules (mentra#43) would let a read-only session install
-//! an authorizer whose `Deny` is final over any remembered rule. Until that
-//! wave lands, do not seed durable allows on stores serving mode-switchable
-//! sessions.
+//! teaches, at Session scope) installs an answer that resolves a `Prompt`
+//! with no `PermissionRequested` ever emitted — and such a rule survives
+//! everything this module relies on: it outlives every mode switch (it is not
+//! in [`SessionApproval`]'s memory) and outlives the attach-time clear too
+//! (that clear is session-scope only). While the mode was read only on the
+//! approver, a seeded durable allow was therefore a standing override of
+//! read-only: nothing ever asked the mode.
+//!
+//! [`ModeGate`] closes that, by putting the refusal where a rule cannot
+//! reach it. **A session in [`ApprovalMode::Never`] refuses every
+//! consequential call itself, and no remembered rule of any scope can allow
+//! one.** mentra returns an authorizer's `Deny` unchanged: no rule is read,
+//! no request is emitted, and the model gets the same refusal
+//! [`ModedApprover`] would have given it. The gate reads the shared
+//! [`SessionApproval`] per call, so this holds from the moment a client
+//! switches to read-only, not merely for a session opened there; and because
+//! mentra's attachment is live-only, [`AcpSession::new`](crate::AcpSession)
+//! installs it on every live session — `session/load` and `session/resume`
+//! included — rather than once per conversation.
+//!
+//! **`Always` and `Prompt` are unchanged, deliberately.** Under both, the gate
+//! still surfaces the call, and a seeded rule still answers ahead of the
+//! client exactly as it did. That is the point of a standing allow, and a mode
+//! that permits consequential work has nothing for it to override. What a host
+//! still cannot do is *revoke* one from here: scope-addressed revocation is
+//! mentra's ([mentra#43](https://github.com/oops-rs/mentra/issues/43)), and a
+//! posture cannot express it. So the old advice narrows rather than
+//! disappears — a durable allow seeded on a store serving mode-switchable
+//! sessions is a standing answer for every mode except read-only, and should
+//! still be seeded deliberately.
 //!
 //! # A request already put to the client stays put
 //!
@@ -85,12 +109,31 @@
 //!   read under `Prompt`, and moving back to `Prompt` is itself a switch,
 //!   which clears it.
 //!
-//! `tests/acp/permission.rs` pins both directions.
+//! [`ModeGate`] does not change this, and could not: mentra samples the
+//! authorizer once per call *before* awaiting the answer, so the gate that
+//! decided this call needed asking is the only one that decides it. A switch
+//! to read-only with a dialog open governs the next call, from both ends of
+//! the pipeline at once.
+//!
+//! The durable-rule case is the same window seen from the other side, and is
+//! worth stating outright: a call the gate has already sampled as `Prompt`
+//! reaches the remembered rules next, so a switch to read-only landing in that
+//! narrow gap does not stop a **pre-seeded durable allow** from resolving that
+//! one call — the same "the mode in force when the request was put decides it"
+//! rule, applied to an answer that arrives before any dialog does. This is a
+//! strict improvement on what came before, not a new hole: previously the
+//! seeded rule won under read-only *always*, and now it wins only for a call
+//! already in flight at the instant of the switch.
+//!
+//! `tests/acp/permission.rs` pins both directions, and the read-only
+//! guarantee above against a rule seeded to break it.
 
 use agent_client_protocol::schema::v1::{SessionMode, SessionModeId, SessionModeState};
 use basis_host::SessionApproval;
 
-pub use basis_host::{ApprovalPolicy as ApprovalMode, PolicyApprover as ModedApprover};
+pub use basis_host::{
+    ApprovalPolicy as ApprovalMode, PolicyApprover as ModedApprover, PolicyGate as ModeGate,
+};
 
 /// Mode ids on the wire. basis chooses them, a client echoes them back, and
 /// [`mode_for`] reads them — a contract with ourselves, so it lives in one

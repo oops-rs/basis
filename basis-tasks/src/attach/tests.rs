@@ -393,3 +393,148 @@ fn an_unknown_provider_fails_the_task_rather_than_going_unread() {
     let runtime = task_runtime(&data, &task, &meta).expect("base runtime");
     assert!(run_parts(&meta, runtime).is_err());
 }
+
+// ---------------------------------------------------------------------------
+// The refusal a durable rule used to outrank
+// ---------------------------------------------------------------------------
+
+/// A scripted turn that writes a file: one consequential call, which is all
+/// [`gated`] has anything to say about.
+fn writing_mock(workspace: &std::path::Path) -> mentra::test::MockRuntime {
+    mentra::test::MockRuntime::builder()
+        .model("mock-model", "openai")
+        // Not permissive, and carrying the authorizer a basis-built runtime
+        // would: the `Prompt` this surfaces is exactly what a remembered rule
+        // gets to answer.
+        .with_policy(mentra::RuntimePolicy::workspace_bounded(workspace))
+        .with_tool_authorizer(basis::ApprovalGate::new())
+        .tool_calls(vec![mentra::test::MockToolCall::new(
+            "files",
+            json!({
+                "operations": [{ "op": "create", "path": "made.txt", "content": "hi" }]
+            }),
+        )])
+        .text("done")
+        .build()
+        .expect("mock runtime builds")
+}
+
+/// Prepares the scripted run against `workspace`, seeds the durable allow no
+/// attach can clear, applies `mode` the way [`drive`] does, and runs it.
+/// Reports whether the write happened, and how many permission requests the
+/// run raised — the second is what tells the two tests below apart from a
+/// dead seed, since a live rule and a refusing gate both leave the write
+/// undone.
+///
+/// The rule is **Global**-scope and written before the first turn, so it is the
+/// standing override a recorded mode has to survive: basis clears session scope
+/// at resume and nothing clears this, and it resolves the runtime gate's
+/// `Prompt` with no permission request ever raised.
+async fn wrote_a_file_under(mode: Approve, workspace: &std::path::Path) -> (bool, usize) {
+    let mock = writing_mock(workspace);
+    let session = mock
+        .runtime()
+        .create_session_with_config(
+            "test",
+            mock.model(),
+            mentra::agent::AgentConfig {
+                workspace: mentra::agent::WorkspaceConfig {
+                    base_dir: workspace.to_path_buf(),
+                    ..Default::default()
+                },
+                ..Default::default()
+            },
+        )
+        .expect("session");
+
+    let run = basis::run::prepare_with_session(
+        session,
+        workspace,
+        "make a file",
+        &basis::ContextConfig {
+            file_name: "AGENTS.md".to_string(),
+            global_dir: None,
+            walk_parents: false,
+        },
+        "openai",
+        "mock-model",
+    )
+    .expect("prepared");
+
+    run.session()
+        .permission_handle()
+        .remember_rule(mentra::session::RememberedRule {
+            key: mentra::session::RuleKey {
+                tool_name: "files".to_string(),
+                // Every call to the tool, which is what a host seeding a
+                // standing allow writes.
+                pattern: None,
+            },
+            allow: true,
+            scope: mentra::session::PermissionRuleScope::Global,
+            reason: None,
+        })
+        .expect("the rule is remembered");
+
+    let mut run = gated(run, mode);
+    let approver = approver(mode, &DriveContext::default()).expect("no host is needed to refuse");
+    let report = time::timeout(
+        Duration::from_secs(10),
+        run.execute_with_approver(basis::CollectingSink::new(), approver),
+    )
+    .await
+    .expect("a refusal never waits on anyone, so this must not hang")
+    .expect("the run completes");
+
+    let asked = report
+        .sink
+        .events()
+        .iter()
+        .filter(|event| matches!(event, basis::Event::PermissionRequested { .. }))
+        .count();
+
+    (workspace.join("made.txt").exists(), asked)
+}
+
+#[tokio::test]
+async fn a_durable_rule_cannot_allow_what_never_refuses() {
+    // The bypass this pairing exists to close. A Global-scope allow seeded
+    // before the task's first turn resolves the runtime gate's `Prompt` ahead
+    // of `DenyAll`, so until the gate went on, a task recorded to refuse could
+    // be talked out of it by a rule no attach of that task wrote.
+    //
+    // Read with its mirror below: this one alone would pass just as happily
+    // against a dead rule, since `never` refuses at the approver too. The
+    // mirror's `asked == 0` assertion is what actually tells a live seed from
+    // an inert one — a refusal here proves nothing about whether the rule was
+    // ever consulted.
+    let workspace = tempfile::tempdir().expect("tempdir");
+    let (written, _asked) = wrote_a_file_under(Approve::Never, workspace.path()).await;
+
+    assert!(
+        !written,
+        "a durable allow must not outlive the recorded mode that refuses it"
+    );
+}
+
+#[tokio::test]
+async fn a_durable_rule_still_answers_where_the_task_would_have_allowed() {
+    // The other half, and the one that actually discriminates the pair:
+    // `always` installs no authorizer of its own, so the runtime's gate still
+    // surfaces the call and the remembered rule still resolves it with nobody
+    // asked. A dead seed would still let the write through here (nothing
+    // refuses `always`), but it would cost a permission request the live rule
+    // never raises — so `asked == 0` is what would catch the seed above going
+    // inert, not the write itself.
+    let workspace = tempfile::tempdir().expect("tempdir");
+    let (written, asked) = wrote_a_file_under(Approve::Always, workspace.path()).await;
+
+    assert!(
+        written,
+        "a seeded rule must still answer for a mode that permits the call"
+    );
+    assert_eq!(
+        asked, 0,
+        "and it must answer without asking, or the seed was never really live"
+    );
+}

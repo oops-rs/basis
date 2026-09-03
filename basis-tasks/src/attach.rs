@@ -60,8 +60,9 @@ use std::{
 };
 
 use basis::{
-    AllowAll, Approver, Bound, CancellationToken, DenyAll, Event, EventSink, RunOutcome, RunSpec,
-    Runtime, RuntimeBuilder, ShellAccess, TurnOptions, Workspace, WorkspaceBuilder,
+    AllowAll, Approver, Bound, CancellationToken, DenyAll, DenyAllGate, Event, EventSink,
+    PreparedRun, RunOutcome, RunSpec, Runtime, RuntimeBuilder, ShellAccess, TurnOptions, Workspace,
+    WorkspaceBuilder,
 };
 use serde_json::Value;
 use tokio::time::{self, Instant};
@@ -546,8 +547,11 @@ async fn run_model(
         Some(agent_id) => workspace.resume(agent_id, spec),
         None => workspace.prepare(spec),
     };
+    // Gated here rather than beside the per-turn `approver` below, and that is
+    // forced: mentra's attachment has to be in place before the first turn, and
+    // this task's recorded mode cannot change while this process drives it.
     let mut run = match prepared {
-        Ok(run) => run.with_workspace(workspace),
+        Ok(run) => gated(run.with_workspace(workspace), meta.options.approve),
         Err(error) => return record_failure(paths, meta, error.to_string(), None),
     };
     if !reattached {
@@ -914,6 +918,38 @@ fn approver(mode: Approve, ctx: &DriveContext) -> Result<Box<dyn Approver>, Erro
             .approver()
             .expect("validate confirmed a host that can ask"),
     })
+}
+
+/// The session authorizer `mode` needs over the runtime's, if any.
+///
+/// Only [`Approve::Never`] needs one, and this is why: mentra resolves the
+/// runtime gate's `Prompt` against the conversation's remembered rules *before*
+/// the [`approver`] above is consulted, so a durable Global- or Project-scope
+/// allow — seeded through the session's permission handle, and outliving both
+/// the attach-time clear (session scope only) and every later attach — answers
+/// ahead of [`DenyAll`] and lets a task recorded to refuse write anyway.
+/// [`DenyAllGate`] states the refusal where mentra treats it as final. The two
+/// say the same thing in the same words; only the layer differs.
+///
+/// **[`Always`](Approve::Always) and [`Prompt`](Approve::Prompt) install
+/// nothing**, deliberately. Both permit consequential work, so a standing allow
+/// is a host saying yes in advance rather than an override of anything — and
+/// installing an authorizer *replaces* whatever the runtime carries rather than
+/// layering over it, which for those two would cost a bound or a posture the
+/// runtime had for no gain. A refusal cannot cost either: it answers from the
+/// request alone and awaits nobody, so `Prompt`'s wait on
+/// [`PromptHost`](crate::approve::PromptHost) is untouched and nothing here
+/// gains something new to wait on.
+///
+/// Read once, before the first turn, unlike [`approver`] — which is rebuilt per
+/// turn because whether `Prompt` is *answerable* is a property of the attaching
+/// process (ADR-0019). The mode itself is the task's, recorded at spawn, and no
+/// attach can change it; a task that must switch posture is a different task.
+fn gated(run: PreparedRun, mode: Approve) -> PreparedRun {
+    match mode {
+        Approve::Never => run.with_tool_authorizer(DenyAllGate),
+        Approve::Always | Approve::Prompt => run,
+    }
 }
 
 pub(crate) fn earlier_deadline(left: Option<u64>, right: Option<u64>) -> Option<u64> {

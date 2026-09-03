@@ -11,7 +11,7 @@ use std::{
 
 use agent_client_protocol::schema::v1::SessionId;
 
-use crate::mode::{ApprovalMode, SessionModes};
+use crate::mode::{ApprovalMode, ModeGate, SessionModes};
 use basis::{PreparedRun, run::TurnOptions};
 use basis_host::HostSession;
 
@@ -27,8 +27,33 @@ pub struct AcpSession {
 impl AcpSession {
     /// Opens a session at `initial_mode`, which is where the client's mode
     /// picker starts.
+    ///
+    /// This is also where the session's [`ModeGate`] goes on, and it is the
+    /// only place it can: mentra's attachment is live-only, so it has to be
+    /// redone for every live session rather than once per conversation, and it
+    /// has to be done before the first turn. Both `session/new` and
+    /// `session/load` reach a conversation through here, and a session is
+    /// filed in the registry — the only way a turn can find it — only after
+    /// this returns. The gate holds the same [`SessionApproval`] the turn's
+    /// approver reads, so one install follows every later `session/set_mode`.
+    ///
+    /// # No bound on the wait, and that is settled rather than overlooked
+    ///
+    /// Installing the gate *replaces* whatever authorizer the source's runtime
+    /// carried, an [`ApprovalGate::with_timeout`](basis::ApprovalGate::with_timeout)
+    /// included, and this constructor offers no way to restate one. Deliberate:
+    /// a `ToolAuthorizer` timeout bounds mentra's wait, not the basis forwarder
+    /// parked in the approver, so it cannot rescue a turn from a client that
+    /// never answers — `PolicyGate`'s doc has the measurement. What can, and
+    /// what ACP requires of a client abandoning a `session/request_permission`,
+    /// is `session/cancel`; `tests/acp/permission.rs` pins that it ends the
+    /// turn, along with close and delete.
+    ///
+    /// [`SessionApproval`]: basis_host::SessionApproval
     pub fn new(run: PreparedRun, initial_mode: ApprovalMode) -> Self {
         let modes = SessionModes::new(initial_mode);
+        let run = run.with_tool_authorizer(ModeGate::new(modes.approval().clone()));
+
         Self {
             host: HostSession::new(run, modes.approval().clone()),
             modes,

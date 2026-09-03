@@ -315,6 +315,7 @@ dependencies = [
  "basis",
  "basis-host",
  "fs2",
+ "mentra",
  "serde",
  "serde_json",
  "tempfile",

@@ -16,7 +16,7 @@ mod session;
 mod source;
 mod timestamp;
 
-pub use approval::{ApprovalPolicy, PolicyApprover, SessionApproval};
+pub use approval::{ApprovalPolicy, PolicyApprover, PolicyGate, SessionApproval};
 pub use config::{Discovery, SessionSource, SessionTemplate};
 pub use session::{HostSession, Interrupt};
 pub use source::ConfiguredSource;

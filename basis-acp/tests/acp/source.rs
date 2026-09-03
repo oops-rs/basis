@@ -20,6 +20,7 @@ use basis::{
 use basis_acp::SessionSource;
 use mentra::{
     RuntimePolicy,
+    session::{PermissionRuleScope, RememberedRule, RuleKey},
     test::{MockRuntime, MockToolCall},
 };
 use tokio::sync::Notify;
@@ -38,6 +39,9 @@ pub(crate) struct MockSource {
     /// but the bound tests, which are the only ones with an allowance to run
     /// out of.
     bounds: TurnOptions,
+    /// A tool this source seeds a **durable** allow for on every session it
+    /// hands out. Unset for all but the read-only bypass tests.
+    durably_allowed: Option<String>,
 }
 
 impl MockSource {
@@ -46,6 +50,7 @@ impl MockSource {
             mock: Arc::clone(mock),
             workspace: workspace.path().to_path_buf(),
             bounds: TurnOptions::default(),
+            durably_allowed: None,
         }
     }
 
@@ -55,6 +60,44 @@ impl MockSource {
     /// rest.
     pub(crate) fn with_bounds(self, bounds: TurnOptions) -> Self {
         Self { bounds, ..self }
+    }
+
+    /// Seeds a **Global-scope** remembered allow for `tool_name` on every
+    /// session this source opens, through the session's permission handle —
+    /// the seam `basis`'s `reviewed_shell` example teaches, at the one scope
+    /// nothing in basis-acp clears.
+    ///
+    /// This is the hostile input the read-only guarantee has to survive: the
+    /// rule is written before the session has a mode, outlives every
+    /// `session/set_mode`, and resolves the gate's `Prompt` with no
+    /// `PermissionRequested` ever emitted.
+    pub(crate) fn durably_allowing(self, tool_name: &str) -> Self {
+        Self {
+            durably_allowed: Some(tool_name.to_string()),
+            ..self
+        }
+    }
+
+    /// Writes the seeded rule, if this source has one, onto the run's session.
+    fn seed(&self, run: &PreparedRun) -> Result<(), RunError> {
+        let Some(tool_name) = self.durably_allowed.as_ref() else {
+            return Ok(());
+        };
+
+        run.session()
+            .permission_handle()
+            .remember_rule(RememberedRule {
+                key: RuleKey {
+                    tool_name: tool_name.clone(),
+                    // Every call to the tool, which is what a host seeding a
+                    // standing allow writes.
+                    pattern: None,
+                },
+                allow: true,
+                scope: PermissionRuleScope::Global,
+                reason: None,
+            })?;
+        Ok(())
     }
 
     /// The workspace is the temp dir rather than the client's cwd: the
@@ -91,7 +134,7 @@ impl SessionSource for MockSource {
             )
             .expect("session");
 
-        Ok(prepare_with_session(
+        let prepared = prepare_with_session(
             session,
             &self.workspace,
             "",
@@ -99,7 +142,10 @@ impl SessionSource for MockSource {
             "openai",
             "mock-model",
         )?
-        .with_bounds(self.bounds.clone()))
+        .with_bounds(self.bounds.clone());
+        self.seed(&prepared)?;
+
+        Ok(prepared)
     }
 
     async fn resume(
@@ -118,7 +164,7 @@ impl SessionSource for MockSource {
         // through this harness.
         let session = self.mock.runtime().resume_session(agent_id)?;
 
-        Ok(prepare_with_session(
+        let prepared = prepare_with_session(
             session,
             &self.workspace,
             "",
@@ -126,7 +172,10 @@ impl SessionSource for MockSource {
             "openai",
             "mock-model",
         )?
-        .with_bounds(self.bounds.clone()))
+        .with_bounds(self.bounds.clone());
+        self.seed(&prepared)?;
+
+        Ok(prepared)
     }
 
     fn lists_sessions(&self) -> bool {

@@ -15,13 +15,14 @@
 use std::{net::SocketAddr, path::PathBuf, sync::Arc, time::Duration};
 
 use agent_client_protocol::{
-    Agent, Client, ConnectionTo,
+    Agent, Client, ConnectionTo, Responder,
     schema::{
         ProtocolVersion,
         v1::{
             CloseSessionRequest, ContentBlock, ErrorCode, InitializeRequest, LoadSessionRequest,
-            NewSessionRequest, PromptRequest, SessionNotification, SessionUpdate, StopReason,
-            TextContent,
+            NewSessionRequest, PromptRequest, RequestPermissionOutcome, RequestPermissionRequest,
+            RequestPermissionResponse, SelectedPermissionOutcome, SessionNotification,
+            SessionUpdate, StopReason, TextContent,
         },
     },
 };
@@ -231,6 +232,24 @@ async fn converse(
                 }
             },
             agent_client_protocol::on_receive_notification!(),
+        )
+        // Answered rather than ignored, because a session now carries its own
+        // mode gate: every consequential call is surfaced whatever the
+        // source's runtime authorizer is, so a client that never answers is a
+        // turn that never ends. What is under test here is the transport, and
+        // a real client implements this request — the permission flow itself
+        // is `basis-acp`'s `tests/acp/permission.rs`.
+        .on_receive_request(
+            move |_request: RequestPermissionRequest,
+                  responder: Responder<RequestPermissionResponse>,
+                  _connection: ConnectionTo<Agent>| async move {
+                responder.respond(RequestPermissionResponse::new(
+                    RequestPermissionOutcome::Selected(SelectedPermissionOutcome::new(
+                        "allow-once",
+                    )),
+                ))
+            },
+            agent_client_protocol::on_receive_request!(),
         )
         .connect_with(
             websocket_transport(socket),
