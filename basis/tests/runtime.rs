@@ -560,6 +560,14 @@ mod roster {
             "a run whose workspace has dropped must still not reach the other open's \
              authenticated server"
         );
+        // Which layer refused it matters: a hide could not have covered this
+        // ordering, so the denial has to be the guard's, reading a row that is
+        // still there because the run holds it.
+        assert!(
+            endpoint.requests()[1].contains("which this workspace did not configure"),
+            "the refusal must come from the ownership guard, in its own words: {}",
+            endpoint.requests()[1]
+        );
 
         drop(owner);
     }

@@ -153,7 +153,7 @@ impl AgentRegistry {
             .map(|entry| Arc::clone(&entry.tools))
     }
 
-    /// A stamp no other handle on this runtime will be given.
+    /// A stamp no other write on this runtime will be given.
     ///
     /// `Relaxed` because uniqueness is all that is asked of it: the counter
     /// orders nothing else, and every comparison of a stamp happens under the
@@ -212,12 +212,6 @@ impl AgentRegistry {
         // last is whoever may take it away, and only a per-write stamp says
         // exactly that.
         let owner = self.new_owner();
-        // Recorded on the registry *before* the map insert below, and the order
-        // is load bearing: the insert may drop an earlier write's hold, whose
-        // `Drop` compares its stamp against whatever entry is standing. Doing
-        // the insert first would let that comparison meet the *old* entry,
-        // which the old stamp does match — and retract a row this call is in
-        // the middle of establishing.
         self.record(owner, agent_id, Arc::new(tools));
         AgentRow {
             registry: Arc::clone(self),
@@ -234,11 +228,10 @@ impl AgentRegistry {
     }
 
     /// Takes `agent_id` off the registry, but only while `owner` is still the
-    /// handle whose write is standing there.
+    /// write standing there.
     ///
-    /// The condition is the whole of it: a handle that recorded an id and was
-    /// then overwritten by another open of the same directory has nothing to
-    /// release, and removing the row anyway would take the *current* owner's
+    /// The condition is the whole of it: a hold whose write was overwritten by
+    /// another open of the same directory has nothing to release, and removing the row anyway would take the *current* owner's
     /// answer away from a session that is still running on it. See
     /// [`AgentOwner`] for why an absent row is worse than a stale one.
     fn forget_if_owned(&self, agent_id: &str, owner: AgentOwner) {
