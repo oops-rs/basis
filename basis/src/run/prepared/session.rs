@@ -97,6 +97,7 @@ impl PreparedRun {
             run,
             bounds,
             workspace,
+            agent_row,
             retry_policy,
             context_snapshot,
         } = self;
@@ -106,6 +107,7 @@ impl PreparedRun {
             run,
             bounds,
             workspace,
+            agent_row,
             retry_policy,
             context_snapshot,
         }
@@ -136,16 +138,6 @@ impl PreparedRun {
             .permission_handle()
             .clear_scope(mentra::session::PermissionRuleScope::Session)?;
         Ok(())
-    }
-
-    /// Gives the session back, ending basis's involvement.
-    ///
-    /// A workspace this run was keeping alive
-    /// ([`with_workspace`](Self::with_workspace)) is dropped here with the
-    /// rest of the run, and its hooks and MCP connections end with it — the
-    /// session that comes back is mentra's alone.
-    pub fn into_session(self) -> Session {
-        self.session
     }
 
     /// The session's id, which changes every time a session is created —

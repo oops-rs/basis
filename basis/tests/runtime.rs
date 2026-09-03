@@ -507,6 +507,71 @@ mod roster {
         );
     }
 
+    #[tokio::test]
+    async fn dropping_the_stranger_workspace_does_not_hand_its_run_the_owners_server() {
+        // The same claim as the test above, with one line added in the middle:
+        // the stranger's workspace is dropped while its run is still live.
+        // `Workspace::prepare` does not attach the workspace to the run, so
+        // that is a supported shape — and it used to take the agent ledger row
+        // the guard reads away with it. Without a row the guard cannot
+        // attribute the caller, and a bridged name has a legitimate
+        // unattributable owner (a host driving `mentra_runtime` itself), so it
+        // allowed. That was one ACP client's session reaching another client's
+        // authenticated server; the row's lifetime is the run's now.
+        let endpoint = ScriptedEndpoint::start(vec![
+            Reply::ToolCall {
+                name: PROD_DB_QUERY.to_string(),
+                arguments: "{}".to_string(),
+            },
+            Reply::Text,
+        ]);
+        let runtime = shared_runtime(&endpoint);
+        let dir = workspace_dir();
+
+        let owner = pinned(dir.path(), Arc::clone(&runtime))
+            .with_mcp(no_mcp().with_supplied(vec![unreachable_server("prod-db")]))
+            .open()
+            .await
+            .expect("opens even though the server does not come up");
+        let stranger = pinned(dir.path(), runtime)
+            .with_mcp(no_mcp())
+            .open()
+            .await
+            .expect("the same directory opens again");
+
+        let ran = Arc::new(std::sync::atomic::AtomicBool::new(false));
+        let _bridged = stranger
+            .mentra_runtime()
+            .try_register_tool_for_audience(
+                ToolAudience::new(store::runtime_identifier(dir.path())),
+                ProdDbQuery(Arc::clone(&ran)),
+            )
+            .expect("nothing answers to that name yet");
+
+        let mut run = stranger.prepare("go").expect("mints");
+        // The whole test: the run outlives the workspace that made it.
+        drop(stranger);
+
+        run.execute_with_approver(CollectingSink::default(), AllowAll)
+            .await
+            .expect("the run completes — a denial is an answer, not an error");
+        assert!(
+            !ran.load(std::sync::atomic::Ordering::SeqCst),
+            "a run whose workspace has dropped must still not reach the other open's \
+             authenticated server"
+        );
+        // Which layer refused it matters: a hide could not have covered this
+        // ordering, so the denial has to be the guard's, reading a row that is
+        // still there because the run holds it.
+        assert!(
+            endpoint.requests()[1].contains("which this workspace did not configure"),
+            "the refusal must come from the ownership guard, in its own words: {}",
+            endpoint.requests()[1]
+        );
+
+        drop(owner);
+    }
+
     /// The `tools` array of a recorded request: the roster the model was
     /// actually offered, read off the wire.
     fn tool_names(request: &str) -> Vec<String> {
@@ -1203,12 +1268,13 @@ mod host_roster {
     #[tokio::test]
     async fn dropping_the_sibling_workspace_does_not_hand_its_run_the_others_tool() {
         // `Workspace::prepare` does not attach the workspace to the run, so
-        // holding the run and dropping the workspace is a supported shape —
-        // and it takes the agent ledger row away underneath a live session.
-        // An unrowed caller is unjudged for a *bridged* name, where a host
-        // driving mentra itself is a real owner; for a native one there is no
-        // such caller, so the default is the other way round. Without that,
-        // this is the sibling leak again through a different door.
+        // holding the run and dropping the workspace is a supported shape. The
+        // row belongs to the run now, so this passes on the row that is still
+        // there — and it stays because the native arm's deny-by-default is the
+        // second answer, for a caller with no row at all. An unrowed caller is
+        // unjudged for a *bridged* name, where a host driving mentra itself is
+        // a real owner; for a native one there is no such caller, so the
+        // default is the other way round.
         let endpoint = ScriptedEndpoint::start(vec![Reply::ToolCall {
             name: "host_ask".to_string(),
             arguments: "{}".to_string(),

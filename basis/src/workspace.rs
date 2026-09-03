@@ -75,10 +75,7 @@ use crate::{
     fingerprint::{self, Snapshot},
     memory::Memory,
     run::{Effort, LoadedSkill, PreparedRun, RunContext},
-    runtime::{
-        HookChainHold, Runtime, SessionScope,
-        agents::{AgentTools, WorkspaceAgents},
-    },
+    runtime::{HookChainHold, Runtime, SessionScope, agents::AgentTools},
     skills::SkillRoots,
     templates::Template,
     tools::{declared::DeclaredTools, host::WorkspaceHostTools},
@@ -200,13 +197,6 @@ pub struct Workspace {
     /// ([`Runtime::register_hook_chain`](crate::runtime::Runtime::register_hook_chain)).
     #[allow(dead_code, reason = "held for its Drop")]
     hooks: HookChainHold,
-    /// What every session this workspace mints or resumes may see and use,
-    /// recorded by agent id so that the two readers an audience cannot serve —
-    /// `spawn`, and the MCP ownership guard in this workspace's own chain —
-    /// can tell a second live open of this same directory from this one.
-    /// Released on drop with everything else this open put on a runtime it may
-    /// not own; see [`crate::runtime::agents`].
-    agents: WorkspaceAgents,
     #[cfg(feature = "mcp")]
     #[allow(dead_code, reason = "held for its Drop")]
     mcp_connections: McpConnections,
@@ -290,12 +280,17 @@ impl Workspace {
         // the agent here and the first provider request is a `PreparedRun`
         // away, so no call of this session can reach a guard before its answer
         // is in.
-        self.agents.record(session.agent_id(), tools);
+        let row = self
+            .runtime
+            .agents()
+            .record_for_workspace(session.agent_id(), tools);
         if !spec.profile.decides_reasoning() {
             apply_effort(&mut session, spec.effort.or(self.effort))?;
         }
 
-        Ok(self.minted(session, spec, model_id, context_snapshot))
+        Ok(self
+            .minted(session, spec, model_id, context_snapshot)
+            .with_agent_row(row))
     }
 
     /// Picks up a conversation a previous process left behind.
@@ -373,7 +368,10 @@ impl Workspace {
         // resumed session inherits a hidden set computed now rather than then,
         // and the MCP ownership guard judges this session against the servers
         // *this* open configured rather than the ones its first mint saw.
-        self.agents.record(agent_id, self.resumed_tools(&session));
+        let row = self
+            .runtime
+            .agents()
+            .record_for_workspace(agent_id, self.resumed_tools(&session));
         let model = if let Some(model) = spec.profile.resolved_model() {
             session.set_model(model.clone())?;
             model.id.clone()
@@ -394,7 +392,9 @@ impl Workspace {
         // the resume loaded, which is exactly the one this run will send.
         let context_snapshot = session.config().system.clone();
 
-        Ok(self.minted(session, spec, model, context_snapshot))
+        Ok(self
+            .minted(session, spec, model, context_snapshot)
+            .with_agent_row(row))
     }
 
     /// A cheap stand-in for everything in this workspace a run could see.

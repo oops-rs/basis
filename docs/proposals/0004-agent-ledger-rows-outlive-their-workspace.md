@@ -1,12 +1,14 @@
 # 0004 — An agent ledger row should outlive the workspace that recorded it
 
-> Status: Deferred — a real defect with a known shape, latent in the shipped
-> adapters and confined to unreleased 0.12.0 material. Deferred because the fix
-> changes the lifetime of a core type and the wave that found it was scoped to
-> something else; it should be closed before 0.12.0 ships.
-> Trigger: anyone adding eviction to `basis_host::ConfiguredSource`'s workspace
-> pool — see "How reachable it is".
-> Created: 2026-09-03
+> Status: Implemented — shape A, plus the withdrawal of
+> `PreparedRun::into_session`, before 0.12.0 ships. Latent in the
+> shipped adapters and confined to unreleased 0.12.0 material: it arrived with
+> the mentra 0.26 adoption and no released basis has had it.
+> Created: 2026-09-03 as a deferred proposal, when the wave that found it was
+> scoped to something else; promoted to its own wave the same day once the reach
+> was understood.
+> Trigger, had it stayed deferred: anyone adding eviction to
+> `basis_host::ConfiguredSource`'s workspace pool — see "How reachable it is".
 > Related: [ADR-0018](../adr/0018-the-runtime-owns-the-process.md) (one runtime,
 > many workspaces), `basis/src/runtime/agents.rs`.
 
@@ -44,6 +46,58 @@ pins the intended behaviour; it simply never drops the workspace.
 so `let run = ws.prepare(..)?; drop(ws); run.execute(..)` is a supported shape
 rather than a misuse.
 
+**There is a second door, and it is why neither half of the lifetime is enough
+on its own.** [`PreparedRun::into_session`](crate::PreparedRun::into_session)
+hands the session back and drops the rest of the run. That session is still
+live, still in its workspace's tool audience, and still judged by the chain a
+sibling open of that directory installed — so a row released with the *run*
+vanishes under it exactly as a row released with the *workspace* vanishes under
+a run that outlived its workspace. The first shipped implementation of this
+proposal held only the run half and reopened the defect through this door; it
+was caught by an adversarial probe before merge, and both tests are in
+`basis/tests/runtime.rs`.
+
+**One ordering the two holders cannot cover — closed by removing its only door.**
+The row has exactly those two holders, so dropping the workspace *and then*
+handing the session back would leave neither, and the session would fall back to
+the unjudged default while a sibling open's chain still judged it. That ordering
+failed identically on the code before this proposal, so it was residual rather
+than introduced; but it was still a hole, and a third holder has nowhere to
+live — a session with no workspace and no run has nothing left to hang a
+lifetime on, and parking the hold on the registry with no release event trades a
+bound that can be reasoned about for one that cannot.
+
+So `PreparedRun::into_session` is withdrawn. It was the only way to hold a live
+session past its run, it had no consumer anywhere in basis or in nous, and
+removing it makes the ordering unreachable rather than documented. A documented
+isolation limit guarding an API nobody calls is dead weight and a standing risk
+at once.
+
+**Migration.** A host that needs a session for longer than one run keeps the
+*workspace* alive for as long as it uses the session; that was always the
+supported shape and is now the only one. Should a raw-session escape hatch ever
+be genuinely wanted, it comes back redesigned *with* an answer to the third
+holder — and this section is the statement of what that answer has to solve.
+
+**And the hold is the run's alone.** A workspace-side hold was implemented and
+then dropped, which is worth recording because the reasoning generalises. A
+`PreparedRun` is the *unique owner* of a basis-minted session — nothing on it
+yields an owned `Session`, only borrows — so tying the row to the run states
+property 1 exactly. A workspace-side hold states a coarser thing: every id an
+open ever recorded, until the open goes. That is a superset today, which makes
+it look like a safety net for a reintroduced escape hatch; it is not. It would
+cover the ordering where the workspace is still alive and miss the one where it
+is not — precisely the ordering `into_session` was withdrawn for, and the harder
+one to think of. A reintroduction would ship with a passing test and an open
+hole. **An exact invariant that fails loudly beats a coarse one that fails
+quietly**, so the reintroducer is left with nothing to lean on, which is the
+right amount of support for someone reopening this door.
+
+Two costs came back with that decision, both real: rows are bounded by live runs
+rather than by distinct ids per workspace, and a mint that fails *after*
+`record` — `record` is followed by `?` in both `Workspace::prepare` and
+`Workspace::resume` — no longer strands a row for a session that never existed.
+
 **The native arm is not affected.** A native tool name is in the claim ledger
 only because a live basis workspace put it there, and a session with no audience
 cannot resolve one at all — so that arm defaults to refusing an unattributable
@@ -51,14 +105,40 @@ caller, and there is no legitimate caller behind that default. The bridged arm
 cannot take the same default: a host driving `Runtime::mentra_runtime()` itself
 can genuinely own a bridged server.
 
-## Why it is not fixed here
+## Why it was not fixed where it was found
 
 The wave that found it was scoped to per-workspace native tools. The correct fix
 changes when an agent ledger row is released, which is a lifetime change to
-`PreparedRun` — a core type — for what is today a single caller. Doing it inside
-an unrelated wave would be the wrong place to make that decision.
+`PreparedRun` — a core type — and doing that inside an unrelated wave would be
+the wrong place to decide it.
 
-## Two shapes, with the trade-off stated
+That reasoning was about *where*, not *whether*. Once the reach was understood —
+a cross-client credential path in material intended for release — it became a
+wave of its own, ahead of the closeout, so that what ships is measured and
+reported without a known isolation hole in it. The two-consumer question the
+deferral raised is answered by the defect itself: the guard needs the row to
+outlive the workspace to do its job at all, which is one consumer, and this
+proposal's own door is the second.
+
+## Two shapes, and which one wins
+
+**Decided: A.** The mechanism above is what settles it. `v0.11.0` had a
+structural barrier underneath all of this and nobody knew, so the guard's design
+already assumes "a live basis session has a row" — A makes that assumption true,
+which is restoring the invariant rather than working around its absence. B leaves
+the lifetime wrong and adds a second question one arm can ask instead; this wave
+already produced two bindings needing the same answer within days of each other,
+and a third would find the lifetime still wrong. B also has a corner and A has
+none: B denies a mentra-driving host its own server when the name collides with a
+live basis claim, which is a behaviour change for exactly the caller the
+allow-on-missing-row default exists to protect. And the no-eviction constraint
+falls out of A by construction — the row stops depending on the workspace at all,
+so eviction becomes a non-event, where B satisfies it for the bridged arm only.
+
+The native arm's deny-by-default stays alongside A. They are complementary rather
+than alternatives: A makes the row present so the posture rarely fires, and the
+posture is still the right answer for a name only a live basis workspace can have
+put in the ledger.
 
 **A. The row's lifetime becomes the session's** (recommended). `WorkspaceAgents::record`
 returns a hold in the shape of `AdoptedChild`, and `PreparedRun` carries one.
@@ -83,7 +163,10 @@ deliberately protects.
 
 1. A row outlives every live session minted or resumed against it, not only the
    workspace that recorded it.
-2. Rows stay removable — no unbounded growth on a long-lived runtime.
+2. Rows stay removable and bounded by *live runs* — not by mints, not by
+   distinct ids, and not by anything a workspace once recorded. The shipped
+   shape reads the property literally, and it is stricter than what basis did
+   before 0.12, where a row lived for its workspace.
 3. Same-root takeover keeps working (`forget_if_owned`), and the reason it is
    safe stays stated: mentra leases one live session per agent id, and both
    stores refuse a second acquire even to the same owner.
@@ -92,6 +175,19 @@ deliberately protects.
    the delegation.
 6. Hiding and refusing stay separate concerns: a roster decides what the model is
    told, the guard decides what may run, and neither is asked to be the other.
+7. **No leak-shaped fix for a leak-shaped bug.** A run that never ends is a live
+   session and its row is legitimately pinned; rows outliving runs that *ended*
+   are the failure. Dropped-without-executing, a panic between mint and execute,
+   and `spawn`'s adopted children must all release, which they do if the hold is
+   a field on `PreparedRun`.
+8. **The hold must not be reachable from the ledger entry it keeps alive.** A
+   self-pinning row is never freed, and looks exactly like correct behaviour
+   until the process runs long enough.
+9. **No holder may outlive what it is holding the row for.** The workspace's
+   own `recorded` set is gone with the shipped shape, and the reason stands as
+   a rule: a holder whose lifetime is coarser than the thing that needs the row
+   retains entries for sessions that ended, or never existed at all — a mint
+   that fails after `record` being the sharpest case.
 
 ## How reachable it is, and by whom
 
@@ -111,6 +207,47 @@ session cannot lose its MCP connections or its `.basis/hooks.json` registrations
 mid-turn. Anyone who later adds eviction, for memory or for a real
 `session/close`, will close *those* two hazards consciously and reopen this one
 without ever learning it existed. Whoever does that is this proposal's reader.
+
+## Where it came from
+
+**This is not a defect basis inherited. It arrived with the mentra 0.26 adoption,
+and no released basis has ever had it.**
+
+mentra 0.25 deep-copied the tool registry into every derived runtime handle
+(`clone_tooling_services`), and `build_session` went through one of those clones
+on its way to `Agent::new`. So every session got a **private registry snapshot
+taken at its creation**, and anything registered on the runtime afterwards was
+invisible to that session permanently. Proven at pointer level on a `v0.11.0`
+checkout: the agent's registry and basis's are two different allocations, and
+the agent's stays at its creation-time count while basis's grows.
+
+That barrier is gone in 0.26 — `share_tooling_services` gives every handle one
+live `Arc<RwLock<ToolRegistry>>` — and that is not a regression upstream should
+undo. It is what the audience ladder is built on, and basis wanted it: adopting
+it is what made cross-*directory* isolation explicit and correct. The same step
+made the same-*directory* case reachable for the first time.
+
+So the property that protected `v0.11.0` **was real, was upstream's, was
+undocumented, and is gone.** basis cannot be said to have regressed something it
+relied on, because it never knew the barrier was there; and the exposure is not
+purely new either. Both halves matter for choosing a fix: there is nothing to
+restore upstream, so the repair is basis's own attribution problem.
+
+`v0.11.0`'s protection was also coherent rather than lucky, which is worth
+recording because it is the shape of a complete answer. The snapshot and the
+mint-time `mcp__` hide cover exact complements: a sibling that bridged *before*
+the mint is in the snapshot and gets hidden by name; one that bridges *after* is
+not in the snapshot and is unreachable forever. The dropped-workspace door does
+not exist there either — the hidden set lives in the persisted agent config, so
+dropping the workspace takes nothing away from a live session.
+
+**A retraction belongs here**, because the first answer to this question was
+right for the wrong reason. An earlier probe reported that the exposure "does not
+reproduce on v0.11.0" and treated that as settling the release-reach question. The
+observation was correct and the reading was not: the probe's tool never entered
+the agent's registry at all, so it never exercised the hide-or-guard question it
+was taken to answer. The conclusion survives on stronger ground — on 0.25 the
+reach is *structurally impossible*, not merely unobserved.
 
 ## Release reach
 
