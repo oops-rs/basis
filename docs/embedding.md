@@ -342,6 +342,46 @@ counts rather than arguments or environment values.
 lists, just as it retains supplied MCP servers. This is the strict-host path for typed inputs, not a
 different precedence ladder.
 
+### A native tool for one workspace
+
+A declared tool wraps a subprocess and sees only the JSON on its stdin. When the tool needs
+something the host holds — a client handle, an open connection, which caller this workspace was
+opened for — it has to run in the host's own process, as an `ExecutableTool`.
+`RuntimeBuilder::with_tool` registers one process-wide. `WorkspaceBuilder::with_tool` registers one
+for a single workspace:
+
+```rust
+let workspace = basis::Workspace::builder("/repo")
+    .with_runtime(std::sync::Arc::clone(&runtime))
+    .with_tool(ReleaseStatus::new(client.clone()))
+    .open()
+    .await?;
+
+assert_eq!(workspace.host_tools(), ["release_status"]);
+```
+
+The tool is registered for that workspace's tool audience, so on a runtime serving five
+repositories the other four's models are neither offered it nor able to reach it by guessing the
+name. A run this workspace mints sees it, and so does a subagent that run delegates to.
+
+**A name that is taken refuses the open**, naming it (`RunError::WorkspaceHostToolName` for a name
+no tool may wear, `WorkspaceHostToolNameTaken` for one already answered to). Nothing is registered
+when any name in the set is refused. One case is worth knowing before you meet it: *two live opens
+of one directory share one tool audience*, and two `ExecutableTool` values cannot be compared, so
+the second open supplying a native tool under a name the first already took is refused rather than
+silently served the first one's closure. A host that needs its own native tools per open of one
+directory needs one `Runtime` per open; a declared tool, being data, joins instead.
+
+The second open that supplies *nothing* is refused nothing, and does not reach the first one's
+tool either: the name is hidden from its roster at the mint and its call is refused by the guard
+in its own chain, so a sibling open sees only the native tools it supplied itself.
+
+**A host tool's `Drop` must not block.** The registration is released while basis holds the lock
+over its tool-name ledger, so a handler that waits on a lock, a channel, or a network round trip on
+its way out stalls every other workspace opening or closing on that runtime. Detached work owned
+only by the tool is outside what a workspace's lifetime covers; finish it, or hand it to a task the
+host owns.
+
 ## What the host says on top of the workspace
 
 basis ships no system prompt: unset, the prompt is the discovered context files and nothing

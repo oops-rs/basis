@@ -38,6 +38,13 @@
 //!
 //! Registered on the runtime, like `spawn` (ADR-0018's host scope): visible to
 //! every workspace and subagent that runtime opens, not to one session.
+//! [`WorkspaceBuilder::with_tool`](crate::WorkspaceBuilder::with_tool) is the
+//! same contract for one workspace — the tool takes that workspace's tool
+//! audience, so on a runtime carrying five repositories the other four's
+//! models are neither offered it nor able to reach it by name. It is what a
+//! host writes when the context the tool closes over is a *repository's*, and
+//! it claims its name on the same ledger a declaration does, since the two
+//! compete for one string on one registry.
 //!
 //! Building one needs mentra's own tool-authoring types, re-exported below
 //! rather than left for a host to reach through basis to a `mentra`
@@ -47,6 +54,7 @@
 //! one might need.
 
 pub mod declared;
+pub(crate) mod host;
 pub mod spawn;
 
 pub use mentra::tool::{

@@ -350,9 +350,10 @@ impl RuntimeBuilder {
     ///
     /// Registered on the runtime (ADR-0018's host scope), so — like `spawn` —
     /// it is visible to every workspace and every subagent this runtime opens,
-    /// not to one session. A host that wants a tool visible to only *some*
-    /// workspaces still needs one runtime per audience; there is no per-
-    /// workspace host-tool registration yet.
+    /// not to one session. A host whose tool belongs to one repository rather
+    /// than to the process says so with
+    /// [`WorkspaceBuilder::with_tool`](crate::WorkspaceBuilder::with_tool),
+    /// which registers for that workspace's tool audience alone.
     ///
     /// **A name basis or an earlier host tool already answers to is refused,
     /// not replaced** (decision D5d). [`build`](Self::build) claims host
@@ -661,7 +662,7 @@ impl RuntimeBuilder {
             host_interceptors,
             #[cfg(feature = "mcp")]
             mcp_claims: Mutex::new(HashMap::new()),
-            declared_claims: Mutex::new(HashMap::new()),
+            tool_claims: crate::runtime::ToolClaims::default(),
             skill_root_holders: Mutex::new(HashMap::new()),
             hook_chains: Mutex::new(HashMap::new()),
             agents,

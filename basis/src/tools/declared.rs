@@ -151,7 +151,7 @@
 //! basis or mentra already answers to cannot be claimed at all, so no manifest
 //! can quietly become `spawn`.
 
-mod manifest;
+pub(crate) mod manifest;
 mod registry;
 mod tool;
 

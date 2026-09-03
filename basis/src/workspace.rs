@@ -81,7 +81,7 @@ use crate::{
     },
     skills::SkillRoots,
     templates::Template,
-    tools::declared::DeclaredTools,
+    tools::{declared::DeclaredTools, host::WorkspaceHostTools},
 };
 
 /// One workspace, resolved: the runtime it borrows, the model, and everything
@@ -178,6 +178,13 @@ pub struct Workspace {
     /// registry and registered for its own audience; releases both on drop.
     #[allow(dead_code, reason = "held for its Drop")]
     declared_registration: DeclaredTools,
+    /// The native tools the host supplied for this workspace, by name, in the
+    /// order it supplied them.
+    host_tools: Vec<String>,
+    /// Keeps those tools claimed on that same ledger and registered for that
+    /// same audience; releases both on drop.
+    #[allow(dead_code, reason = "held for its Drop")]
+    host_tool_registration: WorkspaceHostTools,
     /// This workspace's share of the interception chain live for its tool
     /// audience. Dropping it is what stops a dropped workspace being consulted
     /// — and, when it was the last holder, what takes the chain off the
@@ -222,6 +229,7 @@ impl std::fmt::Debug for Workspace {
             .field("templates", &self.templates.len())
             .field("mcp_servers", &self.mcp_servers)
             .field("declared_tools", &self.declared_tools)
+            .field("host_tools", &self.host_tools)
             .finish_non_exhaustive()
     }
 }
@@ -493,6 +501,20 @@ impl Workspace {
         &self.declared_tools
     }
 
+    /// The native tools the host supplied for this workspace
+    /// ([`WorkspaceBuilder::with_tool`](crate::WorkspaceBuilder::with_tool)),
+    /// by name, in the order it supplied them.
+    ///
+    /// Names only, for [`mcp_servers`](Self::mcp_servers)'s reason. Reported
+    /// beside [`declared_tools`](Self::declared_tools) because the two are one
+    /// question for anything looking at a run — *what did this open put within
+    /// the model's reach that basis did not?* — and the answer is not
+    /// otherwise readable: these are registered for this workspace's audience,
+    /// which mentra's own registry readers do not walk.
+    pub fn host_tools(&self) -> &[String] {
+        &self.host_tools
+    }
+
     /// What `config.json` said about this workspace, and which file said it.
     ///
     /// The answers here are already *in force* — the model below is what they
@@ -577,22 +599,27 @@ impl Workspace {
     /// between claiming its server name and recording what bridged under it
     /// has no names to hide yet. So hiding decides what the model is *told*,
     /// and what it may actually *run* is decided per call, live, by
-    /// [`ForeignMcpGuard`](crate::runtime::agents::ForeignMcpGuard) in this
+    /// [`ForeignToolGuard`](crate::runtime::agents::ForeignToolGuard) in this
     /// workspace's own interception chain — which reads the server list this
     /// open configured rather than any snapshot of the registry. A name that
     /// slips into a roster is still a name that cannot be called.
     fn minted_agent(&self, profile: &RunProfile) -> AgentConfig {
-        let agent = profile.apply_to(self.agent.clone());
+        let mut agent = profile.apply_to(self.agent.clone());
 
         #[cfg(feature = "mcp")]
-        let agent = {
-            let mut agent = agent;
-            agent
-                .tool_profile
-                .hidden_tools
-                .extend(self.runtime.foreign_mcp_tools(&self.mcp_servers));
-            agent
-        };
+        agent
+            .tool_profile
+            .hidden_tools
+            .extend(self.runtime.foreign_mcp_tools(&self.mcp_servers));
+
+        // The third case an audience cannot express, and the one that is not
+        // `mcp__`-shaped: a native tool a *sibling open of this directory*
+        // supplied. It is registered for the audience both opens share, so
+        // mentra resolves it here as readily as for the open that supplied it.
+        agent.tool_profile.hidden_tools.extend(
+            self.runtime
+                .foreign_native_tools(&self.root, &self.host_tools),
+        );
 
         agent
     }
@@ -610,6 +637,7 @@ impl Workspace {
             hidden: agent.tool_profile.hidden_tools.clone(),
             #[cfg(feature = "mcp")]
             mcp_servers: self.mcp_servers.clone(),
+            host_tools: self.host_tools.clone(),
         }
     }
 
@@ -620,21 +648,24 @@ impl Workspace {
     /// must not be handed more than its parent has. What is added is what a
     /// resume cannot restate onto the agent itself: the `mcp__*` names that
     /// are foreign *now* — a sibling that opened while this conversation was
-    /// on disk.
+    /// on disk — and, for the same reason, the native tools such a sibling
+    /// supplied.
     fn resumed_tools(&self, session: &Session) -> AgentTools {
-        let hidden = session.config().tool_profile.hidden_tools.clone();
+        let mut hidden = session.config().tool_profile.hidden_tools.clone();
 
         #[cfg(feature = "mcp")]
-        let hidden = {
-            let mut hidden = hidden;
-            hidden.extend(self.runtime.foreign_mcp_tools(&self.mcp_servers));
-            hidden
-        };
+        hidden.extend(self.runtime.foreign_mcp_tools(&self.mcp_servers));
+
+        hidden.extend(
+            self.runtime
+                .foreign_native_tools(&self.root, &self.host_tools),
+        );
 
         AgentTools {
             hidden,
             #[cfg(feature = "mcp")]
             mcp_servers: self.mcp_servers.clone(),
+            host_tools: self.host_tools.clone(),
         }
     }
 

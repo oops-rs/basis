@@ -42,7 +42,10 @@ use crate::{
     skills::{self, SkillRoots, SkillsConfig},
     store,
     templates::{self, Template, TemplatesConfig},
-    tools::declared::{self, DeclaredTools, ToolsConfig},
+    tools::{
+        declared::{self, DeclaredTools, ToolsConfig},
+        host::WorkspaceHostTools,
+    },
 };
 
 use super::{Workspace, lifecycle::MintPosture, roster::ToolRoster};
@@ -83,6 +86,9 @@ pub struct WorkspaceBuilder {
     templates: TemplatesConfig,
     hooks: HooksConfig,
     tools: ToolsConfig,
+    /// Native tools the host supplied for *this* workspace, registered for its
+    /// audience at [`open`](WorkspaceBuilder::open).
+    host_tools: Vec<Box<dyn crate::tools::ExecutableTool>>,
     shell: ShellAccess,
     compaction: Compaction,
 }
@@ -136,6 +142,7 @@ impl std::fmt::Debug for WorkspaceBuilder {
             .field("templates", &self.templates)
             .field("hooks", &self.hooks)
             .field("tools", &self.tools)
+            .field("host_tools", &self.host_tools.len())
             .field("shell", &self.shell)
             .field("compaction", &self.compaction)
             .finish_non_exhaustive()
@@ -171,6 +178,7 @@ impl WorkspaceBuilder {
             templates: TemplatesConfig::default(),
             hooks: HooksConfig::default(),
             tools: ToolsConfig::default(),
+            host_tools: Vec::new(),
             // Granted, per ADR-0013, and from the enum's own default rather
             // than from anything ambient: what a run may do is stated here, in
             // configuration, not read out of the environment behind the caller.
@@ -451,6 +459,60 @@ impl WorkspaceBuilder {
     /// discovery is disabled.
     pub fn with_tools(self, tools: ToolsConfig) -> Self {
         Self { tools, ..self }
+    }
+
+    /// Registers a tool the *host* implements, in the embedding program's own
+    /// process, for this workspace alone.
+    ///
+    /// The per-workspace half of what
+    /// [`RuntimeBuilder::with_tool`](crate::RuntimeBuilder::with_tool) does
+    /// process-wide, and the same `ExecutableTool` contract — `crate::tools`
+    /// has what a host writes one against, and why a native tool exists at all
+    /// beside a [`declared`](crate::tools::declared) one.
+    ///
+    /// **What "for this workspace alone" means.** The tool is registered for
+    /// this workspace's [`ToolAudience`](mentra::tool::ToolAudience), so on a
+    /// runtime serving five repositories the other four's models are neither
+    /// offered it nor able to reach it by guessing the name — mentra's
+    /// resolution ladder answers a foreign audience's name with `Hidden`. A
+    /// run this workspace mints sees it, and so does a subagent that run
+    /// delegates to, which inherits the audience with the runtime handle it is
+    /// spawned from. Nothing is frozen to achieve that: mentra rebuilds a
+    /// visible set from the live registry each round, so a workspace that
+    /// opens later adds tools only to its own audience.
+    ///
+    /// **A name that is taken refuses the open**, naming it
+    /// ([`RunError::WorkspaceHostTool`](crate::RunError::WorkspaceHostTool)) —
+    /// a global this runtime already answers to, another repository's, or one
+    /// another live open of *this* directory supplied. That last is the one
+    /// case a declaration handles differently, and the error variant carries
+    /// the argument: two opens of one directory share one audience, and two
+    /// `dyn ExecutableTool` values cannot be compared, so the second is
+    /// refused rather than silently served the first's closure. Nothing is
+    /// registered when any name in the set is refused.
+    ///
+    /// **A host tool's `Drop` must not block.** Its registration is released
+    /// while basis holds the lock over the runtime's tool-name ledger, so a
+    /// handler that waits on a lock, a channel or a network round trip on its
+    /// way out stalls every other workspace opening or closing on that
+    /// runtime. mentra drops its own handlers outside its registry lock and
+    /// basis cannot: the claim and the registration have to go together or a
+    /// name is briefly free with a tool still answering to it. Detached work
+    /// owned only by the tool is outside what a workspace's lifetime covers.
+    ///
+    /// Call it once per tool; order is the order they are claimed in.
+    pub fn with_tool<T>(self, tool: T) -> Self
+    where
+        T: crate::tools::ExecutableTool + 'static,
+    {
+        Self {
+            host_tools: {
+                let mut host_tools = self.host_tools;
+                host_tools.push(Box::new(tool));
+                host_tools
+            },
+            ..self
+        }
     }
 
     /// Grants or denies command execution, for every run this workspace mints.
@@ -745,6 +807,27 @@ impl WorkspaceBuilder {
         )?;
         let declared_tool_names = declared_tools.names().to_vec();
 
+        // Beside the declared tools, claimed on the same ledger and registered
+        // for the same audience — the difference is only whose statement the
+        // tool is. A declaration came out of the repository; these came from
+        // the host, for this workspace and no other one this runtime carries.
+        //
+        // **After the declarations, and one refusal's wording depends on it.**
+        // A repository's own manifest keeps first call on a name it already
+        // uses, which is reason enough — but `Runtime::claim_declared_tool`
+        // also tells a declaration that a native tool under its name belongs
+        // to *another* live open, and that is only true because this open has
+        // made no native claim of its own by the time the declarations run.
+        // Registering host tools first would make that message quietly wrong,
+        // with nothing to catch it.
+        let host_tools = WorkspaceHostTools::register(
+            Arc::clone(&runtime),
+            &audience,
+            &path,
+            std::mem::take(&mut self.host_tools),
+        )?;
+        let host_tool_names = host_tools.names().to_vec();
+
         // Templates need no runtime registration — they are basis-side convention
         // data, rendered into a prompt by whatever surface offers them.
         let (templates_dirs, templates) = load_templates(&path, &self.templates)?;
@@ -769,16 +852,16 @@ impl WorkspaceBuilder {
         // directory is inside this workspace. See `Workspace`'s own docs.
         let runner = HookRunner::new(&path, loaded_hooks);
         // basis's own guard, ahead of whatever this repository declared,
-        // because a bridged tool this workspace does not own is not a call a
+        // because a tool this workspace does not own is not a call a
         // repository's hook should have to be written to catch. It reads the
         // runtime's agent ledger rather than this workspace, which is what
         // makes it right for the *other* live open of this directory too: that
         // open joins this chain rather than registering one of its own, so only
         // one of the two guards is ever live and it has to answer for both.
-        // See `crate::runtime::agents::ForeignMcpGuard`.
-        #[cfg(feature = "mcp")]
-        let runner = runner.with_interceptor(crate::runtime::agents::ForeignMcpGuard::new(
+        // See `crate::runtime::agents::ForeignToolGuard`.
+        let runner = runner.with_interceptor(crate::runtime::agents::ForeignToolGuard::new(
             Arc::clone(runtime.agents()),
+            runtime.tool_claims(),
         ));
         // One registration, both seams: mentra 0.26 takes a chain as
         // `ExecutionHookParticipant`s and answers with a single guard whose
@@ -858,6 +941,8 @@ impl WorkspaceBuilder {
             declared_tool_files: sourced(&declared_sources),
             declared_tools: declared_tool_names,
             declared_registration: declared_tools,
+            host_tools: host_tool_names,
+            host_tool_registration: host_tools,
             hooks,
             agents,
             #[cfg(feature = "mcp")]

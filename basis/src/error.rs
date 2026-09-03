@@ -308,6 +308,53 @@ pub enum RunError {
     #[error("`{name}` cannot be a command target name: {reason}")]
     CommandTarget { name: String, reason: String },
 
+    /// A host tool a *workspace* was given
+    /// ([`WorkspaceBuilder::with_tool`](crate::WorkspaceBuilder::with_tool))
+    /// under a name no tool may wear: empty, longer than a provider accepts,
+    /// outside the charset, or `mcp__`-prefixed, which is how mentra names a
+    /// bridged server's tool.
+    ///
+    /// The rules are the declared binding's, called rather than restated —
+    /// what may be a tool name does not depend on which binding put it there
+    /// (`crate::tools::host`).
+    #[error("the host tool `{name}` supplied to this workspace {reason}")]
+    WorkspaceHostToolName { name: String, reason: String },
+
+    /// The same tool, under a name that is well formed but not available.
+    ///
+    /// Apart from [`WorkspaceHostToolName`](Self::WorkspaceHostToolName)
+    /// because the two carry different vocabularies and one sentence cannot
+    /// host both: a malformed name *is* something ("has an empty name"), and
+    /// an unavailable one is refused *because* of something else that is true.
+    /// The declared binding splits its own refusals the same way
+    /// (`DeclaredToolError::Invalid` beside `NameTaken`).
+    ///
+    /// Four things can make a name unavailable: something this runtime already
+    /// answers to globally (`spawn`, a mentra builtin, a
+    /// [`RuntimeBuilder::with_tool`](crate::RuntimeBuilder::with_tool)
+    /// global); another repository open on the same runtime; another live open
+    /// of *this* directory; or the tool itself, if its descriptor named one
+    /// thing when the name was claimed and another when it was registered.
+    ///
+    /// The third is the one a host meets by accident. One directory is one
+    /// tool audience, so two live opens of it share a namespace, and a native
+    /// tool is compiled code closing over whatever the host had when it
+    /// supplied it — there is no way to tell two of them apart, and joining
+    /// would serve the second open the first one's closure. A host that
+    /// genuinely needs its own native tools per open of one directory needs
+    /// one [`Runtime`](crate::Runtime) per open; a declaration, which is data,
+    /// joins instead.
+    ///
+    /// A sibling open that supplies *nothing* meets no error at all, and must
+    /// not: it is refused nothing because it asked for nothing. What keeps it
+    /// out of the tool it never supplied is not this variant but the pair that
+    /// covers every shared-audience binding — hidden from its roster at the
+    /// mint, and refused at the call by the guard in its own chain.
+    ///
+    /// Either variant refuses the open rather than registering part of a set.
+    #[error("the host tool `{name}` cannot be registered for this workspace because {reason}")]
+    WorkspaceHostToolNameTaken { name: String, reason: String },
+
     /// A host tool ([`RuntimeBuilder::with_tool`](crate::RuntimeBuilder::with_tool))
     /// whose name collides with one basis already registered — `spawn`, a
     /// mentra builtin, or an earlier host tool on the same builder (decision
