@@ -28,10 +28,6 @@
 use std::time::Duration;
 
 use async_trait::async_trait;
-use mentra::{
-    error::RuntimeError,
-    tool::{ToolAuthorizationDecision, ToolAuthorizationRequest, ToolAuthorizer},
-};
 use serde_json::Value;
 
 /// How far outside this process a call reaches: nothing, this machine's state,
@@ -45,6 +41,28 @@ use serde_json::Value;
 /// for would mean adding mentra to the host's own manifest, pinned to whatever
 /// version basis happens to resolve.
 pub use mentra::tool::ToolSideEffectLevel;
+
+/// Everything writing a [`ToolAuthorizer`] of one's own makes a caller name.
+///
+/// The same rule as [`ToolSideEffectLevel`] above, applied to the seam
+/// [`PreparedRun::with_tool_authorizer`](crate::PreparedRun::with_tool_authorizer)
+/// opened: a host that installs an authorizer on a live session has to spell
+/// the trait, the request it is handed, the decision it returns and the error
+/// it may return instead, and none of those should cost it a mentra dependency
+/// of its own — pinned to whatever version basis happens to resolve.
+///
+/// These stay in this module rather than joining [`ApprovalGate`] at the crate
+/// root. `RuntimeError` is mentra's runtime error and cannot sit unqualified
+/// beside basis's own [`RunError`](crate::RunError) without the two reading as
+/// a pair, and the five are only meaningful together — an authorizer names all
+/// of them or none.
+pub use mentra::{
+    error::RuntimeError,
+    tool::{
+        ToolAuthorizationDecision, ToolAuthorizationOutcome, ToolAuthorizationRequest,
+        ToolAuthorizer,
+    },
+};
 
 /// What the agent wants to do, as put to an [`Approver`].
 ///

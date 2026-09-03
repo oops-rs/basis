@@ -50,6 +50,67 @@ impl PreparedRun {
         &mut self.session
     }
 
+    /// Replaces the tool authorizer for *this session only*, over the one its
+    /// runtime installed.
+    ///
+    /// The runtime's authorizer is basis's own
+    /// [`ApprovalGate`](crate::ApprovalGate), which answers nothing: every
+    /// consequential call comes back as a `Prompt`, and a `Prompt` is resolved
+    /// by a remembered rule before the run's [`Approver`](crate::Approver) is
+    /// ever consulted. That order is mentra's and it is deliberate — but it
+    /// means a policy the *approver* enforces can be pre-empted by a durable
+    /// rule someone seeded through
+    /// [`session()`](Self::session)`.permission_handle()`. An authorizer's own
+    /// `Allow` and `Deny` are terminal instead: mentra returns them unchanged,
+    /// consulting no rule and emitting no permission request. A host with a
+    /// posture that must not be answerable by a remembered rule puts it here
+    /// rather than in its approver.
+    ///
+    /// Scoped to this session's agent and the descendants it spawns after this
+    /// call. Sibling sessions keep the runtime's. **Live-only**: mentra does
+    /// not persist the attachment, so a conversation picked back up with
+    /// [`Workspace::resume`](crate::Workspace::resume) arrives without it and
+    /// must be given it again — the reason `basis-acp` installs its mode gate
+    /// in `AcpSession::new`, which both `session/new` and `session/load` go
+    /// through.
+    ///
+    /// Install **before the first turn**, which is what taking the run by
+    /// value enforces at the type level: a run already lent to a turn cannot
+    /// be moved. A subagent template taken from the session earlier, and any
+    /// child already spawned, keep the authorizer they inherited.
+    ///
+    /// The replacement is total, not layered — mentra has no way to hand back
+    /// the runtime authorizer being displaced, so an implementation here owns
+    /// the whole question, `ApprovalGate`'s
+    /// [`is_consequential`](crate::approval::is_consequential) filter included.
+    /// One that answered `Prompt` for a read would put every read to whoever
+    /// is approving.
+    pub fn with_tool_authorizer<A>(self, authorizer: A) -> Self
+    where
+        A: crate::approval::ToolAuthorizer + 'static,
+    {
+        // Destructured rather than updated in place: mentra's `Session` is
+        // consumed by its own `with_tool_authorizer`, so there is no borrow of
+        // this run that could hold the rest of it together across the move.
+        let Self {
+            session,
+            run,
+            bounds,
+            workspace,
+            retry_policy,
+            context_snapshot,
+        } = self;
+
+        Self {
+            session: session.with_tool_authorizer(authorizer),
+            run,
+            bounds,
+            workspace,
+            retry_policy,
+            context_snapshot,
+        }
+    }
+
     /// Forgets every "…for this session" approval answer this conversation
     /// holds, now instead of at its next attach.
     ///
