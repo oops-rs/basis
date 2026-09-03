@@ -14,6 +14,12 @@
 //! enum could never express, the trait can: allow edits but deny the network,
 //! ask over Slack with a timeout, escalate after the third refusal.
 //!
+//! [`DenyAllGate`] is [`DenyAll`] restated as an authorizer, and not a fourth
+//! piece: a refusal is the one answer an approver cannot make stick on its own,
+//! because a remembered rule resolves the gate's `Prompt` before any approver
+//! is consulted. A run that must refuse installs both, saying the same thing in
+//! the same words at the two layers that get asked.
+//!
 //! The first of those is the one this module has to make *writable* rather than
 //! merely describable, and it is written on [`Approver`]. It reads
 //! [`ApprovalRequest::side_effect_level`] and names no tool, which is the whole
@@ -281,19 +287,87 @@ impl Approver for AllowAll {
     }
 }
 
+/// Why a refusing run refused, in the words the model reads.
+///
+/// One function because two layers refuse for the same reason — [`DenyAllGate`]
+/// before the call is surfaced at all, [`DenyAll`] for a call some other
+/// authorizer surfaced anyway — and a model given two different explanations of
+/// one prohibition would be reading a difference that is not there.
+fn refusal(tool_name: &str) -> String {
+    format!("{tool_name} changes state outside this process, which this run does not allow")
+}
+
 /// Refuses everything, so the agent can inspect a workspace and report on it
 /// and cannot touch it. Each refusal reaches the model as a tool error, which
 /// is how it learns to stop trying.
+///
+/// **An approver alone is not a refusal a durable rule cannot outrank**, for
+/// the reason written on [`ApprovalGate`]: a remembered allow resolves the
+/// gate's `Prompt` before an approver is ever consulted. A run whose refusal
+/// is the whole point pairs this with [`DenyAllGate`], which states the same
+/// refusal where mentra treats it as final.
 #[derive(Debug, Default, Clone, Copy)]
 pub struct DenyAll;
 
 #[async_trait]
 impl Approver for DenyAll {
     async fn approve(&mut self, request: &ApprovalRequest) -> ApprovalAnswer {
-        ApprovalAnswer::new(ApprovalDecision::Deny).because(format!(
-            "{} changes state outside this process, which this run does not allow",
-            request.tool_name
-        ))
+        ApprovalAnswer::new(ApprovalDecision::Deny).because(refusal(&request.tool_name))
+    }
+}
+
+/// [`DenyAll`]'s refusal, stated one layer down as a tool authorizer, where no
+/// remembered rule can answer over it.
+///
+/// # Why the same refusal twice
+///
+/// [`ApprovalGate`] answers nothing: every consequential call comes back as a
+/// `Prompt`, and mentra resolves a `Prompt` against the conversation's
+/// remembered rules *before* the approver is consulted. For a policy choosing
+/// between asking and allowing that ordering is only a host saying yes in
+/// advance. For [`DenyAll`] it is a standing override — a Global- or
+/// Project-scope allow seeded through
+/// [`session()`](crate::PreparedRun::session)`.permission_handle()` answers
+/// ahead of the refusal, and outlives everything a session-scoped mechanism
+/// clears.
+///
+/// Installed with
+/// [`PreparedRun::with_tool_authorizer`](crate::PreparedRun::with_tool_authorizer),
+/// this refuses first instead. mentra returns an authorizer's `Deny`
+/// unchanged: no rule is read, no `PermissionRequested` is emitted, and the
+/// approver is never reached — so the model gets exactly the refusal
+/// [`DenyAll`] would have given it, in the same words.
+///
+/// # What it still allows
+///
+/// A non-consequential call, outright — [`ApprovalGate`]'s
+/// [`is_consequential`] filter, unchanged and deliberately so. A gate that
+/// denied reads would stop a refusing run from doing the one thing it is for,
+/// which is looking. The corollary [`ApprovalGate`] documents holds here too:
+/// a rule remembered against a read-only tool is never consulted.
+///
+/// # Which runs want it
+///
+/// One whose refusal is fixed for its whole life — a headless `--approve
+/// never` invocation, a task recorded to refuse — where there is no live mode
+/// for a stateful gate to read. A host whose posture can *change* mid-session
+/// wants one that reads that state per call instead; `basis-host`'s
+/// `PolicyGate` is that, and installing this one would freeze the mode a
+/// session opened in.
+#[derive(Debug, Default, Clone, Copy)]
+pub struct DenyAllGate;
+
+#[async_trait]
+impl ToolAuthorizer for DenyAllGate {
+    async fn authorize(
+        &self,
+        request: &ToolAuthorizationRequest,
+    ) -> Result<ToolAuthorizationDecision, RuntimeError> {
+        if !is_consequential(request.preview.side_effect_level) {
+            return Ok(ToolAuthorizationDecision::allow());
+        }
+
+        Ok(ToolAuthorizationDecision::deny(refusal(&request.tool_name)))
     }
 }
 
@@ -336,12 +410,19 @@ pub fn is_consequential(level: ToolSideEffectLevel) -> bool {
 ///
 /// So a host with a refusal that must outrank a remembered answer installs it
 /// as a *session* authorizer instead, where mentra treats a `Deny` as final.
-/// `basis-acp` does exactly that, and only for the one mode with something to
-/// lose: a read-only session gets `basis-host`'s `PolicyGate`, which refuses
-/// consequential calls itself and is otherwise this gate — `Allow` for a read,
-/// `Prompt` for everything else, remembered rules and all. Every other mode,
-/// and every run that installs nothing, is served by this gate on the runtime
-/// exactly as before.
+/// Two shapes of that ship, for the two shapes of host:
+///
+/// - A posture fixed for the run's whole life installs [`DenyAllGate`]. The
+///   attended CLI's `--approve never` and a task recorded to refuse both do,
+///   beside the [`DenyAll`] they were already passing.
+/// - A posture that can change mid-session installs one that reads the live
+///   state per call. `basis-acp` does, on every session it opens, with
+///   `basis-host`'s `PolicyGate`: read-only refuses, and every other mode is
+///   this gate verbatim — `Allow` for a read, `Prompt` for everything else,
+///   remembered rules and all.
+///
+/// Every other policy, and every run that installs nothing, is served by this
+/// gate on the runtime exactly as before.
 ///
 /// # The gate answers first, and its answers are final
 ///
@@ -542,6 +623,67 @@ mod tests {
             reason,
             "shell changes state outside this process, which this run does not allow"
         );
+    }
+
+    async fn refused(level: ToolSideEffectLevel) -> ToolAuthorizationDecision {
+        DenyAllGate
+            .authorize(&request("shell", level))
+            .await
+            .expect("authorization does not error")
+    }
+
+    #[tokio::test]
+    async fn a_refusing_run_refuses_at_the_gate_rather_than_surfacing() {
+        // The whole point: a `Deny` here is terminal, so no remembered rule is
+        // read and the approver is never reached. A `Prompt` would put the call
+        // back where a seeded durable allow can answer it.
+        for level in [
+            ToolSideEffectLevel::LocalState,
+            ToolSideEffectLevel::Process,
+            ToolSideEffectLevel::External,
+        ] {
+            assert_eq!(
+                refused(level).await.outcome,
+                ToolAuthorizationOutcome::Deny,
+                "{level:?} changes something outside this process"
+            );
+        }
+    }
+
+    #[tokio::test]
+    async fn a_refusing_gate_refuses_in_the_approvers_words() {
+        // Two layers, one prohibition: a model told one thing by the gate and
+        // another by `DenyAll` would be reading a difference that is not there.
+        let refusal = refused(ToolSideEffectLevel::Process)
+            .await
+            .reason
+            .expect("a refusal the model can act on must explain itself");
+
+        assert_eq!(
+            refusal,
+            DenyAll
+                .approve(&approval_request())
+                .await
+                .reason
+                .expect("`DenyAll` explains itself too")
+        );
+    }
+
+    #[tokio::test]
+    async fn a_refusing_gate_still_lets_a_read_through() {
+        // A run that refuses is for looking, so the one thing it must keep
+        // doing is looking. `ApprovalGate`'s filter, unchanged.
+        assert_eq!(
+            refused(ToolSideEffectLevel::None).await.outcome,
+            ToolAuthorizationOutcome::Allow
+        );
+    }
+
+    #[test]
+    fn a_refusing_gate_never_waits_and_so_needs_no_bound() {
+        // No `with_timeout` beside `ApprovalGate`'s, and nothing to add one
+        // for: this gate answers from the request alone and awaits nobody.
+        assert_eq!(DenyAllGate.timeout(), None);
     }
 
     #[tokio::test]

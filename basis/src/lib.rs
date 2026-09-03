@@ -93,7 +93,7 @@ pub mod workspace;
 // written against it should not cost the host a mentra dependency of its own.
 pub use approval::{
     AllowAll, ApprovalAnswer, ApprovalDecision, ApprovalGate, ApprovalRequest, Approver, DenyAll,
-    ToolSideEffectLevel,
+    DenyAllGate, ToolSideEffectLevel,
 };
 pub use budget::BudgetPool;
 // Beside the other things a workspace is built *with*: what a run's history
