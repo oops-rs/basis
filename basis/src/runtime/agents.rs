@@ -54,7 +54,7 @@
 use std::{
     collections::{BTreeSet, HashMap},
     sync::{
-        Arc, Mutex, RwLock,
+        Arc, RwLock,
         atomic::{AtomicU64, Ordering},
     },
 };
@@ -178,11 +178,11 @@ impl AgentRegistry {
             .expect("agent registry poisoned")
             .insert(child.to_string(), Entry { owner, tools });
 
-        Some(AgentRow(Arc::new(RowGuard {
+        Some(AgentRow {
             registry: Arc::clone(self),
             owner,
             agent_id: child.to_string(),
-        })))
+        })
     }
 
     fn record(&self, owner: AgentOwner, agent_id: &str, tools: Arc<AgentTools>) {
@@ -220,22 +220,11 @@ impl AgentRegistry {
 #[derive(Debug)]
 pub(crate) struct WorkspaceAgents {
     registry: Arc<AgentRegistry>,
-    /// A hold on every row this workspace has recorded, keyed by agent id and
-    /// replaced when the same id is recorded again.
-    ///
-    /// The workspace's half of "the last of {workspace, live runs}". Bounded by
-    /// the distinct agent ids this open has recorded rather than by its mints,
-    /// and released wholesale when the workspace drops — at which point any row
-    /// a run is still standing on survives on that run's own clone.
-    rows: Mutex<HashMap<String, AgentRow>>,
 }
 
 impl WorkspaceAgents {
     pub(crate) fn new(registry: Arc<AgentRegistry>) -> Self {
-        Self {
-            registry,
-            rows: Mutex::new(HashMap::new()),
-        }
+        Self { registry }
     }
 
     /// States what this workspace's `agent_id` was minted with, replacing
@@ -267,22 +256,11 @@ impl WorkspaceAgents {
         // which the old stamp does match — and retract a row this call is in
         // the middle of establishing.
         self.registry.record(owner, agent_id, Arc::new(tools));
-        let row = AgentRow(Arc::new(RowGuard {
+        AgentRow {
             registry: Arc::clone(&self.registry),
             owner,
             agent_id: agent_id.to_string(),
-        }));
-
-        // One guard, two clones: this map's and the caller's. Replacing an
-        // earlier entry for the same id drops that write's hold here, which is
-        // a release only if no run still stands on it — and either way a
-        // no-op, because the write just made above is now the standing one and
-        // an older stamp cannot retract it.
-        self.rows
-            .lock()
-            .expect("workspace agent rows poisoned")
-            .insert(agent_id.to_string(), row.clone());
-        row
+        }
     }
 }
 
@@ -302,29 +280,31 @@ impl WorkspaceAgents {
 /// which lives from `spawn_subagent` to the answer it reads back and no longer.
 /// Both release the same way, and neither can release a row a sibling open has
 /// since taken over — whoever wrote the row last is whoever may take it away.
-/// **Shared, not exclusive.** One write makes one guard and hands out clones,
-/// because a row answers to more than one thing at once: the workspace that
-/// recorded it, and every run standing on it. The row leaves when the last of
-/// them goes — which is what `docs/proposals/0004` specifies, and neither half
-/// alone is enough. Released with the workspace, it vanishes under a run that
-/// outlived it; released with the run, it vanishes under a session handed back
-/// by anything that outlives it while staying in the workspace's audience.
-#[derive(Debug, Clone)]
-#[must_use = "dropping the last hold takes the agent's row off the ledger"]
-pub(crate) struct AgentRow(#[allow(dead_code, reason = "held for its Drop")] Arc<RowGuard>);
-
-/// The half that actually releases, so the count is what decides when.
+/// **One holder, and it is the run.** A [`PreparedRun`](crate::PreparedRun) is
+/// the unique owner of a basis-minted session — nothing on it yields an owned
+/// `Session`, only borrows that cannot outlive it — so tying the row to the run
+/// states the invariant exactly: a row outlives every live session minted or
+/// resumed against it, because the run *is* how long that session lives.
+///
+/// A workspace-side hold was tried and dropped. It states a coarser thing —
+/// every id this open ever recorded, until the open goes — which is a superset
+/// today and would be only a *partial* cover if a session-escape API ever
+/// returned: it holds while the workspace lives and not otherwise, so it would
+/// satisfy the obvious regression test and leave open the very ordering that
+/// `PreparedRun::into_session` was withdrawn for. An exact invariant that fails
+/// loudly beats a coarse one that fails quietly. `docs/proposals/0004` records
+/// what a reintroduced escape hatch has to solve.
 #[derive(Debug)]
-struct RowGuard {
+#[must_use = "dropping the hold takes the agent's row off the ledger"]
+pub(crate) struct AgentRow {
     registry: Arc<AgentRegistry>,
-    /// Stamped per *write* and shared by that write's holders, so
-    /// last-writer-wins stays unambiguous: whoever wrote the row last is
-    /// whoever may take it away, however many things are standing on it.
+    /// Stamped per *write*, so last-writer-wins stays unambiguous: whoever
+    /// wrote the row last is whoever may take it away.
     owner: AgentOwner,
     agent_id: String,
 }
 
-impl Drop for RowGuard {
+impl Drop for AgentRow {
     fn drop(&mut self) {
         self.registry.forget_if_owned(&self.agent_id, self.owner);
     }
@@ -542,10 +522,10 @@ mod tests {
     /// nothing attaches the two — while the guard reads this ledger on every
     /// call that run makes. A row released with the workspace left a live
     /// session unattributable, which for a bridged name means allowed.
-    /// A row leaves when the last of {workspace, live runs} goes, and both
-    /// halves are load bearing — each covers a door the other leaves open.
+    /// A row's lifetime is its run's, because a run is how long the session
+    /// lives: nothing on a `PreparedRun` yields an owned `Session`.
     #[test]
-    fn a_row_leaves_when_the_last_of_its_workspace_and_its_runs_goes() {
+    fn a_row_outlives_its_workspace_and_leaves_with_its_run() {
         let registry = Arc::new(AgentRegistry::default());
         let workspace = WorkspaceAgents::new(Arc::clone(&registry));
 
@@ -567,28 +547,9 @@ mod tests {
             "each row leaves with the last hold on it and takes no other with it"
         );
         drop(two);
-        assert!(registry.of("agent-2").is_none());
-
-        // The workspace half. `into_session` — the one surface that could hand
-        // a live session past its run — was removed with this proposal, so
-        // nothing in basis reaches this today. It is held anyway, because the
-        // property is "a row outlives every live session minted against it"
-        // and that should hold by construction rather than by the absence of
-        // an API somebody may reintroduce; proposal 0004 records what such a
-        // reintroduction has to solve.
-        let workspace = WorkspaceAgents::new(Arc::clone(&registry));
-        let handed_back = workspace.record("agent-3", tools(&["mcp__prod-db__query"]));
-        drop(handed_back);
         assert!(
-            registry.of("agent-3").is_some(),
-            "a session that outlived its run would still be in its workspace's audience \
-             and still judged by its guard, so it must still be attributable"
-        );
-
-        drop(workspace);
-        assert!(
-            registry.of("agent-3").is_none(),
-            "and nothing outlives the last thing that needed it"
+            registry.of("agent-2").is_none(),
+            "and nothing outlives the thing that needed it"
         );
     }
 
@@ -629,7 +590,6 @@ mod tests {
         let a_moved_again = a.record("moved", tools(&["mcp__a-only__query"]));
 
         drop(b_moved);
-        drop(b);
         drop(a_moved);
 
         assert_eq!(
@@ -642,11 +602,10 @@ mod tests {
 
         drop(a_moved_again);
         drop(a_own);
-        drop(a);
 
         assert!(
             registry.of("moved").is_none() && registry.of("a's own").is_none(),
-            "and a row goes once neither a run nor a workspace is standing on it"
+            "and the holds that do own their rows still release them"
         );
     }
 
@@ -664,7 +623,6 @@ mod tests {
 
         drop(a_moved);
         drop(a_stayed);
-        drop(a);
 
         assert_eq!(
             hides(&registry, "moved"),
@@ -677,11 +635,10 @@ mod tests {
         );
 
         drop(b_moved);
-        drop(b);
 
         assert!(
             registry.of("moved").is_none(),
-            "and the row still leaves with the holds that do own it"
+            "and the row still leaves with the hold that does own it"
         );
     }
 

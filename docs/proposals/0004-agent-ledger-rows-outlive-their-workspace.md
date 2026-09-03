@@ -79,9 +79,24 @@ supported shape and is now the only one. Should a raw-session escape hatch ever
 be genuinely wanted, it comes back redesigned *with* an answer to the third
 holder — and this section is the statement of what that answer has to solve.
 
-The workspace's half of the hold stays even though nothing in basis can now
-reach past a run, because property 1 should hold by construction rather than by
-the continued absence of an API.
+**And the hold is the run's alone.** A workspace-side hold was implemented and
+then dropped, which is worth recording because the reasoning generalises. A
+`PreparedRun` is the *unique owner* of a basis-minted session — nothing on it
+yields an owned `Session`, only borrows — so tying the row to the run states
+property 1 exactly. A workspace-side hold states a coarser thing: every id an
+open ever recorded, until the open goes. That is a superset today, which makes
+it look like a safety net for a reintroduced escape hatch; it is not. It would
+cover the ordering where the workspace is still alive and miss the one where it
+is not — precisely the ordering `into_session` was withdrawn for, and the harder
+one to think of. A reintroduction would ship with a passing test and an open
+hole. **An exact invariant that fails loudly beats a coarse one that fails
+quietly**, so the reintroducer is left with nothing to lean on, which is the
+right amount of support for someone reopening this door.
+
+Two costs came back with that decision, both real: rows are bounded by live runs
+rather than by distinct ids per workspace, and a mint that fails *after*
+`record` — `record` is followed by `?` in both `Workspace::prepare` and
+`Workspace::resume` — no longer strands a row for a session that never existed.
 
 **The native arm is not affected.** A native tool name is in the claim ledger
 only because a live basis workspace put it there, and a session with no audience
@@ -148,14 +163,10 @@ deliberately protects.
 
 1. A row outlives every live session minted or resumed against it, not only the
    workspace that recorded it.
-2. Rows stay removable, and bounded by the distinct agent ids a live workspace
-   has recorded — not by its mints, and not by anything a dropped workspace once
-   held. A host that keeps one workspace for the process and mints a fresh agent
-   id per turn makes that a process-lifetime set; that is the host's choice, it
-   is what basis did before 0.12, and it is one map entry per turn rather than
-   per call. Read the property as forbidding growth *relative to that baseline*,
-   because holding the row for the workspace as well as the run is what closes
-   the `into_session` door and the literal reading would reject it.
+2. Rows stay removable and bounded by *live runs* — not by mints, not by
+   distinct ids, and not by anything a workspace once recorded. The shipped
+   shape reads the property literally, and it is stricter than what basis did
+   before 0.12, where a row lived for its workspace.
 3. Same-root takeover keeps working (`forget_if_owned`), and the reason it is
    safe stays stated: mentra leases one live session per agent id, and both
    stores refuse a second acquire even to the same owner.
@@ -172,14 +183,11 @@ deliberately protects.
 8. **The hold must not be reachable from the ledger entry it keeps alive.** A
    self-pinning row is never freed, and looks exactly like correct behaviour
    until the process runs long enough.
-9. **The workspace's own hold must not grow faster than what shipped.** Its
-   `recorded` set is insert-only today — one `String` per distinct id, for the
-   workspace's life — but the ledger *entry* beside it was already one full row
-   per distinct id for exactly as long. So replacing that set with a map of
-   holds costs one `String` and one pointer per id against a row that was there
-   anyway, and is not the failure this property guards against. What would be:
-   keying the holds by anything that grows faster than distinct agent ids, or
-   holding rows a workspace no longer has any claim on.
+9. **No holder may outlive what it is holding the row for.** The workspace's
+   own `recorded` set is gone with the shipped shape, and the reason stands as
+   a rule: a holder whose lifetime is coarser than the thing that needs the row
+   retains entries for sessions that ended, or never existed at all — a mint
+   that fails after `record` being the sharpest case.
 
 ## How reachable it is, and by whom
 
