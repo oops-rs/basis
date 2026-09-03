@@ -462,9 +462,16 @@ impl Runtime {
 
         match claims.get(name) {
             Some(claim) if claim.root != root => Err(claim.taken_elsewhere()),
-            Some(_) => {
-                Err("another live open of this workspace already answers to that name".to_string())
-            }
+            // Same root, which is three different situations basis cannot
+            // tell apart and does not have to: a sibling open of this
+            // directory, this open's own manifest having declared the name
+            // moments ago, or this open supplying two tools under one name.
+            // One directory is one identity, so the refusal speaks about the
+            // directory rather than guessing which of the three it is.
+            Some(_) => Err(
+                "this workspace is already open on this runtime with a tool by that name"
+                    .to_string(),
+            ),
             None if self.registers_tool(name) => {
                 Err("this runtime already offers a tool by that name".to_string())
             }
@@ -555,6 +562,16 @@ impl Runtime {
         // back the exact snapshot it used, so this compares the two rather
         // than re-asking the tool a third time and trusting that answer.
         // Dropping the registration unregisters precisely that generation.
+        //
+        // Detection rather than prevention, because a caller cannot yet say
+        // which name it meant — the wrongly-named tool is briefly registered
+        // before this takes it back. Every name that could sit in that window
+        // is refused elsewhere anyway (a global collides before the insert, an
+        // `mcp__` name is denied by the guard's bridged arm, another claim's
+        // name by its native arm), so what is left is malformed and harmless.
+        // oops-rs/mentra#58 asks for the registration to take the descriptor
+        // the caller validated, which would retire this check rather than
+        // merely satisfy it.
         let registered = &registration.descriptor().provider.name;
         if *registered != claim.name {
             let registered = registered.clone();
