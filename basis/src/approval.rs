@@ -321,9 +321,27 @@ pub fn is_consequential(level: ToolSideEffectLevel) -> bool {
 /// request can ever be raised, and since mentra 0.26 not even a remembered
 /// rule is read first. Surfacing unconditionally is what lets the answer be
 /// chosen per turn — or changed mid-session, which is how an ACP client's
-/// mode picker works at all. (mentra 0.26 can also swap a live session's
-/// authorizer, `Session::with_tool_authorizer`; basis does not, because the
-/// gate never answers and so never needs replacing.)
+/// mode picker works at all.
+///
+/// # When a session replaces it
+///
+/// Surfacing everything has one cost, and it is the reason
+/// [`PreparedRun::with_tool_authorizer`](crate::PreparedRun::with_tool_authorizer)
+/// exists: a `Prompt` is resolved by a remembered rule *before* the approver
+/// is consulted, so a refusal written on the approver can be pre-empted by a
+/// durable allow someone seeded through the session's permission handle. For
+/// a policy that chooses between asking and allowing that is only a host
+/// saying yes in advance. For one that refuses outright it is a standing
+/// override.
+///
+/// So a host with a refusal that must outrank a remembered answer installs it
+/// as a *session* authorizer instead, where mentra treats a `Deny` as final.
+/// `basis-acp` does exactly that, and only for the one mode with something to
+/// lose: a read-only session gets `basis-host`'s `PolicyGate`, which refuses
+/// consequential calls itself and is otherwise this gate — `Allow` for a read,
+/// `Prompt` for everything else, remembered rules and all. Every other mode,
+/// and every run that installs nothing, is served by this gate on the runtime
+/// exactly as before.
 ///
 /// # The gate answers first, and its answers are final
 ///

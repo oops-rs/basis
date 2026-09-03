@@ -326,7 +326,9 @@ flowchart LR
   is ACP-ecosystem tooling with no basis-specific knowledge, and never an identity argument
   for basis.
 - **The host kit moves behavior; it does not generalize it** (ADR-0025). `ApprovalPolicy`
-  and its session-scoped remembered answers are shared by ACP, tasks, and the CLI;
+  and its session-scoped remembered answers are shared by ACP, tasks, and the CLI, and
+  `PolicyGate` beside them is what a host installs on a live session so its read-only mode
+  refuses where a remembered rule cannot answer — ACP does, on every session it opens;
   `HostSession` keeps one turn lock with cancellation reachable outside it; and
   `ConfiguredSource` keeps one lazy runtime per process plus one never-evicted workspace per
   canonical directory and supplied-MCP digest. `SessionSource`, `SessionTemplate`, and
@@ -951,6 +953,31 @@ identifier — Mentra's resume options have no field for one
 under the runtime's own tag when it next persists, which on a shared runtime takes it out of
 that workspace's `session/list`. The conversation is still resumable by id. `basis::store`'s
 module docs have the whole of it.
+
+### Read-only sessions refuse where a remembered rule cannot answer
+
+A session mode used to be enforced entirely on the approver, one layer above the runtime's
+`ApprovalGate`. That gate answers nothing — every consequential call comes back as a `Prompt` —
+and Mentra resolves a `Prompt` against the conversation's remembered rules *before* the approver
+is consulted. A Global- or Project-scope rule seeded through the session's permission handle
+therefore answered ahead of the mode, with no permission request emitted, and outlived both the
+things that clear an answer: a mode switch (which clears only this layer's in-process memory)
+and the attach-time clear (which clears only session scope). Read-only was a promise a durable
+allow could stand over.
+
+It is stated as an authorizer now. `basis-host`'s `PolicyGate` goes on each live session through
+`PreparedRun::with_tool_authorizer` — Mentra's own session-scoped replacement, which is why
+`AcpSession::new` is the install point: it is where `session/new` and `session/load` both reach a
+conversation, before it is registered where a turn can find it, and the attachment is live-only
+so a resumed session needs it again. Under `ApprovalMode::Never` the gate denies, and Mentra
+returns an authorizer's `Deny` unchanged — no rule read, no request raised. Under `Always` and
+`Prompt` it is the runtime gate verbatim, remembered rules included, because a mode that permits
+consequential work has nothing for a standing allow to override. Two consequences worth naming:
+a source that builds its own runtime no longer keeps *its* authorizer for the sessions an
+adapter serves (an `Interceptor` runs ahead of the authorizer and is not replaceable per
+session, which is where a posture that must survive belongs); and revoking a durable rule is
+still Mentra's to offer ([mentra#43](https://github.com/oops-rs/mentra/issues/43)), so a seeded
+allow remains a standing answer everywhere except read-only.
 
 ### Command targets
 

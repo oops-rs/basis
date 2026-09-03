@@ -23,11 +23,20 @@ use basis::{
 /// custom tools, its own store, a provider basis does not know — can serve it
 /// through an adapter instead of letting basis build one.
 ///
-/// A source that builds its own runtime owns its tool authorizer too, and a
-/// session mode only reaches calls that authorizer surfaces: install
-/// [`ApprovalGate`](basis::approval::ApprovalGate) — which is what basis's own
-/// source gets from the [`Runtime`](basis::Runtime) it builds — or the
-/// client's mode picker will have nothing to decide.
+/// A source that builds its own runtime owns its tool authorizer, and an
+/// adapter that offers a mode picker **replaces it for the sessions it
+/// serves**: `basis-acp` installs [`PolicyGate`](crate::PolicyGate) on each
+/// live session, over whatever the runtime carries, because a read-only mode
+/// has to refuse where mentra treats the refusal as final. So the mode picker
+/// now works whatever a source's runtime authorizer does — and a source with a
+/// stricter one of its own does not keep it for those sessions. A posture that
+/// must survive belongs in a
+/// [`RuntimeBuilder::with_interceptor`](basis::RuntimeBuilder::with_interceptor)
+/// guard, which runs ahead of the authorizer and is not replaceable per
+/// session. Installing
+/// [`ApprovalGate`](basis::approval::ApprovalGate) — what basis's own source
+/// gets from the [`Runtime`](basis::Runtime) it builds — is still what a
+/// source wants for every *other* consumer of its runtime.
 #[async_trait::async_trait]
 pub trait SessionSource: Send + Sync + 'static {
     /// Opens a conversation in `cwd`, for `session/new`, with the MCP servers
