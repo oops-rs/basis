@@ -231,8 +231,9 @@ impl AgentRegistry {
     /// write standing there.
     ///
     /// The condition is the whole of it: a hold whose write was overwritten by
-    /// another open of the same directory has nothing to release, and removing the row anyway would take the *current* owner's
-    /// answer away from a session that is still running on it. See
+    /// another open of the same directory has nothing to release, and removing
+    /// the row anyway would take the *current* owner's answer away from a
+    /// session that is still running on it. See
     /// [`AgentOwner`] for why an absent row is worse than a stale one.
     fn forget_if_owned(&self, agent_id: &str, owner: AgentOwner) {
         // Recovered rather than `expect`ed, because this runs inside a `Drop`

@@ -58,13 +58,18 @@ fn history_text(message: &mentra::Message) -> Option<(Role, String)> {
 }
 
 /// A session and the prompt to send it. Nothing has been sent yet.
-/// **Field order is drop order, and these three depend on it.** `session`
-/// first, because mentra releases the agent's lease with the session's handle
-/// chain and the lease must go before the ledger row that names it; then
-/// `workspace`, whose hooks and MCP connections a still-live session would
-/// still be judged by; then `agent_row`. Reordering the declarations would
-/// change the release order silently.
 pub struct PreparedRun {
+    // **Declaration order is drop order, and one pair depends on it:**
+    // `session` must drop before `agent_row`. The row must outlive the agent's
+    // lease, and `session` is what releases that lease — mentra ties it to the
+    // session's handle chain. Moving `agent_row` above `session` would change
+    // that silently.
+    //
+    // `workspace`'s position is free, and claiming otherwise would be worse
+    // than saying nothing: by the time it drops the session is already gone,
+    // and a `Workspace` touches no part of the agent ledger on its way out —
+    // its `hooks` hold releases an `Arc<AgentRegistry>` refcount, which
+    // mutates no entry.
     session: Session,
     run: RunContext,
     bounds: TurnOptions,
