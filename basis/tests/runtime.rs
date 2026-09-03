@@ -1072,6 +1072,12 @@ mod host_roster {
         // and an exact-agent registration resolves above an audience one — so
         // a workspace that supplies a host tool still gets its pager. Pinned
         // rather than argued, because the argument is what failed last time.
+        //
+        // What it does *not* catch: a freeze someone hand-maintained to name
+        // `read_tool_result` explicitly. No test stops somebody rebuilding
+        // that on purpose — and hand-maintaining it is the fragile thing the
+        // old approach died of. This catches the realistic regression, a
+        // freeze that cannot know about a registration made after the mint.
         let endpoint = ScriptedEndpoint::start(Vec::new());
         let runtime = shared_runtime(&endpoint);
         let dir = workspace_dir();
