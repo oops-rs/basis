@@ -28,8 +28,13 @@ basis-tasks = { version = "0.11", path = "basis-tasks" }
 # basis's code does not compile against unmodified in either direction, so the
 # floor is hard both ways. First, `SessionOptions` gained `policy` and
 # `tool_audience`: basis's exhaustive struct literal in `Runtime::mint`
-# (`basis/src/runtime.rs`) must initialize both, and does so with `None` —
-# the prior runtime-inherited, global-only behavior — deliberately.
+# (`basis/src/runtime/scope.rs`) must initialize both, and states both — the
+# workspace's own policy, and the tool audience its sessions resolve in.
+# `Runtime::resume_minted` restates them, because mentra deliberately keeps
+# neither in the persisted agent: a resumed session handed no policy would
+# inherit the runtime's, which on a shared runtime is the posture of no
+# workspace at all, and one handed no audience would resolve only global
+# names.
 # Second, `Session` now binds its runtime's live permission store
 # automatically — the session namespace is the stable persisted agent id, not
 # the ephemeral UI `SessionId`, so session rules survive a real resume — and
@@ -62,42 +67,52 @@ basis-tasks = { version = "0.11", path = "basis-tasks" }
 # stream, pinned by `basis/tests/compact.rs` — so an older runtime would
 # silently break the accounting contract with nothing here to notice (#44).
 #
-# The adoption waves landing on this floor consume several more of its
-# surfaces basis has not taken up yet. `Runtime::fresh_provider_session_scope`
-# mints an independent provider session scope — fresh turn, response-chain,
-# WebSocket, and in-flight state, same provider identity and configuration —
-# without network I/O. A cold mint, so it does not yet replace the prewarm
-# basis documents today: the retained `ResponsesProvider` clone a host keeps
-# beside `with_registered_provider` (`basis/src/runtime/builder/provider.rs`),
-# whose shared session state a WebSocket opened through it warms (#46).
-# `ExecutionHookParticipant` gives pre- and post-execution one ordered, named,
-# object-safe participant chain, run forward on both sides, in place of
-# today's two separate legacy hook lists (#49). `Runtime::register_pre_hook`
-# / `register_post_hook` and their `*_for_audience` counterparts add or
-# remove execution hooks on a live runtime after construction, returning a
-# guard, instead of only at build time (#40). `SessionOptions::policy` and
-# `SessionResumeOptions::policy` let one shared runtime give a live session a
-# complete `RuntimePolicy` of its own instead of only the runtime builder's
-# (#39). `Runtime::try_register_tool_for_audience` and `ToolAudience` let a
-# shared runtime expose different tool implementations to different live
-# audiences, resolved exact-agent, then audience, then global (#47). And
-# `Session::with_tool_authorizer`, riding the same live-permission-store
-# binding above, replaces the runtime's default `ToolAuthorizer` for one live
-# session without touching its siblings, runtime-spawned agents, policy,
-# hooks, or tool-audience visibility (#43/#38). `skill_root_key` is now a
-# public function for the same canonical-path-with-fallback identity basis's
-# own `skill_root_holders` claim ledger in `runtime.rs` already re-derives by
-# hand, because mentra kept that keying private until now (#36).
-# `Session::config` reads back a resumed session's persisted `AgentConfig`
-# directly; basis's own resume path has no way today to confirm what
-# configuration a resumed session actually came back with (#41). And
-# `FileToolProfile::None` closes the gap `ToolProfile::only`'s docs already
-# name as a caveat: a roster that offers no file tool still finds one sitting
-# on a shared runtime's registry, because no profile could unregister them
-# (#42). Of the 0.26 surfaces, this branch adopts the permission machinery
-# and the compaction-usage accounting above; the rest await the wave that
-# consumes what basis actually uses, and a follow-up will re-align this
-# comment with the shipped surfaces, as 0ab68de did for 0.25.
+# The adoption waves have landed, and these are the surfaces they took up.
+# `SessionOptions::policy` and `SessionResumeOptions::policy` let one shared
+# runtime give a live session a complete `RuntimePolicy` of its own instead of
+# only the runtime builder's, which is what makes a `ShellAccess::Denied`
+# workspace's posture hold for its own sessions and for nobody else's (#39).
+# `Runtime::try_register_tool_for_audience` and `ToolAudience` let that runtime
+# expose different tools to different live audiences, resolved exact-agent,
+# then audience, then global — the primitive under both a repository's
+# declared tools and a host's per-workspace native ones, and the reason a
+# workspace's tools reach that workspace's runs and nothing else on the
+# runtime (#47). `ExecutionHookParticipant` gives pre- and post-execution one
+# ordered, named, object-safe participant chain in place of two legacy lists,
+# so a workspace registers its whole `.basis/hooks.json` as one atomic mixed
+# batch (#49), and `register_execution_hook_for_audience` is what puts that
+# batch on a live runtime after construction, returning a guard the workspace
+# drops (#40). `Session::with_tool_authorizer` replaces the runtime's default
+# `ToolAuthorizer` for one live session without touching its siblings, which
+# is how a read-only session refuses at the authorizer rather than only at the
+# policy (#43/#38). `skill_root_key` is the canonical-path-with-fallback
+# identity basis's skills ledger used to re-derive by hand, and now shares
+# with upstream rather than drifting from it (#36). `Session::config` reads a
+# resumed session's persisted `AgentConfig` back, which is how a resume checks
+# that the conversation it picked up belongs to the workspace picking it up
+# (#41). And `FileToolProfile::None` closes the caveat `ToolProfile::only`'s
+# own docs name: a roster offering no file tool used to find one on the
+# registry anyway, because no profile could unregister them (#42).
+#
+# One 0.26 surface is deliberately not taken up.
+# `Runtime::fresh_provider_session_scope` mints an independent provider
+# session scope without network I/O (#46) — but it is a cold mint, and the
+# rebuild half of reuse that would have consumed it was retired by ADR-0026
+# before this floor landed. Gate 1b stays retired; a pooling host opens a
+# fresh workspace per checkout. The surface is named here so a later reader
+# knows it was considered rather than missed.
+#
+# One 0.26 change is depended on for what it *removed*, which is the kind of
+# floor reason that is easiest to lose. mentra 0.25 deep-copied the tool
+# registry into every derived runtime handle, so a session's view of the
+# registry was a snapshot taken at its creation and nothing registered
+# afterwards could reach it; 0.26 shares one live registry instead. basis
+# wants the live registry — the audience ladder is built on it — but the
+# snapshot had been providing an isolation nobody had written down, and
+# adopting the share is what made a same-directory sibling's tools reachable
+# for the first time. `docs/proposals/0004` carries the account and the fix:
+# an agent's ledger row now lives for its run, and `PreparedRun::into_session`
+# is withdrawn.
 #
 # The 0.25 floor's reasons still hold beneath it. The primary provider stream
 # observes the run's cancellation token and deadline while the provider
