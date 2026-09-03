@@ -308,8 +308,7 @@ impl WorkspaceAgents {
 /// them goes — which is what `docs/proposals/0004` specifies, and neither half
 /// alone is enough. Released with the workspace, it vanishes under a run that
 /// outlived it; released with the run, it vanishes under a session handed back
-/// by [`into_session`](crate::PreparedRun::into_session), which is still in the
-/// workspace's audience and still judged by its guard.
+/// by anything that outlives it while staying in the workspace's audience.
 #[derive(Debug, Clone)]
 #[must_use = "dropping the last hold takes the agent's row off the ledger"]
 pub(crate) struct AgentRow(#[allow(dead_code, reason = "held for its Drop")] Arc<RowGuard>);
@@ -570,16 +569,19 @@ mod tests {
         drop(two);
         assert!(registry.of("agent-2").is_none());
 
-        // The workspace half: a run can hand its session back
-        // (`PreparedRun::into_session`) and drop everything else, while that
-        // session stays live in the workspace's audience. A row released with
-        // the run would vanish under it.
+        // The workspace half. `into_session` — the one surface that could hand
+        // a live session past its run — was removed with this proposal, so
+        // nothing in basis reaches this today. It is held anyway, because the
+        // property is "a row outlives every live session minted against it"
+        // and that should hold by construction rather than by the absence of
+        // an API somebody may reintroduce; proposal 0004 records what such a
+        // reintroduction has to solve.
         let workspace = WorkspaceAgents::new(Arc::clone(&registry));
         let handed_back = workspace.record("agent-3", tools(&["mcp__prod-db__query"]));
         drop(handed_back);
         assert!(
             registry.of("agent-3").is_some(),
-            "a session handed back by `into_session` is still in its workspace's audience \
+            "a session that outlived its run would still be in its workspace's audience \
              and still judged by its guard, so it must still be attributable"
         );
 

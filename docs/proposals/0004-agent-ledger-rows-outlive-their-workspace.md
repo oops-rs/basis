@@ -1,6 +1,7 @@
 # 0004 — An agent ledger row should outlive the workspace that recorded it
 
-> Status: Accepted — being fixed now, shape A, before 0.12.0 ships. Latent in the
+> Status: Implemented — shape A, plus the withdrawal of
+> `PreparedRun::into_session`, before 0.12.0 ships. Latent in the
 > shipped adapters and confined to unreleased 0.12.0 material: it arrived with
 > the mentra 0.26 adoption and no released basis has had it.
 > Created: 2026-09-03 as a deferred proposal, when the wave that found it was
@@ -56,18 +57,31 @@ proposal held only the run half and reopened the defect through this door; it
 was caught by an adversarial probe before merge, and both tests are in
 `basis/tests/runtime.rs`.
 
-**One ordering is not covered, and is recorded here rather than papered over.**
-The row has exactly two holders, so dropping the workspace *and then* handing
-the session back through `into_session` leaves neither, and the session falls
-back to the unjudged default. This fails identically on the code before this
-proposal was implemented — it is residual original defect rather than anything
-the fix introduced, and the fix is a strict improvement against it — but it is a
-known hole and should be read as one. Closing it needs a third holder with
-nowhere to live: a session with no workspace and no run has nothing left to hang
-a lifetime on, and parking the hold on the registry with no release event trades
-a bound that can be reasoned about for one that cannot. The honest options are
-to leave it documented, or to give the bridged arm the ledger fallback of shape
-B — which closes it at the cost of shape B's corner.
+**One ordering the two holders cannot cover — closed by removing its only door.**
+The row has exactly those two holders, so dropping the workspace *and then*
+handing the session back would leave neither, and the session would fall back to
+the unjudged default while a sibling open's chain still judged it. That ordering
+failed identically on the code before this proposal, so it was residual rather
+than introduced; but it was still a hole, and a third holder has nowhere to
+live — a session with no workspace and no run has nothing left to hang a
+lifetime on, and parking the hold on the registry with no release event trades a
+bound that can be reasoned about for one that cannot.
+
+So `PreparedRun::into_session` is withdrawn. It was the only way to hold a live
+session past its run, it had no consumer anywhere in basis or in nous, and
+removing it makes the ordering unreachable rather than documented. A documented
+isolation limit guarding an API nobody calls is dead weight and a standing risk
+at once.
+
+**Migration.** A host that needs a session for longer than one run keeps the
+*workspace* alive for as long as it uses the session; that was always the
+supported shape and is now the only one. Should a raw-session escape hatch ever
+be genuinely wanted, it comes back redesigned *with* an answer to the third
+holder — and this section is the statement of what that answer has to solve.
+
+The workspace's half of the hold stays even though nothing in basis can now
+reach past a run, because property 1 should hold by construction rather than by
+the continued absence of an API.
 
 **The native arm is not affected.** A native tool name is in the claim ledger
 only because a live basis workspace put it there, and a session with no audience

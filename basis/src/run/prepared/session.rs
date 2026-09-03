@@ -140,34 +140,6 @@ impl PreparedRun {
         Ok(())
     }
 
-    /// Gives the session back, ending this run's involvement.
-    ///
-    /// A workspace this run was keeping alive
-    /// ([`with_workspace`](Self::with_workspace)) is dropped here with the
-    /// rest of the run, and its hooks and MCP connections end with it.
-    ///
-    /// **"Mentra's alone" is not quite what comes back, and the difference
-    /// matters.** The session keeps the tool audience it was minted in, so
-    /// while any open of that directory is alive its calls are still composed
-    /// into that open's interception chain and still judged by
-    /// [`ForeignToolGuard`](crate::runtime::agents::ForeignToolGuard). What
-    /// keeps that honest is the agent ledger row, which is held by the
-    /// workspace as well as by this run — so handing the session back does not
-    /// make it unattributable, which for a bridged name would mean *allowed*
-    /// (`docs/proposals/0004`).
-    ///
-    /// **While its workspace is alive.** The row has exactly those two
-    /// holders, so a session handed back *after* its own workspace has been
-    /// dropped has neither, and falls back to the unjudged default a session
-    /// basis never minted gets. Dropping the workspace and then handing its
-    /// session back is the one ordering this does not cover; there is nowhere
-    /// in mentra to hang a third holder, and the proposal records it as a known
-    /// limit rather than pretending otherwise. Hold the workspace for as long
-    /// as you mean to keep the session.
-    pub fn into_session(self) -> Session {
-        self.session
-    }
-
     /// The session's id, which changes every time a session is created —
     /// including on resume.
     pub fn session_id(&self) -> String {

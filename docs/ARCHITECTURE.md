@@ -695,8 +695,10 @@ Nothing else moves. `fresh_only`, `without_discovery`, `with_resolved_model`,
 `ToolRoster::only`, `RunProfile`, `TurnOptions`, `ToolResultPolicy`, and
 `PreparedRun::register_agent_event_tap` are untouched, as are `AgentEventTapGuard`'s name,
 its `#[must_use]`, and its drop semantics. Three documented promises are withdrawn without a
-signature changing: `Workspace::mentra_runtime` and `PreparedRun::session` / `session_mut` /
-`into_session` no longer poison a reuse generation, because there is no generation to poison.
+signature changing: `Workspace::mentra_runtime` and `PreparedRun::session` / `session_mut`
+no longer poison a reuse generation, because there is no generation to poison.
+`PreparedRun::into_session` was withdrawn separately and for a different reason — see
+[proposal 0004](proposals/0004-agent-ledger-rows-outlive-their-workspace.md).
 
 A pooling host opens a fresh workspace per checkout — `with_runtime_builder` +
 `without_discovery` + `fresh_only` + `with_resolved_model` + an exact roster, which is the

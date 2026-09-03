@@ -563,63 +563,6 @@ mod roster {
         drop(owner);
     }
 
-    #[tokio::test]
-    async fn a_session_handed_back_by_into_session_is_still_attributable() {
-        // `into_session` gives the session back and drops the rest of the run.
-        // The session is still live, still in its workspace's tool audience,
-        // and still judged by the chain a sibling open of that directory
-        // installed — so it is not "mentra's alone" in the way the name
-        // suggests, and a row released with the *run* would vanish under it.
-        // That is why the row leaves with the last of {workspace, live runs}
-        // rather than with either alone (`docs/proposals/0004`).
-        let endpoint = ScriptedEndpoint::start(vec![
-            Reply::ToolCall {
-                name: PROD_DB_QUERY.to_string(),
-                arguments: "{}".to_string(),
-            },
-            Reply::Text,
-        ]);
-        let runtime = shared_runtime(&endpoint);
-        let dir = workspace_dir();
-
-        let owner = pinned(dir.path(), Arc::clone(&runtime))
-            .with_mcp(no_mcp().with_supplied(vec![unreachable_server("prod-db")]))
-            .open()
-            .await
-            .expect("opens even though the server does not come up");
-        let stranger = pinned(dir.path(), runtime)
-            .with_mcp(no_mcp())
-            .open()
-            .await
-            .expect("the same directory opens again");
-
-        let ran = Arc::new(std::sync::atomic::AtomicBool::new(false));
-        let _bridged = stranger
-            .mentra_runtime()
-            .try_register_tool_for_audience(
-                ToolAudience::new(store::runtime_identifier(dir.path())),
-                ProdDbQuery(Arc::clone(&ran)),
-            )
-            .expect("nothing answers to that name yet");
-
-        // The run ends and hands its session back; the workspace stays open.
-        let mut session = stranger.prepare("go").expect("mints").into_session();
-        session
-            .append_turn(vec![mentra::ContentBlock::Text {
-                text: "go".to_string(),
-            }])
-            .await
-            .expect("the turn completes — a denial is an answer, not an error");
-
-        assert!(
-            !ran.load(std::sync::atomic::Ordering::SeqCst),
-            "a session handed back by `into_session` must not reach the authenticated \
-             server of another open of its directory"
-        );
-
-        drop(owner);
-    }
-
     /// The `tools` array of a recorded request: the roster the model was
     /// actually offered, read off the wire.
     fn tool_names(request: &str) -> Vec<String> {
@@ -1224,43 +1167,6 @@ mod host_roster {
         assert!(
             offered.iter().any(|tool| tool == "host_ask"),
             "and the workspace's own host tool beside it: {offered:?}"
-        );
-    }
-
-    #[tokio::test]
-    async fn a_session_handed_back_still_reaches_its_own_workspaces_tool() {
-        // The other direction of the same row, and the one a refusal breaks
-        // silently rather than loudly: the open that SUPPLIED the tool hands
-        // its session back and must still be served by it. Without a row the
-        // native arm denies — `holds_native` is true and nothing says this
-        // caller owns it — so the workspace loses its own closure.
-        let endpoint = ScriptedEndpoint::start(vec![Reply::ToolCall {
-            name: "host_ask".to_string(),
-            arguments: "{}".to_string(),
-        }]);
-        let runtime = shared_runtime(&endpoint);
-        let dir = workspace_dir();
-
-        let (tool, calls) = HostTool::counted("host_ask");
-        let owner = pinned(dir.path(), runtime)
-            .with_tool(tool)
-            .open()
-            .await
-            .expect("opens");
-
-        let mut session = owner.prepare("go").expect("mints").into_session();
-        session
-            .append_turn(vec![mentra::ContentBlock::Text {
-                text: "go".to_string(),
-            }])
-            .await
-            .expect("the turn completes");
-
-        assert_eq!(
-            calls.load(Ordering::SeqCst),
-            1,
-            "the open that supplied the tool must still be served by it after handing its \
-             session back"
         );
     }
 
