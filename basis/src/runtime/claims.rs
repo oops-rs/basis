@@ -21,7 +21,7 @@
 
 use std::collections::HashMap;
 use std::path::{Path, PathBuf};
-use std::sync::{Arc, Mutex, MutexGuard};
+use std::sync::{Arc, RwLock, RwLockReadGuard, RwLockWriteGuard};
 
 // `skill_root_key` is the identity mentra's own registry matches a skills root
 // by, so the holder count below is keyed exactly the way upstream keys it —
@@ -133,11 +133,22 @@ enum ClaimedProgram {
 /// [`Runtime`] would close a cycle through mentra's own registry and the
 /// runtime would never drop. Sharing the map alone closes nothing.
 #[derive(Debug, Clone, Default)]
-pub(crate) struct ToolClaims(Arc<Mutex<HashMap<String, ToolNameClaim>>>);
+pub(crate) struct ToolClaims(Arc<RwLock<HashMap<String, ToolNameClaim>>>);
 
 impl ToolClaims {
-    fn lock(&self) -> MutexGuard<'_, HashMap<String, ToolNameClaim>> {
-        self.0.lock().expect("tool claim map poisoned")
+    /// A read, for the two questions asked *per call* rather than per open.
+    ///
+    /// An `RwLock` like the [`AgentRegistry`](super::agents::AgentRegistry)
+    /// beside it and for its reason: claiming is rare and bounded by opens,
+    /// while [`holds_native`](Self::holds_native) is on the path of every tool
+    /// call every agent on this runtime makes, and concurrent calls have no
+    /// reason to queue behind each other to read a map none of them writes.
+    fn read(&self) -> RwLockReadGuard<'_, HashMap<String, ToolNameClaim>> {
+        self.0.read().expect("tool claim map poisoned")
+    }
+
+    fn lock(&self) -> RwLockWriteGuard<'_, HashMap<String, ToolNameClaim>> {
+        self.0.write().expect("tool claim map poisoned")
     }
 
     /// Whether `name` is a native tool some live open supplied.
@@ -147,7 +158,7 @@ impl ToolClaims {
     /// *another* directory is in another audience and cannot reach a call here
     /// at all, and if one ever did, denying it is still the right answer.
     pub(crate) fn holds_native(&self, name: &str) -> bool {
-        self.lock()
+        self.read()
             .get(name)
             .is_some_and(|claim| matches!(claim.program, ClaimedProgram::Native))
     }
@@ -162,7 +173,7 @@ impl ToolClaims {
         root: &Path,
         own: &[String],
     ) -> std::collections::BTreeSet<String> {
-        self.lock()
+        self.read()
             .iter()
             .filter(|(name, claim)| {
                 claim.root == root
@@ -514,8 +525,8 @@ impl Runtime {
     /// registered, so there is no window in which a guard exists that nothing
     /// holds, and no re-lookup by a string the caller had to pass twice. A
     /// claim that is gone by the time it is spent is an `Err` and not a silent
-    /// success: the alternative reports a live declared tool that nothing on
-    /// the runtime answers to.
+    /// success: the alternative reports a live tool that nothing on the
+    /// runtime answers to.
     pub(crate) fn install_claimed_tool<T>(
         &self,
         audience: &ToolAudience,
@@ -741,7 +752,7 @@ impl Runtime {
         name: &str,
     ) -> Option<mentra::tool::RuntimeToolDescriptor> {
         self.tool_claims
-            .lock()
+            .read()
             .get(name)?
             .registration
             .as_ref()

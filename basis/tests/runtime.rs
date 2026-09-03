@@ -1030,6 +1030,39 @@ mod host_roster {
     }
 
     #[tokio::test]
+    async fn one_builder_cannot_supply_two_tools_under_one_name() {
+        // The refusal a host meets soonest, and the one that had no test: two
+        // `with_tool` calls agreeing on a name. It reaches the same arm a
+        // second live open of this directory does, because basis genuinely
+        // cannot tell those apart — one directory is one identity — which is
+        // why the message names the directory rather than guessing. Asserted
+        // on the rendered string, since the wording is the whole finding: it
+        // said "another live open" of a host that had only ever opened once.
+        let runtime = offline_runtime();
+        let dir = workspace_dir();
+
+        let refused = pinned(dir.path(), runtime)
+            .with_tool(HostTool::named("host_ask"))
+            .with_tool(HostTool::named("host_ask"))
+            .open()
+            .await
+            .expect_err("one name is one tool, however many times it is supplied");
+        assert!(
+            matches!(
+                &refused,
+                basis::RunError::WorkspaceHostToolNameTaken { name, .. } if name == "host_ask"
+            ),
+            "the refusal names the tool that caused it: {refused}"
+        );
+        assert!(
+            refused.to_string().contains(
+                "this workspace is already open on this runtime with a tool by that name"
+            ),
+            "and does not tell a host that opened once about another open: {refused}"
+        );
+    }
+
+    #[tokio::test]
     async fn a_workspace_host_tool_does_not_cost_a_paged_run_its_pager() {
         // The second failure mode that killed the first attempt at this seam:
         // it needed a frozen pre-mint allow-list to keep tools apart, and
