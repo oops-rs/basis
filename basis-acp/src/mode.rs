@@ -42,28 +42,36 @@
 //!
 //! mentra can remember a decision — `PermissionDecision::allow_and_remember` —
 //! and since 0.26 its remembered rules resolve the gate's `Prompt` *before*
-//! the approver is consulted, from a store persisted under the conversation's
-//! stable agent id. A rule stored there answers ahead of the mode on every
-//! later call in the live session: someone who allowed `shell` for the
-//! session and then moved to read-only would still be running commands. So
-//! [`ModedApprover`] answers mentra with a plain allow or deny and keeps the
-//! "…for this session" answer here, in process memory, where changing the
-//! mode clears it — which is also why, on a stock basis-acp session, the
-//! approver really does see every surfaced call: this layer never writes a
-//! rule for mentra to answer from.
+//! the approver is consulted, from whichever backend the rule's scope names:
+//! since mentra 0.27, a `Process`-scope rule from the live session's own
+//! handle, otherwise a store persisted under the conversation's stable agent
+//! id. A rule answering there answers ahead of the mode on every later call
+//! in the live session: someone who allowed `shell` for the session and then
+//! moved to read-only would still be running commands. So [`ModedApprover`]
+//! answers mentra with a plain allow or deny and keeps the "…for this
+//! session" answer here, in process memory, where changing the mode clears
+//! it — which is also why, on a stock basis-acp session, the approver really
+//! does see every surfaced call: this layer never writes a rule for mentra to
+//! answer from, of any scope.
 //!
 //! # The bypass a seeded durable rule was, and what closed it
 //!
 //! That guarantee is about what *this layer writes*, not about the pipeline.
-//! A host that seeds a **Global- or Project-scope** rule through the
-//! session's permission handle (the seam `basis`'s `reviewed_shell` example
-//! teaches, at Session scope) installs an answer that resolves a `Prompt`
-//! with no `PermissionRequested` ever emitted — and such a rule survives
-//! everything this module relies on: it outlives every mode switch (it is not
-//! in [`SessionApproval`]'s memory) and outlives the attach-time clear too
-//! (that clear is session-scope only). While the mode was read only on the
-//! approver, a seeded durable allow was therefore a standing override of
-//! read-only: nothing ever asked the mode.
+//! A host that seeds a **Session-, Project-, or Global-scope** rule through
+//! the session's permission handle (the seam `basis`'s `reviewed_shell`
+//! example teaches, at Session scope) installs an answer that resolves a
+//! `Prompt` with no `PermissionRequested` ever emitted — and such a rule
+//! survives everything this module relies on: it is not in
+//! [`SessionApproval`]'s memory, so no mode switch touches it. A
+//! **Session**-scope one is a special case worth naming, because basis's own
+//! runtime does clear that scope on every resume
+//! (`Runtime::resume_minted`) — but only as cleanup for rows a pre-0.12
+//! basis binary left behind, not as a live guarantee this module or any
+//! current approval flow relies on, and a resume is not a mode switch. A
+//! **Project**- or **Global**-scope one has no such reprieve even in
+//! principle: nothing basis runs ever clears those. While the mode was read
+//! only on the approver, a seeded durable allow was therefore a standing
+//! override of read-only: nothing ever asked the mode.
 //!
 //! [`ModeGate`] closes that, by putting the refusal where a rule cannot
 //! reach it. **A session in [`ApprovalMode::Never`] refuses every

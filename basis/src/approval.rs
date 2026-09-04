@@ -122,15 +122,20 @@ pub struct ApprovalRequest {
 /// every later call of that tool on the **live session**: further calls in the
 /// same turn, and further runs on the same [`PreparedRun`](crate::PreparedRun)
 /// in the same process. It dies at the next attach — resuming the
-/// conversation ([`Workspace::resume`](crate::Workspace)) clears it, so a
-/// later process that picks the conversation back up asks again rather than
-/// replaying an answer nobody in that process gave.
+/// conversation ([`Workspace::resume`](crate::Workspace)) starts it with none
+/// remembered, so a later process that picks the conversation back up asks
+/// again rather than replaying an answer nobody in that process gave.
 ///
-/// That boundary is basis's, enforced at resume. mentra 0.26 persists the
-/// remembered rule in the runtime store under the conversation's stable agent
-/// id and would replay it across every attach; basis clears the session scope
-/// on its one resume path instead, because "for the rest of this session"
-/// must not silently mean "forever, in every future process".
+/// That boundary is inherent now, not enforced. mentra 0.27's
+/// `PermissionRuleScope::Process` (mentra#53) is what basis remembers a
+/// `…ForSession` answer into: a rung owned by the live session's own
+/// permission handle, never written to the runtime store, so a resumed
+/// session — a fresh handle, even for the same conversation — simply starts
+/// with an empty one. Nothing basis runs has to clear it. (One resume-time
+/// clear does still exist, in `Runtime::resume_minted`, but it is a one-way
+/// migration for rows a pre-0.12 basis binary remembered into the durable
+/// `Session` scope before this change; it plays no part in the guarantee
+/// documented here for an answer given today.)
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
 pub enum ApprovalDecision {
     Allow,

@@ -316,10 +316,17 @@ pub fn forget_in(dir: &Path, agent_id: &str) -> Result<(), RunError> {
     // store-wide after its writer is gone, which is worse than a dead Session
     // row ever was, and #51 leaves project- and global-scope rows alone on
     // purpose. mentra's creator-oriented `clear_rules` still deletes by
-    // writer id regardless of scope, which is exactly that wider reading —
-    // now redundant with upstream for the session-scope rows alone, and still
-    // the only thing that reaches the rest. Clearing rows that are already
-    // gone removes nothing, so calling both costs nothing either.
+    // writer id regardless of scope, which is exactly that wider reading, and
+    // it stays: correctness across every scope a conversation could have
+    // written to is worth more than the redundant rewrite this now costs in
+    // the common case (an agent with no project/global rules) — mentra's
+    // `clear_rules` always performs one full `rules.json` read, filter, and
+    // atomic replace, unconditionally, whether or not anything is actually
+    // removed (unlike `clear_scope`, which reports and skips the write when
+    // nothing changed). There is no cheaper existence check available
+    // without reading the same file basis would then be reimplementing the
+    // upstream read against, so this pays that cost every time rather than
+    // risk a leftover Global rule outliving the conversation that wrote it.
     rules.clear_rules(agent_id)?;
 
     Ok(())

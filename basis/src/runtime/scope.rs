@@ -15,6 +15,7 @@ use mentra::{
     ModelInfo, RuntimePolicy, Session,
     agent::AgentConfig,
     runtime::{SessionOptions, SessionResumeOptions},
+    session::PermissionRuleScope,
     tool::ToolAudience,
 };
 
@@ -134,16 +135,31 @@ impl Runtime {
     /// and neither of its own. The persisted agent's base directory is checked
     /// against this workspace's identity before anything is stated onto it.
     ///
-    /// **A "…for this session" answer needs nothing stated here at all.**
-    /// mentra 0.27's `PermissionRuleScope::Process` (mentra#53) is what
-    /// basis's own approval flow remembers into for that duration now — a rung
-    /// owned by one live `SessionPermissionHandle`, never written to the
-    /// runtime store — and `resume_session_with_options` above hands back a
-    /// session with a fresh handle and an empty rung, for the same stable
-    /// agent id or any other. There is no durable row to clear and no failure
-    /// mode to fail the resume over; basis's 0.26 workaround (clearing the
-    /// durable session scope here, on every attach) is retired along with the
-    /// durable-scope remembering it existed to undo.
+    /// **A "…for this session" answer this session itself gives needs nothing
+    /// stated here at all.** mentra 0.27's `PermissionRuleScope::Process`
+    /// (mentra#53) is what basis's own approval flow remembers into for that
+    /// duration now — a rung owned by one live `SessionPermissionHandle`,
+    /// never written to the runtime store — and `resume_session_with_options`
+    /// above hands back a session with a fresh handle and an empty rung, for
+    /// the same stable agent id or any other. A *new* such answer therefore
+    /// needs no clearing, ever.
+    ///
+    /// **A row a pre-0.12 basis binary already wrote is a different
+    /// question, and the clear below still answers it.** Before this
+    /// workspace's approval flow existed to remember into `Process`, an
+    /// `AllowForSession`/`DenyForSession` answer was remembered into the
+    /// durable `Session` scope instead — mentra 0.27 still loads and matches
+    /// `Session`-scope rows exactly as it always has (only `Process` rows are
+    /// excluded from `load_applicable_rules`), so a row a person answered
+    /// under an older basis binary sits in `rules.json` today and would
+    /// otherwise be replayed forever against the very session it was
+    /// supposed to die with. This is a one-way migration cleanup, not this
+    /// workspace's live contract — every row it can ever find here from now
+    /// on is somebody else's leftover — and it stays exactly as fallible as
+    /// it always was: a store that cannot be rewritten fails the resume
+    /// closed rather than silently leaving a stale grant in place. Safe to
+    /// retire once no supported basis version can have left a `Session`-scope
+    /// row behind.
     pub(crate) fn resume_minted(
         &self,
         agent_id: &str,
@@ -171,6 +187,20 @@ impl Runtime {
                 agent_workspace: based_in,
             });
         }
+
+        // Legacy-row cleanup only — see the doc comment above. `?` fails the
+        // whole resume on a store that reads but cannot be rewritten, because
+        // the alternative is a stale grant from a pre-0.12 binary silently
+        // applying to a session that never gave it. A store that cannot be
+        // *read* would already have failed closed at point of use, so the
+        // refusal here adds determinism rather than protection on that half.
+        session
+            .permission_handle()
+            .clear_scope(PermissionRuleScope::Session)
+            .map_err(|error| RunError::SessionRulesNotCleared {
+                agent_id: agent_id.to_owned(),
+                error,
+            })?;
 
         Ok(session)
     }

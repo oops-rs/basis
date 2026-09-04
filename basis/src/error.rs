@@ -64,6 +64,35 @@ pub enum RunError {
         dir: std::path::PathBuf,
     },
 
+    /// Resuming a conversation could not clear a pre-0.12 "…for this
+    /// session" approval rule the conversation's `rules.json` still carries,
+    /// so the resume is refused rather than run with a grant or refusal a
+    /// person gave to an earlier, unrelated session.
+    ///
+    /// mentra 0.27's process-scoped rung (mentra#53) means a *new*
+    /// "…for this session" answer never touches the store — but a row an
+    /// older basis binary remembered into the durable `Session` scope before
+    /// this floor still sits in `rules.json`, and mentra still loads and
+    /// matches `Session`-scope rows exactly as it always has. The clear
+    /// reads `rules.json` before it can filter, so one corrupt, truncated, or
+    /// unwritable file fails **every** resume against that store until the
+    /// file is repaired or deleted. Fresh conversations, and any store no
+    /// pre-0.12 binary ever wrote to, are unaffected.
+    #[error(
+        "resuming `{agent_id}` could not clear a legacy for-this-session approval rule \
+         ({error}); every resume on this store will fail until its rules.json — the \
+         path in the error above — is repaired or deleted (deleting it costs only \
+         remembered approval answers, never history)"
+    )]
+    SessionRulesNotCleared {
+        /// The conversation whose resume was refused.
+        agent_id: String,
+        /// The store's own failure, naming the file it could not read or
+        /// rewrite.
+        #[source]
+        error: mentra::error::RuntimeError,
+    },
+
     /// [`Workspace::resume`](crate::Workspace::resume) was handed a
     /// conversation that belongs to a different workspace.
     ///

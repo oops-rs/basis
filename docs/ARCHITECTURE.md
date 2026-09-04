@@ -1007,6 +1007,23 @@ it at the source: every persisted-agent reconstruction now retains the row's own
 identifier through every later save ([mentra#54](https://github.com/oops-rs/mentra/issues/54)),
 so basis needed no code change to pick it up. `basis::store`'s module docs have the whole of it.
 
+**A "…for this session" answer is process-local now, and one API is withdrawn because of it.**
+Mentra 0.27 adds `PermissionRuleScope::Process`
+([mentra#53](https://github.com/oops-rs/mentra/issues/53)), a rung owned by one live
+`SessionPermissionHandle` and never written to the runtime store; basis's approval flow
+remembers `AllowForSession`/`DenyForSession` into it instead of the durable `Session` scope it
+used before. A resumed session gets a fresh handle and an empty rung on its own, so
+`PreparedRun::forget_session_answers` — the 0.26-era method a one-shot host called at the end of
+a run to clear durable session-scope rows nothing would otherwise attach to clear — is
+**withdrawn outright, with no replacement**: there is nothing left to clear. A caller that
+compiled against it needs no substitute call, only its removal. `Runtime::resume_minted` still
+clears the durable `Session` scope on every attach, but only for the migration case this leaves
+behind: a row a *pre-0.12* basis binary remembered there before this change, which mentra 0.27
+still loads and matches like any other durable rule. That clear is safe to retire once no
+supported basis version can have left such a row on disk; `basis/src/runtime/scope.rs`'s doc
+comment carries the account, and `basis/tests/workspace.rs` pins both the live and the legacy
+case as separate tests.
+
 ### A refusal refuses where a remembered rule cannot answer
 
 A refusing posture used to be enforced entirely on the approver, one layer above the runtime's
