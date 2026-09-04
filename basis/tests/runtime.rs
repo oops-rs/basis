@@ -1312,35 +1312,37 @@ mod host_roster {
     }
 
     #[tokio::test]
-    async fn a_tool_that_renames_itself_between_the_claim_and_the_registration_is_refused() {
-        // basis reads a descriptor to learn the name to claim and mentra reads
-        // its own to learn the key to register under. Nothing makes those the
-        // same read, so they are compared rather than assumed — otherwise the
-        // second name is on the registry under no claim at all, past every
-        // rule the ledger enforces, `mcp__` included.
+    async fn a_tools_descriptor_is_read_once_so_it_cannot_rename_itself_after_being_claimed() {
+        // Before oops-rs/mentra#58, basis read a descriptor once to learn the
+        // name to claim and mentra read its own a second time to learn the
+        // key to register under — two reads of a caller-implemented, not
+        // provably pure method that could in principle disagree, catching a
+        // tool like `ShiftingTool` (which answers a different, `mcp__`-shaped
+        // name on its second ask) and refusing it. mentra 0.27's public
+        // `PreparedTool` closes the gap at the root instead of merely
+        // catching it: `PreparedTool::new` is the only place
+        // `ToolDefinition::descriptor()` ever runs, for a tool's whole
+        // lifetime on a runtime, and the same prepared value is what basis
+        // claims a name against and what mentra registers under. A tool that
+        // would answer differently on a second ask is simply never asked a
+        // second time, so it opens under the one name it was ever asked for
+        // rather than being refused for disagreeing with itself.
         let runtime = offline_runtime();
         let dir = workspace_dir();
 
-        let refused = pinned(dir.path(), Arc::clone(&runtime))
+        let workspace = pinned(dir.path(), runtime)
             .with_tool(ShiftingTool(Arc::new(AtomicUsize::new(0))))
             .open()
             .await
-            .expect_err("a tool that will not name itself consistently cannot be registered");
-        assert!(
-            matches!(
-                &refused,
-                basis::RunError::WorkspaceHostToolNameTaken { name, .. } if name == "host_ask"
-            ),
-            "the refusal names the tool as it was claimed: {refused}"
-        );
+            .expect("a tool's descriptor is read exactly once, so it cannot disagree with itself");
 
-        // And nothing of it is left on the runtime under either name.
-        let workspace = pinned(dir.path(), runtime)
-            .with_tool(HostTool::named("host_ask"))
-            .open()
-            .await
-            .expect("the refused registration was taken back, so the name is free");
-        assert_eq!(workspace.host_tools(), ["host_ask"]);
+        assert_eq!(
+            workspace.host_tools(),
+            ["host_ask"],
+            "registered under the one name the tool was ever asked for — the \
+             `mcp__secret__admin` it would have answered on a second ask is a \
+             name nothing ever reads"
+        );
     }
 
     #[tokio::test]

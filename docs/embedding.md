@@ -147,9 +147,10 @@ which a runtime-wide policy could not carry.
 Conversations on a shared runtime are tagged per minted session with the workspace's
 identifier. `store::list` — and ACP's `session/list` over it — therefore returns only that
 workspace's conversations even though provider, store handle, and runtime are shared. One
-exception, and it is upstream's: mentra carries no identifier through a resume, so a resumed
-conversation re-files under the runtime's own tag when it next persists and leaves the
-workspace's list. It stays resumable by id.
+exception used to apply, and mentra 0.27 closed it upstream rather than basis working around it:
+a resumed session used to carry no identifier, so a resumed conversation re-filed under the
+runtime's own tag when it next persisted and left the workspace's list. mentra now retains the
+row's own stored runtime identifier through every later save, so this no longer happens.
 
 The knobs ADR-0018 moved are `RuntimeBuilder`'s now — `with_provider`, `with_base_url`,
 `with_api_key`, `with_store_dir`, `with_ephemeral_history`, `with_interceptor`,

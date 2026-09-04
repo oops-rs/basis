@@ -162,18 +162,25 @@ async fn resolve_if_permission<A: Approver>(
         })
         .await;
 
-    // Fallible since mentra 0.26, and in two different ways. A remembered
-    // answer is persisted to the live rule store *before* the request is
-    // resolved, and on a store failure mentra puts the pending request back
-    // unanswered — so ignoring the error here would leave the turn blocked on
-    // a oneshot nobody will ever answer. The other failure is the old one: the
-    // request was already resolved or withdrawn (a timeout, a cancellation),
+    // Fallible, though mentra 0.27 closes the cause this used to guard most
+    // often. `AllowForSession`/`DenyForSession` remember into
+    // `PermissionRuleScope::Process` now (mentra#53) — a rung owned by this
+    // live session's own handle, never written to the runtime store — so
+    // `remember_rule` for basis's own "…for this session" answers cannot fail
+    // to persist; there is nothing to persist. What remains is the older
+    // cause: the pending request was already resolved or withdrawn (a
+    // timeout, a cancellation) by the time the approver's answer comes back,
     // and there is nothing left to answer.
     //
-    // The retry below tells the two apart by what it finds. A restored request
-    // accepts a plain denial — nothing to persist, so it cannot fail the same
-    // way — and a request that is simply gone refuses the retry too, and
-    // silence is right for that half: mentra already resolved it.
+    // The retry below still tells a recoverable failure from a gone one by
+    // what it finds, and is kept for that reason rather than deleted: a
+    // request mentra restored (remembering failed but the pending entry lives
+    // on) accepts a plain denial, while a request that is simply gone refuses
+    // the retry too — silence is right for that half, because mentra already
+    // resolved it. Basis's own scope choice cannot hit the first case today,
+    // but the function stays correct for any caller of
+    // `SessionPermissionHandle::resolve_permission` that remembers into a
+    // durable scope through it.
     //
     // What the plain denial *says* depends on what was answered. A refusal
     // that could not be remembered is still exactly the outcome the person
@@ -220,10 +227,10 @@ fn permission_decision(answer: ApprovalAnswer) -> PermissionDecision {
         ApprovalDecision::Allow => PermissionDecision::allow(),
         ApprovalDecision::Deny => PermissionDecision::deny(),
         ApprovalDecision::AllowForSession => {
-            PermissionDecision::allow_and_remember(PermissionRuleScope::Session)
+            PermissionDecision::allow_and_remember(PermissionRuleScope::Process)
         }
         ApprovalDecision::DenyForSession => {
-            PermissionDecision::deny_and_remember(PermissionRuleScope::Session)
+            PermissionDecision::deny_and_remember(PermissionRuleScope::Process)
         }
     };
 

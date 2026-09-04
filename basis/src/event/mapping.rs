@@ -268,6 +268,7 @@ fn outcome_of(value: MentraPermissionOutcome) -> PermissionOutcome {
 
 fn scope_of(value: PermissionRuleScope) -> RuleScope {
     match value {
+        PermissionRuleScope::Process => RuleScope::Process,
         PermissionRuleScope::Session => RuleScope::Session,
         PermissionRuleScope::Project => RuleScope::Project,
         PermissionRuleScope::Global => RuleScope::Global,
@@ -605,6 +606,28 @@ mod tests {
         };
         assert_eq!(outcome, PermissionOutcome::Allowed);
         assert_eq!(rule_scope, Some(RuleScope::Project));
+    }
+
+    #[test]
+    fn permission_resolution_maps_the_process_scope_mentra_027_added() {
+        let event = SessionEvent::PermissionResolved {
+            request_id: "r1".to_string(),
+            tool_call_id: "c1".to_string(),
+            tool_name: "shell".to_string(),
+            outcome: MentraPermissionOutcome::Denied,
+            rule_scope: Some(PermissionRuleScope::Process),
+        };
+
+        let Some(Event::PermissionResolved {
+            outcome,
+            rule_scope,
+            ..
+        }) = from_session_event(&event)
+        else {
+            panic!("expected a permission_resolved event");
+        };
+        assert_eq!(outcome, PermissionOutcome::Denied);
+        assert_eq!(rule_scope, Some(RuleScope::Process));
     }
 
     #[test]

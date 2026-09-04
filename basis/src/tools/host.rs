@@ -21,8 +21,7 @@
 //! [`declared::manifest::check_name`](super::declared::manifest::check_name)
 //! is called rather than restated: what may be a tool name on this runtime
 //! does not depend on which binding put it there, and two copies of one rule
-//! answer differently the first time either is edited — the mistake
-//! [`crate::runtime::probe`] exists to remember.
+//! answer differently the first time either is edited.
 //!
 //! One of those rules is load bearing here in a way it is not there. A
 //! workspace-scoped registration is invisible to
@@ -37,7 +36,7 @@ use std::{
     sync::Arc,
 };
 
-use mentra::tool::ToolAudience;
+use mentra::tool::{PreparedTool, ToolAudience};
 
 use crate::{
     RunError,
@@ -77,10 +76,13 @@ impl WorkspaceHostTools {
     /// workspace that failed to open would still be answering for every other
     /// workspace that shares its audience.
     ///
-    /// Each descriptor is read once, at the top, and the name it yields is what
-    /// is validated, claimed, and released. mentra reads its own descriptor
-    /// again when it registers — that is upstream's call and outside basis's
-    /// reach — but nothing basis decides is decided twice off two reads.
+    /// Each tool is captured into a [`PreparedTool`] once, at the top —
+    /// `ToolDefinition::descriptor()` runs exactly once per tool, ever, for
+    /// this registration. The name that snapshot carries is what is
+    /// validated, claimed, and released, and the very same `PreparedTool`
+    /// value is what [`Runtime::install_claimed_tool`] later hands mentra to
+    /// register under, so nothing here or in mentra's registry is decided
+    /// twice off two reads.
     pub(crate) fn register(
         runtime: Arc<Runtime>,
         audience: &ToolAudience,
@@ -89,7 +91,10 @@ impl WorkspaceHostTools {
     ) -> Result<Self, RunError> {
         let named = tools
             .into_iter()
-            .map(|tool| (tool.descriptor().provider.name, tool))
+            .map(|tool| {
+                let prepared = PreparedTool::new(tool);
+                (prepared.descriptor().provider.name.clone(), prepared)
+            })
             .collect::<Vec<_>>();
 
         let mut held = Self::none(runtime, root);
@@ -113,9 +118,9 @@ impl WorkspaceHostTools {
             permissions.push(permit);
         }
 
-        for ((name, tool), permit) in named.into_iter().zip(permissions) {
+        for ((name, prepared), permit) in named.into_iter().zip(permissions) {
             held.runtime
-                .install_claimed_tool(audience, permit, tool)
+                .install_claimed_tool(audience, permit, prepared)
                 .map_err(|reason| RunError::WorkspaceHostToolNameTaken { name, reason })?;
         }
 

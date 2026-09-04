@@ -301,14 +301,19 @@ impl Workspace {
     /// already knows everything the last one did.
     ///
     /// Resuming is also where a "…for this session" approval answer dies
-    /// (see [`ApprovalDecision`](crate::ApprovalDecision)): the attach clears
-    /// the conversation's session-scope rules before anything can answer
-    /// from them. That clear must read the store's `rules.json`, so a
-    /// corrupt or unwritable file fails **every** resume against the store —
-    /// not just this conversation's — with
+    /// (see [`ApprovalDecision`](crate::ApprovalDecision)). A *new* one needs
+    /// nothing basis does about it: mentra 0.27 remembers it into
+    /// `PermissionRuleScope::Process` (mentra#53), a rung owned by the live
+    /// session that gave it and never written to the runtime store, so
+    /// `resume_session_with_options` already hands back a session with a
+    /// fresh handle and an empty rung, whatever the agent id. A row a
+    /// pre-0.12 basis binary remembered into the durable `Session` scope
+    /// instead is a different matter — mentra still loads and matches those —
+    /// so the attach still clears that one scope for exactly that legacy
+    /// case, and a corrupt or unwritable `rules.json` fails the resume with
     /// [`RunError::SessionRulesNotCleared`](crate::RunError) naming the file
-    /// to repair or delete; fresh conversations keep working, and deleting
-    /// the file costs only remembered approval answers, never history.
+    /// to repair or delete. Project- and global-scope rules are durable by
+    /// definition and are unaffected either way.
     ///
     /// The workspace has to be the one the conversation belongs to, and this
     /// checks it: mentra's store is keyed by agent rather than by path, so an

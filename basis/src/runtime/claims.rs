@@ -28,7 +28,7 @@ use std::sync::{Arc, RwLock, RwLockReadGuard, RwLockWriteGuard};
 // where basis used to carry a copy of the rule that could drift out of step.
 use mentra::{
     skill_root_key,
-    tool::{AudienceToolRegistration, ToolAudience, ToolNameCollision},
+    tool::{AudienceToolRegistration, PreparedTool, ToolAudience, ToolNameCollision},
 };
 
 use crate::tools::declared::DeclaredToolSpec;
@@ -527,15 +527,43 @@ impl Runtime {
     /// claim that is gone by the time it is spent is an `Err` and not a silent
     /// success: the alternative reports a live tool that nothing on the
     /// runtime answers to.
-    pub(crate) fn install_claimed_tool<T>(
+    ///
+    /// The caller hands over the [`PreparedTool`] it built the claimed name
+    /// from — not a bare tool value. `PreparedTool::new` is where
+    /// `ToolDefinition::descriptor()` runs, once, for this tool's whole
+    /// lifetime on this runtime, and the caller reads the name to claim off
+    /// that same snapshot — so `descriptor()`'s own impurity, the risk
+    /// oops-rs/mentra#58 closed, cannot make the claimed name and the
+    /// prepared one disagree: there is only one read of it anywhere in this
+    /// path, on the caller's side, before either name reaches here.
+    ///
+    /// **The names are still checked against each other before anything is
+    /// registered, not assumed equal**, because #58 closed the
+    /// `descriptor()`-impurity risk, not every way a `claim` and a `prepared`
+    /// could arrive here mismatched. Every caller today builds both from one
+    /// tool, but nothing in this function's own signature enforces that —
+    /// a future call site, or a refactor of an existing one, could construct
+    /// a `ToolNamePermit` for one tool and a `PreparedTool` for another and
+    /// pass both. Before #58, a mismatch here meant the wrong name was
+    /// briefly *live* on the registry before this rolled it back; the check
+    /// now runs before mentra ever sees the prepared value, so a mismatch
+    /// never reaches the registry at all — strictly cheaper to catch than
+    /// the case it replaces, not just as cheap.
+    pub(crate) fn install_claimed_tool(
         &self,
         audience: &ToolAudience,
         claim: ToolNamePermit,
-        tool: T,
-    ) -> Result<(), String>
-    where
-        T: mentra::tool::ExecutableTool + 'static,
-    {
+        prepared: PreparedTool,
+    ) -> Result<(), String> {
+        if prepared.descriptor().provider.name != claim.name {
+            return Err(format!(
+                "its descriptor named '{}' when the name was claimed and '{}' when it was \
+                 prepared for registration; a tool has to be the same tool both times",
+                claim.name,
+                prepared.descriptor().provider.name,
+            ));
+        }
+
         let mut claims = self.tool_claims.lock();
 
         // Unreachable in practice — the claim map serializes every opener on
@@ -555,7 +583,7 @@ impl Runtime {
 
         let registration = self
             .mentra
-            .try_register_tool_for_audience(audience.clone(), tool)
+            .try_register_prepared_tool_for_audience(audience.clone(), prepared)
             .map_err(|collision: ToolNameCollision| {
                 format!(
                     "something registered a tool called '{}' on this runtime while this \
@@ -563,40 +591,6 @@ impl Runtime {
                     collision.name
                 )
             })?;
-
-        // **What was claimed and what was registered are checked against each
-        // other, not assumed equal.** basis reads a tool's descriptor to learn
-        // the name it must claim; mentra reads its own to learn the key it
-        // registers under. For an ordinary tool those are the same string
-        // twice, but `descriptor()` is a caller's method and nothing makes it
-        // pure — so a tool that answered differently the second time would
-        // otherwise sit on the registry under a name no claim covers, missing
-        // every rule this ledger exists to enforce, `mcp__` included.
-        //
-        // mentra 0.26 is what makes the check possible: the registration hands
-        // back the exact snapshot it used, so this compares the two rather
-        // than re-asking the tool a third time and trusting that answer.
-        // Dropping the registration unregisters precisely that generation.
-        //
-        // Detection rather than prevention, because a caller cannot yet say
-        // which name it meant — the wrongly-named tool is briefly registered
-        // before this takes it back. Every name that could sit in that window
-        // is refused elsewhere anyway (a global collides before the insert, an
-        // `mcp__` name is denied by the guard's bridged arm, another claim's
-        // name by its native arm), so what is left is malformed and harmless.
-        // oops-rs/mentra#58 asks for the registration to take the descriptor
-        // the caller validated, which would retire this check rather than
-        // merely satisfy it.
-        let registered = &registration.descriptor().provider.name;
-        if *registered != claim.name {
-            let registered = registered.clone();
-            drop(registration);
-            return Err(format!(
-                "its descriptor named '{}' when the name was claimed and '{registered}' when it \
-                 was registered; a tool has to be the same tool both times",
-                claim.name
-            ));
-        }
 
         entry.registration = Some(registration);
         Ok(())
@@ -740,12 +734,14 @@ impl Runtime {
 
     /// The descriptor of the workspace tool live under `name`.
     ///
-    /// Read off basis's own hold on the registration, because mentra exposes no
-    /// reader for an audience's tools: `Runtime::tools` and
-    /// `Runtime::tool_descriptor` both walk the global map only (an upstream
-    /// candidate), so an audience-registered tool is invisible to both.
-    /// `#[cfg(test)]` because the only caller is the test that pins *which*
-    /// program a name is serving when one repository is open twice.
+    /// Read off basis's own hold on the registration — the exact snapshot
+    /// [`install_claimed_tool`](Self::install_claimed_tool) registered under
+    /// — rather than asked fresh of `Runtime::tools_for_audience`. That reader
+    /// exists now (oops-rs/mentra#55), but it resolves and clones a whole
+    /// audience's roster to answer a question this ledger already holds the
+    /// answer to for exactly one name. `#[cfg(test)]` because the only caller
+    /// is the test that pins *which* program a name is serving when one
+    /// repository is open twice.
     #[cfg(test)]
     pub(crate) fn claimed_tool_descriptor(
         &self,

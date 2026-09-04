@@ -529,7 +529,7 @@ fn describe(position: usize, call: &Call) {
         (true, Some((outcome, scope))) => println!(
             "   reviewed: {outcome:?}{}",
             match scope {
-                Some(scope) => format!(", remembered for the {scope:?}"),
+                Some(scope) => format!(", remembered for {}", scope_label(*scope)),
                 None => String::new(),
             }
         ),
@@ -543,6 +543,21 @@ fn describe(position: usize, call: &Call) {
         Some((true, summary)) => println!("   refused: {}", first_line(summary)),
         Some((false, summary)) => println!("   ran: {}", first_line(summary)),
         None => println!("   never completed"),
+    }
+}
+
+/// User-facing words for a remembered rule's duration — never mentra's own
+/// scope name, which since mentra 0.27 is `PermissionRuleScope::Process` for
+/// exactly the case a person reading this example means by "for this
+/// session" (see [`ApprovalDecision::AllowForSession`](basis::ApprovalDecision::AllowForSession)).
+/// Printing `{scope:?}` directly would read as "remembered for the Process" —
+/// an internal rename leaking into output nobody edited for it.
+fn scope_label(scope: RuleScope) -> &'static str {
+    match scope {
+        RuleScope::Process => "the rest of this session",
+        RuleScope::Session => "the rest of this session (durable)",
+        RuleScope::Project => "this project",
+        RuleScope::Global => "every workspace",
     }
 }
 

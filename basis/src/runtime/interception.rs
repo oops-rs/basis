@@ -193,6 +193,25 @@ impl Runtime {
     /// Compared on the chain itself rather than on a digest of it, because a
     /// [`HookSpec`](crate::hooks::HookSpec) is small, `Eq`, and already the
     /// complete statement of what a participant will do.
+    ///
+    /// **Why this still hand-rolls join-and-count rather than calling
+    /// [`Runtime::register_execution_hook_shared_for_audience`](mentra::Runtime::register_execution_hook_shared_for_audience),**
+    /// mentra 0.27's native clone-counted, caller-keyed sibling of the plain
+    /// registration below (oops-rs/mentra#56): that primitive shares one
+    /// chain entry when a caller re-presents the *same key and the same `Arc`
+    /// allocation*, and refuses a key reused with a different one. The
+    /// `runner` a second open hands this function is never that — it is read
+    /// fresh off `.basis/hooks.json` on every open (see the `WorkspaceKey`
+    /// doc in `basis-host/src/source.rs`, which states as much: "the chain is
+    /// read off disk at each open"), so two opens of one root that agree
+    /// produce two distinct, unequal-by-identity `HookRunner`s that must
+    /// still join. Getting mentra's shared primitive to treat them as one
+    /// entry would mean caching and re-presenting a single canonical `Arc`
+    /// per audience across opens — exactly the bookkeeping this claim map
+    /// already does, so switching would add a second, redundant accounting
+    /// layer rather than remove this one. What #56 fixes for basis is
+    /// upstream, not here: it is what a *sibling* embedder without a ledger
+    /// like this one would otherwise be missing.
     pub(crate) fn register_hook_chain(
         self: &Arc<Self>,
         audience: &ToolAudience,

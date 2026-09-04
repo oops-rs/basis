@@ -1,30 +1,21 @@
-//! Asking the registry a question it has no reader for.
+//! Asking the registry a question more than one test module needs to ask.
 //!
-//! mentra exposes no way to enumerate one audience's tool registrations —
-//! `Runtime::tools` and `Runtime::tool_descriptor` walk the global map only, so
-//! an audience-registered tool is invisible to both. The upstream fix is
-//! `Runtime::tools_for_audience` ([mentra#55]); until it lands, a test that
-//! needs the answer has to write to get it: a registration that *collides* is a
-//! name already held, globally or in that audience, and the probe's own
-//! registration drops on the spot, so asking changes nothing.
-//!
-//! One helper rather than one per module. Two of these had grown — the MCP
-//! bridge's and the declared-tool registry's — and they had already drifted:
-//! one derived the audience from [`crate::store::runtime_identifier`] and the
-//! other hardcoded the string `"basis:/repo"`, which would have gone on
-//! answering after a change to the identifier's prefix and silently stopped
-//! meaning anything. Deriving it in one place is what makes that impossible.
-//!
-//! [mentra#55]: https://github.com/oops-rs/mentra/issues/55
+//! `Runtime::tools_for_audience` (oops-rs/mentra#55) is a real reader now —
+//! before it landed, a test that needed this answer had to write to get it: a
+//! registration that *collided* was a name already held, and the probe's own
+//! registration dropped on the spot, so asking changed nothing. That write-based
+//! shim is gone; what stays is the one reason it was a single module and not
+//! copy-pasted scaffolding in each test file that wanted it. Two of these had
+//! grown independently before — the MCP bridge's and the declared-tool
+//! registry's — and they had already drifted: one derived the audience from
+//! [`crate::store::runtime_identifier`] and the other hardcoded the string
+//! `"basis:/repo"`, which would have gone on answering after a change to the
+//! identifier's prefix and silently stopped meaning anything. Deriving it in
+//! one place is what makes that impossible.
 
 use std::path::Path;
 
-use async_trait::async_trait;
-use mentra::tool::{
-    ParallelToolContext, RuntimeToolDescriptor, ToolAudience, ToolDefinition, ToolExecutor,
-    ToolResult,
-};
-use serde_json::{Value, json};
+use mentra::tool::ToolAudience;
 
 use super::Runtime;
 
@@ -44,25 +35,7 @@ pub(crate) fn audience_for(root: &Path) -> ToolAudience {
 pub(crate) fn answers(runtime: &Runtime, root: &Path, name: &str) -> bool {
     runtime
         .mentra_runtime()
-        .try_register_tool_for_audience(audience_for(root), Probe(name.to_string()))
-        .is_err()
-}
-
-/// Something registrable under an arbitrary name, with nothing behind it.
-struct Probe(String);
-
-impl ToolDefinition for Probe {
-    fn descriptor(&self) -> RuntimeToolDescriptor {
-        RuntimeToolDescriptor::builder(&self.0)
-            .description("a probe")
-            .input_schema(json!({"type": "object"}))
-            .build()
-    }
-}
-
-#[async_trait]
-impl ToolExecutor for Probe {
-    async fn execute(&self, _ctx: ParallelToolContext, _input: Value) -> ToolResult {
-        Ok("probed".to_string())
-    }
+        .tools_for_audience(Some(&audience_for(root)))
+        .iter()
+        .any(|descriptor| descriptor.provider.name == name)
 }

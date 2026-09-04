@@ -17,7 +17,7 @@ use std::{
     sync::Arc,
 };
 
-use mentra::tool::ToolAudience;
+use mentra::tool::{PreparedTool, ToolAudience};
 
 use crate::runtime::{DeclaredToolOrigin, Runtime};
 
@@ -60,14 +60,23 @@ impl DeclaredTools {
     /// a shared runtime a half-registered manifest from a workspace that failed
     /// to open would still be in every other workspace's roster.
     ///
-    /// The second pass registers with `try_register_tool_for_audience`, which
-    /// is the difference between a check-then-act that is safe *because* of the
-    /// claim map and one that is safe on its own. Nothing basis does can reach
-    /// the gap between the two passes — the claim map serializes every
-    /// workspace on this runtime — but a host holding the same `mentra::Runtime`
-    /// can call `register_tool` on it directly, and a claim it walked past
-    /// would otherwise be a repository's program silently answering to the
-    /// host's name, or the reverse.
+    /// The second pass registers through [`Runtime::install_claimed_tool`],
+    /// which is the difference between a check-then-act that is safe
+    /// *because* of the claim map and one that is safe on its own. Nothing
+    /// basis does can reach the gap between the two passes — the claim map
+    /// serializes every workspace on this runtime — but a host holding the
+    /// same `mentra::Runtime` can call `register_tool` on it directly, and a
+    /// claim it walked past would otherwise be a repository's program
+    /// silently answering to the host's name, or the reverse.
+    ///
+    /// The name claimed in the first pass is `spec.name` — data the manifest
+    /// wrote, not a tool's `descriptor()` — so it cannot disagree with what
+    /// [`wrapped`]'s `DeclaredTool` reports later: `DeclaredTool::descriptor`
+    /// always builds its name from that same `spec`. The second pass still
+    /// wraps that tool in a [`PreparedTool`] before registering it, because
+    /// mentra's prepared registration path never calls `descriptor()` again
+    /// either — the schema and description this tool carries get built once,
+    /// not twice.
     ///
     /// `audience` is the workspace's own, so a tool a repository declares is
     /// offered to that repository's runs and to nothing else on the runtime —
@@ -116,10 +125,10 @@ impl DeclaredTools {
             };
 
             let name = spec.name.clone();
-            let tool = wrapped(&claimed.runtime, spec, root);
+            let prepared = PreparedTool::new(wrapped(&claimed.runtime, spec, root));
             claimed
                 .runtime
-                .install_claimed_tool(audience, claim, tool)
+                .install_claimed_tool(audience, claim, prepared)
                 .map_err(|reason| name_taken(path.as_deref(), &name, reason))?;
         }
 
@@ -236,10 +245,12 @@ mod tests {
         crate::runtime::probe::audience_for(Path::new(root))
     }
 
-    /// Whether mentra's registry answers to `name` for `root`'s audience — the
-    /// only honest answer to "is this tool on the runtime", since basis's claim
-    /// map is a separate ledger that could disagree. See
-    /// [`crate::runtime::probe`] for why a read is written as a write.
+    /// Whether mentra's registry answers to `name` for `root`'s audience —
+    /// the only honest answer to "is this tool on the runtime", since basis's
+    /// claim map is a separate ledger that could disagree. Shared with
+    /// [`mcp::connections`](crate::mcp::connections)'s own test module
+    /// through [`crate::runtime::probe`] so the two cannot drift the way they
+    /// once had (see that module's doc).
     fn registers(runtime: &Runtime, root: &str, name: &str) -> bool {
         crate::runtime::probe::answers(runtime, Path::new(root), name)
     }

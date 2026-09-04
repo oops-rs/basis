@@ -64,19 +64,22 @@ pub enum RunError {
         dir: std::path::PathBuf,
     },
 
-    /// Resuming a conversation could not clear its "…for this session"
-    /// approval rules, so the resume is refused rather than run with grants
-    /// a person gave to an earlier session possibly still live.
+    /// Resuming a conversation could not clear a pre-0.12 "…for this
+    /// session" approval rule the conversation's `rules.json` still carries,
+    /// so the resume is refused rather than run with a grant or refusal a
+    /// person gave to an earlier, unrelated session.
     ///
-    /// The clear reads the store's `rules.json` before it can filter, so one
-    /// corrupt, truncated, or unwritable file fails **every** resume against
-    /// that store — ACP `session/load`, `--continue`, a task reattach —
-    /// until the file is repaired or deleted. Fresh conversations are
-    /// unaffected. Deliberately surfaced rather than worked around: the
-    /// underlying store error names the exact file path, and deleting
-    /// `rules.json` costs only remembered approval answers, never history.
+    /// mentra 0.27's process-scoped rung (mentra#53) means a *new*
+    /// "…for this session" answer never touches the store — but a row an
+    /// older basis binary remembered into the durable `Session` scope before
+    /// this floor still sits in `rules.json`, and mentra still loads and
+    /// matches `Session`-scope rows exactly as it always has. The clear
+    /// reads `rules.json` before it can filter, so one corrupt, truncated, or
+    /// unwritable file fails **every** resume against that store until the
+    /// file is repaired or deleted. Fresh conversations, and any store no
+    /// pre-0.12 binary ever wrote to, are unaffected.
     #[error(
-        "resuming `{agent_id}` could not clear its for-this-session approval rules \
+        "resuming `{agent_id}` could not clear a legacy for-this-session approval rule \
          ({error}); every resume on this store will fail until its rules.json — the \
          path in the error above — is repaired or deleted (deleting it costs only \
          remembered approval answers, never history)"

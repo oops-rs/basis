@@ -583,11 +583,13 @@ impl WorkspaceBuilder {
     /// per session, so a shared runtime tags each workspace's conversations
     /// with that workspace rather than with the process.
     ///
-    /// A *resumed* conversation is the exception, and it is upstream's:
-    /// mentra's resume options carry no identifier, so a resumed session
-    /// re-files under the runtime's own tag when it next persists — which on a
-    /// shared runtime takes it out of this list. [`crate::store`] has the whole
-    /// of it.
+    /// A *resumed* conversation used to be an exception, and it was
+    /// upstream's: mentra's resume options carried no identifier, so a
+    /// resumed session re-filed under the runtime's own tag when it next
+    /// persisted — which on a shared runtime took it out of this list.
+    /// mentra 0.27 closed that (mentra#54) by retaining a resumed agent's own
+    /// stored tag instead. [`crate::store`] has the whole of it, including
+    /// the older-record gap that fix opened in its place.
     ///
     /// # What sharing a runtime shares
     ///

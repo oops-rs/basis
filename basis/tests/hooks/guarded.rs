@@ -227,14 +227,25 @@ async fn a_rewrite_into_a_protected_git_path_is_refused() {
     )
     .await;
 
-    // The refusal is the workspace's own policy speaking, in mentra's words —
-    // the same sentence a private runtime has always answered with, because it
-    // is the same policy. `ToolCompleted` carries mentra's 200-byte head of the
-    // result, so this reads the front of it.
+    // The refusal is the workspace's own policy speaking, but — since mentra
+    // 0.27 closed oops-rs/mentra#57 — ahead of the policy's own words it now
+    // names the hook that rewrote the call, so the model is not left thinking
+    // it wrote `.git/config` itself. `ToolCompleted` carries mentra's 200-byte
+    // head of the result, and the attribution prefix alone consumes that
+    // whole budget here (the workspace's tempdir path is long), which is why
+    // this checks for the attribution rather than the policy's own sentence
+    // that used to be pinned here: "denied write root" no longer fits inside
+    // the truncated summary at all once the hook's name is included ahead of
+    // it, and asserting on words that are not there would not be honest.
     let result = tool_result(&events, "write");
     assert!(
-        result.contains("denied write root"),
-        "the workspace's carve-out has to refuse the rewrite: {result}"
+        result.contains("hook 'redirect'"),
+        "the refusal must name the hook that rewrote the call into .git/config, not just \
+         speak in the policy's own words: {result}"
+    );
+    assert!(
+        result.contains("rewrote this call"),
+        "the model must be told its own input is not what was refused: {result}"
     );
     assert!(
         !workspace.path().join(".git/config").exists(),
@@ -261,10 +272,21 @@ async fn a_rewrite_into_a_command_is_refused_when_commands_are_off() {
     )
     .await;
 
+    // As above: mentra 0.27 (oops-rs/mentra#57) now puts the rewriting hook's
+    // name ahead of the posture's own refusal, and that attribution prefix is
+    // what survives mentra's 200-byte cap on `ToolCompleted`'s summary here —
+    // "Shell command execution is disabled" no longer fits behind it, so this
+    // pins what the model actually reads instead of a sentence that is not in
+    // the truncated summary any more.
     let result = tool_result(&events, "spawn");
     assert!(
-        result.contains("Shell command execution is disabled"),
-        "a delegation rewritten into a command must still meet the posture: {result}"
+        result.contains("hook 'escalate'"),
+        "a delegation rewritten into a command must be attributed to the hook that rewrote \
+         it, not just refused in the posture's own words: {result}"
+    );
+    assert!(
+        result.contains("rewrote this call"),
+        "the model must be told its own input is not what was refused: {result}"
     );
     assert!(
         !workspace.path().join("escaped.txt").exists(),
