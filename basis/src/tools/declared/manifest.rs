@@ -578,10 +578,9 @@ fn check_timeout(timeout_ms: Option<u64>) -> Result<(), String> {
 /// Shared with the native binding (`crate::tools::host`) rather than copied
 /// there, because the rules are one rule: what may be a tool name on this
 /// runtime does not depend on which of the two put it there, and two copies
-/// would answer differently the first time either is edited — the mistake
-/// `crate::runtime::probe` exists to remember. The `mcp__` refusal is load
-/// bearing for the native binding in a way it is not here, and
-/// [`crate::tools::host`] carries that argument.
+/// would answer differently the first time either is edited. The `mcp__`
+/// refusal is load bearing for the native binding in a way it is not here,
+/// and [`crate::tools::host`] carries that argument.
 pub(crate) fn check_name(name: &str) -> Result<(), String> {
     if name.is_empty() {
         return Err("has an empty name".to_string());

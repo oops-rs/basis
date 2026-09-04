@@ -211,8 +211,10 @@ where
 
 /// The names a batch of registrations put on the registry, in order.
 ///
-/// Read off basis's own holds rather than asked of mentra, which exposes no
-/// reader for one audience's registrations (upstream `mentra#55`).
+/// Read off basis's own holds rather than asked fresh of mentra's
+/// `Runtime::tools_for_audience`: `bridge` already returned the exact
+/// registrations it just made, so a second read of the whole audience would
+/// answer a question this function already has the answer to.
 fn registered_names(registered: &[AudienceToolRegistration]) -> Vec<String> {
     registered
         .iter()
@@ -300,7 +302,7 @@ mod tests {
     }
 
     fn audience() -> ToolAudience {
-        crate::runtime::probe::audience_for(root())
+        ToolAudience::new(crate::store::runtime_identifier(root()))
     }
 
     /// The names a batch of registrations put on the registry, in order.
@@ -311,10 +313,16 @@ mod tests {
             .collect()
     }
 
-    /// Whether this workspace's audience already answers to `name`. See
-    /// [`crate::runtime::probe`] for why a read is written as a write.
+    /// Whether this workspace's audience already answers to `name` — asked
+    /// straight of `Runtime::tools_for_audience`, the real reader oops-rs/mentra#55
+    /// added; a test no longer has to register a colliding probe tool to find
+    /// out.
     fn answers(runtime: &Runtime, name: &str) -> bool {
-        crate::runtime::probe::answers(runtime, root(), name)
+        runtime
+            .mentra_runtime()
+            .tools_for_audience(Some(&audience()))
+            .iter()
+            .any(|descriptor| descriptor.provider.name == name)
     }
 
     #[test]

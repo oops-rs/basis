@@ -621,15 +621,17 @@ async fn a_narrowed_child_is_not_offered_a_siblings_tools() {
 /// all.
 ///
 /// `mcp__prod-db__query` is registered as a runtime **global** here, which is
-/// the limb of `Runtime::foreign_mcp_tools` an integration test can reach —
-/// mentra exposes no way to enumerate one audience's registrations (upstream
-/// `mentra#55`), so a same-directory sibling's *bridged* names cannot be put
-/// on the registry from out here without a live MCP server. Both limbs feed
-/// one `hidden_tools` set through one line of `minted_agent`, and the
-/// same-directory limb is pinned where it can be, beside
-/// `Runtime::foreign_mcp_tools` itself. The two same-root opens are real
-/// regardless, and they are what makes the second assertion meaningful: the
-/// open that *did* configure `prod-db` must still be able to delegate it.
+/// the limb of `Runtime::foreign_mcp_tools` an integration test can reach:
+/// its *sibling-bridge* limb reads basis's own `mcp_claims` ledger, not
+/// mentra's registry, and that ledger is only ever written by
+/// `Runtime::record_bridged_tools` — `pub(crate)`, so nothing outside this
+/// crate can fill it in without a live MCP server actually bridging through
+/// `McpConnections::bridge`. Both limbs feed one `hidden_tools` set through
+/// one line of `minted_agent`, and the same-directory limb is pinned where it
+/// can be, beside `Runtime::foreign_mcp_tools` itself. The two same-root
+/// opens are real regardless, and they are what makes the second assertion
+/// meaningful: the open that *did* configure `prod-db` must still be able to
+/// delegate it.
 #[cfg(feature = "mcp")]
 #[tokio::test]
 async fn a_narrowed_child_keeps_every_hide_its_parent_was_minted_with() {
@@ -895,12 +897,13 @@ async fn a_delegated_child_cannot_call_a_later_siblings_bridged_tool_either() {
 /// what the mint saw, which is a set that predates the name entirely.
 ///
 /// The name is registered as a runtime **global**, for the reason
-/// `a_narrowed_child_keeps_every_hide_its_parent_was_minted_with` gives: mentra
-/// exposes no way to enumerate one audience's registrations (upstream
-/// `mentra#55`), so a same-directory sibling's *bridged* names cannot be put on
-/// the registry from out here without a live MCP server. Both limbs feed one
-/// set through the one `hidden.extend(…)` line of `Workspace::resumed_tools`,
-/// which is the line under test.
+/// `a_narrowed_child_keeps_every_hide_its_parent_was_minted_with` gives:
+/// `Runtime::foreign_mcp_tools`'s sibling-bridge limb reads basis's own
+/// `mcp_claims` ledger, and only a live MCP server bridging through
+/// `McpConnections::bridge` writes it — an integration test cannot fake that
+/// ledger from out here, so the reachable limb is the global one. Both limbs
+/// feed one set through the one `hidden.extend(…)` line of
+/// `Workspace::resumed_tools`, which is the line under test.
 #[cfg(feature = "mcp")]
 #[tokio::test]
 async fn a_child_of_a_resumed_parent_inherits_the_hides_the_resume_computed() {

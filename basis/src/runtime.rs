@@ -55,8 +55,6 @@ mod claims;
 mod credential;
 mod executor;
 mod interception;
-#[cfg(test)]
-pub(crate) mod probe;
 mod scope;
 mod tool_results;
 
