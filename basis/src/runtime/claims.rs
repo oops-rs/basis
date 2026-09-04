@@ -531,23 +531,39 @@ impl Runtime {
     /// The caller hands over the [`PreparedTool`] it built the claimed name
     /// from — not a bare tool value. `PreparedTool::new` is where
     /// `ToolDefinition::descriptor()` runs, once, for this tool's whole
-    /// lifetime on this runtime; the caller reads the name to claim off that
-    /// same snapshot, and `try_register_prepared_tool_for_audience` below
-    /// consumes it without consulting the tool definition again. So the
-    /// registered name cannot disagree with the claimed one — there is no
-    /// second read left for it to disagree *from*. Before
-    /// oops-rs/mentra#58 made `PreparedTool` public, the claim's name and the
-    /// registered name came from two separate evaluations of a
-    /// caller-implemented, not-provably-pure method, and this function had to
-    /// compare mentra's returned descriptor against the claim and drop the
-    /// registration on a mismatch. That comparison is gone: there is only one
-    /// descriptor now, and it is the one both sides already agree on.
+    /// lifetime on this runtime, and the caller reads the name to claim off
+    /// that same snapshot — so `descriptor()`'s own impurity, the risk
+    /// oops-rs/mentra#58 closed, cannot make the claimed name and the
+    /// prepared one disagree: there is only one read of it anywhere in this
+    /// path, on the caller's side, before either name reaches here.
+    ///
+    /// **The names are still checked against each other before anything is
+    /// registered, not assumed equal**, because #58 closed the
+    /// `descriptor()`-impurity risk, not every way a `claim` and a `prepared`
+    /// could arrive here mismatched. Every caller today builds both from one
+    /// tool, but nothing in this function's own signature enforces that —
+    /// a future call site, or a refactor of an existing one, could construct
+    /// a `ToolNamePermit` for one tool and a `PreparedTool` for another and
+    /// pass both. Before #58, a mismatch here meant the wrong name was
+    /// briefly *live* on the registry before this rolled it back; the check
+    /// now runs before mentra ever sees the prepared value, so a mismatch
+    /// never reaches the registry at all — strictly cheaper to catch than
+    /// the case it replaces, not just as cheap.
     pub(crate) fn install_claimed_tool(
         &self,
         audience: &ToolAudience,
         claim: ToolNamePermit,
         prepared: PreparedTool,
     ) -> Result<(), String> {
+        if prepared.descriptor().provider.name != claim.name {
+            return Err(format!(
+                "its descriptor named '{}' when the name was claimed and '{}' when it was \
+                 prepared for registration; a tool has to be the same tool both times",
+                claim.name,
+                prepared.descriptor().provider.name,
+            ));
+        }
+
         let mut claims = self.tool_claims.lock();
 
         // Unreachable in practice — the claim map serializes every opener on
@@ -564,16 +580,6 @@ impl Runtime {
                 "the claim on that name was released while this workspace was opening".to_string(),
             );
         };
-
-        // A caller's own bookkeeping bug, not the `descriptor()`-impurity risk
-        // #58 closed: a `debug_assert` rather than a checked `Err`, because
-        // nothing beyond this module builds a `ToolNamePermit` and a
-        // `PreparedTool` from two different tools and hands both here.
-        debug_assert_eq!(
-            prepared.descriptor().provider.name,
-            claim.name,
-            "install_claimed_tool was handed a claim and a prepared tool for different names",
-        );
 
         let registration = self
             .mentra
