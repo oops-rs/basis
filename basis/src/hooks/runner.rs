@@ -400,9 +400,15 @@ impl HookRunner {
 /// permit. And a rewrite's *attribution* survives: mentra threads the reason a
 /// `Modify` carried into the refusal that a rejected rewrite earns (invalid
 /// JSON, a schema violation, a parallel-lane category flip), where the legacy
-/// seam drops it. Threading it into a *policy* or authorizer denial is a
-/// separate upstream gap (`mentra#57`), which is why a refusal of a rewritten
-/// write still speaks in the policy's words and does not name the hook.
+/// seam drops it. Threading it into a *policy* or authorizer denial used to be
+/// a separate upstream gap (`mentra#57`); mentra 0.27 closed it, so a refusal
+/// of a rewritten write now speaks in the policy's words *and* names the hook
+/// ahead of them — `"mixed execution hooks (execution hook '<chain>': hook
+/// '<name>': <reason>) rewrote this call; the rewritten call then failed:
+/// <policy's own words>"`. See `basis/tests/hooks/guarded.rs` for what a
+/// caller actually reads once mentra's own 200-byte cap on a `ToolCompleted`
+/// summary is applied — the policy's words are often the part that no longer
+/// fits.
 #[async_trait::async_trait]
 impl ExecutionHookParticipant for HookRunner {
     fn name(&self) -> &str {
