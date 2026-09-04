@@ -74,9 +74,18 @@ pub enum PermissionOutcome {
 }
 
 /// How far a remembered permission decision reaches.
+///
+/// `Process` is mentra 0.27's addition ([mentra#53]): the highest-precedence
+/// rung, owned by one live session and never written to the durable store. It
+/// is what basis's own "…for this session" answers remember into now — see
+/// [`ApprovalDecision::AllowForSession`](crate::ApprovalDecision::AllowForSession)
+/// — so most `Process` scopes on this stream are basis's own, not a host's.
+///
+/// [mentra#53]: https://github.com/oops-rs/mentra/issues/53
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum RuleScope {
+    Process,
     Session,
     Project,
     Global,

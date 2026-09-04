@@ -28,28 +28,40 @@
 //! independent of it — so nothing already written is lost. Records created
 //! before this scheme carry `"default"` and do not appear in any workspace's
 //! list, which is the correct answer for a conversation whose workspace was
-//! never recorded. They are not stranded either: mentra loads an agent by id
-//! alone, so resuming one still works, and it re-tags itself the next time it
-//! persists. [`WorkspaceBuilder::open`](crate::WorkspaceBuilder::open) is where
-//! the tag is set, and where that ruling is written down.
+//! never recorded. They are not stranded: mentra loads an agent by id alone,
+//! so resuming one still works. [`WorkspaceBuilder::open`](crate::WorkspaceBuilder::open)
+//! is where the tag is set, and where that ruling is written down.
+//!
+//! **They no longer re-tag themselves, either — a real loss mentra 0.27
+//! introduced.** Every persist used to re-derive the tag from the live
+//! runtime's own current identifier, so the first resume-and-run of an old
+//! `"default"`-tagged conversation silently adopted it into the resuming
+//! workspace's list. mentra 0.27's fix for
+//! [mentra#54](https://github.com/oops-rs/mentra/issues/54) rebinds a
+//! resumed agent to its *own stored* identifier and carries that forward
+//! instead, which is the right fix for #54's bug (a shared runtime's
+//! resumed-then-run rows re-filing under its generic tag) but also closes
+//! this door: a legacy record now stays `"default"`-tagged forever, with no
+//! code path left to adopt it. `SessionResumeOptions` has no field to
+//! override the tag on resume — filed as
+//! [mentra#59](https://github.com/oops-rs/mentra/issues/59). Until it lands,
+//! an old record is resumable by id and nothing else.
 //!
 //! Every workspace tags its own rows, on a private runtime and on a shared
 //! one alike: [`Runtime`](crate::Runtime)'s `mint` states the identifier per
 //! session, so one store file serving five repositories still lists each one's
 //! conversations apart.
 //!
-//! **One gap, and it is upstream's.** A *resumed* session carries no
-//! identifier: mentra's `SessionResumeOptions` has no field for one
-//! ([mentra#54](https://github.com/oops-rs/mentra/issues/54)), so a
-//! resumed conversation persists under the runtime's own tag — its workspace's
-//! on a private runtime, and `"basis:runtime"` on a shared one. On a shared
-//! runtime, therefore, resuming a conversation and running it takes its row
-//! out of that workspace's list, exactly as the `"default"` ruling above
-//! takes an unrecorded one out. Nothing is stranded — mentra loads an agent by
-//! id and a client that already holds the id can still resume it — but a
-//! client that lists to find its conversations will not see that one again.
-//! `Runtime::resume_minted` is the one line that changes when the field
-//! lands.
+//! **The gap that used to live here is closed.** A *resumed* session used to
+//! carry no identifier — mentra's `SessionResumeOptions` had no field for one
+//! — so a resumed conversation re-persisted under the runtime's own tag on
+//! its next save, taking its row out of the workspace's list on a shared
+//! runtime the moment it was used again. mentra 0.27 fixes this at the
+//! source rather than by adding that field: every persisted-agent
+//! reconstruction now retains the row's own stored runtime identifier
+//! through every later save
+//! ([mentra#54](https://github.com/oops-rs/mentra/issues/54)), so
+//! `Runtime::resume_minted` needed no change to pick it up.
 //!
 //! # Where the files go
 //!
@@ -276,13 +288,16 @@ pub fn forget_in(dir: &Path, agent_id: &str) -> Result<(), RunError> {
     let store = store_in(dir)?;
     // A clone of one file store shares its in-process lock, so the clear
     // below mutates through the same concurrency boundary the runtime's
-    // deletion does. That boundary is this function's own store pair and
-    // nothing wider: a *live workspace* on the same root holds its own
-    // independently constructed store, and mentra places two independent
-    // stores on one root outside its concurrency contract — so a forget
-    // racing a live session's remembered answer can lose one side's write
-    // (mentra#50). basis does not add locking of its own over a boundary
-    // upstream owns; the race window is one rules.json rewrite.
+    // deletion does. That boundary used to be narrower than it looked: a
+    // *live workspace* on the same root holds its own independently
+    // constructed store, and before mentra 0.27 two independent stores on one
+    // root were outside its concurrency contract — so a forget racing a live
+    // session's remembered answer could lose one side's write. mentra 0.27
+    // closed that: `FileRuntimeStore` now serializes every `rules.json`
+    // read-modify-replace behind a stable advisory `rules.lock`, so
+    // independently constructed stores and cooperating processes alike
+    // cannot silently overwrite one another's rows (mentra#50). basis adds no
+    // locking of its own over a boundary upstream now owns end to end.
     let rules = store.clone();
 
     // The identifier tags rows on write and filters them on `list_agents_by_
@@ -291,17 +306,20 @@ pub fn forget_in(dir: &Path, agent_id: &str) -> Result<(), RunError> {
     // so nothing in this module opens a store under a tag no workspace uses.
     enumerating_runtime(&runtime_identifier(dir), store)?.delete_agent(agent_id)?;
 
-    // mentra's `delete_agent` removes `agents/<id>/` and nothing else, so the
-    // conversation's remembered permission rules — command patterns included
-    // — would sit in the store root's `rules.json` forever: a privacy
-    // leftover and unbounded growth. Forgetting means the rules too, and it
-    // means every row this conversation *wrote*, whatever its scope — a
-    // host-seeded Global rule keeps answering prompts store-wide after its
-    // writer is gone, which is worse than the dead Session rows. mentra's
-    // creator-oriented `clear_rules` deletes by writer id regardless of
-    // scope, which is exactly that reading. (Upstream cleaning its own rules
-    // on delete is mentra#51; this stays correct either way, because
-    // clearing rows that are already gone removes nothing.)
+    // mentra 0.27 made `delete_agent` clean up after itself for the session
+    // scope (mentra#51): it now also removes that agent's durable
+    // session-scoped rows in the same operation, sibling, project, and global
+    // rules preserved by design — the right default for a deletion whose
+    // caller only ever names one agent. Forgetting is a wider promise than
+    // that, though: it means every row this conversation *wrote*, whatever
+    // its scope — a host-seeded Global rule keeps answering prompts
+    // store-wide after its writer is gone, which is worse than a dead Session
+    // row ever was, and #51 leaves project- and global-scope rows alone on
+    // purpose. mentra's creator-oriented `clear_rules` still deletes by
+    // writer id regardless of scope, which is exactly that wider reading —
+    // now redundant with upstream for the session-scope rows alone, and still
+    // the only thing that reaches the rest. Clearing rows that are already
+    // gone removes nothing, so calling both costs nothing either.
     rules.clear_rules(agent_id)?;
 
     Ok(())

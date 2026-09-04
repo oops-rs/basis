@@ -94,19 +94,11 @@ pub(crate) async fn execute_run(args: RunArgs) -> Result<ExitCode, String> {
         .await
         .map_err(|error| error.to_string())?;
 
-    // This route mints and never resumes, so the attach-time death of a
-    // "…for this session" answer never arrives for its conversation — an
-    // 'always'/'never' answered at the prompt above would sit in the store's
-    // rules.json until someone happened to resume or forget it. The run is
-    // over, so the answers are too. Best-effort: cleanup failing must not
-    // mask the run's own result, so it is a warning on stderr, never the
-    // exit code.
-    if let Err(error) = run.forget_session_answers() {
-        eprintln!(
-            "warning: this run's session-scope approval answers could not be cleared: {error}"
-        );
-    }
-
+    // This route mints and never resumes, and there is no longer a durable
+    // row to worry about outliving it: mentra 0.27 remembers a "…for this
+    // session" answer into `PermissionRuleScope::Process` (mentra#53), a rung
+    // owned by this run's own live session and never written to the store.
+    // The process exiting is what ends it; nothing here has to.
     Ok(ExitCode::from(exit_code(&report)))
 }
 
@@ -374,8 +366,10 @@ mod tests {
     ///
     /// The rule is **Global**-scope and written before the first turn, so it is
     /// the standing override a fixed policy has to survive: nothing here clears
-    /// it, `forget_session_answers` reaches only session scope, and it resolves
-    /// the runtime gate's `Prompt` with no permission request ever raised.
+    /// it — this route remembers a "…for this session" answer into mentra
+    /// 0.27's process-local `Process` scope, not Global, so it could not reach
+    /// this rule even if it tried — and it resolves the runtime gate's
+    /// `Prompt` with no permission request ever raised.
     async fn wrote_a_file_under(policy: ApprovalPolicy, workspace: &Path) -> (bool, usize) {
         let mock = writing_mock(workspace);
         let session = mock

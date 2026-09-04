@@ -106,6 +106,46 @@ fn write(path: &Path, body: &str) {
     std::fs::write(path, body).expect("write file");
 }
 
+/// [`offline`], but attached to a runtime the caller already built and may
+/// share with another workspace — `RuntimeBuilder::build`'s public path
+/// rather than the private one `with_runtime_builder` drives, and tagged
+/// `"basis:runtime"` rather than any one workspace's identity (see
+/// [`store::runtime_identifier`]). The shape a shared host like `basis-host`
+/// is in, and the one
+/// [`a_resumed_conversation_keeps_listing_under_its_own_workspace`] needs: a
+/// runtime whose own tag provably differs from the workspace's.
+fn offline_shared(workspace: &Path, runtime: Arc<Runtime>) -> WorkspaceBuilder {
+    Workspace::builder(workspace)
+        .with_runtime(runtime)
+        .with_model(ModelSelector::Id("test-model".to_string()))
+        .with_context(ContextConfig {
+            file_name: "AGENTS.md".to_string(),
+            global_dir: None,
+            walk_parents: false,
+        })
+        .with_skills(SkillsConfig {
+            workspace_subdir: Some(PathBuf::from(".basis/skills")),
+            shared_workspace_dir: true,
+            global_dir: None,
+            shared_home_dir: false,
+        })
+        .with_memory(MemoryConfig::disabled())
+        .with_templates(TemplatesConfig {
+            workspace_subdir: PathBuf::from(".basis/templates"),
+            global_dir: None,
+        })
+        .with_hooks(HooksConfig {
+            workspace_file: PathBuf::from(".basis/hooks.json"),
+            global_dir: None,
+            supplied: Vec::new(),
+        })
+        .with_tools(ToolsConfig {
+            workspace_file: PathBuf::from(".basis/tools.json"),
+            global_dir: None,
+            supplied: Vec::new(),
+        })
+}
+
 #[tokio::test]
 async fn context_is_discovered_at_open_not_at_mint() {
     let dir = tempfile::tempdir().expect("tempdir");
@@ -253,11 +293,14 @@ async fn a_conversation_is_found_again_only_through_the_directory_it_was_written
 }
 
 /// basis's documented duration for a "…for this session" approval answer:
-/// it lives with the live session and dies at the next attach. mentra 0.26
-/// persists session-scope rules under the stable agent id and would replay
-/// them across every resume; basis clears the session scope on its one
-/// resume path, so a later process asks again rather than replaying an
-/// answer nobody in it gave.
+/// it lives with the live session and dies at the next attach. mentra 0.27's
+/// `PermissionRuleScope::Process` (mentra#53) is what basis's own approval
+/// flow remembers into for that duration — a rung owned by one live
+/// `SessionPermissionHandle`, never written to the runtime store — so a
+/// resumed session (a fresh handle, even for the same stable agent id) starts
+/// with an empty rung automatically. basis states nothing here to make that
+/// true; the previous durable-scope workaround (basis clearing session scope
+/// on every attach) is gone with the durable remembering it existed to undo.
 #[tokio::test]
 async fn a_resumed_conversation_forgets_its_for_this_session_answers() {
     use mentra::session::{PermissionRuleScope, RememberedRule, RuleKey};
@@ -282,7 +325,7 @@ async fn a_resumed_conversation_forgets_its_for_this_session_answers() {
                 pattern: None,
             },
             allow: false,
-            scope: PermissionRuleScope::Session,
+            scope: PermissionRuleScope::Process,
             reason: Some("refused for the rest of this session".to_string()),
         })
         .expect("remembers");
@@ -291,7 +334,7 @@ async fn a_resumed_conversation_forgets_its_for_this_session_answers() {
             .session()
             .permission_handle()
             .remembered_rules()
-            .expect("reads the live store")
+            .expect("reads the live handle")
             .len(),
         1,
         "the answer must hold for the live session that gave it"
@@ -311,9 +354,10 @@ async fn a_resumed_conversation_forgets_its_for_this_session_answers() {
             .session()
             .permission_handle()
             .remembered_rules()
-            .expect("reads the live store"),
+            .expect("reads the live handle"),
         Vec::new(),
-        "a for-this-session answer must die at the next attach, not replay forever"
+        "a for-this-session answer must die at the next attach, not replay forever — and \
+         it never touched disk to begin with"
     );
 }
 
@@ -521,6 +565,68 @@ async fn a_conversation_is_listed_for_the_workspace_that_minted_it() {
     );
 }
 
+/// A conversation resumed on a *shared* runtime and used again keeps listing
+/// under its own workspace, rather than re-filing under the runtime's.
+///
+/// mentra used to carry no runtime identifier through a resume, so the next
+/// persist re-tagged the row with the runtime's own — invisible on a private
+/// runtime, where that tag already matches the one workspace it serves, but
+/// real on a shared one: a resumed-then-run conversation would drop out of
+/// `store::list_in` for the workspace that minted it (mentra#54). mentra 0.27
+/// closes it by retaining the row's own stored identifier through every later
+/// save, which is why this test needs no basis-side fix beside it —
+/// `Runtime::resume_minted` states nothing about the identifier at all.
+///
+/// [`offline_shared`] is what makes the gap reachable: its runtime is tagged
+/// `"basis:runtime"`, provably not this workspace's own `basis:<path>`, so a
+/// silent fallback to the runtime's tag would be caught here rather than
+/// hidden by the two happening to agree.
+#[tokio::test]
+async fn a_resumed_conversation_keeps_listing_under_its_own_workspace() {
+    let dir = tempfile::tempdir().expect("tempdir");
+    write(&dir.path().join("AGENTS.md"), "house rules");
+    let store_dir = tempfile::tempdir().expect("tempdir");
+
+    let shared = Arc::new(
+        Runtime::builder()
+            .with_base_url(CLOSED_PORT)
+            .with_api_key("test-key")
+            .with_store_dir(store_dir.path())
+            .build()
+            .expect("builds offline"),
+    );
+
+    let opened = offline_shared(dir.path(), shared.clone())
+        .open()
+        .await
+        .expect("opens");
+    let agent_id = {
+        // Scoped so the mint's own lease is released before the resume below
+        // takes it again.
+        opened.prepare("go").expect("mints").agent_id().to_string()
+    };
+    assert_eq!(
+        listed_ids(store_dir.path(), dir.path()),
+        vec![agent_id.clone()],
+        "a fresh mint lists under its own workspace, not the shared runtime's"
+    );
+
+    let mut resumed = opened.resume(&agent_id, "again").expect("resumes");
+    // Renaming rewrites the agent's row — the persist that used to lose the
+    // tag (`the_conversation_touched_last_is_listed_first` uses the same
+    // trigger).
+    resumed
+        .set_name("touched after a resume")
+        .expect("renames, which persists");
+
+    assert_eq!(
+        listed_ids(store_dir.path(), dir.path()),
+        vec![agent_id],
+        "a resumed-then-persisted conversation must keep listing under its own \
+         workspace rather than falling back to the shared runtime's own tag"
+    );
+}
+
 /// A list is read to find the conversation you were just in, so that one is at
 /// the top — even when it is the oldest.
 ///
@@ -621,26 +727,33 @@ async fn one_workspace_does_not_list_anothers_conversations() {
     );
 }
 
-/// A conversation written before workspaces were tagged is still resumable, and
-/// joins its workspace's list the first time it is used.
+/// A conversation written before workspaces were tagged is still resumable —
+/// but, since mentra 0.27, no longer joins its workspace's list the first
+/// time it is used.
 ///
-/// The back-compat question the tag raised, answered forward-only: nothing
-/// migrates old records, because nothing has to. mentra loads an agent by id
-/// alone (`RuntimeStore::load_agent` reads that agent's own `agent.json`), so
-/// the identifier never gated resuming; and it re-derives the tag from the
-/// live runtime every time it persists (`Agent::persisted_record`, rewritten
-/// whole into the record on every save), so using an old conversation is what
-/// files it. Since listing never worked, no client has ever seen these
-/// records to miss them in the meantime.
+/// That self-healing was the back-compat answer 0.7 gave: nothing migrates an
+/// old record, but *using* one used to adopt it, because every persist
+/// re-derived the tag from the live runtime's own current identifier,
+/// unconditionally overwriting whatever the row already carried. mentra 0.27
+/// changed that specifically to fix mentra#54 (a resumed-then-run
+/// conversation on a *shared* runtime re-filing under the runtime's generic
+/// tag): `Agent::from_loaded` now rebinds to the row's own stored identifier
+/// and carries it forward, so a legacy `"default"`-tagged row stays
+/// `"default"`-tagged forever — there is no longer a code path that adopts
+/// it, on a private runtime or a shared one. `SessionResumeOptions` still has
+/// no field to override the tag on resume (the alternative mentra#54's own
+/// "Ask" also named and did not take up), so basis cannot restate it either;
+/// filed as [mentra#59](https://github.com/oops-rs/mentra/issues/59).
 ///
 /// The record below carries the workspace as its agent's `base_dir`, because
 /// that is what every basis that ever wrote one carried: the agent config has
 /// been scoped to the opened workspace since the first `run`, long before the
 /// tag existed. It is also what makes the conversation *this* workspace's for
 /// `Workspace::resume`'s binding check — the tag never gated resuming, and the
-/// base directory always did name the repository.
+/// base directory always did name the repository. Resuming and listing by id
+/// both still work; only self-filing into the list is gone.
 #[tokio::test]
-async fn a_conversation_tagged_before_workspaces_were_is_resumable_and_files_itself() {
+async fn a_conversation_tagged_before_workspaces_were_is_resumable_but_no_longer_files_itself() {
     let dir = tempfile::tempdir().expect("tempdir");
     write(&dir.path().join("AGENTS.md"), "house rules");
     let store_dir = tempfile::tempdir().expect("tempdir");
@@ -701,14 +814,13 @@ async fn a_conversation_tagged_before_workspaces_were_is_resumable_and_files_its
         .expect("the resumed run completes");
 
     assert!(matches!(report.outcome, RunOutcome::Ok));
-    assert_eq!(
+    assert!(
         store::list_in(store_dir.path(), dir.path())
             .expect("lists")
-            .into_iter()
-            .map(|session| session.agent_id)
-            .collect::<Vec<_>>(),
-        vec![agent_id],
-        "using an old conversation is what files it under its workspace"
+            .is_empty(),
+        "mentra#54's fix (resume preserves a row's own stored tag) means using \
+         an old conversation no longer adopts it into this workspace's list — \
+         a real loss, tracked as mentra#59, not a choice basis made"
     );
 }
 

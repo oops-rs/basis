@@ -1000,12 +1000,12 @@ against its own identity and refuses with `RunError::WorkspaceMismatch` before a
 stated onto the conversation. `store::forget` still keys on the id alone, and deliberately: a
 deletion states nothing.
 
-**One gap this does not close, and it is upstream's.** A *resumed* session carries no runtime
-identifier — Mentra's resume options have no field for one
-([mentra#54](https://github.com/oops-rs/mentra/issues/54)) — so a resumed conversation re-files
-under the runtime's own tag when it next persists, which on a shared runtime takes it out of
-that workspace's `session/list`. The conversation is still resumable by id. `basis::store`'s
-module docs have the whole of it.
+**One gap this used to leave open is now upstream's fix, not basis's.** A *resumed* session
+used to carry no runtime identifier, so it re-filed under the runtime's own tag the next time
+it persisted — on a shared runtime, out of that workspace's `session/list`. Mentra 0.27 closes
+it at the source: every persisted-agent reconstruction now retains the row's own stored runtime
+identifier through every later save ([mentra#54](https://github.com/oops-rs/mentra/issues/54)),
+so basis needed no code change to pick it up. `basis::store`'s module docs have the whole of it.
 
 ### A refusal refuses where a remembered rule cannot answer
 

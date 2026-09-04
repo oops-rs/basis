@@ -388,16 +388,16 @@ fn children_of(data: &DataDir, task: &str) -> Result<Vec<String>, String> {
 /// case that is T2(b)'s double-continuation race; for the timed-out waiter
 /// it is README's "waiting is not owning".
 ///
-/// One residue is accepted rather than cleaned here: a "…for this session"
-/// approval answered during a drive persists in the store's `rules.json`
-/// until the task's next attach, whose resume clears it. A task nobody ever
-/// reattaches keeps those rows — reasons included — indefinitely. There is
-/// deliberately no end-of-drive clear: this function returns from eight
-/// places (deadline-abandoned turns among them, where the run is still
-/// borrowed), a crash leaves the rows regardless, and a durable task's whole
-/// point is that the next attach exists — which is also the moment the
-/// documented duration ends. The upstream fix is process-scoped rules that
-/// never touch the store (mentra#53).
+/// There is no residue to accept here any more. A "…for this session"
+/// approval answered during a drive used to persist in the store's
+/// `rules.json` until the task's next attach, whose resume cleared it — so a
+/// task nobody ever reattached kept those rows, reasons included,
+/// indefinitely. mentra 0.27's `PermissionRuleScope::Process` (mentra#53) is
+/// what basis's approval flow remembers into now: a rung owned by the live
+/// session driving this attempt, never written to the store. It dies with
+/// this process — whichever of the eight returns below ends it, deadline
+/// abandonment and a crash included — and there is nothing left for a next
+/// attach to clear.
 pub(crate) async fn drive(
     data: &DataDir,
     task: &str,

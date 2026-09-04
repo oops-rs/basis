@@ -15,7 +15,6 @@ use mentra::{
     ModelInfo, RuntimePolicy, Session,
     agent::AgentConfig,
     runtime::{SessionOptions, SessionResumeOptions},
-    session::PermissionRuleScope,
     tool::ToolAudience,
 };
 
@@ -133,9 +132,18 @@ impl Runtime {
     /// base directory — so a repository whose workspace denies commands and
     /// carves out `.git` would find both true of *another* repository's posture
     /// and neither of its own. The persisted agent's base directory is checked
-    /// against this workspace's identity before anything is stated onto it, and
-    /// before the session-scope clear below mutates a conversation that is not
-    /// this workspace's to mutate.
+    /// against this workspace's identity before anything is stated onto it.
+    ///
+    /// **A "…for this session" answer needs nothing stated here at all.**
+    /// mentra 0.27's `PermissionRuleScope::Process` (mentra#53) is what
+    /// basis's own approval flow remembers into for that duration now — a rung
+    /// owned by one live `SessionPermissionHandle`, never written to the
+    /// runtime store — and `resume_session_with_options` above hands back a
+    /// session with a fresh handle and an empty rung, for the same stable
+    /// agent id or any other. There is no durable row to clear and no failure
+    /// mode to fail the resume over; basis's 0.26 workaround (clearing the
+    /// durable session scope here, on every attach) is retired along with the
+    /// durable-scope remembering it existed to undo.
     pub(crate) fn resume_minted(
         &self,
         agent_id: &str,
@@ -163,36 +171,6 @@ impl Runtime {
                 agent_workspace: based_in,
             });
         }
-
-        // basis's documented duration for a "…for this session" answer is the
-        // live session: it survives further runs in the process that holds it
-        // and dies at the next attach. mentra 0.26 disagrees — its session
-        // rule namespace is the stable agent id, persisted in the runtime
-        // store and replayed across every resume — so the attach is where
-        // basis restores its own contract: clear the session scope before the
-        // resumed session answers anything from it. A fresh mint has a fresh
-        // agent id and nothing to clear; project- and global-scope rules are
-        // durable by definition and stay.
-        //
-        // The `?` fails the whole resume, and the two ways the clear can fail
-        // deserve stating apart, because the refusal earns its keep on only
-        // one of them. A store that cannot be *read* (corrupt, truncated,
-        // newer schema) would fail closed at point of use anyway — mentra
-        // propagates the same read error from every rule lookup before
-        // applying anything — so refusing the resume there adds determinism,
-        // not protection. A store that reads but cannot be *rewritten*
-        // (permissions, disk full) is the case the refusal genuinely guards:
-        // point-of-use lookups succeed, so the stale session grants WOULD
-        // apply, silently. The cost — one bad rules.json fails every resume
-        // on the store until repaired — is documented on the error variant
-        // and on `Workspace::resume`.
-        session
-            .permission_handle()
-            .clear_scope(PermissionRuleScope::Session)
-            .map_err(|error| RunError::SessionRulesNotCleared {
-                agent_id: agent_id.to_owned(),
-                error,
-            })?;
 
         Ok(session)
     }

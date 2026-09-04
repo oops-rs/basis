@@ -272,12 +272,11 @@ impl SessionSource for ConfiguredSource {
     /// identifier per session, so the shared runtime this source runs on files
     /// each `session/new` under the `cwd` it was opened for.
     ///
-    /// One conversation this cannot answer for is one that has been *resumed*
-    /// and run again: mentra carries no identifier through a resume, so the row
-    /// re-files itself under the shared runtime's own tag and leaves the
-    /// workspace's list ([`basis::store`] has the gap, and the one line that
-    /// closes it upstream). The conversation is still resumable by id, which is
-    /// what a client that kept the session id does.
+    /// A conversation that has been *resumed* and run again stays on this
+    /// list too: mentra 0.27 retains a persisted agent's own stored runtime
+    /// identifier through every later save ([`basis::store`] has the account),
+    /// so a row this source's shared runtime resumed re-files under this
+    /// workspace's own tag rather than the runtime's.
     async fn list_sessions(&self, cwd: PathBuf) -> Result<Vec<PersistedSession>, RunError> {
         basis::store::list(&cwd)
     }
