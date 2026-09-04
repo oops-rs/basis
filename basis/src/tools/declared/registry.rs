@@ -242,19 +242,17 @@ mod tests {
 
     /// A workspace's audience, keyed on its root the way an open keys it.
     fn audience_for(root: &str) -> ToolAudience {
-        ToolAudience::new(crate::store::runtime_identifier(Path::new(root)))
+        crate::runtime::probe::audience_for(Path::new(root))
     }
 
     /// Whether mentra's registry answers to `name` for `root`'s audience —
-    /// asked straight of `Runtime::tools_for_audience`, the only honest answer
-    /// to "is this tool on the runtime", since basis's claim map is a separate
-    /// ledger that could disagree.
+    /// the only honest answer to "is this tool on the runtime", since basis's
+    /// claim map is a separate ledger that could disagree. Shared with
+    /// [`mcp::connections`](crate::mcp::connections)'s own test module
+    /// through [`crate::runtime::probe`] so the two cannot drift the way they
+    /// once had (see that module's doc).
     fn registers(runtime: &Runtime, root: &str, name: &str) -> bool {
-        runtime
-            .mentra_runtime()
-            .tools_for_audience(Some(&audience_for(root)))
-            .iter()
-            .any(|descriptor| descriptor.provider.name == name)
+        crate::runtime::probe::answers(runtime, Path::new(root), name)
     }
 
     #[test]

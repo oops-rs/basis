@@ -302,7 +302,7 @@ mod tests {
     }
 
     fn audience() -> ToolAudience {
-        ToolAudience::new(crate::store::runtime_identifier(root()))
+        crate::runtime::probe::audience_for(root())
     }
 
     /// The names a batch of registrations put on the registry, in order.
@@ -313,16 +313,12 @@ mod tests {
             .collect()
     }
 
-    /// Whether this workspace's audience already answers to `name` — asked
-    /// straight of `Runtime::tools_for_audience`, the real reader oops-rs/mentra#55
-    /// added; a test no longer has to register a colliding probe tool to find
-    /// out.
+    /// Whether this workspace's audience already answers to `name` — shared
+    /// with [`tools::declared::registry`](crate::tools::declared::registry)'s
+    /// own test module through [`crate::runtime::probe`] so the two cannot
+    /// drift the way they once had (see that module's doc).
     fn answers(runtime: &Runtime, name: &str) -> bool {
-        runtime
-            .mentra_runtime()
-            .tools_for_audience(Some(&audience()))
-            .iter()
-            .any(|descriptor| descriptor.provider.name == name)
+        crate::runtime::probe::answers(runtime, root(), name)
     }
 
     #[test]
