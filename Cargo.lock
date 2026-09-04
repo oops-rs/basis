@@ -1417,9 +1417,9 @@ checksum = "cf8baf1c55e62ffcace7a9f06f4bd9cd3f0c4beb022d3b367256b91b87513d98"
 
 [[package]]
 name = "mentra"
-version = "0.26.0"
+version = "0.27.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "12ecf071787632dbb9509e26c77341efde2e5151f7e5ed0f8a04123c26968027"
+checksum = "0e69e899ae249ac4440e63c4a8a079fc865604f3340a0ee0871b34ee146d6e3b"
 dependencies = [
  "async-trait",
  "base64",
@@ -1433,6 +1433,7 @@ dependencies = [
  "rand 0.9.5",
  "regex",
  "reqwest",
+ "same-file",
  "serde",
  "serde_json",
  "serde_yaml_ng",

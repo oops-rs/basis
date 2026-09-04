@@ -24,95 +24,126 @@ basis-host = { version = "0.11", path = "basis-host" }
 # that is now merely their first client.
 basis-tasks = { version = "0.11", path = "basis-tasks" }
 
-# The 0.26 floor's reasons are two host-observable runtime contract changes
-# basis's code does not compile against unmodified in either direction, so the
-# floor is hard both ways. First, `SessionOptions` gained `policy` and
-# `tool_audience`: basis's exhaustive struct literal in `Runtime::mint`
-# (`basis/src/runtime/scope.rs`) must initialize both, and states both — the
-# workspace's own policy, and the tool audience its sessions resolve in.
-# `Runtime::resume_minted` restates them, because mentra deliberately keeps
-# neither in the persisted agent: a resumed session handed no policy would
-# inherit the runtime's, which on a shared runtime is the posture of no
-# workspace at all, and one handed no audience would resolve only global
-# names.
-# Second, `Session` now binds its runtime's live permission store
-# automatically — the session namespace is the stable persisted agent id, not
-# the ephemeral UI `SessionId`, so session rules survive a real resume — and
-# manual `Session::set_permission_store`, `load_persisted_rules`, and cached
-# `rule_store` access were removed because each could hold a stale
-# authorization overlay against that live binding; basis's event forwarder
-# and rule seeding now go through `SessionPermissionHandle` instead, whose
-# `resolve_permission` is fallible (a store failure restores the pending
-# request, and basis fails it closed). `Session::remembered_rules`
-# now returns `Result<Vec<_>, RuntimeError>` because every call reads the live
-# backend, and a session's current `ToolAuthorizer` is now sampled once per
-# call and is authoritative over remembered rules: only its `Prompt` answer
-# may be resolved by a matching rule or forwarded to the live permission flow,
-# so a remembered allow can no longer bypass a session switched to a stricter
-# authorizer, nor can a remembered denial override a current explicit allow.
-# basis keeps its own two-rule approval layer on top and records the deltas
-# where they are observable: for-this-session answers are cleared at the next
-# attach (`Runtime::resume_minted`), and a forgotten conversation's rules are
-# cleared beside its deletion (`store::forget_in`).
+# The 0.27 floor's reason is one host-observable, source-breaking addition
+# basis's code does not compile against unmodified in either direction.
+# `PermissionRuleScope` gained `Process`, a highest-precedence
+# remembered-answer rung owned by one live `SessionPermissionHandle` and
+# never written to the runtime store; basis's exhaustive `scope_of` match
+# (`basis/src/event/mapping.rs`) must decide what it means on the wire, and
+# does — `basis/src/event.rs`'s own `RuleScope` gained the matching variant,
+# a second source break basis makes deliberately rather than losing the new
+# scope to a wildcard.
 #
-# One more 0.26 surface is depended on outright: compaction usage. The
-# standard compaction engine now carries every provider-reported token-usage
-# sample forward (`CompactionResponse::usage`,
-# `CompactionOutcome::provider_usage`) instead of dropping it while
-# extracting summary text, emits one ordinary `UsageReport` per sample after
-# its existing `ContextCompacted` event, and charges an in-run pass to the
-# run's shared token counter at the same point. basis's documented accounting
-# is built on exactly that behavior — `RunUsage`/`RunReport` totals, token
-# budgets and `BudgetPool` draw-down, and the per-sample `usage` lines on the
-# stream, pinned by `basis/tests/compact.rs` — so an older runtime would
-# silently break the accounting contract with nothing here to notice (#44).
+# Process scope is not merely matched, it is depended on: it is what basis's
+# approval flow remembers a "…for this session" answer into now
+# (`basis/src/run/prepared/forward.rs`), replacing the durable Session-scope
+# remembering the 0.26 floor forced basis to build three separate
+# compensating mechanisms around — an attach-time clear
+# (`Runtime::resume_minted`), a one-shot CLI end-of-run clear
+# (`PreparedRun::forget_session_answers`, since withdrawn), and a documented
+# residue for a durable task nobody ever reattaches
+# (`basis-tasks::attach::drive`). All three are gone: a process-scoped answer
+# was never durable to begin with, so there is nothing left for any of them
+# to clear (#53).
 #
 # The adoption waves have landed, and these are the surfaces they took up.
-# `SessionOptions::policy` and `SessionResumeOptions::policy` let one shared
-# runtime give a live session a complete `RuntimePolicy` of its own instead of
-# only the runtime builder's, which is what makes a `ShellAccess::Denied`
-# workspace's posture hold for its own sessions and for nobody else's (#39).
-# `Runtime::try_register_tool_for_audience` and `ToolAudience` let that runtime
-# expose different tools to different live audiences, resolved exact-agent,
-# then audience, then global — the primitive under both a repository's
-# declared tools and a host's per-workspace native ones, and the reason a
-# workspace's tools reach that workspace's runs and nothing else on the
-# runtime (#47). `ExecutionHookParticipant` gives pre- and post-execution one
-# ordered, named, object-safe participant chain in place of two legacy lists,
-# so a workspace registers its whole `.basis/hooks.json` as one atomic mixed
-# batch (#49), and `register_execution_hook_for_audience` is what puts that
-# batch on a live runtime after construction, returning a guard the workspace
-# drops (#40). `Session::with_tool_authorizer` replaces the runtime's default
-# `ToolAuthorizer` for one live session without touching its siblings, which
-# is how a read-only session refuses at the authorizer rather than only at the
-# policy (#43/#38). `skill_root_key` is the canonical-path-with-fallback
-# identity basis's skills ledger used to re-derive by hand, and now shares
-# with upstream rather than drifting from it (#36). `Session::config` reads a
-# resumed session's persisted `AgentConfig` back, which is how a resume checks
-# that the conversation it picked up belongs to the workspace picking it up
-# (#41). And `FileToolProfile::None` closes the caveat `ToolProfile::only`'s
-# own docs name: a roster offering no file tool used to find one on the
-# registry anyway, because no profile could unregister them (#42).
+# `FileRuntimeStore` now serializes every `rules.json` read-modify-replace
+# behind a stable advisory `rules.lock`, closing the lost-update window
+# between independently constructed stores and cooperating processes that
+# `store::forget_in` used to carry a comment about (#50). `delete_agent` now
+# also removes a deleted agent's own durable session-scoped rules, sibling,
+# project, and global rules preserved by design — `store::forget_in`'s own
+# creator-oriented `clear_rules` call is redundant with that for the session
+# scope now, and still the only thing that reaches the wider project/global
+# rows a conversation wrote, so it stays (#51). `FileRuntimeStore` caches a
+# parsed `rules.json` behind an mtime/generation check internally, so the
+# read cost every consequential call used to pay is a `stat` in the common
+# case now — basis names no surface for this because it needed none; the
+# whole point is that nothing here had to change to benefit (#52).
+# `Runtime::tools_for_audience` is the reader basis's own `#[cfg(test)]`
+# collision probe (`runtime::probe`, since withdrawn) existed only to fake;
+# every caller that used to register-and-see-if-it-collides asks directly now
+# (#55). Public `PreparedTool` captures a tool's descriptor exactly once;
+# `Runtime::install_claimed_tool` now builds one `PreparedTool` per tool and
+# threads that same value through claiming and registering, so the name
+# mentra registers under cannot disagree with the name basis claimed — not
+# detected after the fact and rolled back, structurally impossible. The
+# compare-and-drop check that used to guard the disagreement is withdrawn
+# (#58). Authorizer, runtime-policy, and tool failures after a hook rewrite
+# now retain the rewriting hook's own attribution, restoring — upstream, not
+# in basis's own retired pre-0.26 dispatch guard — the naming a policy denial
+# of a rewritten call lost when basis adopted 0.26's audience-scoped hook
+# registration; `basis/tests/hooks/guarded.rs` pins the model actually
+# reading it now (#57).
 #
-# One 0.26 surface is deliberately not taken up.
-# `Runtime::fresh_provider_session_scope` mints an independent provider
-# session scope without network I/O (#46) — but it is a cold mint, and the
-# rebuild half of reuse that would have consumed it was retired by ADR-0026
-# before this floor landed. Gate 1b stays retired; a pooling host opens a
-# fresh workspace per checkout. The surface is named here so a later reader
-# knows it was considered rather than missed.
+# One 0.27 surface is read and deliberately not adopted structurally.
+# `register_execution_hook_shared_for_audience`'s clone-counted, caller-keyed
+# dedup shares one chain entry only for the exact same `Arc` allocation
+# re-presented under the same key — and basis reads `.basis/hooks.json`
+# fresh off disk on every workspace open, so two opens of one root that agree
+# produce two distinct, unequal-by-identity `HookRunner`s that must still
+# join. Basis's own content-compared, holder-counted claim
+# (`Runtime::register_hook_chain`) already does exactly that reconciliation;
+# adopting mentra's primitive on top would mean caching and re-presenting one
+# canonical `Arc` per audience across opens — a second, redundant accounting
+# layer over the first, not a replacement for it. What #56 fixes is real for
+# an embedder with no ledger like this one; basis already had the ledger
+# (#56).
 #
-# One 0.26 change is depended on for what it *removed*, which is the kind of
-# floor reason that is easiest to lose. mentra 0.25 deep-copied the tool
-# registry into every derived runtime handle, so a session's view of the
-# registry was a snapshot taken at its creation and nothing registered
-# afterwards could reach it; 0.26 shares one live registry instead. basis
-# wants the live registry — the audience ladder is built on it — but the
-# snapshot had been providing an isolation nobody had written down, and
-# adopting the share is what made a same-directory sibling's tools reachable
-# for the first time. `docs/proposals/0004` carries the account and the fix:
-# an agent's ledger row now lives for its run, and `PreparedRun::into_session`
-# is withdrawn.
+# One 0.27 change opened a gap basis had no floor reason to expect, which is
+# exactly the kind of floor note that is easiest to lose because the change
+# reads as a pure fix. Every persisted-agent reconstruction now retains the
+# row's own stored runtime identifier through every later save instead of
+# the live runtime's current one — the right fix for #54's bug (a
+# resumed-then-run conversation on a shared runtime re-filing under the
+# runtime's generic tag) — but it also closes the door basis's pre-0.7
+# records used to walk through: a legacy `"default"`-tagged conversation used
+# to adopt its workspace's identifier the first time it was resumed and used
+# again, because every persist used to re-derive the tag from the runtime's
+# own current identifier unconditionally. It no longer does.
+# `SessionResumeOptions` still has no field to override the tag on resume, so
+# basis cannot restate it either; filed upstream as
+# [mentra#59](https://github.com/oops-rs/mentra/issues/59). `basis/src/store.rs`'s
+# module docs and `basis/tests/workspace.rs`'s
+# `a_conversation_tagged_before_workspaces_were_is_resumable_but_no_longer_files_itself`
+# carry the account.
+#
+# The 0.26 floor's reasons still hold beneath it. `SessionOptions` carries
+# `policy` and `tool_audience` so a shared runtime's session states its own
+# workspace policy and tool audience rather than inheriting the runtime's or
+# resolving only global names, and `Runtime::resume_minted` restates both on
+# every resume for the same reason. `Session` binds its runtime's live
+# permission store automatically, keyed by the stable persisted agent id
+# rather than the ephemeral UI session id, so remembered rules survive a real
+# resume; its `resolve_permission` and `remembered_rules` are fallible
+# because both now read the live backend on every call, and a session's
+# current `ToolAuthorizer` is authoritative over remembered rules so a
+# remembered allow cannot bypass a session switched to a stricter authorizer.
+# Compaction carries every provider-reported usage sample forward instead of
+# dropping it while extracting summary text — `RunUsage`/`RunReport` totals,
+# `BudgetPool` draw-down, and the per-sample stream lines basis documents are
+# built on exactly that (#44, pinned by `basis/tests/compact.rs`). Per-session
+# `RuntimePolicy` (#39), audience-scoped atomic tool registration (#47), one
+# ordered `ExecutionHookParticipant` chain for pre- and post-execution with
+# post-construction registration (#49/#40), per-session `ToolAuthorizer`
+# replacement (#43/#38), the shared `skill_root_key` identity (#36), a
+# resumed session's persisted `AgentConfig` (#41), and `FileToolProfile::None`
+# (#42) are all adopted and named here so a later reader can find what each
+# gave basis without re-deriving it. `Runtime::fresh_provider_session_scope`
+# (#46) is read and deliberately not adopted — ADR-0026 retired the rebuild
+# path that would have consumed it.
+#
+# One 0.26 change is depended on for what it *removed*, and it is the
+# security reason this floor cannot drop even though basis writes no line of
+# code for it. mentra 0.25 deep-copied the tool registry into every derived
+# runtime handle, so a session's view was a snapshot taken at its creation
+# and nothing registered afterwards could reach it; 0.26 shares one live
+# registry instead. That snapshot had been providing a cross-client
+# isolation nobody had written down, and adopting the share is what first
+# made a same-directory sibling's tools reachable — lowering the floor back
+# below 0.26 would reintroduce that reach with nothing here to notice.
+# `docs/proposals/0004` carries the account and the fix: an agent's ledger
+# row now lives for its run, and `PreparedRun::into_session` is withdrawn.
 #
 # The 0.25 floor's reasons still hold beneath it. The primary provider stream
 # observes the run's cancellation token and deadline while the provider
@@ -182,7 +213,7 @@ basis-tasks = { version = "0.11", path = "basis-tasks" }
 # persistent store is the file-backed one, which is exactly ADR-0023's
 # posture — basis persists to files and links no database — so nothing
 # re-offers it.
-mentra = { version = "0.26.0", default-features = false }
+mentra = { version = "0.27.0", default-features = false }
 
 async-trait = "0.1"
 # ACP carries an image in a prompt as base64; basis's `PromptPart` carries the
