@@ -224,7 +224,7 @@ impl PreparedRun {
     /// *persisted* agent carries, read back off the resumed session, rather
     /// than the workspace's current default: the two differ whenever the
     /// original run carried a profile override. A run built through
-    /// [`prepare_with_session`](crate::prepare_with_session) knows no prompt at
+    /// [`prepare_with_session`](crate::run::prepare_with_session) knows no prompt at
     /// all — there is no workspace to ask — and its floor excludes one
     /// entirely. Useful beside
     /// [`context_window`](Self::context_window) for a host deciding whether to

@@ -47,7 +47,7 @@
 //! reopens it explicitly: `SessionResumeOptions::runtime_identifier` rehomes
 //! a resumed agent under a chosen identifier on its next persist, without
 //! retagging any other agent or the shared runtime's own identifier.
-//! [`Runtime::resume_minted`](crate::runtime::Runtime::resume_minted) passes
+//! `Runtime::resume_minted` (crate-private) passes
 //! this workspace's own identifier on every resume, not only for a legacy
 //! `"default"` row — the check it makes immediately after already refuses to
 //! hand back a session whose `base_dir` disagrees with this workspace, so

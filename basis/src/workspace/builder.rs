@@ -482,7 +482,7 @@ impl WorkspaceBuilder {
     /// opens later adds tools only to its own audience.
     ///
     /// **A name that is taken refuses the open**, naming it
-    /// ([`RunError::WorkspaceHostTool`](crate::RunError::WorkspaceHostTool)) —
+    /// ([`RunError::WorkspaceHostToolNameTaken`](crate::RunError::WorkspaceHostToolNameTaken)) —
     /// a global this runtime already answers to, another repository's, or one
     /// another live open of *this* directory supplied. That last is the one
     /// case a declaration handles differently, and the error variant carries
@@ -606,7 +606,7 @@ impl WorkspaceBuilder {
     /// the `mcp__*` tools of servers this workspace does not own, and every
     /// call of one is refused by this workspace's own interception chain
     /// whether or not the roster it was offered had caught it
-    /// ([`crate::runtime::agents`]).
+    /// (`runtime::agents`, crate-private).
     pub async fn open(mut self) -> Result<Workspace, RunError> {
         // A shared runtime can acquire a skill loader after any one-time
         // inspection, and Mentra appends that loader's descriptions on every

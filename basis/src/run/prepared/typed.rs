@@ -189,6 +189,9 @@ impl PreparedRun {
     /// # Ok(())
     /// # }
     /// ```
+    // OutputFailure is deliberately unboxed — see its doc comment — so it
+    // stays over clippy's default size threshold.
+    #[allow(clippy::result_large_err)]
     pub async fn output<T: DeserializeOwned, S: EventSink, A: Approver>(
         &mut self,
         prompt: impl Into<String>,
@@ -207,6 +210,7 @@ impl PreparedRun {
     /// [`send_parts`](Self::send_parts): a typed turn is cancellable and
     /// boundable like any other, and a fan-out that gives each of its runs a
     /// deadline should not have to give up types to get one.
+    #[allow(clippy::result_large_err)]
     pub async fn output_with_options<T: DeserializeOwned, S: EventSink, A: Approver>(
         &mut self,
         prompt: impl Into<String>,
@@ -229,6 +233,7 @@ impl PreparedRun {
     /// finding, reported as [`RunError::OutputMismatch`], instead of arriving
     /// as one more `MalformedProviderEvent` indistinguishable from a provider
     /// that misbehaved.
+    #[allow(clippy::result_large_err)]
     async fn typed_turn<T: DeserializeOwned, S: EventSink, A: Approver>(
         &mut self,
         prompt: String,
