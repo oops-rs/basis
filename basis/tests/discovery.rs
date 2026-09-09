@@ -35,7 +35,10 @@ use basis::{
 #[cfg(unix)]
 use basis::HookSpec;
 #[cfg(feature = "mcp")]
-use basis::{McpConfig, McpServer};
+use basis::McpConfig;
+// McpServer is only built by the unix-gated test below.
+#[cfg(all(unix, feature = "mcp"))]
+use basis::McpServer;
 use serde_json::{Value, json};
 
 const PROVIDER: &str = "host-provider";
@@ -516,7 +519,10 @@ async fn discovery_off_still_runs_supplied_hooks() {
     assert_eq!(interceptions.load(Ordering::SeqCst), 1);
 }
 
-#[cfg(feature = "mcp")]
+// #[cfg(unix)] beside the feature gate for the same reason as
+// `discovery_off_still_runs_supplied_hooks`: the supplied server here is a
+// `/bin/sh` fixture standing in for a real one.
+#[cfg(all(unix, feature = "mcp"))]
 #[tokio::test]
 async fn discovery_off_still_applies_supplied_mcp_servers() {
     let workspace = tempfile::tempdir().expect("workspace");
