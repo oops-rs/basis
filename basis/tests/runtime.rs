@@ -30,10 +30,15 @@ use std::{
 };
 
 use basis::{
-    AllowAll, CollectingSink, ContextConfig, HookSpec, MemoryConfig, RunOutcome, Runtime,
-    Workspace, WorkspaceBuilder, hooks::HooksConfig, skills::SkillsConfig, store,
-    templates::TemplatesConfig, tools::declared::ToolsConfig,
+    AllowAll, CollectingSink, ContextConfig, MemoryConfig, RunOutcome, Runtime, Workspace,
+    WorkspaceBuilder, hooks::HooksConfig, skills::SkillsConfig, store, templates::TemplatesConfig,
+    tools::declared::ToolsConfig,
 };
+// Both consumers of `HookSpec` below are `#[cfg(unix)]`-only (they shell out
+// to a `#!/bin/sh` script and set its executable bit), so the import is
+// unused — and denied — on Windows unless it carries the same gate.
+#[cfg(unix)]
+use basis::HookSpec;
 use mentra::ModelSelector;
 use serde_json::json;
 
