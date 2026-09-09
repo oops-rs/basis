@@ -15,8 +15,8 @@ use std::{
 
 use basis::{
     AllowAll, CollectingSink, Config, ContextConfig, ContextScope, HookOutcome, HookRequest,
-    HookSpec, HooksConfig, Interceptor, InterceptorError, MemoryConfig, ModelInfo, Provider,
-    RunError, RunOutcome, Runtime, RuntimeBuilder, Setting, SystemPrompt, ToolRoster, Workspace,
+    HooksConfig, Interceptor, InterceptorError, MemoryConfig, ModelInfo, Provider, RunError,
+    RunOutcome, Runtime, RuntimeBuilder, Setting, SystemPrompt, ToolRoster, Workspace,
     WorkspaceBuilder, WorkspaceMemoryRoot, async_trait,
     event::ContextFile,
     runtime::{
@@ -30,6 +30,10 @@ use basis::{
         declared::ToolsConfig,
     },
 };
+// The only consumer below is #[cfg(unix)] (it shells out to `/bin/sh`), so
+// this import is unused, and denied, on Windows unless it carries the gate.
+#[cfg(unix)]
+use basis::HookSpec;
 #[cfg(feature = "mcp")]
 use basis::{McpConfig, McpServer};
 use serde_json::{Value, json};
