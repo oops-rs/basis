@@ -149,11 +149,14 @@ async fn the_header_reports_the_context_that_was_loaded() {
 
     // Discovery resolves symlinks (on macOS the temp dir is one), so the
     // reported path is the resolved spelling — and the header's `workspace`
-    // must agree with it rather than echoing what was typed.
-    let resolved = workspace
+    // must agree with it rather than echoing what was typed. Plain
+    // `canonicalize` is the wrong expectation on Windows, where it yields the
+    // verbatim `\\?\C:\…` that discovery deliberately simplifies away.
+    let canonical = workspace
         .path()
         .canonicalize()
         .expect("canonical workspace");
+    let resolved = dunce::simplified(&canonical).to_path_buf();
     assert_eq!(context_files[0].path, resolved.join("AGENTS.md"));
 
     let Some(Event::RunStarted {
