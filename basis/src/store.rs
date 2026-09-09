@@ -32,20 +32,27 @@
 //! so resuming one still works. [`WorkspaceBuilder::open`](crate::WorkspaceBuilder::open)
 //! is where the tag is set, and where that ruling is written down.
 //!
-//! **They no longer re-tag themselves, either — a real loss mentra 0.27
-//! introduced.** Every persist used to re-derive the tag from the live
-//! runtime's own current identifier, so the first resume-and-run of an old
-//! `"default"`-tagged conversation silently adopted it into the resuming
-//! workspace's list. mentra 0.27's fix for
-//! [mentra#54](https://github.com/oops-rs/mentra/issues/54) rebinds a
-//! resumed agent to its *own stored* identifier and carries that forward
-//! instead, which is the right fix for #54's bug (a shared runtime's
-//! resumed-then-run rows re-filing under its generic tag) but also closes
-//! this door: a legacy record now stays `"default"`-tagged forever, with no
-//! code path left to adopt it. `SessionResumeOptions` has no field to
-//! override the tag on resume — filed as
-//! [mentra#59](https://github.com/oops-rs/mentra/issues/59). Until it lands,
-//! an old record is resumable by id and nothing else.
+//! **They stopped re-tagging themselves in mentra 0.27, and mentra 0.28 turns
+//! that back on as an explicit basis-side choice.** Every persist used to
+//! re-derive the tag from the live runtime's own current identifier, so the
+//! first resume-and-run of an old `"default"`-tagged conversation silently
+//! adopted it into the resuming workspace's list. mentra 0.27's fix for
+//! [mentra#54](https://github.com/oops-rs/mentra/issues/54) rebound a
+//! resumed agent to its *own stored* identifier and carried that forward
+//! instead, which was the right fix for #54's bug (a shared runtime's
+//! resumed-then-run rows re-filing under its generic tag) but also closed
+//! this door: a legacy record stayed `"default"`-tagged forever, with no
+//! code path left to adopt it — filed as
+//! [mentra#59](https://github.com/oops-rs/mentra/issues/59). mentra 0.28
+//! reopens it explicitly: `SessionResumeOptions::runtime_identifier` rehomes
+//! a resumed agent under a chosen identifier on its next persist, without
+//! retagging any other agent or the shared runtime's own identifier.
+//! [`Runtime::resume_minted`](crate::runtime::Runtime::resume_minted) passes
+//! this workspace's own identifier on every resume, not only for a legacy
+//! `"default"` row — the check it makes immediately after already refuses to
+//! hand back a session whose `base_dir` disagrees with this workspace, so
+//! every row a resume succeeds on is provably this workspace's own, and
+//! restating its identifier is always correct.
 //!
 //! Every workspace tags its own rows, on a private runtime and on a shared
 //! one alike: [`Runtime`](crate::Runtime)'s `mint` states the identifier per

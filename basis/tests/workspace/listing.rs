@@ -211,9 +211,9 @@ async fn one_workspace_does_not_list_anothers_conversations() {
     );
 }
 
-/// A conversation written before workspaces were tagged is still resumable —
-/// but, since mentra 0.27, no longer joins its workspace's list the first
-/// time it is used.
+/// A conversation written before workspaces were tagged is still resumable,
+/// and — since mentra 0.28 — rejoins its workspace's list the first time it
+/// is used again.
 ///
 /// That self-healing was the back-compat answer 0.7 gave: nothing migrates an
 /// old record, but *using* one used to adopt it, because every persist
@@ -221,23 +221,25 @@ async fn one_workspace_does_not_list_anothers_conversations() {
 /// unconditionally overwriting whatever the row already carried. mentra 0.27
 /// changed that specifically to fix mentra#54 (a resumed-then-run
 /// conversation on a *shared* runtime re-filing under the runtime's generic
-/// tag): `Agent::from_loaded` now rebinds to the row's own stored identifier
-/// and carries it forward, so a legacy `"default"`-tagged row stays
-/// `"default"`-tagged forever — there is no longer a code path that adopts
-/// it, on a private runtime or a shared one. `SessionResumeOptions` still has
-/// no field to override the tag on resume (the alternative mentra#54's own
-/// "Ask" also named and did not take up), so basis cannot restate it either;
-/// filed as [mentra#59](https://github.com/oops-rs/mentra/issues/59).
+/// tag): `Agent::from_loaded` rebinds to the row's own stored identifier and
+/// carries it forward, so a legacy `"default"`-tagged row stayed
+/// `"default"`-tagged forever — there was no longer a code path that adopted
+/// it, on a private runtime or a shared one. Filed as
+/// [mentra#59](https://github.com/oops-rs/mentra/issues/59), mentra 0.28
+/// added `SessionResumeOptions::runtime_identifier`, and basis's
+/// `Runtime::resume_minted` now passes this workspace's own identifier on
+/// every resume — restoring the self-healing, this time as an explicit
+/// rehome rather than an unconditional overwrite of whatever the runtime's
+/// own tag happened to be.
 ///
 /// The record below carries the workspace as its agent's `base_dir`, because
 /// that is what every basis that ever wrote one carried: the agent config has
 /// been scoped to the opened workspace since the first `run`, long before the
 /// tag existed. It is also what makes the conversation *this* workspace's for
 /// `Workspace::resume`'s binding check — the tag never gated resuming, and the
-/// base directory always did name the repository. Resuming and listing by id
-/// both still work; only self-filing into the list is gone.
+/// base directory always did name the repository.
 #[tokio::test]
-async fn a_conversation_tagged_before_workspaces_were_is_resumable_but_no_longer_files_itself() {
+async fn a_conversation_tagged_before_workspaces_were_is_resumable_and_files_itself_again() {
     let dir = tempfile::tempdir().expect("tempdir");
     write(&dir.path().join("AGENTS.md"), "house rules");
     let store_dir = tempfile::tempdir().expect("tempdir");
@@ -298,12 +300,16 @@ async fn a_conversation_tagged_before_workspaces_were_is_resumable_but_no_longer
         .expect("the resumed run completes");
 
     assert!(matches!(report.outcome, RunOutcome::Ok));
-    assert!(
-        store::list_in(store_dir.path(), dir.path())
-            .expect("lists")
-            .is_empty(),
-        "mentra#54's fix (resume preserves a row's own stored tag) means using \
-         an old conversation no longer adopts it into this workspace's list — \
-         a real loss, tracked as mentra#59, not a choice basis made"
+    let listed = store::list_in(store_dir.path(), dir.path()).expect("lists");
+    assert_eq!(
+        listed
+            .iter()
+            .map(|session| session.agent_id.as_str())
+            .collect::<Vec<_>>(),
+        vec![agent_id.as_str()],
+        "mentra#59's fix (`SessionResumeOptions::runtime_identifier`) means \
+         resuming an old `\"default\"`-tagged conversation through this \
+         workspace rehomes it, so using it again adopts it into this \
+         workspace's list just as it did before mentra 0.27"
     );
 }

@@ -172,6 +172,13 @@ impl Runtime {
                 project_id: None,
                 policy: Some(scope.policy.clone()),
                 tool_audience: Some(scope.audience()),
+                // Unconditional, not only for a legacy `"default"` row: the
+                // `WorkspaceMismatch` check below already refuses to return a
+                // session whose `base_dir` disagrees with this workspace, so
+                // every row a resume succeeds on is provably this
+                // workspace's own, and restating its identifier here is
+                // always correct (mentra#59).
+                runtime_identifier: Some(Arc::from(scope.identifier.as_str())),
             },
         )?;
 
