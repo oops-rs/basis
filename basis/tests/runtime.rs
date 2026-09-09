@@ -97,6 +97,15 @@ fn workspace_dir() -> tempfile::TempDir {
     dir
 }
 
+/// What an open resolves a workspace root to internally, and so the spelling
+/// an error naming that root actually carries. Plain `canonicalize` is the
+/// wrong expectation on Windows, where it yields the verbatim `\\?\C:\…` that
+/// basis deliberately simplifies away (`basis/src/context/discovery.rs`).
+fn resolved(path: &Path) -> PathBuf {
+    let canonical = path.canonicalize().expect("canonical path");
+    dunce::simplified(&canonical).to_path_buf()
+}
+
 /// The tool names in the nth request's `tools` array — the roster the model was
 /// actually offered, which is the only honest observable for a registration
 /// scoped to an audience: mentra's own registry readers walk the global map,
@@ -268,8 +277,8 @@ async fn a_conversation_cannot_be_resumed_under_a_workspace_it_did_not_run_in() 
     );
     let message = refused.to_string();
     assert!(
-        message.contains(&dir_a.path().to_string_lossy().to_string())
-            && message.contains(&dir_b.path().to_string_lossy().to_string()),
+        message.contains(&resolved(dir_a.path()).to_string_lossy().to_string())
+            && message.contains(&resolved(dir_b.path()).to_string_lossy().to_string()),
         "and it has to name both directories: {message}"
     );
 
