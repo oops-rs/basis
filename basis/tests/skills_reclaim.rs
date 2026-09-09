@@ -468,8 +468,12 @@ async fn a_loaded_skill_names_the_root_it_came_from() {
 
     // The workspace root is canonical by the time discovery joins the subdir
     // onto it (`WorkspaceBuilder::open`'s one resolution), so the expectation
-    // has to be too — on macOS a tempdir is reached through a symlink.
-    let workspace_root = std::fs::canonicalize(dir.path()).expect("canonical workspace");
+    // has to be too — on macOS a tempdir is reached through a symlink. Plain
+    // `canonicalize` is the wrong expectation on Windows, where it yields the
+    // verbatim `\\?\C:\…` prefix basis's own resolution simplifies away —
+    // and, left verbatim, changes how `Path::join` treats the subdir's `/`.
+    let canonical = std::fs::canonicalize(dir.path()).expect("canonical workspace");
+    let workspace_root = dunce::simplified(&canonical).to_path_buf();
     assert_eq!(
         attributed,
         [
