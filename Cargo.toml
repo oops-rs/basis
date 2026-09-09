@@ -24,6 +24,38 @@ basis-host = { version = "0.12", path = "basis-host" }
 # that is now merely their first client.
 basis-tasks = { version = "0.12", path = "basis-tasks" }
 
+# The 0.28 floor's reason is the same shape as 0.27's: one host-observable,
+# source-breaking addition basis's code does not compile against unmodified.
+# `SessionResumeOptions` gained `runtime_identifier: Option<Arc<str>>`, so
+# `basis/src/runtime/scope.rs`'s exhaustive literal in `resume_minted` must
+# decide it — and it is the field basis was missing a version ago: `Some(id)`
+# rehomes a resumed agent's persisted runtime-store tag to `id` on its next
+# persist, without touching any other agent's tag or the shared runtime's own
+# identifier. `resume_minted` now passes this workspace's own identifier
+# unconditionally rather than only for a legacy `"default"` row: the
+# `WorkspaceMismatch` check immediately after it already refuses to return a
+# session whose `base_dir` disagrees with this workspace, so every row a
+# resume succeeds on is provably this workspace's own, and restating its
+# identifier is always correct. This closes
+# [mentra#59](https://github.com/oops-rs/mentra/issues/59), which basis filed
+# against exactly the gap the 0.27 floor note below describes. `basis/src/store.rs`'s
+# module docs and `basis/tests/workspace/listing.rs`'s
+# `a_conversation_tagged_before_workspaces_were_is_resumable_and_files_itself_again`
+# (renamed from `..._but_no_longer_files_itself` and rewritten to assert the
+# row is adopted, not still absent) carry the account.
+#
+# mentra-provider 0.9 shipped alongside it folding `ModelCatalog` and
+# `ProviderSessionFactory` into `Provider`, dropping the unread `retry` field
+# from `ProviderDefinition`, and replacing the seven `mentra::provider`
+# forwarding wrapper types (`AnthropicProvider` and six siblings) with free
+# functions. basis touches none of the removed surface: its own `RetryPolicy`
+# (`basis/src/runtime.rs`) is a type basis defines itself, not mentra's, and
+# the registered-provider seam
+# (`RuntimeBuilder::with_registered_provider`) goes through
+# `provider_core::anthropic::AnthropicProvider` — `mentra_provider`'s
+# unaffected low-level type, not the removed `mentra::provider` wrapper of the
+# same name — so none of it is a floor reason, only a compatible rebuild.
+#
 # The 0.27 floor's reason is one host-observable, source-breaking addition
 # basis's code does not compile against unmodified in either direction.
 # `PermissionRuleScope` gained `Process`, a highest-precedence
@@ -96,17 +128,13 @@ basis-tasks = { version = "0.12", path = "basis-tasks" }
 # row's own stored runtime identifier through every later save instead of
 # the live runtime's current one — the right fix for #54's bug (a
 # resumed-then-run conversation on a shared runtime re-filing under the
-# runtime's generic tag) — but it also closes the door basis's pre-0.7
+# runtime's generic tag) — but it also closed the door basis's pre-0.7
 # records used to walk through: a legacy `"default"`-tagged conversation used
 # to adopt its workspace's identifier the first time it was resumed and used
 # again, because every persist used to re-derive the tag from the runtime's
-# own current identifier unconditionally. It no longer does.
-# `SessionResumeOptions` still has no field to override the tag on resume, so
-# basis cannot restate it either; filed upstream as
-# [mentra#59](https://github.com/oops-rs/mentra/issues/59). `basis/src/store.rs`'s
-# module docs and `basis/tests/workspace.rs`'s
-# `a_conversation_tagged_before_workspaces_were_is_resumable_but_no_longer_files_itself`
-# carry the account.
+# own current identifier unconditionally. Filed as
+# [mentra#59](https://github.com/oops-rs/mentra/issues/59); the 0.28 floor
+# note above is where it closes back up.
 #
 # The 0.26 floor's reasons still hold beneath it. `SessionOptions` carries
 # `policy` and `tool_audience` so a shared runtime's session states its own
@@ -213,7 +241,7 @@ basis-tasks = { version = "0.12", path = "basis-tasks" }
 # persistent store is the file-backed one, which is exactly ADR-0023's
 # posture — basis persists to files and links no database — so nothing
 # re-offers it.
-mentra = { version = "0.27.0", default-features = false }
+mentra = { version = "0.28.0", default-features = false }
 
 async-trait = "0.1"
 # ACP carries an image in a prompt as base64; basis's `PromptPart` carries the
