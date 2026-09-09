@@ -385,11 +385,18 @@ mod tests {
             .expect("a supplied cwd always resolves");
         assert_eq!(resolved, Path::new("/home/agent/data"));
 
-        let already = absolutize(PathBuf::from("/srv/basis"), || {
+        // `/srv/basis` is only absolute by Rust's own rule on Unix — Windows
+        // additionally requires a prefix (a drive letter or a UNC root).
+        let absolute = if cfg!(windows) {
+            r"C:\srv\basis"
+        } else {
+            "/srv/basis"
+        };
+        let already = absolutize(PathBuf::from(absolute), || {
             panic!("an absolute root must never ask for the current directory")
         })
         .expect("absolute stays put");
-        assert_eq!(already, Path::new("/srv/basis"));
+        assert_eq!(already, Path::new(absolute));
     }
 
     #[test]
