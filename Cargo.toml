@@ -5,7 +5,7 @@ resolver = "3"
 [workspace.package]
 # One version across the five: they are one product split by dependency
 # weight (ADR-0011), not five things that release on their own schedules.
-version = "0.12.1"
+version = "0.12.2"
 edition = "2024"
 rust-version = "1.88"
 license = "MIT"
@@ -241,7 +241,7 @@ basis-tasks = { version = "0.12", path = "basis-tasks" }
 # persistent store is the file-backed one, which is exactly ADR-0023's
 # posture — basis persists to files and links no database — so nothing
 # re-offers it.
-mentra = { version = "0.28.0", default-features = false }
+mentra = { version = "0.28.1", default-features = false }
 
 async-trait = "0.1"
 # ACP carries an image in a prompt as base64; basis's `PromptPart` carries the
@@ -316,12 +316,3 @@ strip = true
 opt-level = "s"
 lto = true
 codegen-units = 1
-
-# **Temporary, and it stays until the mentra release carrying
-# `mentra_provider::gateway_ring` is published.** `RuntimeBuilder::with_gateway_ring`
-# builds on `GatewayRing`, which landed in mentra after 0.28.0 went to crates.io.
-# Until the release is out, a standalone checkout of basis does not resolve
-# without this line and the sibling checkout it names — which is exactly the
-# state this comment exists to make impossible to forget.
-[patch.crates-io]
-mentra = { path = "/Users/wendell/developer/oops-rs/mentra/mentra" }
