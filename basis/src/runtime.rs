@@ -66,7 +66,7 @@ use std::sync::{Arc, Mutex};
 
 use mentra::ModelSelector;
 
-pub use builder::RuntimeBuilder;
+pub use builder::{GatewayMember, RuntimeBuilder};
 pub use tool_results::ToolResultPolicy;
 
 pub(crate) use claims::DeclaredToolOrigin;
@@ -192,6 +192,15 @@ pub use mentra::provider::{
     ContentBlock, ContentBlockDelta, ContentBlockStart, ModelInfo, ProviderCapabilities,
     ProviderDescriptor, ProviderError, ProviderEvent, ProviderEventStream, ProviderId, Request,
     Response, Role, TokenUsage, provider_event_stream_from_response,
+};
+
+/// What [`RuntimeBuilder::with_gateway_ring`] and its two companions take
+/// and report, under the same rule as the provider-authoring types above: the
+/// builder makes a host name these, so basis re-exports them. The ring itself
+/// stays in mentra (ADR-0027); [`GatewayMember`] is basis's own, because it
+/// carries a URL the way [`RuntimeBuilder::with_base_url`] takes one.
+pub use mentra::provider_core::gateway_ring::{
+    FailureKind, GatewayMemberRef, GatewayRingEvent, GatewayRingPolicy,
 };
 
 /// Which request format a custom endpoint is spoken to in, as

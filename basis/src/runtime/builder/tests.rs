@@ -13,6 +13,7 @@ use std::thread;
 use mentra::{Provider, provider_core::AuthScheme};
 
 use super::*;
+use crate::runtime::GatewayRingPolicy;
 use crate::runtime::ProviderRetry;
 use crate::tools::SPAWN;
 use crate::{provider, runtime::credential::Credential};
@@ -1238,4 +1239,147 @@ async fn without_the_roots_the_same_write_is_refused() {
         !target.exists(),
         "a path outside the workspace and every root must stay refused"
     );
+}
+
+/// A ring is the endpoint answer, so the other two endpoint knobs are refused
+/// beside it by name — in either order, like the instance case above — and
+/// so is a ring beside an instance, which is two whole answers.
+#[test]
+fn a_gateway_ring_beside_another_endpoint_answer_is_refused_by_name() {
+    let member = || GatewayMember::new("http://127.0.0.1:1/v1");
+    let cases: Vec<(RuntimeBuilder, &str)> = vec![
+        (
+            RuntimeBuilder::default()
+                .with_gateway_ring([member()])
+                .with_base_url("http://127.0.0.1:2/v1"),
+            "with_base_url",
+        ),
+        (
+            RuntimeBuilder::default()
+                .with_api_key("sk-for-whom")
+                .with_gateway_ring([member()]),
+            "with_api_key",
+        ),
+        (
+            RuntimeBuilder::default()
+                .with_provider_instance(StubProvider)
+                .with_gateway_ring([member()]),
+            "with_gateway_ring",
+        ),
+    ];
+
+    for (told_twice, knob) in cases {
+        let error = told_twice
+            .with_ephemeral_history()
+            .build()
+            .expect_err("two answers to one question must not rank silently");
+        match error {
+            RunError::Provider(provider::ProviderError::AmbiguousProviderSource {
+                knob: named,
+            }) => assert_eq!(named, knob),
+            other => panic!("the refusal must name the knob, got: {other:?}"),
+        }
+    }
+}
+
+#[test]
+fn an_empty_gateway_ring_is_refused_rather_than_resolved_from_the_environment() {
+    let error = RuntimeBuilder::default()
+        .with_gateway_ring(Vec::<GatewayMember>::new())
+        .with_ephemeral_history()
+        .build()
+        .expect_err("a ring with nobody in it answers nothing");
+
+    assert!(matches!(
+        error,
+        RunError::Provider(provider::ProviderError::EmptyGatewayRing)
+    ));
+}
+
+/// A ring reads `with_provider` for the id its models are filed under and
+/// `with_wire` for how its members are spoken to, exactly as one base URL
+/// does; the runtime reports one provider, and it is the ring's.
+#[test]
+fn a_gateway_ring_is_filed_under_the_named_provider_on_either_wire() {
+    for wire in [Wire::ChatCompletions, Wire::Responses] {
+        let runtime = RuntimeBuilder::default()
+            .with_wire(wire)
+            .with_gateway_ring([
+                GatewayMember::new("http://127.0.0.1:1/v1").with_api_key("k1"),
+                GatewayMember::new("http://127.0.0.1:2/"),
+            ])
+            .with_ephemeral_history()
+            .build()
+            .expect("a ring builds without network access");
+        assert_eq!(
+            runtime.provider(),
+            "openai",
+            "unnamed, a ring is compatible"
+        );
+
+        let named = RuntimeBuilder::default()
+            .with_wire(wire)
+            .with_provider(BuiltinProvider::OpenRouter)
+            .with_gateway_ring([GatewayMember::new("http://127.0.0.1:1/v1")])
+            .with_ephemeral_history()
+            .build()
+            .expect("a named ring builds");
+        assert_eq!(named.provider(), "openrouter");
+    }
+}
+
+/// A member's URL is taken as published, the way `with_base_url` takes one,
+/// and a URL that is not one is refused at build with the same error.
+#[test]
+fn a_gateway_members_url_is_normalized_like_a_base_url() {
+    let error = RuntimeBuilder::default()
+        .with_gateway_ring([GatewayMember::new("not a url")])
+        .with_ephemeral_history()
+        .build()
+        .expect_err("a member that is not a URL is refused");
+
+    assert!(matches!(
+        error,
+        RunError::Provider(provider::ProviderError::InvalidBaseUrl(_))
+    ));
+}
+
+/// The three ring knobs compose in any order: policy and observer set before
+/// the members are kept, and a later `with_gateway_ring` replaces only the
+/// members.
+#[test]
+fn the_ring_knobs_compose_in_any_order() {
+    let builder = RuntimeBuilder::default()
+        .with_gateway_ring_policy(GatewayRingPolicy::sticky())
+        .with_gateway_ring_observer(|_| {})
+        .with_gateway_ring([GatewayMember::new("http://127.0.0.1:1/")])
+        .with_gateway_ring([GatewayMember::new("http://127.0.0.1:2/")]);
+
+    let spec = builder.gateway_ring.as_ref().expect("a ring is set");
+    assert_eq!(spec.policy, GatewayRingPolicy::sticky());
+    assert!(spec.observer.is_some());
+    let members = spec.members.as_ref().expect("stated");
+    assert_eq!(members.len(), 1);
+    assert_eq!(members[0].base_url(), "http://127.0.0.1:2/");
+    // And the key never reaches a log.
+    let printed = format!(
+        "{:?}",
+        GatewayMember::new("http://x/").with_api_key("sk-secret")
+    );
+    assert!(printed.contains("<redacted>") && !printed.contains("sk-secret"));
+}
+
+/// A policy or an observer without members is not a ring: resolution runs as
+/// if neither had been said, so a base URL beside them is not refused.
+#[test]
+fn a_ring_policy_alone_says_nothing() {
+    let runtime = RuntimeBuilder::default()
+        .with_gateway_ring_policy(GatewayRingPolicy::sticky())
+        .with_gateway_ring_observer(|_| {})
+        .with_base_url("http://127.0.0.1:1/v1")
+        .with_ephemeral_history()
+        .build()
+        .expect("a base URL beside an unstated ring resolves as usual");
+
+    assert_eq!(runtime.provider(), "openai");
 }

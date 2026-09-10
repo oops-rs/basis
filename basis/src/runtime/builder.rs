@@ -14,6 +14,7 @@
 // What stays here is the builder itself: its fields, its defaults, the
 // registration knobs with no better home, and `build`.
 pub(super) mod execution;
+mod gateway_ring;
 mod history;
 mod provider;
 mod provider_settlement;
@@ -36,6 +37,8 @@ use crate::{
 };
 
 use execution::{PolicyShaping, shared_policy, validate_target_names, workspace_policy};
+pub use gateway_ring::GatewayMember;
+pub(in crate::runtime) use gateway_ring::GatewayRingSpec;
 pub(crate) use history::History;
 pub(in crate::runtime) use provider_settlement::HostProvider;
 
@@ -146,6 +149,15 @@ pub struct RuntimeBuilder {
     /// runs, the environment is never read, and [`build`](Self::build) refuses
     /// the knobs resolution would have read beside it.
     host_provider: Option<HostProvider>,
+    /// Several gateways to one model, in preference order
+    /// ([`with_gateway_ring`](Self::with_gateway_ring)). Like a host-supplied
+    /// provider this answers the endpoint question in full: resolution never
+    /// runs beside it, and [`build`](Self::build) refuses `base_url` and
+    /// `api_key` next to it. Unlike one, it still reads
+    /// [`with_provider`](Self::with_provider) for the id to file under and
+    /// [`with_wire`](Self::with_wire) for the wire, exactly as a lone base
+    /// URL does.
+    gateway_ring: Option<GatewayRingSpec>,
 }
 
 /// Hand-written so a supplied credential cannot reach a log through a
@@ -161,6 +173,7 @@ impl std::fmt::Debug for RuntimeBuilder {
                 "provider_instance",
                 &self.host_provider.as_ref().map(|host| host.id.as_str()),
             )
+            .field("gateway_ring", &self.gateway_ring)
             .field("model", &self.model)
             .field("history", &self.history)
             .field(
@@ -219,6 +232,7 @@ impl Default for RuntimeBuilder {
             child_policy: None,
             tool_result_policy: None,
             host_provider: None,
+            gateway_ring: None,
         }
     }
 }
@@ -520,6 +534,7 @@ impl RuntimeBuilder {
         // `provider_settlement::settle`'s own docs have the ambiguity rule.
         let source = provider_settlement::settle(
             self.host_provider,
+            self.gateway_ring,
             self.provider,
             self.base_url,
             self.api_key,
