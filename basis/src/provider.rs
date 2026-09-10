@@ -46,6 +46,10 @@ const BASE_URL_VARS: &[&str] = &["BASIS_BASE_URL", "OPENAI_BASE_URL"];
 /// Environment variables holding the key for a custom endpoint.
 const COMPATIBLE_KEY_VARS: &[&str] = &["BASIS_API_KEY", "OPENAI_API_KEY"];
 
+/// The id a custom endpoint's models are filed under when nothing named one:
+/// a base URL, or a ring of them, is "OpenAI-compatible" and says so.
+pub(crate) const DEFAULT_COMPATIBLE_PROVIDER: BuiltinProvider = BuiltinProvider::OpenAI;
+
 /// A provider together with the key it will authenticate with.
 #[derive(Clone)]
 pub struct ProviderChoice {
@@ -118,6 +122,7 @@ pub enum ProviderError {
     UnattributedCredential,
 
     /// [`RuntimeBuilder::with_provider_instance`](crate::RuntimeBuilder::with_provider_instance)
+    /// — or [`with_gateway_ring`](crate::RuntimeBuilder::with_gateway_ring) —
     /// beside a knob this module's resolution reads. The instance would win,
     /// but a silent priority is a knob that silently stopped meaning anything
     /// — so the pair is refused the way an unattributed credential is, naming
@@ -127,6 +132,13 @@ pub enum ProviderError {
          {knob} decides, so state one or the other"
     )]
     AmbiguousProviderSource { knob: &'static str },
+
+    /// [`RuntimeBuilder::with_gateway_ring`](crate::RuntimeBuilder::with_gateway_ring)
+    /// with nothing in it. A ring is the endpoint answer, and an empty one
+    /// answers nothing — refused at build like every other unanswerable
+    /// endpoint, rather than resolved from the environment as if unsaid.
+    #[error("a gateway ring was supplied with no members")]
+    EmptyGatewayRing,
 }
 
 /// Trims a base URL to what mentra's transports expect.
@@ -313,7 +325,7 @@ fn resolve_compatible(
     };
 
     Ok(ProviderChoice {
-        provider: requested.unwrap_or(BuiltinProvider::OpenAI),
+        provider: requested.unwrap_or(DEFAULT_COMPATIBLE_PROVIDER),
         api_key,
         source_var,
         base_url: Some(base_url),

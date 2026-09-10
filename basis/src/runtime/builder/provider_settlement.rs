@@ -25,7 +25,7 @@ use mentra::{
 
 use crate::{error::RunError, provider, runtime::credential::Credential};
 
-use super::Wire;
+use super::{GatewayRingSpec, Wire, gateway_ring};
 
 /// A provider instance the host built, held until [`assemble`] hands it to the
 /// matching mentra registration seam.
@@ -48,11 +48,19 @@ pub(in crate::runtime) struct HostProvider {
 }
 
 /// Where the provider a runtime runs on came from: an instance the host
-/// constructed, or basis's resolution over the enum, the base URL and the
-/// environment. [`settle`] decides which; [`assemble`] is what each answer
-/// does to mentra's builder chain.
+/// constructed, a ring of gateways basis builds members for, or basis's
+/// resolution over the enum, the base URL and the environment. [`settle`]
+/// decides which; [`assemble`] is what each answer does to mentra's builder
+/// chain.
 pub(super) enum ProviderSource {
     Host(HostProvider),
+    /// The members are built at assembly, in `wire`, under `provider`'s id —
+    /// the two things a ring still reads from the builder, exactly as a lone
+    /// base URL does.
+    Ring {
+        spec: GatewayRingSpec,
+        provider: BuiltinProvider,
+    },
     Resolved(provider::ProviderChoice),
 }
 
@@ -61,24 +69,32 @@ pub(super) enum ProviderSource {
 ///
 /// A host-supplied instance, at either provider abstraction level, is an answer
 /// rather than a preference: with one present, resolution — and with it the
-/// environment — is skipped entirely, and `provider`/`base_url`/`api_key` set
-/// beside it are each refused by name with
+/// environment — is skipped entirely, and `provider`/`base_url`/`api_key`/
+/// `gateway_ring` set beside it are each refused by name with
 /// [`provider::ProviderError::AmbiguousProviderSource`], whichever was set. A
 /// silent priority here would be a `with_provider` that silently stopped
-/// meaning anything, so this checks all three before choosing either path
+/// meaning anything, so this checks all four before choosing either path
 /// rather than letting one win quietly.
+///
+/// A gateway ring is the same kind of answer for the *endpoint* question, so
+/// `base_url` and `api_key` are refused beside it — but `provider` is not: a
+/// ring is several base URLs, and a base URL reads `with_provider` for the id
+/// to file its models under. The ring reads it for the same reason.
 pub(super) fn settle(
     host_provider: Option<HostProvider>,
+    gateway_ring: Option<GatewayRingSpec>,
     provider: Option<BuiltinProvider>,
     base_url: Option<String>,
     api_key: Option<String>,
 ) -> Result<ProviderSource, RunError> {
-    match host_provider {
-        Some(host) => {
+    let gateway_ring = gateway_ring.filter(GatewayRingSpec::is_stated);
+    match (host_provider, gateway_ring) {
+        (Some(host), gateway_ring) => {
             for (also_set, knob) in [
                 (provider.is_some(), "with_provider"),
                 (base_url.is_some(), "with_base_url"),
                 (api_key.is_some(), "with_api_key"),
+                (gateway_ring.is_some(), "with_gateway_ring"),
             ] {
                 if also_set {
                     return Err(provider::ProviderError::AmbiguousProviderSource { knob }.into());
@@ -86,7 +102,21 @@ pub(super) fn settle(
             }
             Ok(ProviderSource::Host(host))
         }
-        None => Ok(ProviderSource::Resolved(provider::resolve_with(
+        (None, Some(spec)) => {
+            for (also_set, knob) in [
+                (base_url.is_some(), "with_base_url"),
+                (api_key.is_some(), "with_api_key"),
+            ] {
+                if also_set {
+                    return Err(provider::ProviderError::AmbiguousProviderSource { knob }.into());
+                }
+            }
+            Ok(ProviderSource::Ring {
+                spec,
+                provider: provider.unwrap_or(provider::DEFAULT_COMPATIBLE_PROVIDER),
+            })
+        }
+        (None, None) => Ok(ProviderSource::Resolved(provider::resolve_with(
             provider,
             base_url.as_deref(),
             api_key.as_deref(),
@@ -109,6 +139,14 @@ pub(super) fn assemble(
 ) -> Result<(mentra::Runtime, ProviderId), RunError> {
     match source {
         ProviderSource::Host(host) => Ok(((host.install)(builder).build()?, host.id)),
+        // Members built here in the wire named, then registered through the
+        // same provider-core seam a host's own instance takes. What the ring
+        // does after this point is mentra's (ADR-0027).
+        ProviderSource::Ring { spec, provider } => {
+            let ring = gateway_ring::assemble(spec, provider, wire)?;
+            let id = ProviderId::from(provider);
+            Ok((builder.with_registered_provider(ring).build()?, id))
+        }
         ProviderSource::Resolved(choice) => {
             let assembled = match (&choice.base_url, wire) {
                 // mentra's own door for a compatible endpoint, keyed or not;
