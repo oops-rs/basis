@@ -601,6 +601,20 @@ compatibility assumption; native provider presets retain Mentra's Hybrid state
 chaining. The question does not arise on `chat/completions`, which has no server-side
 conversation state to chain.
 
+More than one gateway to the same model is `RuntimeBuilder::with_gateway_ring`, a base
+URL said more than once: each `GatewayMember` is a URL and its own key, built exactly as a
+lone base URL is — same normalization, same wire, same provider id — and the ring of them
+is the runtime's one provider. The ring prefers the first member, rotates to the next
+after a streak of failures (or at once on a `4xx` that is not a rate limit), and finishes
+the failing attempt on the new member, so nothing above the provider learns a rotation
+happened; `with_gateway_ring_policy` sets the streak and whether the ring drifts back,
+`with_gateway_ring_observer` is how a host's logs find out which gateway answered. The
+rotation itself is mentra's `GatewayRing`; basis states the members and never touches the
+provider after `build` ([ADR-0027](adr/0027-gateway-failover-lives-below-basis.md)).
+Members must front the same upstream serving the same model — a replayed transcript
+carrying one vendor's reasoning items is refused by another's endpoint — and basis
+documents that rather than checking it.
+
 A repository can state its own answer instead of relying on the flag or the
 variable. `.basis/config.json` — `provider`, `model`, `effort`, and in the
 global `config.json` only, `base_url` — layers under everything an invocation
