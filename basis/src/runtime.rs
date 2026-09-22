@@ -159,6 +159,15 @@ impl Default for RetryPolicy {
 /// without it.
 pub use mentra::provider::ResponsesTransport;
 
+/// How a Responses request treats provider-side conversation state, as
+/// [`RuntimeBuilder::with_responses_state_mode`] takes it.
+///
+/// Re-exported beside [`ResponsesTransport`] above and for its reason. The
+/// default, [`ResponsesStateMode::ReplayOnly`], is mentra's and needs no
+/// method: basis replays a transcript on every request, so there is nothing a
+/// chained id could add that the request does not already carry.
+pub use mentra::provider::ResponsesStateMode;
+
 /// Which builtin file tools the model is offered, as
 /// [`RuntimeBuilder::with_file_tools`] takes it.
 ///

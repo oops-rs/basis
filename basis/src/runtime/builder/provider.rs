@@ -16,7 +16,9 @@
 
 use mentra::{BuiltinProvider, ModelSelector, Provider};
 
-use super::{HostProvider, ResponsesTransport, RetryPolicy, RuntimeBuilder, Wire};
+use super::{
+    HostProvider, ResponsesStateMode, ResponsesTransport, RetryPolicy, RuntimeBuilder, Wire,
+};
 use crate::runtime::ProviderRetry;
 
 impl RuntimeBuilder {
@@ -377,6 +379,32 @@ impl RuntimeBuilder {
     pub fn with_responses_transport(self, transport: ResponsesTransport) -> Self {
         Self {
             responses_transport: Some(transport),
+            ..self
+        }
+    }
+
+    /// Chooses whether Responses requests chain a `previous_response_id`.
+    ///
+    /// [`ResponsesStateMode::ReplayOnly`] by default, and that default is the
+    /// one basis wants: every request carries the projected transcript, and
+    /// nothing elides the items a chain would repeat, so a chained id can only
+    /// hand the endpoint the same context twice. It is also the safe answer
+    /// about *whose* context — a chain head belongs to a provider scope, and a
+    /// host that got that wrong would chain one conversation from another.
+    ///
+    /// So this exists for the host that wants chaining anyway: an endpoint
+    /// whose pricing or routing rewards a chained id despite the repetition.
+    /// Stating [`Hybrid`](ResponsesStateMode::Hybrid) or
+    /// [`Stateful`](ResponsesStateMode::Stateful) here says so once, for the
+    /// runtime, instead of restating a complete `ProviderRequestOptions` on
+    /// every run profile to change one field.
+    ///
+    /// Read back through `Runtime::mentra_runtime().responses_state_mode()`,
+    /// beside the transport's reader and for its reason.
+    #[must_use]
+    pub fn with_responses_state_mode(self, state_mode: ResponsesStateMode) -> Self {
+        Self {
+            responses_state_mode: Some(state_mode),
             ..self
         }
     }
