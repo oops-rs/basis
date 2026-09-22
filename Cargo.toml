@@ -321,9 +321,3 @@ strip = true
 opt-level = "s"
 lto = true
 codegen-units = 1
-
-# Temporary, until mentra 0.28.5 is published: per-agent conversation scopes
-# and `with_responses_state_mode`. Remove once it is out.
-[patch.crates-io]
-mentra = { path = "../mentra/mentra" }
-mentra-provider = { path = "../mentra/mentra-provider" }
