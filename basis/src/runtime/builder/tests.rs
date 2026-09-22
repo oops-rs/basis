@@ -910,6 +910,31 @@ fn a_chosen_transport_reaches_mentras_own_runtime() {
 }
 
 #[test]
+fn a_chosen_state_mode_reaches_mentras_own_runtime() {
+    // Same seam as the transport above, and the same half that matters. Unset
+    // is the interesting case here: basis wants mentra's default, so restating
+    // it would be a second opinion to keep in step.
+    let chosen = offline()
+        .with_responses_state_mode(ResponsesStateMode::Hybrid)
+        .build()
+        .expect("builds offline");
+
+    assert_eq!(
+        chosen.mentra_runtime().responses_state_mode(),
+        Some(ResponsesStateMode::Hybrid)
+    );
+    assert_eq!(
+        offline()
+            .build()
+            .expect("builds offline")
+            .mentra_runtime()
+            .responses_state_mode(),
+        None,
+        "unset must leave the choice to mentra, whose default is ReplayOnly"
+    );
+}
+
+#[test]
 fn the_last_word_about_the_transport_is_the_one_that_counts() {
     // The rule every single-valued knob here follows: a helper that hands out
     // websocket builders has to be overridable by a caller that wants HTTP.

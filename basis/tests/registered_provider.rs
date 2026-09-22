@@ -1,10 +1,12 @@
 //! A customized provider-core instance through basis's supported runtime seam.
 //!
 //! This test deliberately uses only `basis` exports. Besides proving that a
-//! customized Responses definition reaches a prepared run, it keeps the
-//! caller's clone and proves that clone shares the registered provider's
-//! session state. That is the property a host needs to prewarm the connection
-//! the real run will use instead of an unrelated session.
+//! customized Responses definition reaches a prepared run, it pins where the
+//! retained clone and the run meet and where they do not: they share the
+//! *endpoint* — the client, its pool and any warmed connection, which is the
+//! property a host prewarms for — and they do not share the *conversation*.
+//! mentra mints a conversation scope per agent, so the run's response chain is
+//! its own and cannot be read or overwritten by another one.
 
 use std::{
     borrow::Cow,
@@ -63,7 +65,7 @@ fn pinned(workspace: &Path, runtime: Arc<Runtime>) -> WorkspaceBuilder {
 }
 
 #[tokio::test]
-async fn a_retained_clone_shares_the_registered_responses_session() {
+async fn a_retained_clone_shares_the_endpoint_but_not_the_conversation() {
     let endpoint = ScriptedEndpoint::start();
     let provider_id = provider_core::ProviderId::new("custom-responses");
     let mut definition = provider_core::responses::openai_definition();
@@ -124,8 +126,8 @@ async fn a_retained_clone_shares_the_registered_responses_session() {
     assert_eq!(report.final_message.as_deref(), Some("reply-2"));
     assert_eq!(
         provider.session().latest_response_id().as_deref(),
-        Some("resp_2"),
-        "the retained clone must observe state written by the actual run"
+        Some("resp_1"),
+        "the run's chain is the run's own; it must not land on the host's clone"
     );
 
     let post_payloads = endpoint
@@ -137,9 +139,16 @@ async fn a_retained_clone_shares_the_registered_responses_session() {
             serde_json::from_str::<serde_json::Value>(body).expect("request body is JSON")
         })
         .collect::<Vec<_>>();
-    assert_eq!(post_payloads.len(), 2);
+    assert_eq!(
+        post_payloads.len(),
+        2,
+        "both requests reach the one scripted endpoint, which is the shared half"
+    );
+    // Neither chains: `ReplayOnly` is the default, because both requests carry
+    // their whole transcript already. The run would not have chained `resp_1`
+    // even if it could still see it.
     assert!(post_payloads[0].get("previous_response_id").is_none());
-    assert_eq!(post_payloads[1]["previous_response_id"], "resp_1");
+    assert!(post_payloads[1].get("previous_response_id").is_none());
 }
 
 /// The same retained-clone seam, over the WebSocket transport: the host opens

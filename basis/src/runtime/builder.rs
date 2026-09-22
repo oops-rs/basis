@@ -43,7 +43,8 @@ pub(crate) use history::History;
 pub(in crate::runtime) use provider_settlement::HostProvider;
 
 use super::{
-    FileToolProfile, ResponsesTransport, RetryPolicy, Runtime, ToolResultPolicy, Wire,
+    FileToolProfile, ResponsesStateMode, ResponsesTransport, RetryPolicy, Runtime,
+    ToolResultPolicy, Wire,
     executor::{CommandTargets, TargetedExecutor},
     interception::HostInterceptors,
 };
@@ -96,6 +97,13 @@ pub struct RuntimeBuilder {
     /// default is mentra's to state, basis has no business restating it, and
     /// `None` here means the builder chain never mentions transport at all.
     responses_transport: Option<ResponsesTransport>,
+    /// How mentra treats provider-side conversation state
+    /// ([`with_responses_state_mode`](Self::with_responses_state_mode)).
+    ///
+    /// An `Option` for the same reason as
+    /// [`responses_transport`](Self::responses_transport) above: the default is
+    /// mentra's to state, and `None` means the chain never mentioned it.
+    responses_state_mode: Option<ResponsesStateMode>,
     /// Which request format a custom endpoint is spoken to in
     /// ([`with_wire`](Self::with_wire)).
     ///
@@ -187,6 +195,7 @@ impl std::fmt::Debug for RuntimeBuilder {
             .field("provider_retry", &self.retry_policy.schedule)
             .field("provider_retry_budget", &self.retry_policy.budget)
             .field("responses_transport", &self.responses_transport)
+            .field("responses_state_mode", &self.responses_state_mode)
             .field("wire", &self.wire)
             .field("file_tools", &self.file_tools)
             .field("delegation_depth", &self.delegation_depth)
@@ -223,6 +232,7 @@ impl Default for RuntimeBuilder {
             interceptors: Vec::new(),
             retry_policy: RetryPolicy::default(),
             responses_transport: None,
+            responses_state_mode: None,
             wire: Wire::ChatCompletions,
             file_tools: FileToolProfile::Split,
             command_environment: BTreeMap::new(),
@@ -611,6 +621,13 @@ impl RuntimeBuilder {
         // second opinion to keep in step with upstream's first.
         let builder = match self.responses_transport {
             Some(transport) => builder.with_responses_transport(transport),
+            None => builder,
+        };
+
+        // Only when the host named one, for the reason directly above: mentra
+        // owns the default, and it is already the one basis wants.
+        let builder = match self.responses_state_mode {
+            Some(state_mode) => builder.with_responses_state_mode(state_mode),
             None => builder,
         };
 

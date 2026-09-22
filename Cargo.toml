@@ -5,7 +5,7 @@ resolver = "3"
 [workspace.package]
 # One version across the five: they are one product split by dependency
 # weight (ADR-0011), not five things that release on their own schedules.
-version = "0.12.2"
+version = "0.12.3"
 edition = "2024"
 rust-version = "1.88"
 license = "MIT"
@@ -241,7 +241,12 @@ basis-tasks = { version = "0.12", path = "basis-tasks" }
 # persistent store is the file-backed one, which is exactly ADR-0023's
 # posture — basis persists to files and links no database — so nothing
 # re-offers it.
-mentra = { version = "0.28.1", default-features = false }
+# The 0.28.5 floor is `with_responses_state_mode`, which
+# `RuntimeBuilder::with_responses_state_mode` forwards to, and the per-agent
+# conversation scope underneath it: before 0.28.5 every agent in a process
+# shared one response chain and one turn-state, so a host running a
+# conversation per chat had each chat reading the others'.
+mentra = { version = "0.28.5", default-features = false }
 
 async-trait = "0.1"
 # ACP carries an image in a prompt as base64; basis's `PromptPart` carries the
