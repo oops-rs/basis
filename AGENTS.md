@@ -26,16 +26,17 @@ implementation.
 - The core principle: **the core has no opinions** — no task-specific types,
   pipelines, or vocabulary (PROPOSAL.md Bet 4).
 - **mentra/basis split**: capabilities generic enough for any harness (session branching,
-  compaction lifecycle, hook points, MCP client) belong in mentra, not here. basis keeps
-  conventions and protocol: context discovery, ACP mapping, the CLI grammar. When basis
+  compaction lifecycle, hook points, MCP client, A2A client) belong in mentra, not here. basis
+  keeps conventions and protocol: context discovery, ACP and A2A mapping, the CLI grammar. When basis
   hits a mentra gap, file a mentra issue even if fixing it immediately.
-- **Five crates, split by dependency weight** (ADR-0011), so new code has one right home:
+- **Six crates, split by dependency weight** (ADR-0011), so new code has one right home:
   `basis` is the SDK and carries no protocol, no transport, and no TTY code; `basis-host`
   is the adapter-neutral host kit over it (ADR-0025); `basis-tasks` is the durable task layer
-  (ADR-0022); `basis-acp` is the ACP adapter; `basis-cli` publishes the `basis` binary over
-  all four libraries. Anything that would put a JSON-RPC, websocket, or
-  terminal dependency into `basis` belongs in one of the other four. MCP lives behind
-  `basis`'s default-on `mcp` feature (ADR-0012).
+  (ADR-0022); `basis-acp` is the ACP adapter; `basis-a2a` is the A2A server, the one crate
+  that links an HTTP server (ADR-0028); `basis-cli` publishes the `basis` binary over all five
+  libraries. Anything that would put a JSON-RPC, HTTP-server, websocket, or terminal
+  dependency into `basis` belongs in one of the other five. MCP and the A2A client live
+  behind `basis`'s default-on `mcp` and `a2a` features (ADR-0012, ADR-0028).
 
 ## Workflow Discipline
 

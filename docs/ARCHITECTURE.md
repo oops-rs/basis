@@ -1,6 +1,6 @@
 # basis — Architecture
 
-> rev 15 · 2026-09-02 · **basis** — the minimal set everything else is built from
+> rev 16 · 2026-10-09 · **basis** — the minimal set everything else is built from
 > The *how*. For the *why* — problem, idea, bets — see [`PROPOSAL.md`](PROPOSAL.md);
 > locked decisions live in [`adr/`](adr/); deferred ideas in [`proposals/`](proposals/);
 > research grounding in [`p0-groundwork.md`](p0-groundwork.md).
@@ -30,7 +30,10 @@
 > adapter-neutral approval policy, served-session source, runtime/workspace
 > pool, and turn discipline have since moved out of ACP into `basis-host`, with
 > ACP retaining only protocol translation (ADR-0025). Programmatic hosts can
-> now supply typed hooks and declared tools without file discovery. The closed ledger and
+> now supply typed hooks and declared tools without file discovery. A2A became the
+> agent-to-agent protocol beside ACP (ADR-0028): a sixth crate, `basis-a2a`, serves any
+> workspace's agent to other agents over durable `basis-tasks`, and mentra's A2A client,
+> configured by `.basis/a2a.json`, puts remote agents in the roster. The closed ledger and
 > phases are in [`archive/REDESIGN.md`](archive/REDESIGN.md).
 > Reference bar: [pi](https://github.com/earendil-works/pi) (earendil-works) — minimal core, complete harness.
 > General-purpose: no domain assumptions. Periodic bug-checking is one use case, never a design input.
@@ -261,12 +264,16 @@ flowchart LR
     zed["Zed · JetBrains"]
     web["acp-ui (web)"]
   end
+  peers["other agents (A2A)"]
   subgraph bin["basis — the binary"]
     entry["CLI grammar · terminal approver"]
     br["ws bridge (extractable)"]
   end
   subgraph adapter["basis-acp — the ACP adapter"]
     srv["server · wire session mapping · mode presentation"]
+  end
+  subgraph a2a["basis-a2a — the A2A server"]
+    a2asrv["JSON-RPC + SSE · agent card · task projection"]
   end
   subgraph tasks["basis-tasks — durable tasks"]
     durable["handles · inbox · attach lock · journal"]
@@ -278,7 +285,7 @@ flowchart LR
     ws["Workspace — opened once: context · model · MCP · seams"]
     lrt["Runtime — one per process: provider · credential · history · host interceptors"]
     ctx["context: AGENTS.md · skills · templates"]
-    ext["declared tools · interception (2 bindings) · MCP client (mcp feature)"]
+    ext["declared tools · interception (2 bindings) · MCP client (mcp) · A2A client (a2a)"]
     runs["runs — minted cheaply: typed output · bounds · cancel · fan-in"]
     sess["sessions · compaction"]
     rt["Mentra runtime"]
@@ -288,6 +295,10 @@ flowchart LR
   end
   llm[("providers")]
   host["a Rust host, in-process"]
+  peers -- http --> a2asrv
+  entry --> a2asrv
+  a2asrv --> durable
+  ext -- http --> peers
   zed -- stdio --> entry
   web -- ws --> br
   br --> srv
@@ -313,18 +324,28 @@ flowchart LR
 ```
 
 - **Crate layering mirrors pi's package layering**: mentra-provider ≈ pi-ai, mentra ≈
-  pi-agent-core, basis ≈ pi-coding-agent minus TUI. Basis is itself five crates,
+  pi-agent-core, basis ≈ pi-coding-agent minus TUI. Basis is itself six crates,
   split by dependency weight rather than by release schedule (they share one version):
   **`basis`** is the in-process SDK and carries no protocol, no transport, and no TTY
   code; **`basis-host`** is the adapter-neutral approval, session, and served-workspace kit
   over it (ADR-0025); **`basis-tasks`** is the durable task layer, reachable from Rust without
   the binary (ADR-0022); **`basis-acp`** is the ACP adapter over the SDK and host kit, opt-in by
-  dependency; **`basis-cli`** publishes the `basis` binary over all four libraries, and the explicit
-  `basis serve --acp` command is what an editor spawns. MCP is a
-  default-on `mcp` feature of `basis`, so an embedder can compile a core that has never
-  heard of it (ADR-0012). The websocket bridge stays in the binary, marked extractable: it
+  dependency; **`basis-a2a`** is the A2A server over `basis-tasks`, and the only crate that links
+  an HTTP server (ADR-0028); **`basis-cli`** publishes the `basis` binary over all five libraries,
+  and the explicit `basis serve --acp` command is what an editor spawns. MCP and the A2A client
+  are default-on `mcp` and `a2a` features of `basis`, so an embedder can compile a core that has
+  never heard of either (ADR-0012, ADR-0028). The websocket bridge stays in the binary, marked extractable: it
   is ACP-ecosystem tooling with no basis-specific knowledge, and never an identity argument
   for basis.
+- **An A2A task is a basis task** (ADR-0028). `basis-a2a` runs no lifecycle of its own: each
+  accepted message is one detached `basis-tasks` spawn, a `contextId` is a conversation continued
+  with `Continuation::Named`, the terminal record is the A2A state, and `events.jsonl` is the SSE
+  stream. The serving process drives what it accepted and resumes the unsettled tasks on open, so
+  a restart costs a turn, never a task. What A2A adds — ids, the caller's message — is an index
+  under `Tasks::host_dir("a2a")`, never inside a task directory. Inbound runs never prompt
+  (`InboundApproval` has no such variant), have no shell unless granted, and a non-loopback bind
+  needs a bearer token. The other direction is mentra's client: each agent in `.basis/a2a.json`
+  is one `a2a__<name>` tool with `External` side effects, so the approval gate sees every call.
 - **The host kit moves behavior; it does not generalize it** (ADR-0025). `ApprovalPolicy`
   and its session-scoped remembered answers are shared by ACP, tasks, and the CLI, and
   `PolicyGate` beside them is what a host with a *switchable* mode installs on a live session so

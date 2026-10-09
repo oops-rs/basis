@@ -8,8 +8,8 @@ basis is an agent harness you **embed**. `basis` is the harness itself, as a lib
 no protocol, no transport and no terminal code, so an embedding host's dependency graph states what
 it uses ([ADR-0011](docs/adr/0011-layered-crates.md)). `basis-host` is the adapter-neutral host kit
 over it ([ADR-0025](docs/adr/0025-the-host-kit-is-a-crate.md)); `basis-tasks` is the durable task
-layer ([ADR-0022](docs/adr/0022-the-task-layer-is-a-crate.md)); `basis-acp` and `basis-cli` are the
-protocol and command shells.
+layer ([ADR-0022](docs/adr/0022-the-task-layer-is-a-crate.md)); `basis-acp`, `basis-a2a` and
+`basis-cli` are the protocol and command shells.
 
 ```rust
 // [dependencies] basis = "0.11"
@@ -278,7 +278,7 @@ every `BASIS_*` variable, and which wins when two say the same thing.
 Details of each, and of the one `spawn` tool carrying both commands and delegation
 ([ADR-0016](docs/adr/0016-one-delegation-surface.md)), are in [docs/ARCHITECTURE.md](docs/ARCHITECTURE.md).
 
-## The same core, two shells
+## The same core, three shells
 
 `basis serve --acp` speaks the [Agent Client Protocol](https://agentclientprotocol.com) (JSON-RPC 2.0
 over stdio) over `basis`'s event stream, so any ACP client drives it with no basis-specific client
@@ -290,6 +290,16 @@ model and the reasoning effort per session through `session/set_config_option`, 
 alongside its text. `basis serve --bridge` puts
 the same server behind a websocket for a browser client, binding loopback and serving nothing until
 an `--allow-origin` is named — a websocket handshake is exempt from the same-origin policy.
+
+`basis serve --a2a <ADDR>` serves the workspace's agent to *other agents* over
+[A2A](https://a2a-protocol.org/v1.0.0/specification) — the JSON-RPC binding with SSE streaming, and
+an Agent Card at `/.well-known/agent-card.json`
+([ADR-0028](docs/adr/0028-a2a-is-the-agent-to-agent-protocol.md)). An A2A task *is* a durable
+basis task, so it survives the server restarting and `basis list` shows it; a `contextId` is a
+conversation, continued by the next message that names it. The other direction needs no command:
+name a remote agent in `.basis/a2a.json` and the model gets it as one tool, `a2a__<name>`, put to
+the approver like any external call. ACP is how a person drives an agent, MCP is how an agent
+calls tools, A2A is how one agent hands work to another.
 
 The CLI is one small grammar ([ADR-0015](docs/adr/0015-cli-grammar.md)). A positional argument that
 names no subcommand is a prompt; bare `basis` prints usage rather than starting a server:
@@ -313,6 +323,7 @@ basis watch <ID>                     # observe bounded/replayable progress
 basis inbox [ID]                     # list bounded message/reply summaries
 basis serve --acp                    # ACP server on stdio — what an editor spawns
 basis serve --bridge                 # the same ACP server on a websocket, for a browser
+basis serve --a2a 127.0.0.1:8080     # this workspace's agent, served to other agents over A2A
 basis fingerprint                    # the workspace's hash, for a loop you write yourself
 ```
 
@@ -441,7 +452,11 @@ ACP and works wherever a run is attached to a terminal, while `--resumable` work
 rather than silently allowing. Task state lives in a user-private (0700) data
 directory and never records a credential — an agent's executor is whichever process attached to
 it, holding that shell's environment, so there is nothing on disk to leak and no daemon holding a
-key on your behalf; the bridge's `Origin` allowlist starts empty. The boundary, where you want
+key on your behalf; the bridge's `Origin` allowlist starts empty. An A2A server is reached by
+other agents rather than by you, so its defaults are the narrow ones: no shell unless `--shell`,
+`never` unless `--approve always` (`prompt` is refused — there is nobody to ask), and any address
+but loopback refused unless `--token-env` names a bearer token. It does not terminate TLS; put a
+proxy in front and advertise it with `--public-url`. The boundary, where you want
 one, is the OS's — [docs/containerization.md](docs/containerization.md) has the read-only-root
 pattern, what it protects, and what it does not. A command routed to a registered target
 (`!@mac …`) is no different: it runs with whatever authority the executor the *host* wrote
@@ -476,9 +491,10 @@ that a third frontend otherwise had to recover from ACP, plus typed supplied hoo
 programmatic hosts. Named honestly, still open:
 the packages convention and provider OAuth; surfacing `team_*`, which stays hidden until a concrete
 use case asks for it; and **nobody has driven this from Zed or JetBrains yet** — it is verified against the
-protocol and its official client library, not against the ecosystem. The five workspace crates
-share one version; the 0.11 crates already published remain on crates.io, while `basis-host` joins
-them only when the user performs the next release. CI runs fmt, clippy at
+protocol and its official client library, not against the ecosystem. The six workspace crates
+share one version; `basis-a2a` joins the published ones only when the user performs the next
+release, and A2A is likewise verified against the official SDK's wire types and its own tests, not
+yet against a third-party agent. CI runs fmt, clippy at
 `-D warnings`, and the full suite on Linux, macOS and Windows, plus MSRV (1.88, edition 2024).
 
 Every addition faces one check: does it make embedding cheaper for a Rust host, is it a convention
