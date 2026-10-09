@@ -9,6 +9,8 @@
 > [`0022-the-task-layer-is-a-crate.md`](0022-the-task-layer-is-a-crate.md) and
 > [`0025-the-host-kit-is-a-crate.md`](0025-the-host-kit-is-a-crate.md).
 > Deferred work: [`proposals/0005-a2a-beyond-the-first-cut.md`](../proposals/0005-a2a-beyond-the-first-cut.md).
+> Amended by [`0029-a-remote-agent-is-a-spawn-target.md`](0029-a-remote-agent-is-a-spawn-target.md):
+> basis reaches a remote agent through `spawn "@agent …"`, not an `a2a__{agent}` tool (§1).
 
 ## Context
 
