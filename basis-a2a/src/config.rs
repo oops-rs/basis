@@ -11,7 +11,7 @@
 use std::{fmt, path::PathBuf, time::Duration};
 
 use a2a::AgentSkill;
-use basis::Effort;
+use basis::{Effort, SystemPrompt};
 use basis_tasks::Approve;
 
 /// How a served task's consequential calls are answered. There is no third
@@ -126,9 +126,20 @@ pub struct RunDefaults {
     pub(crate) deadline: Option<Duration>,
     pub(crate) tool_budget: Option<usize>,
     pub(crate) token_budget: Option<u64>,
+    pub(crate) system_prompt: Option<SystemPrompt>,
 }
 
 impl RunDefaults {
+    /// Replaces or appends to the workspace's own system prompt, as
+    /// `--system-prompt` / `--append-system-prompt` do for `basis spawn`.
+    #[must_use]
+    pub fn with_system_prompt(self, system_prompt: SystemPrompt) -> Self {
+        Self {
+            system_prompt: Some(system_prompt),
+            ..self
+        }
+    }
+
     #[must_use]
     pub fn with_provider(self, provider: impl Into<String>) -> Self {
         Self {
@@ -224,8 +235,9 @@ impl ServeConfig {
         Self { approval, ..self }
     }
 
-    /// Grants served tasks the shell (ADR-0006: an explicit grant, never a
-    /// default).
+    /// Grants served tasks the shell. Off by default, unlike the CLI and ACP
+    /// (ADR-0013): there the operator is the one asking for work, and here it
+    /// is another agent (ADR-0028 §4).
     #[must_use]
     pub fn with_shell(self) -> Self {
         Self {

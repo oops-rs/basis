@@ -50,6 +50,7 @@ Shorthand:
   basis ask <ID> \"question\"      enqueue and await that message's reply
   basis serve --acp               serve ACP on stdio
   basis serve --bridge            serve ACP over a websocket
+  basis serve --a2a 127.0.0.1:8080  serve this workspace's agent over A2A
 
 Exit codes:
   0  the run finished
@@ -183,18 +184,84 @@ pub(crate) struct InboxArgs {
 #[derive(Debug, clap::Args)]
 pub(crate) struct ServeArgs {
     /// Serve ACP over stdio.
-    #[arg(long, conflicts_with = "bridge", required_unless_present = "bridge")]
+    #[arg(
+        long,
+        conflicts_with_all = ["bridge", "a2a"],
+        required_unless_present_any = ["bridge", "a2a"]
+    )]
     pub(crate) acp: bool,
 
     /// Serve ACP over a websocket.
-    #[arg(long, conflicts_with = "acp", required_unless_present = "acp")]
+    #[arg(
+        long,
+        conflicts_with_all = ["acp", "a2a"],
+        required_unless_present_any = ["acp", "a2a"]
+    )]
     pub(crate) bridge: bool,
+
+    /// Serve this workspace's agent to other agents over A2A, listening on
+    /// ADDR. Anything but loopback needs --token-env.
+    #[arg(
+        long,
+        value_name = "ADDR",
+        conflicts_with_all = ["acp", "bridge"],
+        required_unless_present_any = ["acp", "bridge"]
+    )]
+    pub(crate) a2a: Option<SocketAddr>,
 
     #[command(flatten)]
     pub(crate) acp_args: AcpArgs,
 
     #[command(flatten)]
     pub(crate) bridge_args: BridgeArgs,
+
+    #[command(flatten)]
+    pub(crate) a2a_args: A2aArgs,
+}
+
+/// Knobs for `serve --a2a` (ADR-0028). Unlike ACP, the caller here is another
+/// agent: it names no workspace and answers no questions, so the workspace,
+/// the agent's card and its bounds are all the operator's to say.
+#[derive(Debug, Default, clap::Args)]
+pub(crate) struct A2aArgs {
+    /// Workspace the served agent works in. Defaults to the current directory.
+    #[arg(short = 'C', long, value_name = "DIR", requires = "a2a")]
+    pub(crate) workspace: Option<PathBuf>,
+
+    /// The agent's name on its card. Defaults to the workspace directory's name.
+    #[arg(long, value_name = "NAME", requires = "a2a")]
+    pub(crate) name: Option<String>,
+
+    /// What the agent does, as its card says to agents choosing whom to ask.
+    #[arg(long, value_name = "TEXT", requires = "a2a")]
+    pub(crate) description: Option<String>,
+
+    /// Environment variable holding the bearer token every caller must send.
+    /// Required for any address but loopback.
+    #[arg(long, value_name = "VAR", requires = "a2a")]
+    pub(crate) token_env: Option<String>,
+
+    /// The URL callers reach this server at, as the card advertises it — the
+    /// https:// address of the proxy in front, when there is one.
+    #[arg(long, value_name = "URL", requires = "a2a")]
+    pub(crate) public_url: Option<String>,
+
+    /// Let served tasks run commands. Off for A2A, unlike `spawn` and ACP:
+    /// the party asking for work is another agent, not you (ADR-0028).
+    #[arg(long, requires = "a2a")]
+    pub(crate) shell: bool,
+
+    /// Give up on each served task after this long: 90s, 30m, 2h.
+    #[arg(long, value_name = "DURATION", requires = "a2a")]
+    pub(crate) deadline: Option<DurationArg>,
+
+    /// Cap how many tool calls each served task may make.
+    #[arg(long, value_name = "N", requires = "a2a")]
+    pub(crate) tool_budget: Option<usize>,
+
+    /// Cap the tokens each served task may report using, input plus output.
+    #[arg(long, value_name = "N", requires = "a2a")]
+    pub(crate) token_budget: Option<u64>,
 }
 
 /// Knobs for the websocket bridge. These fields are only valid with
@@ -217,6 +284,33 @@ pub(crate) struct BridgeArgs {
 }
 
 impl ServeArgs {
+    /// Only `--a2a` takes these. Checked by the caller, as the bridge's own
+    /// options are: clap does not enforce `requires` against a mode another
+    /// mode conflicts with.
+    pub(crate) fn has_a2a_options(&self) -> bool {
+        let A2aArgs {
+            workspace,
+            name,
+            description,
+            token_env,
+            public_url,
+            shell,
+            deadline,
+            tool_budget,
+            token_budget,
+        } = &self.a2a_args;
+        workspace.is_some()
+            || name.is_some()
+            || description.is_some()
+            || token_env.is_some()
+            || public_url.is_some()
+            || *shell
+            || deadline.is_some()
+            || tool_budget.is_some()
+            || token_budget.is_some()
+    }
+
+    /// Only `--bridge` takes these; `--acp` and `--a2a` both refuse them.
     pub(crate) fn has_bridge_options(&self) -> bool {
         self.bridge_args.bind.is_some()
             || !self.bridge_args.allow_origin.is_empty()
@@ -290,16 +384,12 @@ pub(crate) struct AcpArgs {
     #[arg(long, value_name = "LEVEL")]
     pub(crate) effort: Option<EffortArg>,
 
-    /// When to ask before the agent changes anything. Defaults to asking the
-    /// ACP client, which is the point of a protocol with a permission request
-    /// in it.
-    #[arg(
-        long,
-        value_name = "MODE",
-        default_value = ApprovalPolicy::Prompt.type_tag(),
-        value_parser = approval_policy_parser()
-    )]
-    pub(crate) approve: ApprovalPolicy,
+    /// When to ask before the agent changes anything. ACP defaults to asking
+    /// the client, which is the point of a protocol with a permission request
+    /// in it. A2A defaults to never and refuses prompt: its caller is another
+    /// agent, with nobody behind it to answer.
+    #[arg(long, value_name = "MODE", value_parser = approval_policy_parser())]
+    pub(crate) approve: Option<ApprovalPolicy>,
 }
 
 #[derive(Debug, clap::Args)]
@@ -856,6 +946,74 @@ mod tests {
         assert!(Cli::try_parse_from(["basis", "serve", "--acp", "--bridge"]).is_err());
         assert!(Cli::try_parse_from(["basis", "serve", "--acp"]).is_ok());
         assert!(Cli::try_parse_from(["basis", "serve", "--bridge"]).is_ok());
+        assert!(Cli::try_parse_from(["basis", "serve", "--a2a", "127.0.0.1:0"]).is_ok());
+        assert!(Cli::try_parse_from(["basis", "serve", "--a2a", "127.0.0.1:0", "--acp"]).is_err());
+        assert!(
+            Cli::try_parse_from(["basis", "serve", "--a2a", "127.0.0.1:0", "--bridge"]).is_err()
+        );
+        assert!(Cli::try_parse_from(["basis", "serve", "--a2a"]).is_err());
+    }
+
+    #[test]
+    fn a2a_takes_its_card_bounds_and_token_and_nothing_takes_them_without_it() {
+        let Some(Command::Serve(serve)) = Cli::try_parse_from([
+            "basis",
+            "serve",
+            "--a2a",
+            "127.0.0.1:8080",
+            "-C",
+            "/repo",
+            "--name",
+            "helper",
+            "--token-env",
+            "HELPER_TOKEN",
+            "--shell",
+            "--deadline",
+            "10m",
+            "--approve",
+            "always",
+        ])
+        .expect("parses")
+        .command
+        else {
+            panic!("serve command should parse");
+        };
+        assert_eq!(serve.a2a, Some("127.0.0.1:8080".parse().unwrap()));
+        assert_eq!(serve.a2a_args.workspace, Some(PathBuf::from("/repo")));
+        assert_eq!(serve.a2a_args.name.as_deref(), Some("helper"));
+        assert_eq!(serve.a2a_args.token_env.as_deref(), Some("HELPER_TOKEN"));
+        assert!(serve.a2a_args.shell);
+        assert_eq!(serve.acp_args.approve, Some(ApprovalPolicy::Always));
+
+        for flag in [
+            ["--token-env", "T"],
+            ["--name", "x"],
+            ["--shell", "--no-shell"],
+        ] {
+            let mut argv = vec!["basis", "serve", "--acp"];
+            argv.extend(flag);
+            let Some(Command::Serve(serve)) = Cli::try_parse_from(&argv)
+                .expect("clap parses the complete shape")
+                .command
+            else {
+                panic!("serve command should parse");
+            };
+            assert!(serve.has_a2a_options(), "{flag:?} is refused without --a2a");
+        }
+    }
+
+    #[test]
+    fn acp_still_defaults_to_asking_its_client() {
+        let Some(Command::Serve(serve)) = Cli::try_parse_from(["basis", "serve", "--acp"])
+            .expect("parses")
+            .command
+        else {
+            panic!("serve command should parse");
+        };
+        assert_eq!(
+            serve.acp_args.approve, None,
+            "resolved to prompt by serve_acp"
+        );
     }
 
     #[test]

@@ -78,13 +78,13 @@ use std::process::ExitCode;
 use clap::{CommandFactory, Parser};
 
 use crate::{
-    cli::{Cli, Command, RunArgs},
+    cli::{Cli, Command, RunArgs, ServeArgs},
     exit::{EXIT_FAILED, EXIT_USAGE},
     fingerprint::execute_fingerprint,
     local::ClientError,
     route::{Route, route},
     run::execute_run,
-    serve::{serve_acp, serve_bridge},
+    serve::{serve_a2a, serve_acp, serve_bridge},
     shorthand::normalize,
 };
 
@@ -161,12 +161,24 @@ async fn main() -> ExitCode {
                 ExitCode::from(EXIT_FAILED)
             }
         },
-        Some(Command::Serve(args)) if args.acp && args.has_bridge_options() => {
-            eprintln!("basis: bridge options cannot be used with `basis serve --acp`");
+        Some(Command::Serve(args)) if !args.bridge && args.has_bridge_options() => {
+            let mode = if args.acp { "--acp" } else { "--a2a" };
+            eprintln!("basis: bridge options cannot be used with `basis serve {mode}`");
             eprintln!("next: remove the bridge flags or use `basis serve --bridge`");
             ExitCode::from(EXIT_USAGE)
         }
+        Some(Command::Serve(args)) if args.a2a.is_none() && args.has_a2a_options() => {
+            eprintln!("basis: A2A options need `basis serve --a2a <ADDR>`");
+            eprintln!("next: add --a2a <ADDR>, or remove the A2A flags");
+            ExitCode::from(EXIT_USAGE)
+        }
         Some(Command::Serve(args)) if args.acp => serve_acp(args.acp_args).await,
+        Some(Command::Serve(ServeArgs {
+            a2a: Some(bind),
+            acp_args,
+            a2a_args,
+            ..
+        })) => serve_a2a(acp_args, a2a_args, bind).await,
         Some(Command::Serve(args)) => serve_bridge(args.acp_args, args.bridge_args).await,
         None => usage(),
     }

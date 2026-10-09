@@ -95,9 +95,12 @@ JSON-RPC.**
    driving the non-terminal ones it accepted before — a restart costs latency,
    not work. `basis serve --a2a <addr>` is the binary's door to it.
 
-4. **Inbound runs never prompt.** A served agent runs under `never` (the
-   default) or `always`; `prompt` is refused at start-up, not discovered on the
-   first tool call. Shell still needs the explicit grant ADR-0006 requires.
+4. **Inbound runs never prompt, and have no shell unless granted.** A served
+   agent runs under `never` (the default) or `always`; `prompt` is refused at
+   start-up, not discovered on the first tool call. The shell is off unless the
+   operator grants it — the opposite of ADR-0013's default for the CLI and
+   ACP, and for ADR-0013's own reason: there the party asking for work is the
+   operator, who owns the boundary; here it is someone else's agent.
 
 5. **The first cut is narrow, and says so on the wire.** JSON-RPC is the one
    binding; version `1.0` is the one version, and a missing version is refused

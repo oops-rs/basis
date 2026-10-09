@@ -15,10 +15,13 @@
 //! already said why in the vocabulary of the half that failed, and wrapping
 //! that in one more "basis: " would only make it longer.
 
+mod a2a;
+
 use std::process::ExitCode;
 
 use basis::{ModelSelector, ShellAccess, provider};
 use basis_acp::StdioError;
+use basis_host::ApprovalPolicy;
 
 use crate::{
     bridge, cli,
@@ -39,6 +42,8 @@ const ACP_RETRY: &str =
     "next: retry with `basis serve --acp` after addressing the reported failure";
 const BRIDGE_RETRY: &str =
     "next: retry with `basis serve --bridge` after addressing the reported failure";
+
+pub(crate) use a2a::serve_a2a;
 
 pub(crate) async fn serve_acp(args: AcpArgs) -> ExitCode {
     let config = match acp_config(args) {
@@ -161,7 +166,8 @@ fn acp_config(args: AcpArgs) -> Result<basis_acp::ServeConfig, String> {
         template = template.with_effort(effort.into());
     }
 
-    Ok(basis_acp::ServeConfig::new(template).with_initial_mode(args.approve))
+    Ok(basis_acp::ServeConfig::new(template)
+        .with_initial_mode(args.approve.unwrap_or(ApprovalPolicy::Prompt)))
 }
 
 #[cfg(test)]

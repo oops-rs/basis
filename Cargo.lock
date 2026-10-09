@@ -368,6 +368,7 @@ dependencies = [
  "agent-client-protocol",
  "async-trait",
  "basis",
+ "basis-a2a",
  "basis-acp",
  "basis-host",
  "basis-tasks",

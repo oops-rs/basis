@@ -136,6 +136,9 @@ impl A2aService {
         if let Some(token_budget) = run.token_budget {
             spec = spec.with_token_budget(token_budget);
         }
+        if let Some(system_prompt) = &run.system_prompt {
+            spec = spec.with_system_prompt(system_prompt.clone());
+        }
         spec
     }
 }
