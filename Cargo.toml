@@ -5,7 +5,7 @@ resolver = "3"
 [workspace.package]
 # One version across the six: they are one product split by dependency
 # weight (ADR-0011), not six things that release on their own schedules.
-version = "0.13.0"
+version = "0.14.0"
 edition = "2024"
 rust-version = "1.88"
 license = "MIT"
@@ -16,14 +16,14 @@ homepage = "https://github.com/oops-rs/basis"
 [workspace.dependencies]
 # The layers of ADR-0011, named here so each crate states which of them it is
 # built on and cargo resolves one version of each.
-basis = { version = "0.13", path = "basis" }
-basis-a2a = { version = "0.13", path = "basis-a2a" }
-basis-acp = { version = "0.13", path = "basis-acp" }
-basis-host = { version = "0.13", path = "basis-host" }
+basis = { version = "0.14", path = "basis" }
+basis-a2a = { version = "0.14", path = "basis-a2a" }
+basis-acp = { version = "0.14", path = "basis-acp" }
+basis-host = { version = "0.14", path = "basis-host" }
 # The durable task layer (ADR-0017 over ADR-0019's substrate, D8): one crate
 # so the rules live once and are reachable from Rust, not only from the CLI
 # that is now merely their first client.
-basis-tasks = { version = "0.13", path = "basis-tasks" }
+basis-tasks = { version = "0.14", path = "basis-tasks" }
 
 # The 0.28 floor's reason is the same shape as 0.27's: one host-observable,
 # source-breaking addition basis's code does not compile against unmodified.
@@ -247,9 +247,13 @@ basis-tasks = { version = "0.13", path = "basis-tasks" }
 # conversation scope underneath it: before 0.28.5 every agent in a process
 # shared one response chain and one turn-state, so a host running a
 # conversation per chat had each chat reading the others'.
-# The 0.28.6 floor is mentra's `a2a` feature, which `basis`'s own `a2a`
-# feature enables: the A2A client and the `a2a__{agent}` tool (ADR-0028 §1).
-mentra = { version = "0.28.6", default-features = false }
+# The 0.28.6 floor was mentra's `a2a` feature, which `basis`'s own `a2a`
+# feature enables (ADR-0028 §1). The 0.28.7 floor is what `spawn` builds remote
+# delegation on (ADR-0029, mentra#61): `Session::register_tool` and
+# `Agent::register_tool` for the per-agent copy that teaches an agent its
+# remote agents, and the A2A exchange as `submit`/`settle`, so a task id is
+# recorded before the wait that a restart could otherwise lose.
+mentra = { version = "0.28.7", default-features = false }
 
 async-trait = "0.1"
 # ACP carries an image in a prompt as base64; basis's `PromptPart` carries the
@@ -338,9 +342,3 @@ strip = true
 opt-level = "s"
 lto = true
 codegen-units = 1
-
-# TEMPORARY: builds `basis` against the unreleased mentra branch that adds
-# `Session::register_tool` and the A2A exchange (mentra#61, ADR-0029). Remove
-# once mentra releases with them, before basis releases.
-[patch.crates-io]
-mentra = { path = "../mentra/mentra" }
