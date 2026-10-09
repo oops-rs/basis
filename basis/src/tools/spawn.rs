@@ -313,10 +313,11 @@ impl SpawnTool {
     /// `Ok` when this call names a target this runtime can reach, and the
     /// refusal the model should read instead when it does not.
     ///
-    /// Asked only of a command: [`Mode::Agent`] never carries a target, by
-    /// construction in the parser.
+    /// Asked only of a command: a delegation's target is a remote agent
+    /// (ADR-0029), which is the calling agent's workspace's to answer, not
+    /// this runtime's command targets.
     fn authorize_target(&self, spawn: &Spawn) -> Result<(), String> {
-        let Some(target) = spawn.target() else {
+        let (Mode::Command, Some(target)) = (spawn.mode(), spawn.target()) else {
             return Ok(());
         };
 
@@ -350,6 +351,11 @@ impl SpawnTool {
         self.authorize_target(spawn)?;
         match spawn.mode() {
             Mode::Command => Ok(SpawnDecision::Command),
+            Mode::Agent if spawn.target().is_some() => Err(format!(
+                "spawn has no remote agents to hand `@{}` to; write the task with no `@` to \
+                 hand it to a subagent here, or `@@` to begin it with a literal `@`",
+                spawn.target().unwrap_or_default()
+            )),
             Mode::Agent => {
                 let depth = self.depth.authorize_delegation(agent_id)?;
                 let (spec, workspace) = match self.policy.as_ref() {

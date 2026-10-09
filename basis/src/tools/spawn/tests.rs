@@ -139,11 +139,72 @@ fn the_escape_still_wins_over_the_routing_prefix() {
 }
 
 #[test]
-fn a_delegation_never_carries_a_target() {
-    // The dimension belongs to commands: a delegation is a subagent on this
-    // runtime, and there is nowhere else for it to be.
+fn a_delegation_with_no_at_is_a_subagent_here() {
     assert_eq!(parsed("find every TODO").target(), None);
     assert_eq!(parsed("!!@mac still a prompt").target(), None);
+}
+
+#[test]
+fn an_at_names_the_remote_agent_a_task_is_for() {
+    // ADR-0029: the same dimension a command has, on a delegation.
+    let spawn = parsed("@reviewer look at this diff");
+
+    assert_eq!(spawn.mode(), Mode::Agent);
+    assert_eq!(spawn.target(), Some("reviewer"));
+    assert_eq!(spawn.body(), "look at this diff");
+    assert!(!spawn.is_remote_wait());
+}
+
+#[test]
+fn an_agent_named_alone_waits_on_what_it_is_still_doing() {
+    // The one call whose body may be empty: it sends nothing new.
+    let spawn = parsed("  @reviewer  ");
+
+    assert_eq!(spawn.target(), Some("reviewer"));
+    assert_eq!(spawn.body(), "");
+    assert!(spawn.is_remote_wait());
+}
+
+#[test]
+fn a_doubled_at_is_a_task_that_begins_with_one() {
+    let spawn = parsed("@@channel is how the team pings everyone");
+
+    assert_eq!(spawn.mode(), Mode::Agent);
+    assert_eq!(spawn.target(), None);
+    assert_eq!(spawn.body(), "@channel is how the team pings everyone");
+}
+
+#[test]
+fn a_bad_agent_spelling_is_taught_the_working_one_and_the_escape() {
+    for (input, taught) in [
+        ("@", "`@<agent> <task>`"),
+        ("@ reviewer look", "`@<agent> <task>`"),
+        ("@src/main.rs explain this file", "letters, digits"),
+        ("@\"reviewer\" look", "letters, digits"),
+    ] {
+        let error = refusal(input);
+        assert!(error.contains(taught), "{input}: {error}");
+        assert!(error.contains("`@@`"), "{input} names the escape: {error}");
+    }
+}
+
+#[test]
+fn local_is_not_an_agent_name_either() {
+    let error = refusal("@local do it");
+
+    assert!(error.contains(LOCAL_TARGET), "{error}");
+}
+
+#[test]
+fn a_remote_delegation_is_not_a_command_target_question() {
+    // Command targets and remote agents are two registries: a runtime whose
+    // only command target is `mac` must not route `@mac …` to it.
+    let routed = SpawnTool::with_targets(["mac".to_string()]);
+
+    assert_eq!(
+        routed.authorize_target(&parsed("@mac look at this")),
+        Ok(())
+    );
 }
 
 #[test]

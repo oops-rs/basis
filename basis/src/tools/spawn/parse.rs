@@ -14,6 +14,10 @@
 //! the model had to make on every call, including the calls that have no
 //! target to name.
 //!
+//! ADR-0029 gives a delegation the same dimension: `@<agent> <task>` hands the
+//! task to a remote agent, `@<agent>` alone waits again on what that agent is
+//! still working on, and `@@` escapes a task that begins with a literal `@`.
+//!
 //! Nothing here touches the runtime, which is why it is a module of its own:
 //! the whole boundary is testable as a function.
 
@@ -39,7 +43,8 @@ pub(crate) const LOCAL_TARGET: &str = "local";
 pub enum Mode {
     /// `!…` — run this.
     Command,
-    /// Anything else — a prompt for a subagent.
+    /// Anything else — a task for a subagent here, or for a remote agent when
+    /// it begins `@<agent>`.
     Agent,
 }
 
@@ -56,15 +61,15 @@ impl Mode {
 }
 
 /// Every fact the spawn input parser owns: mode, normalized body, and optional
-/// command target. The working directory is not model input; the tool context
+/// target — where a command runs, or which remote agent a task is for. The working directory is not model input; the tool context
 /// resolves it later when building the authorization preview.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Spawn {
     mode: Mode,
     body: String,
-    /// Where the command runs, or `None` for *here* (ADR-0021). Always `None`
-    /// in [`Mode::Agent`]: a delegation is a subagent on this runtime, and
-    /// there is no other place for it to be.
+    /// Where a command runs (ADR-0021), or the remote agent a delegation is
+    /// for (ADR-0029); `None` for *here* — this process for a command, a
+    /// subagent on this runtime for a delegation.
     target: Option<String>,
 }
 
@@ -77,11 +82,18 @@ impl Spawn {
         &self.body
     }
 
-    /// The registered target this command named, or `None` for the local
-    /// executor. Never `Some("local")`: `local` is the reserved wire spelling
-    /// for the executor in this process, not a registered target name.
+    /// The target this call named — a command's executor, or a delegation's
+    /// remote agent — or `None` for here. Never `Some("local")`: `local` is the
+    /// reserved wire spelling for this process, not a name anything can take.
     pub fn target(&self) -> Option<&str> {
         self.target.as_deref()
+    }
+
+    /// Whether this is a delegation to a remote agent that hands it nothing
+    /// new: `@<agent>` alone, which waits again on that agent's outstanding
+    /// task (ADR-0029 §5). The one call whose body may be empty.
+    pub fn is_remote_wait(&self) -> bool {
+        self.mode == Mode::Agent && self.target.is_some() && self.body.is_empty()
     }
 }
 
@@ -135,8 +147,19 @@ fn read(raw: &str, mode: Mode) -> Result<Spawn, String> {
 
     if mode == Mode::Agent {
         // `!!` is the escape, and it consumes exactly one `!`: what remains
-        // still begins with the one the prompt meant to have.
-        return delegation(trimmed.strip_prefix('!').unwrap_or(trimmed));
+        // still begins with the one the prompt meant to have. It is read
+        // before `@`, so `!!@x` is a task that begins `!@x`.
+        if let Some(escaped) = trimmed.strip_prefix('!') {
+            return delegation(escaped);
+        }
+        // `@@` is the same escape for `@`, consuming exactly one of them.
+        if let Some(escaped) = trimmed.strip_prefix("@@") {
+            return delegation(&format!("@{escaped}"));
+        }
+        return match trimmed.strip_prefix('@') {
+            Some(addressed) => remote(addressed),
+            None => delegation(trimmed),
+        };
     }
 
     let rest = trimmed
@@ -220,6 +243,48 @@ fn command(body: &str, target: Option<String>) -> Result<Spawn, String> {
     })
 }
 
+/// `@<agent> <task>` — a delegation to a remote agent (ADR-0029), read here
+/// and nowhere else.
+///
+/// Read like `!@`'s target: the name runs to the first whitespace, a space
+/// straight after `@` names nothing, and every refusal spells the working form
+/// and the `@@` escape, because a task that merely happened to begin with `@`
+/// should be one rewrite away from going through.
+fn remote(rest: &str) -> Result<Spawn, String> {
+    if rest.is_empty() || rest.starts_with(char::is_whitespace) {
+        return Err(
+            "`@` names a remote agent and needs its name right after it: write \
+             `@<agent> <task>`, as `@reviewer look at this diff`, or `@@` to begin a task with \
+             a literal `@`"
+                .to_string(),
+        );
+    }
+
+    let (name, body) = rest.split_once(char::is_whitespace).unwrap_or((rest, ""));
+
+    if !is_target_name(name) {
+        return Err(format!(
+            "`{name}` is not an agent name: a name is letters, digits, `_` or `-`, as \
+             `@reviewer look at this diff`; write `@@` to begin a task with a literal `@`"
+        ));
+    }
+
+    if name == LOCAL_TARGET {
+        return Err(format!(
+            "`{LOCAL_TARGET}` is not an agent name: a task with no `@` already goes to a \
+             subagent here"
+        ));
+    }
+
+    Ok(Spawn {
+        mode: Mode::Agent,
+        // Empty is allowed here and only here: `@<agent>` alone waits on that
+        // agent's outstanding task rather than sending a new one.
+        body: body.trim().to_string(),
+        target: Some(name.to_string()),
+    })
+}
+
 fn delegation(body: &str) -> Result<Spawn, String> {
     let body = body.trim();
     if body.is_empty() {
@@ -231,8 +296,7 @@ fn delegation(body: &str) -> Result<Spawn, String> {
     Ok(Spawn {
         mode: Mode::Agent,
         body: body.to_string(),
-        // A delegation runs on this runtime, so there is nowhere else for it
-        // to be: the dimension belongs to commands only (ADR-0021).
+        // A delegation with no `@` is a subagent on this runtime.
         target: None,
     })
 }
