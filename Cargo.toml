@@ -336,3 +336,14 @@ strip = true
 opt-level = "s"
 lto = true
 codegen-units = 1
+
+# TEMPORARY: builds `basis` against the unreleased mentra branch that adds the
+# `a2a` feature (ADR-0028, Decision §1). mentra on crates.io is still 0.28.5
+# without it, and the branch keeps that version, so the `mentra` requirement
+# above is unchanged and resolves here. mentra-provider needs no patch of its
+# own: basis never names it, and mentra reaches it by path. Remove this
+# section once mentra releases with `a2a` — before basis releases, because a
+# published crate cannot carry a path patch and `cargo publish` would build
+# against the registry mentra that has no `a2a` feature to enable.
+[patch.crates-io]
+mentra = { path = "../mentra/mentra" }

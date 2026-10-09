@@ -58,7 +58,14 @@
 //!   none (ADR-0012). Custom tools remain, because MCP was only ever one of the
 //!   ways to reach them: [`tools::declared`] is core, and a workspace's
 //!   `.basis/tools.json` works in a build that has never heard of MCP.
+//! - **`a2a`** (default) — `.basis/a2a.json` discovery and the A2A binding
+//!   (ADR-0028): each named remote agent bridged into the roster as one
+//!   `a2a__{agent}` tool through mentra's A2A client. Built without it, the
+//!   crate names no agents, and mentra's client and the `a2a-lf` wire types
+//!   drop out of the tree with it, because mentra gates them too.
 
+#[cfg(feature = "a2a")]
+pub mod a2a;
 pub mod approval;
 pub mod budget;
 pub mod compaction;
@@ -87,6 +94,11 @@ pub mod templates;
 pub mod tools;
 pub mod workspace;
 
+#[cfg(feature = "a2a")]
+pub use a2a::{
+    A2aAgent, A2aAgentConfig, A2aConfig, A2aError, A2aLimits, A2aSource, DEFAULT_GLOBAL_A2A_FILE,
+    DEFAULT_WORKSPACE_A2A_FILE,
+};
 // `ToolSideEffectLevel` is mentra's, and comes to the root under the same rule
 // as `CancellationToken` below: `is_consequential` and
 // `ApprovalRequest::side_effect_level` both make a caller name it, and a policy

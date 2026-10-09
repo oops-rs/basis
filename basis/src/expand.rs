@@ -10,8 +10,12 @@
 //! handshake failure to find out why — so basis expands, and treats an unset
 //! variable with no default as an error rather than as an empty string.
 //!
-//! One implementation rather than one per reader, so the two files cannot come
-//! to disagree about what `${TOKEN:-}` means.
+//! `a2a.json` is the third reader, for the same reason with a remote agent in
+//! place of a program: what it names is a host to send work to, and the
+//! header that authenticates to it is the credential.
+//!
+//! One implementation rather than one per reader, so the files cannot come to
+//! disagree about what `${TOKEN:-}` means.
 //!
 //! The lookup is a parameter rather than a call to [`std::env::var`] so the
 //! rules below are testable without mutating the process environment.

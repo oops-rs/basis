@@ -23,8 +23,17 @@ categories = ["development-tools"]
 # compile time — and the day mentra gates its MCP client too, this is where
 # that gets forwarded.
 [features]
-default = ["mcp"]
+default = ["mcp", "a2a"]
 mcp = []
+# A2A is the agent-to-agent binding (ADR-0028) and sits beside `mcp` for the
+# same reason: one convention (`.basis/a2a.json`, the global `a2a.json`), one
+# adapter, droppable at compile time. Default-on so the file means the same
+# thing in every host built on the default features.
+#
+# Unlike `mcp`, this one does forward: mentra gates its A2A client behind its
+# own `a2a` feature, so turning this off drops the client and the `a2a-lf`
+# wire types underneath it rather than only basis's half.
+a2a = ["mentra/a2a"]
 
 # mentra streams the Responses wire format over HTTP+SSE or over a websocket,
 # and the second transport is the only reason tokio-tungstenite was ever in
