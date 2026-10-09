@@ -467,8 +467,11 @@ impl SpawnTool {
         self.authorize_target(spawn)?;
         match spawn.mode() {
             Mode::Command => Ok(SpawnDecision::Command),
-            Mode::Agent if let Some(name) = spawn.target() => self.authorize_remote(agent_id, name),
+            // Not an `if let` guard: those are newer than `rust-version`.
             Mode::Agent => {
+                if let Some(name) = spawn.target() {
+                    return self.authorize_remote(agent_id, name);
+                }
                 let depth = self.depth.authorize_delegation(agent_id)?;
                 let (spec, workspace) = match self.policy.as_ref() {
                     Some(_) => {
