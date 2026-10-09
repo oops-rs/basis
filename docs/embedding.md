@@ -18,6 +18,11 @@ basis = "0.8"
 MCP is a default-on `mcp` feature rather than a fixed part of the core:
 `default-features = false` compiles a `basis` with no MCP concept at all — no `.mcp.json`
 discovery, no servers registered ([ADR-0012](adr/0012-one-contract-many-bindings.md)).
+A2A sits beside it as the default-on `a2a` feature: `.basis/a2a.json` discovery,
+`WorkspaceBuilder::with_a2a`, and each named remote agent bridged as one `a2a__{agent}`
+tool through mentra's A2A client ([ADR-0028](adr/0028-a2a-is-the-agent-to-agent-protocol.md)).
+Off, it drops that client and the `a2a-lf` wire types with it, because mentra gates them
+behind its own `a2a` feature.
 
 ## A workspace opens once and mints runs
 

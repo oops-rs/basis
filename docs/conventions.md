@@ -27,6 +27,7 @@ configuration would be hiding it from the person who put it there.
 | Declared tools | `.basis/tools.json` | `tools.json` | host-supplied → workspace → global by tool name |
 | Subprocess hooks | `.basis/hooks.json` | `hooks.json` | runtime interceptors → host-supplied → global → workspace; all matching entries run until the first refusal |
 | MCP servers | `.mcp.json` | `mcp.json` | client-supplied → workspace → global, by server name |
+| A2A agents | `.basis/a2a.json` | `a2a.json` | host-supplied → workspace → global, by agent name |
 | Memories | `memory/` beside the runtime's store dir | `<config dir>/memory/` | workspace shadows global by memory name |
 
 A missing file is never an error. A file that exists and cannot be read or
@@ -34,10 +35,11 @@ parsed always is: the operator wrote it meaning something, and a silently
 skipped file is a capability the model's instructions assume and will not find.
 
 There is **no parent walk** for `.mcp.json`, `.basis/tools.json`,
-`.basis/hooks.json` or `.basis/config.json`. Instructions are prose and a
-monorepo's house rules should reach every crate inside it; these four name
-programs to run and credentials to run them with, and inheriting one from a
-directory nobody pointed basis at means running a program nobody chose.
+`.basis/hooks.json`, `.basis/config.json` or `.basis/a2a.json`. Instructions
+are prose and a monorepo's house rules should reach every crate inside it;
+these five name programs to run, agents to hand work to, and credentials to
+do either with, and inheriting one from a directory nobody pointed basis at
+means running a program — or briefing an agent — nobody chose.
 
 ### `AGENTS.md` / `CLAUDE.md`
 
@@ -249,6 +251,44 @@ as server `evil`, and a name like `evil_` joins its trailing `_` to a tool's
 leading `_` the same way — `evil_` with tool `_thing` encodes identically to
 `evil` with tool `__thing`. The rule applies wherever a server name comes
 from, not just this file.
+
+### `.basis/a2a.json`
+
+The remote agents this workspace can hand work to over
+[A2A](adr/0028-a2a-is-the-agent-to-agent-protocol.md), each bridged into the
+model's roster as one tool, `a2a__{agent}`:
+
+```json
+{"agents": {"nous": {"url": "https://nous.example.com", "headers": {"Authorization": "Bearer ${NOUS_TOKEN}"}}}}
+```
+
+`url` is the agent's base URL — its card is fetched from
+`/.well-known/agent-card.json` on that origin — or, when it has a path, the
+card's own URL. `headers` are sent on the card fetch and on every call. Every
+rule `.mcp.json` follows carries over: host-supplied agents
+(`WorkspaceBuilder::with_a2a`) outrank the workspace file, which outranks the
+global one, by name and whole; there is no parent walk; `${VAR}` expands in
+`url` and every header value; a name may not contain `__` or end in `_`; and a
+file that exists but names no `agents` is an error. Unlike `.mcp.json`, the
+format is basis's own, so an unknown key is refused like one in
+`.basis/config.json` — a misspelled `headers` would otherwise be an agent
+called without the credential its operator wrote down.
+
+A header may not travel over plaintext `http` to a non-loopback host, and the
+file has no key to say otherwise: a committed file cannot grant its own
+credential plaintext passage. A host that needs it builds the agent in code
+with mentra's `allowing_plaintext_credentials`. An `A2A-Version` header is
+refused too — the client speaks `1.0` and says so itself.
+
+Each card is fetched once, at open. An agent that cannot be reached warns and
+the open continues; it is still named in `run_started`'s `a2a_agents`, beside
+`a2a_files`, and in `Workspace::a2a_agents`. A name another workspace on the
+same runtime already holds comes back suffixed, as a server name does. A
+second open of the same directory that did not name the agent is not offered
+its tool, and a call to it is refused — the tool carries this open's
+credential. Every call reaches the approval gate as an `External` side effect,
+like an external MCP tool's. A repository's declared tools may not take the
+`a2a__` prefix.
 
 ### Memory files
 
