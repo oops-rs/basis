@@ -139,6 +139,13 @@ const LEGACY_SQLITE_FILENAME: &str = "runtime.sqlite";
 /// nobody said anything.
 const TRANSCRIPTS_DIRNAME: &str = "transcripts";
 
+/// Where a session's conversations with remote A2A agents are remembered,
+/// beside the store that holds the session itself (ADR-0029 §5): one file per
+/// agent id, so a resumed session picks up the remote work it had handed off
+/// rather than handing it off again.
+#[cfg(feature = "a2a")]
+const A2A_CONVERSATIONS_DIRNAME: &str = "a2a-conversations";
+
 /// The runtime identifier for conversations in `workspace`.
 ///
 /// Every caller that creates or enumerates a conversation must derive it from
@@ -336,6 +343,11 @@ pub fn forget_in(dir: &Path, agent_id: &str) -> Result<(), RunError> {
     // risk a leftover Global rule outliving the conversation that wrote it.
     rules.clear_rules(agent_id)?;
 
+    // The conversation's record of remote work it handed off is a row it
+    // wrote, too; it goes with the rest. Absent is the ordinary case.
+    #[cfg(feature = "a2a")]
+    crate::a2a::remote::forget(&a2a_conversations_in(dir), agent_id)?;
+
     Ok(())
 }
 
@@ -435,6 +447,14 @@ pub(crate) fn volatile() -> VolatileRuntimeStore {
 /// is for [`store_in`].
 pub(crate) fn transcripts_in(dir: &Path) -> PathBuf {
     dir.join(TRANSCRIPTS_DIRNAME)
+}
+
+/// Where a store under `dir` remembers its sessions' remote conversations,
+/// beside the sessions themselves so [`RuntimeBuilder::with_store_dir`](crate::RuntimeBuilder::with_store_dir)
+/// moves both.
+#[cfg(feature = "a2a")]
+pub(crate) fn a2a_conversations_in(dir: &Path) -> PathBuf {
+    dir.join(A2A_CONVERSATIONS_DIRNAME)
 }
 
 /// Where they go when nobody said where the history lives.

@@ -66,11 +66,9 @@ pub(crate) use builder::load_templates;
 use lifecycle::MintPosture;
 
 #[cfg(feature = "a2a")]
-use crate::a2a::connections::A2aConnections;
+use crate::a2a::remote::RemoteAgents;
 #[cfg(feature = "mcp")]
 use crate::mcp::connections::McpConnections;
-#[cfg(any(feature = "mcp", feature = "a2a"))]
-use crate::runtime::Bridge;
 use crate::{
     config::Config,
     context::WorkspaceContext,
@@ -206,9 +204,10 @@ pub struct Workspace {
     #[cfg(feature = "mcp")]
     #[allow(dead_code, reason = "held for its Drop")]
     mcp_connections: McpConnections,
+    /// The remote agents this open connected, recorded on every agent it
+    /// mints or resumes (ADR-0029 §3). `None` when none were configured.
     #[cfg(feature = "a2a")]
-    #[allow(dead_code, reason = "held for its Drop")]
-    a2a_connections: A2aConnections,
+    a2a_remote: Option<Arc<RemoteAgents>>,
 }
 
 /// Hand-written because neither the runtime nor the registration is `Debug`
@@ -294,6 +293,8 @@ impl Workspace {
             .runtime
             .agents()
             .record_for_workspace(session.agent_id(), tools);
+        #[cfg(feature = "a2a")]
+        self.teach_remote_agents(&mut session);
         if !spec.profile.decides_reasoning() {
             apply_effort(&mut session, spec.effort.or(self.effort))?;
         }
@@ -387,6 +388,8 @@ impl Workspace {
             .runtime
             .agents()
             .record_for_workspace(agent_id, self.resumed_tools(&session));
+        #[cfg(feature = "a2a")]
+        self.teach_remote_agents(&mut session);
         let model = if let Some(model) = spec.profile.resolved_model() {
             session.set_model(model.clone())?;
             model.id.clone()
@@ -507,10 +510,10 @@ impl Workspace {
         &self.mcp_servers
     }
 
-    /// The remote A2A agents bridged at open, by the names that took effect —
-    /// each one is the model's `a2a__{name}` tool. The configured name, unless
-    /// another workspace on the shared runtime already held it, in which case
-    /// it carries a deterministic suffix, as a server name does.
+    /// The remote A2A agents this workspace configured, by name — each one a
+    /// target the model reaches as `spawn "@<name> <task>"` (ADR-0029).
+    /// Verbatim: a remote agent is not a tool on the shared registry, so
+    /// nothing is claimed and no name is suffixed.
     ///
     /// Every configured agent is listed, reachable at open or not, so a host
     /// can see what the workspace asked for. Names only, for
@@ -606,10 +609,8 @@ impl Workspace {
     /// tool registered globally under an `mcp__`-shaped name is visible to
     /// every audience by the rule that makes globals global. Neither is a
     /// server this workspace configured, so neither is offered.
-    /// [`Runtime::foreign_bridged_tools`](crate::runtime::Runtime::foreign_bridged_tools)
-    /// is the whole rule, and it is asked again for `a2a__*` names: a
-    /// same-directory sibling's bridged agent, or a global shaped like one, is
-    /// hidden by the same reasoning.
+    /// [`Runtime::foreign_mcp_tools`](crate::runtime::Runtime::foreign_mcp_tools)
+    /// is the whole rule.
     ///
     /// Per mint rather than per open, because the shared registry moves as
     /// siblings come and go, and a roster is honest only about the registry it
@@ -637,18 +638,10 @@ impl Workspace {
         let mut agent = profile.apply_to(self.agent.clone());
 
         #[cfg(feature = "mcp")]
-        agent.tool_profile.hidden_tools.extend(
-            self.runtime
-                .foreign_bridged_tools(Bridge::Mcp, &self.mcp_servers),
-        );
-        // The same two cases for a bridged remote agent, which is worse to
-        // leak than most: the sibling's `a2a__*` tool carries the sibling's
-        // credential.
-        #[cfg(feature = "a2a")]
-        agent.tool_profile.hidden_tools.extend(
-            self.runtime
-                .foreign_bridged_tools(Bridge::A2a, &self.a2a_agents),
-        );
+        agent
+            .tool_profile
+            .hidden_tools
+            .extend(self.runtime.foreign_mcp_tools(&self.mcp_servers));
 
         // The third case an audience cannot express, and the one that is not
         // `mcp__`-shaped: a native tool a *sibling open of this directory*
@@ -675,9 +668,28 @@ impl Workspace {
             hidden: agent.tool_profile.hidden_tools.clone(),
             #[cfg(feature = "mcp")]
             mcp_servers: self.mcp_servers.clone(),
-            #[cfg(feature = "a2a")]
-            a2a_agents: self.a2a_agents.clone(),
             host_tools: self.host_tools.clone(),
+            #[cfg(feature = "a2a")]
+            remote: self.a2a_remote.clone(),
+        }
+    }
+
+    /// Gives a freshly minted or resumed session the copy of `spawn` that
+    /// knows this open's remote agents (ADR-0029 §4) — or nothing, when none
+    /// answered at open, so its model keeps the `spawn` every agent sees.
+    ///
+    /// Registered on the session's agent alone, which is the isolation: a
+    /// sibling open of this directory shares this audience but not this agent,
+    /// so it is neither told about these agents nor routed to them.
+    #[cfg(feature = "a2a")]
+    fn teach_remote_agents(&self, session: &mut Session) {
+        if let Some(copy) = self
+            .a2a_remote
+            .as_deref()
+            .and_then(|remote| self.runtime.spawn_tool().for_remote_agents(remote))
+            .map(crate::tools::SpawnTool::remembering)
+        {
+            session.register_tool(copy);
         }
     }
 
@@ -694,15 +706,7 @@ impl Workspace {
         let mut hidden = session.config().tool_profile.hidden_tools.clone();
 
         #[cfg(feature = "mcp")]
-        hidden.extend(
-            self.runtime
-                .foreign_bridged_tools(Bridge::Mcp, &self.mcp_servers),
-        );
-        #[cfg(feature = "a2a")]
-        hidden.extend(
-            self.runtime
-                .foreign_bridged_tools(Bridge::A2a, &self.a2a_agents),
-        );
+        hidden.extend(self.runtime.foreign_mcp_tools(&self.mcp_servers));
 
         hidden.extend(
             self.runtime
@@ -713,9 +717,9 @@ impl Workspace {
             hidden,
             #[cfg(feature = "mcp")]
             mcp_servers: self.mcp_servers.clone(),
-            #[cfg(feature = "a2a")]
-            a2a_agents: self.a2a_agents.clone(),
             host_tools: self.host_tools.clone(),
+            #[cfg(feature = "a2a")]
+            remote: self.a2a_remote.clone(),
         }
     }
 

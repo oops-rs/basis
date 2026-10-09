@@ -6,8 +6,6 @@
 //! model's string — they are handed a body, and a destination, that
 //! [`parse`](super::parse) already decided the meaning of.
 
-use std::sync::Arc;
-
 use mentra::{
     ContentBlock, DelegationArtifact, DelegationEdge, DelegationKind, DelegationStatus,
     SpawnedAgentStatus, SpawnedAgentSummary,
@@ -15,9 +13,9 @@ use mentra::{
     tool::{ToolContext, ToolResult},
 };
 
-use crate::runtime::agents::{AgentRegistry, AgentTools};
+use crate::runtime::agents::AgentTools;
 
-use super::{child::ChildSpec, depth::Depth};
+use super::{SpawnTool, child::ChildSpec};
 
 /// Runs a command on mentra's own execution path, at the place it named.
 ///
@@ -138,13 +136,14 @@ fn read_back(output: CommandOutput) -> ToolResult {
 ///   shape is mentra's `task` intrinsic's, because `spawn` replaces that door
 ///   (ADR-0016) and a reader should not have to know which one was used.
 pub(super) async fn delegate(
-    ledger: &Depth,
+    tool: &SpawnTool,
     ctx: &mut ToolContext<'_>,
     prompt: &str,
     depth: usize,
     spec: ChildSpec,
-    agents: Option<&Arc<AgentRegistry>>,
 ) -> ToolResult {
+    let ledger = &tool.depth;
+    let agents = tool.agents.as_ref();
     // Read before the child exists, because it is the *parent's* answer: what
     // this workspace's mint denied its own model, which a roster override must
     // not undo. `None` on a runtime with no basis workspaces on it.
@@ -153,6 +152,19 @@ pub(super) async fn delegate(
         .await
         .map_err(|error| format!("spawn could not start a subagent: {error}"))?;
     let child_id = child.id().to_string();
+
+    // The child inherits its parent's row below, remote agents included, so
+    // it may reach them — and is told so, by the same per-agent copy of this
+    // tool its parent was given (ADR-0029 §4). Its own conversation with each,
+    // because a child is a conversation of its own.
+    #[cfg(feature = "a2a")]
+    if let Some(copy) = inherited
+        .as_ref()
+        .and_then(|row| row.remote.as_deref())
+        .and_then(|remote| tool.for_remote_agents(remote))
+    {
+        child.register_tool(copy);
+    }
 
     // Held for the child's whole run, like the depth entry below, and read by
     // both of the ledger's readers. A child of this child asks it the same

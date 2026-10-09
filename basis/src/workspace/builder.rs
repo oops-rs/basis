@@ -27,7 +27,7 @@ use std::{
 use mentra::{ModelInfo, ModelSelector};
 
 #[cfg(feature = "a2a")]
-use crate::a2a::{self, A2aConfig, connections::A2aConnections};
+use crate::a2a::{self, A2aConfig, remote::RemoteAgents};
 #[cfg(feature = "mcp")]
 use crate::mcp::{self, McpConfig, connections::McpConnections};
 use crate::{
@@ -442,9 +442,9 @@ impl WorkspaceBuilder {
     /// where the first of those goes, outranking both files by name. See
     /// [`crate::a2a`] for the rules, which are `.mcp.json`'s.
     ///
-    /// Each agent's card is fetched once, by [`open`](Self::open), and its
-    /// `a2a__{agent}` tool lives exactly as long as the workspace — on a shared
-    /// runtime it goes with this workspace, not with the runtime (ADR-0018).
+    /// Each agent's card is fetched once, by [`open`](Self::open), and the
+    /// agent is reachable — as `spawn "@<agent> <task>"`, ADR-0029 — from the
+    /// sessions this workspace mints or resumes, and from nowhere else.
     #[cfg(feature = "a2a")]
     pub fn with_a2a(self, a2a: A2aConfig) -> Self {
         Self { a2a, ..self }
@@ -929,12 +929,17 @@ impl WorkspaceBuilder {
         // Beside MCP and under the same rule: both lists reach the header in
         // every build, so the stream's shape does not depend on the feature.
         #[cfg(feature = "a2a")]
-        let (a2a_connections, a2a_agents) = {
-            let connections =
-                A2aConnections::connect(Arc::clone(&runtime), &audience, &path, a2a_agents).await;
-            let names = connections.names().to_vec();
+        let (a2a_remote, a2a_agents) = if a2a_agents.is_empty() {
+            (None, Vec::new())
+        } else {
+            let remote = RemoteAgents::connect(
+                a2a_agents,
+                runtime.a2a_conversations_dir().map(Path::to_path_buf),
+            )
+            .await;
+            let names = remote.names();
 
-            (connections, names)
+            (Some(Arc::new(remote)), names)
         };
         #[cfg(not(feature = "a2a"))]
         let (a2a_files, a2a_agents): (Vec<ContextFile>, Vec<String>) = (Vec::new(), Vec::new());
@@ -986,7 +991,7 @@ impl WorkspaceBuilder {
             #[cfg(feature = "mcp")]
             mcp_connections,
             #[cfg(feature = "a2a")]
-            a2a_connections,
+            a2a_remote,
         })
     }
 }
@@ -1028,12 +1033,12 @@ fn discovered_mcp(
     Ok((files, mcp::configured(workspace, config)?))
 }
 
-/// Discovers the remote agents this workspace bridges, and which files said
+/// Discovers the remote agents this workspace can reach, and which files said
 /// so.
 ///
 /// Each file is read once: the sources are what the header names, and the
 /// same sources are layered under the host's own list into what connects.
-/// [`crate::a2a::connections`] owns the claim-and-register fold.
+/// [`crate::a2a::remote`] owns connecting them.
 #[cfg(feature = "a2a")]
 fn discovered_a2a(
     workspace: &Path,

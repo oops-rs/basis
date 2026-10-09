@@ -2,9 +2,11 @@
 //!
 //! The split is `crate::mcp`'s, and ADR-0028 draws it the same way:
 //! mentra owns the client half — fetching an Agent Card, speaking JSON-RPC,
-//! bridging each agent into the roster as one `a2a__{agent}` tool — and basis
-//! owns the convention half: which file names an agent, where that file lives,
-//! and what its fields mean. Nothing here speaks to an agent.
+//! sending a task and waiting on it — and basis owns the convention half:
+//! which file names an agent, where that file lives, and what its fields mean.
+//! The model reaches a named agent through `spawn` (`@<agent> <task>`,
+//! ADR-0029); [`remote`] holds what an open connected, and `spawn` does the
+//! talking.
 //!
 //! # The format is basis's
 //!
@@ -46,8 +48,8 @@
 //!
 //! Nothing read here is ever repeated back: see [`A2aError`].
 
-pub(crate) mod connections;
 mod file;
+pub(crate) mod remote;
 
 use std::path::{Path, PathBuf};
 
@@ -83,8 +85,8 @@ impl A2aAgent {
         Self(config)
     }
 
-    /// The agent's name, which is also the tool it is bridged as:
-    /// `a2a__{name}`.
+    /// The agent's name, which is also how `spawn` addresses it:
+    /// `@{name} <task>`.
     pub fn name(&self) -> &str {
         &self.0.name
     }
@@ -215,6 +217,15 @@ pub enum A2aError {
         origin: String,
         name: String,
         reason: String,
+    },
+
+    /// A forgotten conversation's record of the remote work it handed off
+    /// could not be removed ([`crate::store::forget`]).
+    #[error("failed to remove remembered A2A conversations {path}: {source}")]
+    Forget {
+        path: PathBuf,
+        #[source]
+        source: std::io::Error,
     },
 }
 

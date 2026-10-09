@@ -1,7 +1,8 @@
 //! One basis agent calling another over A2A, end to end: a workspace whose
-//! `.basis/a2a.json` names a live `A2aServer` gets the `a2a__{agent}` tool,
-//! its model calls it, and the served agent's answer comes back into the
-//! calling run as the tool's result (ADR-0028 §1–§3).
+//! `.basis/a2a.json` names a live `A2aServer` is told about it in `spawn`'s
+//! description, its model calls `spawn "@helper …"`, and the served agent's
+//! answer comes back into the calling run as the tool's result (ADR-0028,
+//! ADR-0029).
 //!
 //! Both models are scripted loopback `chat/completions` endpoints, the shape
 //! `serve.rs` uses: the served agent's always answers with a fixed sentence,
@@ -23,7 +24,8 @@ use std::{
 };
 
 use basis::{
-    AllowAll, CollectingSink, ContextConfig, Event, MemoryConfig, ModelSelector, Runtime, Workspace,
+    A2aAgentConfig, A2aConfig, AllowAll, CollectingSink, ContextConfig, Event, MemoryConfig,
+    ModelSelector, Runtime, Workspace,
 };
 use basis_a2a::{A2aServer, A2aService, AgentIdentity, BearerToken, RunDefaults, ServeConfig};
 use serde_json::{Value, json};
@@ -68,8 +70,8 @@ async fn a_workspace_hands_work_to_a_served_agent_and_reads_its_answer() {
     // naming the agent and the variable its token lives in.
     let caller_model = ScriptedEndpoint::start(vec![
         Reply::ToolCall {
-            name: "a2a__helper".to_string(),
-            arguments: json!({"message": "what is the answer?"}).to_string(),
+            name: "spawn".to_string(),
+            arguments: json!({"input": "@helper what is the answer?"}).to_string(),
         },
         Reply::Text("done".to_string()),
     ]);
@@ -100,9 +102,9 @@ async fn a_workspace_hands_work_to_a_served_agent_and_reads_its_answer() {
         .expect("the caller opens");
     assert_eq!(workspace.a2a_agents(), ["helper"]);
 
-    // `AllowAll` stands in for the approver: the tool declares `External`
-    // side effects, so the call reaches the approval gate exactly as an
-    // external MCP tool's does.
+    // `AllowAll` stands in for the approver: a remote delegation declares
+    // `External` side effects, so the call reaches the approval gate exactly
+    // as an external MCP tool's does.
     let report = workspace
         .prepare("ask the helper")
         .expect("mints")
@@ -131,17 +133,149 @@ async fn a_workspace_hands_work_to_a_served_agent_and_reads_its_answer() {
                 tool_name,
                 is_error,
                 ..
-            } if tool_name == "a2a__helper" => Some(*is_error),
+            } if tool_name == "spawn" => Some(*is_error),
             _ => None,
         })
-        .expect("the a2a tool ran");
+        .expect("spawn ran");
     assert!(!completed, "the call succeeded");
     let requests = caller_model.requests();
     assert_eq!(requests.len(), 2, "one turn to call, one to wrap up");
     assert!(
+        requests[0].contains("@<agent> <task>") && requests[0].contains("`helper`"),
+        "the caller's model is taught the agent through spawn: {}",
+        requests[0]
+    );
+    assert!(
+        !requests[0].contains("a2a__"),
+        "and no tool of its own: {}",
+        requests[0]
+    );
+    assert!(
         requests[1].contains(ANSWER),
         "the served agent's answer is the tool result the model reads: {}",
         requests[1]
+    );
+}
+
+/// Two opens of one directory share a tool audience, so ADR-0029 decides
+/// reach per agent: the open that was handed the agent teaches it and routes
+/// to it, and the sibling that was handed none is neither told about it nor
+/// able to reach it by guessing the name.
+#[tokio::test]
+async fn a_sibling_open_of_the_same_directory_cannot_reach_the_agent() {
+    isolate_environment();
+
+    let served_model = ScriptedEndpoint::start(vec![Reply::Text(ANSWER.to_string())]);
+    let served_data = tempfile::tempdir().unwrap();
+    let served_workspace = tempfile::tempdir().unwrap();
+    let service = A2aService::open(
+        ServeConfig::new(
+            served_workspace.path(),
+            AgentIdentity::new("helper", "Answers questions in tests."),
+        )
+        .with_data_dir(served_data.path())
+        .with_run_defaults(
+            RunDefaults::default()
+                .with_base_url(&served_model.base_url)
+                .with_model("test-model")
+                .with_deadline(Duration::from_secs(60)),
+        ),
+    )
+    .expect("opens");
+    let server = A2aServer::bind("127.0.0.1:0".parse().unwrap(), service)
+        .await
+        .expect("binds loopback");
+    let base = format!("http://{}", server.local_addr());
+    tokio::spawn(server.serve());
+
+    // One model endpoint, one shared runtime: the owner's run is turns 0–1,
+    // the sibling's turns 2–3, and each run's first turn guesses the agent.
+    let guess = Reply::ToolCall {
+        name: "spawn".to_string(),
+        arguments: json!({"input": "@helper what is the answer?"}).to_string(),
+    };
+    let caller_model = ScriptedEndpoint::start(vec![
+        guess.clone(),
+        Reply::Text("done".to_string()),
+        guess,
+        Reply::Text("done".to_string()),
+    ]);
+    let runtime = Arc::new(
+        Runtime::builder()
+            .with_base_url(&caller_model.base_url)
+            .with_api_key("test-key")
+            .with_ephemeral_history()
+            .build()
+            .expect("builds"),
+    );
+    let caller = tempfile::tempdir().unwrap();
+    let open = |a2a: A2aConfig| {
+        Workspace::builder(caller.path())
+            .with_runtime(Arc::clone(&runtime))
+            .with_model(ModelSelector::Id("test-model".to_string()))
+            .with_context(ContextConfig::none())
+            .with_memory(MemoryConfig::disabled())
+            .with_a2a(a2a)
+            .open()
+    };
+    let no_files = || A2aConfig {
+        global_dir: None,
+        ..A2aConfig::default()
+    };
+    let owner = open(no_files().with_supplied(vec![A2aAgentConfig::new("helper", &base).into()]))
+        .await
+        .expect("the owner opens");
+    let sibling = open(no_files())
+        .await
+        .expect("the same directory opens again");
+
+    let owned = owner
+        .prepare("ask the helper")
+        .expect("mints")
+        .execute_with_approver(CollectingSink::default(), AllowAll)
+        .await
+        .expect("the owner's run completes");
+    let guessed = sibling
+        .prepare("ask the helper")
+        .expect("mints")
+        .execute_with_approver(CollectingSink::default(), AllowAll)
+        .await
+        .expect("the sibling's run completes");
+
+    let spawn_failed = |events: &[Event]| {
+        events.iter().find_map(|event| match event {
+            Event::ToolCompleted {
+                tool_name,
+                is_error,
+                ..
+            } if tool_name == "spawn" => Some(*is_error),
+            _ => None,
+        })
+    };
+    assert_eq!(spawn_failed(owned.sink.events()), Some(false));
+    assert_eq!(
+        spawn_failed(guessed.sink.events()),
+        Some(true),
+        "a guessed name reaches nothing"
+    );
+
+    let requests = caller_model.requests();
+    assert_eq!(requests.len(), 4);
+    assert!(requests[0].contains("`helper`"), "the owner is taught it");
+    assert!(
+        !requests[2].contains("@<agent>"),
+        "the sibling is never taught a prefix that leads nowhere: {}",
+        requests[2]
+    );
+    assert!(
+        requests[3].contains("no remote agents"),
+        "and its guess is refused before anything is sent: {}",
+        requests[3]
+    );
+    assert_eq!(
+        served_model.requests().len(),
+        1,
+        "only the owner's task reached the served agent"
     );
 }
 

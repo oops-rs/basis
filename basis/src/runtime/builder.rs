@@ -557,6 +557,16 @@ impl RuntimeBuilder {
         // holds the `Runtime` that holds the registry.
         let agents = Arc::new(super::agents::AgentRegistry::default());
 
+        // Kept as well as registered: a workspace whose agents can reach
+        // remote agents gives each one its own copy, told about those agents
+        // (ADR-0029 §4), and the copy shares this one's depth ledger, child
+        // policy and agent ledger.
+        let spawn = spawn_tool(
+            target_names,
+            self.delegation_depth,
+            self.child_policy,
+            Arc::clone(&agents),
+        );
         let builder = mentra::Runtime::builder()
             // Which conversations belong where, which is the only question
             // `session/list` can honestly answer (see `crate::store`). Unset,
@@ -588,12 +598,7 @@ impl RuntimeBuilder {
             // (ADR-0021). With none registered, the default depth and no child
             // policy this is `SpawnTool::new()` in every observable respect,
             // including that the model is never told the prefix exists.
-            .with_tool(spawn_tool(
-                target_names,
-                self.delegation_depth,
-                self.child_policy,
-                Arc::clone(&agents),
-            ));
+            .with_tool(spawn.clone());
         // No *workspace* hooks are installed here. mentra 0.26 takes them live
         // (`Runtime::register_execution_hook_for_audience`), so each workspace
         // registers its own folded runner at open and holds the guard — which
@@ -646,6 +651,8 @@ impl RuntimeBuilder {
         // conversation, derived beside the store it belongs next to so
         // `with_store_dir` moves both or neither — `History::transcripts`.
         let transcripts = History::transcripts(self.history.as_ref());
+        #[cfg(feature = "a2a")]
+        let a2a_conversations = History::a2a_conversations(self.history.as_ref());
 
         // A base URL is the only place the wire is a question: a preset
         // carries the one its vendor speaks, and an instance *is* its wire —
@@ -690,14 +697,18 @@ impl RuntimeBuilder {
             retry_policy: self.retry_policy,
             ephemeral_history,
             transcripts,
+            #[cfg(feature = "a2a")]
+            a2a_conversations,
             policy_shaping,
             host_interceptors,
-            #[cfg(any(feature = "mcp", feature = "a2a"))]
-            bridged_claims: Mutex::new(HashMap::new()),
+            #[cfg(feature = "mcp")]
+            mcp_claims: Mutex::new(HashMap::new()),
             tool_claims: crate::runtime::ToolClaims::default(),
             skill_root_holders: Mutex::new(HashMap::new()),
             hook_chains: Mutex::new(HashMap::new()),
             agents,
+            #[cfg(feature = "a2a")]
+            spawn,
         })
     }
 }

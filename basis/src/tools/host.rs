@@ -25,7 +25,7 @@
 //!
 //! One of those rules is load bearing here in a way it is not there. A
 //! workspace-scoped registration is invisible to
-//! `Runtime::foreign_bridged_tools`,
+//! [`Runtime::foreign_mcp_tools`](crate::runtime::Runtime::foreign_mcp_tools),
 //! which walks the *global* registry to find names shaped like a bridged tool
 //! of a server nobody configured — so a host tool wearing `mcp__` would be the
 //! one such name basis could not catch after the fact, offered to this

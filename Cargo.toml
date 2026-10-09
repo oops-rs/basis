@@ -338,3 +338,9 @@ strip = true
 opt-level = "s"
 lto = true
 codegen-units = 1
+
+# TEMPORARY: builds `basis` against the unreleased mentra branch that adds
+# `Session::register_tool` and the A2A exchange (mentra#61, ADR-0029). Remove
+# once mentra releases with them, before basis releases.
+[patch.crates-io]
+mentra = { path = "../mentra/mentra" }

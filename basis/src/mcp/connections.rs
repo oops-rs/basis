@@ -10,7 +10,7 @@
 //! The runtime's tool registry is single, so:
 //!
 //! - each server's name is **claimed** on the runtime first
-//!   ([`Runtime::claim_bridged`]), and a name another workspace holds comes
+//!   ([`Runtime::claim_mcp_server`]), and a name another workspace holds comes
 //!   back suffixed — the effective name is what tools are bridged under and
 //!   what [`Workspace::mcp_servers`](crate::Workspace::mcp_servers) reports;
 //! - a workspace's bridged tools come off the registry when it drops, together
@@ -37,7 +37,7 @@ use std::sync::Arc;
 
 use mentra::{mcp::McpManager, tool::AudienceToolRegistration, tool::ToolAudience};
 
-use crate::runtime::{Bridge, Runtime};
+use crate::runtime::Runtime;
 
 use super::{ConfiguredServer, McpServer};
 
@@ -82,7 +82,7 @@ impl McpConnections {
             sse_inferred,
         } in servers
         {
-            let effective = runtime.claim_bridged(Bridge::Mcp, server.name(), root);
+            let effective = runtime.claim_mcp_server(server.name(), root);
             claimed.push(effective.clone());
 
             // The claimed name is written into the config before connecting,
@@ -115,12 +115,7 @@ impl McpConnections {
                     // already answered to was skipped, and a name this
                     // workspace does not actually serve must not be hidden
                     // from a sibling that legitimately does.
-                    runtime.record_bridged_tools(
-                        Bridge::Mcp,
-                        &effective,
-                        root,
-                        registered_names(&registered),
-                    );
+                    runtime.record_bridged_tools(&effective, root, registered_names(&registered));
                     bridged.extend(registered);
                 }
                 // Degraded mode, mentra's own wording: one unreachable server
@@ -235,8 +230,7 @@ impl Drop for McpConnections {
         self.bridged.clear();
 
         for name in self.claimed.drain(..) {
-            self.runtime
-                .release_bridged_claim(Bridge::Mcp, &name, &self.root);
+            self.runtime.release_mcp_claim(&name, &self.root);
         }
 
         if let Some(mut manager) = self.manager.take() {

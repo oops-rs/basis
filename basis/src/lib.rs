@@ -59,10 +59,10 @@
 //!   ways to reach them: [`tools::declared`] is core, and a workspace's
 //!   `.basis/tools.json` works in a build that has never heard of MCP.
 //! - **`a2a`** (default) — `.basis/a2a.json` discovery and the A2A binding
-//!   (ADR-0028): each named remote agent bridged into the roster as one
-//!   `a2a__{agent}` tool through mentra's A2A client. Built without it, the
-//!   crate names no agents, and mentra's client and the `a2a-lf` wire types
-//!   drop out of the tree with it, because mentra gates them too.
+//!   (ADR-0028): each named remote agent reachable from `spawn` as
+//!   `@<agent> <task>` (ADR-0029), through mentra's A2A client. Built without
+//!   it, the crate names no agents, and mentra's client and the `a2a-lf` wire
+//!   types drop out of the tree with it, because mentra gates them too.
 
 #[cfg(feature = "a2a")]
 pub mod a2a;

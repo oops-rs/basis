@@ -320,9 +320,9 @@ pub enum Event {
         /// written before it existed reads as naming none — no version bump.
         #[serde(default, skip_serializing_if = "Vec::is_empty")]
         a2a_files: Vec<ContextFile>,
-        /// The agents bridged as `a2a__{agent}` tools, by the names that took
-        /// effect. Names only — a URL or a header is configuration, and this
-        /// line travels into logs.
+        /// The remote agents configured for this run's workspace, each one a
+        /// `spawn "@<agent> …"` target (ADR-0029). Names only — a URL or a
+        /// header is configuration, and this line travels into logs.
         #[serde(default, skip_serializing_if = "Vec::is_empty")]
         a2a_agents: Vec<String>,
     },

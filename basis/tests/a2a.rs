@@ -1,11 +1,13 @@
 //! `.basis/a2a.json` and `WorkspaceBuilder::with_a2a`, end to end through a
-//! workspace open: what is discovered, what is bridged onto the runtime and
-//! for whom, what a run reports, and what goes when the workspace does.
+//! workspace open: what is discovered, what connects, what a run reports, and
+//! — ADR-0029 — that none of it lands on the runtime's tool registry, so no
+//! name is claimed or suffixed.
 //!
 //! The agent on the other end is a loopback listener that serves an Agent
 //! Card and nothing else — everything asserted here happens at the open or at
-//! a mint, before any task is sent. `basis-a2a/tests/client.rs` drives a real
-//! call against a live basis A2A server.
+//! a mint, before any task is sent. `basis-a2a/tests/client.rs` drives
+//! `spawn "@agent …"` against a live basis A2A server, including what each
+//! agent's model is told and which agents a sibling open can reach.
 
 #![cfg(feature = "a2a")]
 
@@ -134,21 +136,29 @@ fn write(path: &Path, body: &str) {
     std::fs::write(path, body).expect("write file");
 }
 
-/// The tool names this directory's audience resolves — the honest observable
-/// for an audience-scoped registration, which mentra's global readers do not
-/// walk.
-fn offered(runtime: &Runtime, root: &Path) -> Vec<String> {
+/// Every tool this directory's audience resolves, global or its own — where a
+/// bridged agent used to appear, and where ADR-0029 says none does.
+fn registered(runtime: &Runtime, root: &Path) -> Vec<String> {
     runtime
         .mentra_runtime()
         .tools_for_audience(Some(&ToolAudience::new(store::runtime_identifier(root))))
         .into_iter()
         .map(|descriptor| descriptor.provider.name)
-        .filter(|name| name.starts_with("a2a__"))
         .collect()
 }
 
+/// A remote agent is a `spawn` target, never a tool of its own.
+fn assert_no_agent_tools(runtime: &Runtime, root: &Path) {
+    let names = registered(runtime, root);
+    assert!(
+        names.iter().all(|name| !name.starts_with("a2a__")),
+        "a remote agent is not a tool: {names:?}"
+    );
+    assert!(names.iter().any(|name| name == "spawn"), "{names:?}");
+}
+
 #[tokio::test]
-async fn a_supplied_agent_is_bridged_for_its_own_workspace_only() {
+async fn a_supplied_agent_is_named_and_connected_without_registering_a_tool() {
     let server = CardServer::start();
     let runtime = offline_runtime();
     let (mine, theirs) = (tempfile::tempdir().unwrap(), tempfile::tempdir().unwrap());
@@ -164,11 +174,8 @@ async fn a_supplied_agent_is_bridged_for_its_own_workspace_only() {
         .expect("opens");
 
     assert_eq!(workspace.a2a_agents(), ["nous"]);
-    assert_eq!(offered(&runtime, mine.path()), ["a2a__nous"]);
-    assert!(
-        offered(&runtime, theirs.path()).is_empty(),
-        "another directory's model can neither list nor call this repository's agent"
-    );
+    assert_no_agent_tools(&runtime, mine.path());
+    assert_no_agent_tools(&runtime, theirs.path());
     assert_eq!(
         server.fetches.load(Ordering::SeqCst),
         1,
@@ -211,7 +218,7 @@ async fn a_supplied_agent_outranks_the_file_by_name() {
     let runtime = offline_runtime();
     let dir = tempfile::tempdir().unwrap();
     // The file's `nous` is unreachable; the host's is live. Whichever wins
-    // is the one that gets bridged.
+    // is the one whose card is fetched.
     write(
         &dir.path().join(".basis/a2a.json"),
         r#"{"agents":{"nous":{"url":"http://127.0.0.1:1"}}}"#,
@@ -224,7 +231,11 @@ async fn a_supplied_agent_outranks_the_file_by_name() {
         .expect("opens");
 
     assert_eq!(workspace.a2a_agents(), ["nous"], "one name is one agent");
-    assert_eq!(offered(&runtime, dir.path()), ["a2a__nous"]);
+    assert_eq!(
+        server.fetches.load(Ordering::SeqCst),
+        1,
+        "the host's agent won, so its card is the one fetched"
+    );
 }
 
 #[tokio::test]
@@ -243,7 +254,7 @@ async fn an_unreachable_agent_degrades_and_is_still_reported() {
         ["nous"],
         "a configured agent is the workspace's whether or not it came up"
     );
-    assert!(offered(&runtime, dir.path()).is_empty(), "nothing bridged");
+    assert_no_agent_tools(&runtime, dir.path());
 }
 
 #[tokio::test]
@@ -269,87 +280,35 @@ async fn a_broken_file_refuses_the_open_naming_it_and_nothing_it_read() {
 }
 
 #[tokio::test]
-async fn two_repositories_naming_one_agent_are_told_apart_and_released_on_drop() {
+async fn two_workspaces_naming_one_agent_both_keep_the_name() {
+    // Nothing is registered per agent, so there is no shared name to claim:
+    // both repositories — and both opens of one repository — call it `nous`.
     let server = CardServer::start();
     let runtime = offline_runtime();
     let (one, two) = (tempfile::tempdir().unwrap(), tempfile::tempdir().unwrap());
 
-    let first = pinned(one.path(), Arc::clone(&runtime))
-        .with_a2a(no_a2a().with_supplied(vec![server.agent("nous").into()]))
-        .open()
-        .await
-        .expect("opens");
-    let second = pinned(two.path(), Arc::clone(&runtime))
-        .with_a2a(no_a2a().with_supplied(vec![server.agent("nous").into()]))
-        .open()
-        .await
-        .expect("opens");
-
-    let suffixed = second.a2a_agents()[0].clone();
-    assert_eq!(first.a2a_agents(), ["nous"]);
-    assert!(suffixed.starts_with("nous-"), "{suffixed}");
-    assert_eq!(offered(&runtime, one.path()), ["a2a__nous"]);
-    assert_eq!(offered(&runtime, two.path()), [format!("a2a__{suffixed}")]);
-
-    drop(first);
-    assert!(
-        offered(&runtime, one.path()).is_empty(),
-        "a registry a host keeps for its whole process must not grow per open"
-    );
-
-    let third = pinned(one.path(), Arc::clone(&runtime))
-        .with_a2a(no_a2a().with_supplied(vec![server.agent("nous").into()]))
-        .open()
-        .await
-        .expect("opens");
-    assert_eq!(
-        third.a2a_agents(),
-        ["nous"],
-        "a released name is free again"
-    );
-}
-
-#[tokio::test]
-async fn a_same_directory_sibling_that_named_no_agent_is_not_offered_it() {
-    // One directory is one audience, so mentra resolves the owner's bridged
-    // agent for the sibling too. The tool carries the owner's credential;
-    // the mint is what hides it (and `ForeignToolGuard` what refuses a call
-    // the hide could not cover — `runtime::agents`' own tests).
-    let server = CardServer::start();
-    let runtime = offline_runtime();
-    let dir = tempfile::tempdir().unwrap();
-
-    let owner = pinned(dir.path(), Arc::clone(&runtime))
-        .with_a2a(
-            no_a2a().with_supplied(vec![server.agent("nous").with_bearer_token("owner").into()]),
-        )
-        .open()
-        .await
-        .expect("opens");
-    let sibling = pinned(dir.path(), Arc::clone(&runtime))
-        .open()
-        .await
-        .expect("the same directory opens again");
-
-    let hidden = |workspace: &Workspace| {
-        workspace
-            .prepare("go")
-            .expect("mints")
-            .session()
-            .config()
-            .tool_profile
-            .hidden_tools
-            .contains("a2a__nous")
+    let open = |root: PathBuf| {
+        let runtime = Arc::clone(&runtime);
+        let agent = server.agent("nous");
+        async move {
+            pinned(&root, runtime)
+                .with_a2a(no_a2a().with_supplied(vec![agent.into()]))
+                .open()
+                .await
+                .expect("opens")
+        }
     };
-    assert!(
-        hidden(&sibling),
-        "the open that named no agent is not offered it"
-    );
-    assert!(!hidden(&owner), "and the open that named it keeps it");
+    let first = open(one.path().to_path_buf()).await;
+    let second = open(two.path().to_path_buf()).await;
+    let sibling = open(one.path().to_path_buf()).await;
+
+    assert_eq!(first.a2a_agents(), ["nous"]);
+    assert_eq!(second.a2a_agents(), ["nous"]);
+    assert_eq!(sibling.a2a_agents(), ["nous"]);
 }
 
 #[tokio::test]
-async fn discovery_off_still_bridges_a_supplied_agent_and_reads_no_file() {
+async fn discovery_off_still_connects_a_supplied_agent_and_reads_no_file() {
     let server = CardServer::start();
     let dir = tempfile::tempdir().unwrap();
     // Malformed, so reading it at all would refuse the open.
@@ -375,13 +334,5 @@ async fn discovery_off_still_bridges_a_supplied_agent_and_reads_no_file() {
         ["from-host"],
         "being handed an agent is not finding one"
     );
-    assert!(
-        workspace
-            .mentra_runtime()
-            .tools_for_audience(Some(&ToolAudience::new(store::runtime_identifier(
-                dir.path()
-            ))))
-            .iter()
-            .any(|descriptor| descriptor.provider.name == "a2a__from-host")
-    );
+    assert_eq!(server.fetches.load(Ordering::SeqCst), 1, "and it connected");
 }

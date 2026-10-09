@@ -14,8 +14,8 @@
 //! the claim is the thing that knows how many workspaces are still serving it.
 //!
 //! Where they differ is what a collision *means*, and each says so on its own
-//! claim: a bridged name — an MCP server's or an A2A agent's — is suffixed, and
-//! a declared tool's name is refused. The third ledger of this shape — one interception chain per
+//! claim: a bridged MCP server name is suffixed, and a declared tool's name is
+//! refused. The third ledger of this shape — one interception chain per
 //! audience — lives beside the rest of interception, in
 //! [`super::interception`].
 
@@ -35,88 +35,25 @@ use crate::tools::declared::DeclaredToolSpec;
 
 use super::Runtime;
 
-/// Which bridge a claimed name namespaces tools for.
-///
-/// MCP and A2A are the two bindings that put tools on the registry under a
-/// *synthetic* name built from one the operator chose — `mcp__{server}__{tool}`
-/// and `a2a__{agent}` — and they need exactly the same ledger: the operator's
-/// name is claimed per runtime, suffixed on collision, what bridged under it
-/// is recorded so a same-directory sibling can be told which names are not
-/// its own, and the claim goes with the workspace.
-///
-/// **One ledger keyed by bridge, rather than a second copy for A2A**, because
-/// every rule above is the same rule and two copies are two places for it to
-/// drift — the suffix scheme, the owner-only release, the foreign-name walk.
-/// What the bridges do *not* share is the namespace: a server and an agent
-/// may both be called `nous`, because their tools can never collide
-/// (`mcp__nous__*` against `a2a__nous`), so the bridge is part of the key
-/// rather than the names being pooled. And what tells one bridge's tool names
-/// apart is mentra's own parser for that bridge, which
-/// [`owner_of`](Self::owner_of) is the whole of.
-#[cfg(any(feature = "mcp", feature = "a2a"))]
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
-pub(crate) enum Bridge {
-    #[cfg(feature = "mcp")]
-    Mcp,
-    #[cfg(feature = "a2a")]
-    A2a,
-}
-
-#[cfg(any(feature = "mcp", feature = "a2a"))]
-impl Bridge {
-    /// Every bridge this build has, for the reader that asks each in turn.
-    pub(crate) const ALL: &[Self] = &[
-        #[cfg(feature = "mcp")]
-        Self::Mcp,
-        #[cfg(feature = "a2a")]
-        Self::A2a,
-    ];
-
-    /// What a claimed name names, for a refusal a person reads.
-    pub(crate) fn noun(self) -> &'static str {
-        match self {
-            #[cfg(feature = "mcp")]
-            Self::Mcp => "MCP server",
-            #[cfg(feature = "a2a")]
-            Self::A2a => "A2A agent",
-        }
-    }
-
-    /// The claimed name `tool` was bridged under, when `tool` is shaped like
-    /// one of this bridge's tools.
-    ///
-    /// mentra's own parsers, so a name a suffixed claim assembled
-    /// ([`Runtime::claim_bridged`] resolves a collision with `-<hash>`, which
-    /// holds no `__`) splits here exactly as it was put together there.
-    pub(crate) fn owner_of(self, tool: &str) -> Option<&str> {
-        match self {
-            #[cfg(feature = "mcp")]
-            Self::Mcp => mentra::mcp::parse_mcp_tool_name(tool).map(|(server, _)| server),
-            #[cfg(feature = "a2a")]
-            Self::A2a => mentra::a2a::parse_a2a_tool_name(tool),
-        }
-    }
-}
-
-/// One bridged name held on this runtime's single tool registry, and what was
-/// bridged under it.
+/// One MCP server name held on this runtime's single tool registry, and what
+/// was bridged under it.
 ///
 /// The names matter as much as the owner, and only for one question: *which
-/// bridged tools on this runtime belong to somebody else?* mentra's audience
+/// `mcp__*` tools on this runtime belong to somebody else?* mentra's audience
 /// ladder answers it for a workspace in another audience, and cannot answer it
 /// for a sibling open of the **same directory** — two such opens share one
 /// audience by construction (`SessionScope::audience`), which is exactly the
 /// pair `basis-host` produces when one repository is opened twice with
 /// different client-supplied servers. So the tool names live beside the claim,
-/// and [`Runtime::foreign_bridged_tools`] is what a mint asks.
-#[cfg(any(feature = "mcp", feature = "a2a"))]
+/// and [`Runtime::foreign_mcp_tools`] is what a mint asks.
+#[cfg(feature = "mcp")]
 #[derive(Debug)]
-pub(super) struct BridgedClaim {
+pub(super) struct McpClaim {
     /// The claiming workspace root; only it can release the name.
     root: PathBuf,
-    /// The tool names bridged under this claim, in the order they took. Empty
-    /// until the connection succeeds, and empty forever for a server or an
-    /// agent that never came up.
+    /// The `mcp__<server>__<tool>` names bridged under this server, in the
+    /// order they took. Empty until the connection succeeds, and empty forever
+    /// for a server that never came up.
     tools: Vec<String>,
 }
 
@@ -248,8 +185,8 @@ impl ToolClaims {
     }
 }
 
-#[cfg(any(feature = "mcp", feature = "a2a"))]
-impl BridgedClaim {
+#[cfg(feature = "mcp")]
+impl McpClaim {
     fn new(root: &Path) -> Self {
         Self {
             root: root.to_path_buf(),
@@ -323,75 +260,58 @@ pub(crate) enum DeclaredToolOrigin {
 }
 
 impl Runtime {
-    /// Claims a bridged name — an MCP server's or an A2A agent's — on this
-    /// runtime's tool registry for the workspace at `root`, returning the name
-    /// that took effect.
+    /// Claims an MCP server name on this runtime's tool registry for the
+    /// workspace at `root`, returning the name that took effect.
     ///
-    /// Bridged tools are namespaced by that name on one registry, so a name
-    /// two workspaces both configure would collide: the second claimant gets
-    /// a deterministic suffix derived from its root instead, and reports it
-    /// through `Workspace::mcp_servers` or `Workspace::a2a_agents`.
-    #[cfg(any(feature = "mcp", feature = "a2a"))]
-    pub(crate) fn claim_bridged(&self, bridge: Bridge, name: &str, root: &Path) -> String {
-        let mut claims = self
-            .bridged_claims
-            .lock()
-            .expect("bridged claim map poisoned");
-        let key = |name: &str| (bridge, name.to_string());
+    /// Bridged tools are namespaced `mcp__<server>__<tool>` on one registry,
+    /// so a name two workspaces both configure would collide: the second
+    /// claimant gets a deterministic suffix derived from its root instead, and
+    /// reports it through [`Workspace::mcp_servers`](crate::Workspace::mcp_servers).
+    #[cfg(feature = "mcp")]
+    pub(crate) fn claim_mcp_server(&self, name: &str, root: &Path) -> String {
+        let mut claims = self.mcp_claims.lock().expect("mcp claim map poisoned");
 
-        if let std::collections::hash_map::Entry::Vacant(slot) = claims.entry(key(name)) {
-            slot.insert(BridgedClaim::new(root));
+        if !claims.contains_key(name) {
+            claims.insert(name.to_string(), McpClaim::new(root));
             return name.to_string();
         }
 
         // `-` cannot appear in the `__` separators mentra parses on, so a
-        // suffixed name still round-trips through either bridge's parser, and
-        // ends in a hex digit rather than the `_` both name rules refuse.
+        // suffixed name still round-trips through `parse_mcp_tool_name`.
         let mut effective = format!("{name}-{}", root_suffix(root));
         let mut attempt = 2_u32;
-        while claims.contains_key(&key(&effective)) {
+        while claims.contains_key(&effective) {
             effective = format!("{name}-{}-{attempt}", root_suffix(root));
             attempt += 1;
         }
 
-        claims.insert(key(&effective), BridgedClaim::new(root));
+        claims.insert(effective.clone(), McpClaim::new(root));
         effective
     }
 
-    /// Records what a connected server or agent actually bridged under the
-    /// name it claimed, so a sibling open can be told which names are not its
-    /// own.
+    /// Records what a connected server actually bridged under the name it
+    /// claimed, so a sibling open can be told which names are not its own.
     ///
     /// Separate from the claim because the two happen at different times: a
-    /// name is claimed before the connection is attempted — the bridged tools
-    /// are named by it — and what came back is only known after. Only the
-    /// owning root may write, for
-    /// [`release_bridged_claim`](Self::release_bridged_claim)'s reason.
-    #[cfg(any(feature = "mcp", feature = "a2a"))]
-    pub(crate) fn record_bridged_tools(
-        &self,
-        bridge: Bridge,
-        name: &str,
-        root: &Path,
-        tools: Vec<String>,
-    ) {
-        let mut claims = self
-            .bridged_claims
-            .lock()
-            .expect("bridged claim map poisoned");
-        if let Some(claim) = claims.get_mut(&(bridge, name.to_string()))
+    /// name is claimed before the connection is attempted — the manager
+    /// namespaces every tool by it — and what came back is only known after.
+    /// Only the owning root may write, for
+    /// [`release_mcp_claim`](Self::release_mcp_claim)'s reason.
+    #[cfg(feature = "mcp")]
+    pub(crate) fn record_bridged_tools(&self, name: &str, root: &Path, tools: Vec<String>) {
+        let mut claims = self.mcp_claims.lock().expect("mcp claim map poisoned");
+        if let Some(claim) = claims.get_mut(name)
             && claim.root == root
         {
             claim.tools = tools;
         }
     }
 
-    /// Every one of `bridge`'s tool names on this runtime whose claimed name
-    /// is not one of `own`.
+    /// Every `mcp__*` name on this runtime whose server is not one of `own`.
     ///
     /// What a mint hides from its model. Two sources, because two kinds of
-    /// bridged-shaped registration are reachable from a workspace's session
-    /// and neither is covered by mentra's audience ladder:
+    /// `mcp__*` registration are reachable from a workspace's session and
+    /// neither is covered by mentra's audience ladder:
     ///
     /// - **A sibling open of the same directory.** Its bridged tools are
     ///   registered for the audience this workspace also resolves in — one
@@ -399,35 +319,29 @@ impl Runtime {
     ///   the pair `basis-host` deliberately produces when two ACP sessions open
     ///   one repository with different `mcpServers`, and without this the
     ///   session that supplied none could list *and call* the other's
-    ///   authenticated server — or, for A2A, hand work to an agent with the
-    ///   other open's credential.
-    /// - **A host tool registered globally under a bridged-shaped name**
+    ///   authenticated server.
+    /// - **A host tool registered globally under an `mcp__`-shaped name**
     ///   ([`RuntimeBuilder::with_tool`]). A global is visible to every
-    ///   audience on purpose; a name shaped like a bridged tool of a server or
-    ///   an agent this workspace never configured is not what that rule is
-    ///   for.
+    ///   audience on purpose; a name shaped like a bridged tool of a server
+    ///   this workspace never configured is not what that rule is for.
     ///
     /// Hiding rather than refusing, and by name: these tools belong to
     /// somebody still open and still serving them. A name in `hidden_tools` is
     /// neither offered nor invokable (`Agent::name_is_allowed`), which is the
     /// property that matters — a model that guessed the name gets the same
     /// answer as one that was never shown it.
-    #[cfg(any(feature = "mcp", feature = "a2a"))]
-    pub(crate) fn foreign_bridged_tools(
-        &self,
-        bridge: Bridge,
-        own: &[String],
-    ) -> std::collections::BTreeSet<String> {
-        let mine = |name: &str| own.iter().any(|owned| owned == name);
+    #[cfg(feature = "mcp")]
+    pub(crate) fn foreign_mcp_tools(&self, own: &[String]) -> std::collections::BTreeSet<String> {
+        let mine = |server: &str| own.iter().any(|owned| owned == server);
         let mut foreign = std::collections::BTreeSet::new();
 
-        for ((claimed_by, name), claim) in self
-            .bridged_claims
+        for (server, claim) in self
+            .mcp_claims
             .lock()
-            .expect("bridged claim map poisoned")
+            .expect("mcp claim map poisoned")
             .iter()
         {
-            if *claimed_by != bridge || mine(name) {
+            if mine(server) {
                 continue;
             }
             foreign.extend(claim.tools.iter().cloned());
@@ -435,8 +349,8 @@ impl Runtime {
 
         for descriptor in self.mentra.tools() {
             let name = &descriptor.provider.name;
-            if let Some(owner) = bridge.owner_of(name)
-                && !mine(owner)
+            if let Some((server, _)) = mentra::mcp::parse_mcp_tool_name(name)
+                && !mine(server)
             {
                 foreign.insert(name.clone());
             }
@@ -445,18 +359,14 @@ impl Runtime {
         foreign
     }
 
-    /// Releases a claim [`claim_bridged`](Self::claim_bridged) granted. Only
-    /// the owning root can release, so one workspace's drop cannot free a name
-    /// another still serves.
-    #[cfg(any(feature = "mcp", feature = "a2a"))]
-    pub(crate) fn release_bridged_claim(&self, bridge: Bridge, name: &str, root: &Path) {
-        let mut claims = self
-            .bridged_claims
-            .lock()
-            .expect("bridged claim map poisoned");
-        let key = (bridge, name.to_string());
-        if claims.get(&key).is_some_and(|claim| claim.root == root) {
-            claims.remove(&key);
+    /// Releases a claim [`claim_mcp_server`](Self::claim_mcp_server) granted.
+    /// Only the owning root can release, so one workspace's drop cannot free a
+    /// name another still serves.
+    #[cfg(feature = "mcp")]
+    pub(crate) fn release_mcp_claim(&self, name: &str, root: &Path) {
+        let mut claims = self.mcp_claims.lock().expect("mcp claim map poisoned");
+        if claims.get(name).is_some_and(|claim| claim.root == root) {
+            claims.remove(name);
         }
     }
 
@@ -464,7 +374,7 @@ impl Runtime {
     /// holds it.
     ///
     /// Refused rather than suffixed, which is where this parts company with
-    /// `claim_bridged`. A bridged tool's name is
+    /// [`claim_mcp_server`](Self::claim_mcp_server). A bridged tool's name is
     /// already synthetic (`mcp__<server>__<tool>`), so renaming one on a
     /// collision costs nothing; a declared tool's name is what the model calls,
     /// what an operator writes in a remembered rule, and what a
@@ -804,7 +714,7 @@ impl Runtime {
 
     /// Every native tool name claimed on `root` that this open did not supply.
     ///
-    /// What a mint hides, beside `foreign_bridged_tools`
+    /// What a mint hides, beside [`foreign_mcp_tools`](Self::foreign_mcp_tools)
     /// and for the third case of the same problem: mentra's audience ladder
     /// hides another *directory's* tools, and two live opens of one directory
     /// share one audience by construction, so a native tool the other open
@@ -862,7 +772,7 @@ impl Runtime {
 
 /// Eight hex characters of FNV-1a over the workspace root: stable across
 /// processes, so the same collision resolves to the same name every run.
-#[cfg(any(feature = "mcp", feature = "a2a"))]
+#[cfg(feature = "mcp")]
 fn root_suffix(root: &Path) -> String {
     const OFFSET: u64 = 0xcbf2_9ce4_8422_2325;
     const PRIME: u64 = 0x0000_0100_0000_01b3;
@@ -876,11 +786,11 @@ fn root_suffix(root: &Path) -> String {
     format!("{:08x}", (hash >> 32) as u32 ^ hash as u32)
 }
 
-#[cfg(test)]
+// Every test here is about a bridged MCP server.
+#[cfg(all(test, feature = "mcp"))]
 mod tests {
     use super::*;
 
-    #[cfg(feature = "mcp")]
     #[test]
     fn a_taken_server_name_is_suffixed_and_a_released_one_is_free_again() {
         use std::path::Path;
@@ -892,9 +802,9 @@ mod tests {
             .build()
             .expect("builds");
 
-        let first = runtime.claim_bridged(Bridge::Mcp, "fs", Path::new("/repo/one"));
-        let second = runtime.claim_bridged(Bridge::Mcp, "fs", Path::new("/repo/two"));
-        let again = runtime.claim_bridged(Bridge::Mcp, "fs", Path::new("/repo/two"));
+        let first = runtime.claim_mcp_server("fs", Path::new("/repo/one"));
+        let second = runtime.claim_mcp_server("fs", Path::new("/repo/two"));
+        let again = runtime.claim_mcp_server("fs", Path::new("/repo/two"));
 
         assert_eq!(first, "fs", "the first claimant keeps the plain name");
         assert_ne!(second, "fs", "the second must not collide in the registry");
@@ -902,17 +812,17 @@ mod tests {
         assert_ne!(again, second, "every live claim is its own namespace");
 
         // Only the owner can free a name.
-        runtime.release_bridged_claim(Bridge::Mcp, "fs", Path::new("/repo/two"));
-        runtime.release_bridged_claim(Bridge::Mcp, &second, Path::new("/repo/one"));
+        runtime.release_mcp_claim("fs", Path::new("/repo/two"));
+        runtime.release_mcp_claim(&second, Path::new("/repo/one"));
         assert_eq!(
-            runtime.claim_bridged(Bridge::Mcp, "fs", Path::new("/repo/three")),
+            runtime.claim_mcp_server("fs", Path::new("/repo/three")),
             format!("fs-{}", root_suffix(Path::new("/repo/three"))),
             "a name someone else holds stays held"
         );
 
-        runtime.release_bridged_claim(Bridge::Mcp, "fs", Path::new("/repo/one"));
+        runtime.release_mcp_claim("fs", Path::new("/repo/one"));
         assert_eq!(
-            runtime.claim_bridged(Bridge::Mcp, "fs", Path::new("/repo/four")),
+            runtime.claim_mcp_server("fs", Path::new("/repo/four")),
             "fs",
             "a released name is claimable plain again"
         );
@@ -922,7 +832,6 @@ mod tests {
     /// directory share one audience, so a sibling's bridged tools resolve
     /// `Visible` for either of them. What tells them apart is which servers
     /// each open actually configured, which is what this asks.
-    #[cfg(feature = "mcp")]
     #[test]
     fn a_bridged_tool_is_foreign_to_every_open_that_did_not_configure_its_server() {
         use std::path::Path;
@@ -938,17 +847,12 @@ mod tests {
         // authenticated server, the second supplied none. Same root, so the
         // same audience.
         let root = Path::new("/repo");
-        let server = runtime.claim_bridged(Bridge::Mcp, "prod-db", root);
-        runtime.record_bridged_tools(
-            Bridge::Mcp,
-            &server,
-            root,
-            vec!["mcp__prod-db__query".to_string()],
-        );
+        let server = runtime.claim_mcp_server("prod-db", root);
+        runtime.record_bridged_tools(&server, root, vec!["mcp__prod-db__query".to_string()]);
 
         assert_eq!(
             runtime
-                .foreign_bridged_tools(Bridge::Mcp, &[])
+                .foreign_mcp_tools(&[])
                 .into_iter()
                 .collect::<Vec<_>>(),
             ["mcp__prod-db__query"],
@@ -956,87 +860,20 @@ mod tests {
         );
         assert!(
             runtime
-                .foreign_bridged_tools(Bridge::Mcp, std::slice::from_ref(&server))
+                .foreign_mcp_tools(std::slice::from_ref(&server))
                 .is_empty(),
             "and the open that configured it keeps it"
         );
 
         // Released with its workspace: a name nothing serves is nobody's to
         // hide.
-        runtime.release_bridged_claim(Bridge::Mcp, &server, root);
-        assert!(runtime.foreign_bridged_tools(Bridge::Mcp, &[]).is_empty());
-    }
-
-    /// One ledger, two namespaces: a server and an agent may share a name
-    /// because their tools cannot collide, and everything else — suffixing,
-    /// owner-only release, foreign-name hiding — is the MCP rule unchanged.
-    #[cfg(feature = "a2a")]
-    #[test]
-    fn a_bridged_agent_name_is_claimed_suffixed_hidden_and_released_like_a_servers() {
-        use std::path::Path;
-
-        let runtime = Runtime::builder()
-            .with_base_url("http://127.0.0.1:1/v1")
-            .with_api_key("test-key")
-            .with_ephemeral_history()
-            .build()
-            .expect("builds");
-        let (one, two) = (Path::new("/repo/one"), Path::new("/repo/two"));
-
-        #[cfg(feature = "mcp")]
-        assert_eq!(
-            runtime.claim_bridged(Bridge::Mcp, "nous", one),
-            "nous",
-            "a server called `nous` holds nothing in the agents' namespace"
-        );
-        assert_eq!(runtime.claim_bridged(Bridge::A2a, "nous", one), "nous");
-        let second = runtime.claim_bridged(Bridge::A2a, "nous", two);
-        assert_eq!(second, format!("nous-{}", root_suffix(two)));
-        assert_eq!(
-            Bridge::A2a.owner_of(&mentra::a2a::a2a_tool_name(&second)),
-            Some(second.as_str()),
-            "a suffixed name still round-trips through mentra's parser"
-        );
-
-        runtime.record_bridged_tools(Bridge::A2a, "nous", one, vec!["a2a__nous".to_string()]);
-        assert_eq!(
-            runtime
-                .foreign_bridged_tools(Bridge::A2a, &[])
-                .into_iter()
-                .collect::<Vec<_>>(),
-            ["a2a__nous"],
-            "the open that named no agent must not be offered the other's"
-        );
-        assert!(
-            runtime
-                .foreign_bridged_tools(Bridge::A2a, &["nous".to_string()])
-                .is_empty()
-        );
-        #[cfg(feature = "mcp")]
-        assert!(
-            runtime.foreign_bridged_tools(Bridge::Mcp, &[]).is_empty(),
-            "an agent's tool is none of the MCP walk's business"
-        );
-
-        runtime.release_bridged_claim(Bridge::A2a, "nous", two);
-        assert_eq!(
-            runtime.foreign_bridged_tools(Bridge::A2a, &[]).len(),
-            1,
-            "only the owner can free a name"
-        );
-        runtime.release_bridged_claim(Bridge::A2a, "nous", one);
-        assert!(runtime.foreign_bridged_tools(Bridge::A2a, &[]).is_empty());
-        assert_eq!(
-            runtime.claim_bridged(Bridge::A2a, "nous", Path::new("/repo/three")),
-            "nous",
-            "a released name is claimable plain again"
-        );
+        runtime.release_mcp_claim(&server, root);
+        assert!(runtime.foreign_mcp_tools(&[]).is_empty());
     }
 
     /// A host tool registered globally under an `mcp__`-shaped name is visible
     /// to every audience by the rule that makes globals global — which is not
     /// the rule a name shaped like somebody's bridged server tool should get.
-    #[cfg(feature = "mcp")]
     #[test]
     fn a_global_tool_shaped_like_a_bridged_one_is_foreign_to_every_workspace() {
         use mentra::tool::{
@@ -1072,7 +909,7 @@ mod tests {
 
         assert_eq!(
             runtime
-                .foreign_bridged_tools(Bridge::Mcp, &[])
+                .foreign_mcp_tools(&[])
                 .into_iter()
                 .collect::<Vec<_>>(),
             ["mcp__internal__admin"],

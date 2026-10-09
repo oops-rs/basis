@@ -69,11 +69,9 @@ use mentra::ModelSelector;
 pub use builder::{GatewayMember, RuntimeBuilder};
 pub use tool_results::ToolResultPolicy;
 
-#[cfg(any(feature = "mcp", feature = "a2a"))]
-pub(crate) use claims::Bridge;
-#[cfg(any(feature = "mcp", feature = "a2a"))]
-use claims::BridgedClaim;
 pub(crate) use claims::DeclaredToolOrigin;
+#[cfg(feature = "mcp")]
+use claims::McpClaim;
 pub(crate) use claims::ToolClaims;
 use interception::HookChainClaim;
 pub(crate) use interception::HookChainHold;
@@ -303,6 +301,10 @@ pub struct Runtime {
     /// beside it in that config are the workspace's
     /// ([`Compaction`](crate::Compaction)), the directory is this.
     transcripts: PathBuf,
+    /// Where sessions remember their remote A2A conversations, or `None` when
+    /// history is kept nowhere (ADR-0029 §5).
+    #[cfg(feature = "a2a")]
+    a2a_conversations: Option<PathBuf>,
     /// What this runtime's builder said about every policy it hands out, kept
     /// so a workspace's own policy gets the same shaping the runtime's did.
     /// See [`session_policy`](Self::session_policy).
@@ -325,13 +327,11 @@ pub struct Runtime {
     /// `None` when the host registered no interceptors.
     #[allow(dead_code, reason = "held for its Drop")]
     host_interceptors: Option<mentra::runtime::ExecutionHookRegistration>,
-    /// Which workspace owns each bridged name — an MCP server's, an A2A
-    /// agent's — on this runtime's single tool registry: bridged tools are
-    /// namespaced by that name, so two workspaces configuring one name must be
-    /// told apart here. Keyed by bridge too, because the two namespaces never
-    /// collide with each other (`claims::Bridge`).
-    #[cfg(any(feature = "mcp", feature = "a2a"))]
-    bridged_claims: Mutex<HashMap<(Bridge, String), BridgedClaim>>,
+    /// Which workspace owns each MCP server name on this runtime's single tool
+    /// registry — bridged tools are namespaced by server, so two workspaces
+    /// configuring one name must be told apart here.
+    #[cfg(feature = "mcp")]
+    mcp_claims: Mutex<HashMap<String, McpClaim>>,
     /// Which workspace owns each tool name a workspace registered on the same
     /// single registry. See [`Runtime::claim_declared_tool`] for why this
     /// exists.
@@ -350,6 +350,12 @@ pub struct Runtime {
     /// `Arc<Runtime>` there would be a cycle through the registry and the
     /// runtime would never drop — and each workspace's interception chain.
     agents: Arc<agents::AgentRegistry>,
+    /// The `spawn` this runtime registered, kept so a workspace can give one
+    /// agent a copy told about that agent's remote agents (ADR-0029 §4). The
+    /// copy shares this one's ledgers, so depth and the child policy are one
+    /// thing however many copies there are.
+    #[cfg(feature = "a2a")]
+    spawn: crate::tools::SpawnTool,
 }
 
 /// Hand-written because mentra's runtime is not `Debug`. No credential lives
@@ -393,6 +399,11 @@ impl Runtime {
     /// because a host that wants to say where it goes says it once, with
     /// [`with_store_dir`](RuntimeBuilder::with_store_dir), and a reader here
     /// would invite a second answer.
+    #[cfg(feature = "a2a")]
+    pub(crate) fn a2a_conversations_dir(&self) -> Option<&Path> {
+        self.a2a_conversations.as_deref()
+    }
+
     pub(crate) fn transcripts_dir(&self) -> &Path {
         &self.transcripts
     }
@@ -413,6 +424,11 @@ impl Runtime {
     /// Which workspace each live agent here answers for, for the two readers
     /// that cannot ask an audience: a workspace's own interception chain, and
     /// `spawn`. See [`agents`].
+    #[cfg(feature = "a2a")]
+    pub(crate) fn spawn_tool(&self) -> &crate::tools::SpawnTool {
+        &self.spawn
+    }
+
     pub(crate) fn agents(&self) -> &Arc<agents::AgentRegistry> {
         &self.agents
     }
