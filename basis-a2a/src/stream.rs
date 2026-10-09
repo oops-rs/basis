@@ -71,6 +71,12 @@ async fn produce(
 ) {
     loop {
         tokio::time::sleep(POLL).await;
+        // A subscriber that went away while nothing happened would otherwise
+        // only be noticed on the next send, which a task nobody drives never
+        // makes.
+        if sender.is_closed() {
+            return;
+        }
         let records = match cursor.poll() {
             Ok(records) => records,
             Err(error) => {

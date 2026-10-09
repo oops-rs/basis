@@ -446,6 +446,84 @@ async fn a_non_loopback_address_without_a_token_is_refused_before_listening() {
     ));
 }
 
+#[test]
+fn a_restarted_server_resumes_driving_the_tasks_it_accepted() {
+    isolate_environment();
+    let model = ScriptedEndpoint::start(true);
+    let data = tempfile::tempdir().unwrap();
+    let workspace = tempfile::tempdir().unwrap();
+    let config = || {
+        ServeConfig::new(
+            workspace.path(),
+            AgentIdentity::new("durable", "Survives restarts."),
+        )
+        .with_data_dir(data.path())
+        .with_run_defaults(
+            RunDefaults::default()
+                .with_base_url(&model.base_url)
+                .with_model("test-model")
+                .with_deadline(Duration::from_secs(60)),
+        )
+    };
+    let request = |text: &str| -> basis_a2a::a2a::SendMessageRequest {
+        serde_json::from_value(json!({
+            "message": user_message(text, None),
+            "configuration": {"returnImmediately": true},
+        }))
+        .unwrap()
+    };
+
+    // First life: the task is accepted and its turn is in flight when the
+    // process's runtime goes away underneath it.
+    let first_life = tokio::runtime::Runtime::new().unwrap();
+    let id = first_life.block_on(async {
+        let service = A2aService::open(config()).unwrap();
+        let basis_a2a::a2a::SendMessageResponse::Task(task) =
+            service.send_message(request("survive")).await.unwrap()
+        else {
+            panic!("a send answers with a task");
+        };
+        let deadline = Instant::now() + Duration::from_secs(30);
+        while model.requests().is_empty() {
+            assert!(
+                Instant::now() < deadline,
+                "the turn never reached the model"
+            );
+            tokio::time::sleep(Duration::from_millis(20)).await;
+        }
+        task.id
+    });
+    first_life.shutdown_timeout(Duration::from_millis(200));
+    model.release();
+
+    // Second life: opening the service is all it takes to pick the task back
+    // up — nobody sends anything.
+    let second_life = tokio::runtime::Runtime::new().unwrap();
+    second_life.block_on(async {
+        let service = A2aService::open(config()).unwrap();
+        let deadline = Instant::now() + Duration::from_secs(30);
+        loop {
+            let task = service
+                .get_task(serde_json::from_value(json!({"id": id})).unwrap())
+                .unwrap();
+            if task.status.state == basis_a2a::a2a::TaskState::Completed {
+                let text = task.artifacts.unwrap()[0].parts[0]
+                    .as_text()
+                    .unwrap()
+                    .to_string();
+                assert!(text.starts_with("reply-"), "{text}");
+                return;
+            }
+            assert!(
+                Instant::now() < deadline,
+                "the restarted server never finished the task: {:?}",
+                task.status.state
+            );
+            tokio::time::sleep(Duration::from_millis(50)).await;
+        }
+    });
+}
+
 /// The provider's credential is read from the environment, and the global
 /// config directory would otherwise be the developer's own.
 fn isolate_environment() {
