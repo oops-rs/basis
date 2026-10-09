@@ -1,0 +1,207 @@
+//! Accepting a message: validating it, deciding which conversation it
+//! continues, and spawning the task that answers it.
+
+use a2a::{A2AError, Message, PartContent, Role, SendMessageRequest};
+use basis_tasks::{Continuation, Hint, RunSpec, now_ms};
+
+use super::A2aService;
+use crate::{card::TEXT, index::Record, project::internal};
+
+/// The output modes a caller may accept for this server to be able to answer.
+const TEXT_MODES: [&str; 4] = [TEXT, "text/*", "*/*", "text"];
+
+/// What [`A2aService::accept`] settled on.
+pub(crate) struct Accepted {
+    pub(crate) record: Record,
+    pub(crate) history_length: Option<usize>,
+    pub(crate) return_immediately: bool,
+}
+
+impl A2aService {
+    /// Validates `request`, spawns the task that answers it, records it, and
+    /// starts driving it.
+    pub(super) async fn accept(&self, request: SendMessageRequest) -> Result<Accepted, A2AError> {
+        let SendMessageRequest {
+            message,
+            configuration,
+            ..
+        } = request;
+        let configuration = configuration.unwrap_or(a2a::SendMessageConfiguration {
+            accepted_output_modes: None,
+            task_push_notification_config: None,
+            history_length: None,
+            return_immediately: None,
+        });
+        if configuration.task_push_notification_config.is_some() {
+            return Err(A2AError::push_notification_not_supported());
+        }
+        if let Some(modes) = &configuration.accepted_output_modes
+            && !modes.is_empty()
+            && !modes
+                .iter()
+                .any(|mode| TEXT_MODES.contains(&mode.trim().to_ascii_lowercase().as_str()))
+        {
+            return Err(A2AError::content_type_not_supported());
+        }
+        let history_length = crate::project::history_length(configuration.history_length)?;
+        let text = text_of(&message)?;
+        let (context_id, continuation) = self.conversation(&message)?;
+
+        let spec = self.run_spec(text.clone(), continuation);
+        let tasks = self.tasks().clone();
+        let handle = tokio::task::spawn_blocking(move || tasks.spawn(spec))
+            .await
+            .map_err(internal)?
+            .map_err(|error| match error.hint() {
+                // `basis-tasks` keeps one executor per conversation; a second
+                // message into a context whose last task is still running is
+                // the caller's to wait out, not a fault of ours.
+                Some(Hint::Wait(_)) => A2AError::unsupported_operation(
+                    "a task in this context is still working; wait for it to settle, then send again",
+                ),
+                _ => internal(error),
+            })?;
+
+        let record = Record::new(&handle, context_id, message.message_id, text, now_ms());
+        self.inner.index.insert(record.clone()).map_err(internal)?;
+        self.drive(&record);
+        Ok(Accepted {
+            record,
+            history_length,
+            return_immediately: configuration.return_immediately.unwrap_or(false),
+        })
+    }
+
+    /// Which conversation `message` belongs to: the one its `contextId`
+    /// names, or a new one. A message naming a task is a reply to a task
+    /// waiting for input, and no task this server runs ever waits for input
+    /// (ADR-0028 §4), so it is refused with the reason.
+    fn conversation(&self, message: &Message) -> Result<(String, Continuation), A2AError> {
+        if let Some(task_id) = &message.task_id {
+            let record = self.record(task_id)?;
+            if message
+                .context_id
+                .as_ref()
+                .is_some_and(|context| *context != record.context_id)
+            {
+                return Err(A2AError::invalid_params(
+                    "contextId does not match the task's context",
+                ));
+            }
+            return Err(A2AError::unsupported_operation(format!(
+                "task {task_id} is not waiting for input; send a message with its contextId and \
+                 no taskId to continue the conversation"
+            )));
+        }
+        match &message.context_id {
+            None => Ok((a2a::new_context_id(), Continuation::New)),
+            Some(context_id) => {
+                let latest = self.inner.index.latest_in(context_id).ok_or_else(|| {
+                    A2AError::invalid_params(format!(
+                        "contextId {context_id} is not one this server issued"
+                    ))
+                })?;
+                Ok((context_id.to_string(), Continuation::Named(latest.handle())))
+            }
+        }
+    }
+
+    fn run_spec(&self, prompt: String, continuation: Continuation) -> RunSpec {
+        let run = &self.inner.run;
+        let mut spec = RunSpec::new(prompt)
+            .with_approve(self.inner.approval.into())
+            .detached()
+            .continuing(continuation);
+        if !self.inner.shell {
+            spec = spec.without_shell();
+        }
+        if let Some(provider) = &run.provider {
+            spec = spec.with_provider(provider.clone());
+        }
+        if let Some(base_url) = &run.base_url {
+            spec = spec.with_base_url(base_url.clone());
+        }
+        if let Some(model) = &run.model {
+            spec = spec.with_model(model.clone());
+        }
+        if let Some(effort) = run.effort {
+            spec = spec.with_effort(effort);
+        }
+        if let Some(deadline) = run.deadline {
+            spec = spec.with_deadline(deadline);
+        }
+        if let Some(tool_budget) = run.tool_budget {
+            spec = spec.with_tool_budget(tool_budget);
+        }
+        if let Some(token_budget) = run.token_budget {
+            spec = spec.with_token_budget(token_budget);
+        }
+        spec
+    }
+}
+
+/// The prompt a message carries: its text parts, joined. Anything that is
+/// not text is refused rather than dropped — a caller who sent a file and
+/// got an answer that ignored it has no way to know.
+fn text_of(message: &Message) -> Result<String, A2AError> {
+    if message.role != Role::User {
+        return Err(A2AError::invalid_params(
+            "a message to an agent has role ROLE_USER",
+        ));
+    }
+    if message.message_id.trim().is_empty() {
+        return Err(A2AError::invalid_params("messageId is required"));
+    }
+    let mut texts = Vec::with_capacity(message.parts.len());
+    for part in &message.parts {
+        match &part.content {
+            PartContent::Text(text) => texts.push(text.as_str()),
+            _ => return Err(A2AError::content_type_not_supported()),
+        }
+    }
+    let text = texts.join("\n\n");
+    if text.trim().is_empty() {
+        return Err(A2AError::invalid_params("the message has no text"));
+    }
+    Ok(text)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use a2a::{Part, error_code};
+
+    fn message(parts: Vec<Part>) -> Message {
+        Message::new(Role::User, parts)
+    }
+
+    #[test]
+    fn text_parts_are_joined_into_one_prompt() {
+        let text = text_of(&message(vec![Part::text("one"), Part::text("two")])).unwrap();
+        assert_eq!(text, "one\n\ntwo");
+    }
+
+    #[test]
+    fn a_non_text_part_is_refused_not_dropped() {
+        let error = text_of(&message(vec![
+            Part::text("see attached"),
+            Part::url("https://example.com/a.png"),
+        ]))
+        .unwrap_err();
+        assert_eq!(error.code, error_code::CONTENT_TYPE_NOT_SUPPORTED);
+    }
+
+    #[test]
+    fn an_agent_role_or_an_empty_message_is_invalid() {
+        let agent = Message::new(Role::Agent, vec![Part::text("hi")]);
+        assert_eq!(
+            text_of(&agent).unwrap_err().code,
+            error_code::INVALID_PARAMS
+        );
+        let blank = message(vec![Part::text("  ")]);
+        assert_eq!(
+            text_of(&blank).unwrap_err().code,
+            error_code::INVALID_PARAMS
+        );
+    }
+}

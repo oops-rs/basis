@@ -1,0 +1,37 @@
+[package]
+name = "basis-a2a"
+description = "The A2A (Agent2Agent) server over basis: any basis agent, reachable by any A2A client, with tasks as durable as basis-tasks makes them."
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+readme.workspace = true
+repository.workspace = true
+homepage.workspace = true
+keywords = ["agent", "a2a", "llm", "harness", "mentra"]
+categories = ["development-tools"]
+
+[dependencies]
+# The event vocabulary a served task's journal is written in, read to turn a
+# run's progress into A2A status updates.
+basis.workspace = true
+# An A2A task *is* a basis-tasks task (ADR-0028 §3): this crate projects that
+# lifecycle onto the wire and owns no second one.
+basis-tasks.workspace = true
+
+a2a-lf.workspace = true
+axum.workspace = true
+chrono.workspace = true
+futures.workspace = true
+serde = { workspace = true }
+serde_json.workspace = true
+tempfile.workspace = true
+thiserror.workspace = true
+tokio.workspace = true
+
+[dev-dependencies]
+# The HTTP client the integration tests call the server with. Already in the
+# tree via mentra; plain HTTP to loopback, so no TLS features.
+reqwest = { version = "0.12", default-features = false, features = ["json"] }
+tempfile.workspace = true
+tokio = { workspace = true, features = ["time"] }

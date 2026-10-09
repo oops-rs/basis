@@ -1,0 +1,294 @@
+//! A basis task, seen as an A2A `Task`.
+//!
+//! The mapping is ADR-0028 §3's table and nothing more. basis-tasks publishes
+//! two facts about a task, and the A2A state is read straight off them:
+//! whether `terminal.json` exists (and what it says), and whether anyone
+//! holds the attach lock.
+//!
+//! | basis-tasks | A2A |
+//! | --- | --- |
+//! | `Succeeded { result }` | `COMPLETED`, the result as one text artifact |
+//! | `Failed { error }` | `FAILED`, the error as the status message |
+//! | `Cancelled` | `CANCELED` |
+//! | a terminal state this build does not know | `FAILED`, saying so |
+//! | no terminal, attached | `WORKING` |
+//! | no terminal, not attached | `SUBMITTED` |
+//!
+//! The final answer is an artifact, never a message: the spec reserves
+//! messages for the exchange, and a caller reading only artifacts must still
+//! get the whole result.
+
+use a2a::{
+    A2AError, Artifact, Message, Part, Role, Task, TaskState, TaskStatus, TaskStatusUpdateEvent,
+};
+use basis_tasks::{Tasks, Terminal, TerminalRecord};
+use chrono::{DateTime, Utc};
+
+use crate::index::Record;
+
+/// The id of the one artifact a completed task carries.
+pub(crate) const RESULT_ARTIFACT: &str = "result";
+
+/// What a caller asked to see of a task.
+#[derive(Debug, Clone, Copy)]
+pub(crate) struct View {
+    /// `None`: all of it. `Some(0)`: none.
+    pub(crate) history_length: Option<usize>,
+    pub(crate) include_artifacts: bool,
+}
+
+impl View {
+    /// `GetTask` and `SendMessage` show artifacts; only `ListTasks` hides
+    /// them by default.
+    pub(crate) fn full(history_length: Option<usize>) -> Self {
+        Self {
+            history_length,
+            include_artifacts: true,
+        }
+    }
+}
+
+/// `historyLength` as the spec defines it: unset is no limit, zero omits the
+/// history, a positive value keeps that many of the most recent messages.
+pub(crate) fn history_length(requested: Option<i32>) -> Result<Option<usize>, A2AError> {
+    match requested {
+        None => Ok(None),
+        Some(length) => usize::try_from(length)
+            .map(Some)
+            .map_err(|_| A2AError::invalid_params("historyLength must not be negative")),
+    }
+}
+
+/// Where a task stands, read off basis-tasks without attaching.
+#[derive(Debug, Clone)]
+pub(crate) enum Standing {
+    Submitted,
+    Working,
+    Settled(TerminalRecord),
+}
+
+impl Standing {
+    pub(crate) fn read(tasks: &Tasks, record: &Record) -> Result<Self, A2AError> {
+        let handle = record.handle();
+        if let Some(terminal) = tasks.terminal(&handle).map_err(internal)? {
+            return Ok(Self::Settled(terminal));
+        }
+        Ok(if tasks.is_attached(&handle).map_err(internal)? {
+            Self::Working
+        } else {
+            Self::Submitted
+        })
+    }
+
+    pub(crate) fn is_terminal(&self) -> bool {
+        matches!(self, Self::Settled(_))
+    }
+
+    pub(crate) fn state(&self) -> TaskState {
+        match self {
+            Self::Submitted => TaskState::Submitted,
+            Self::Working => TaskState::Working,
+            Self::Settled(record) => match &record.terminal {
+                Some(Terminal::Succeeded { .. }) => TaskState::Completed,
+                Some(Terminal::Cancelled) => TaskState::Canceled,
+                Some(Terminal::Failed { .. }) | None => TaskState::Failed,
+                // `Terminal` is non-exhaustive; a state a newer basis adds is
+                // not one this build can vouch for as success.
+                Some(_) => TaskState::Failed,
+            },
+        }
+    }
+}
+
+/// The task as A2A sees it.
+pub(crate) fn task(record: &Record, standing: &Standing, view: View) -> Task {
+    let status = status(record, standing);
+    let artifacts = view
+        .include_artifacts
+        .then(|| result_artifact(standing))
+        .flatten()
+        .map(|artifact| vec![artifact]);
+    Task {
+        id: record.id.clone(),
+        context_id: record.context_id.clone(),
+        status,
+        artifacts,
+        history: history(record, view.history_length),
+        metadata: None,
+    }
+}
+
+/// The status update that says where `standing` leaves the task.
+pub(crate) fn status_update(record: &Record, standing: &Standing) -> TaskStatusUpdateEvent {
+    TaskStatusUpdateEvent {
+        task_id: record.id.clone(),
+        context_id: record.context_id.clone(),
+        status: status(record, standing),
+        metadata: None,
+    }
+}
+
+fn status(record: &Record, standing: &Standing) -> TaskStatus {
+    let message = match standing {
+        Standing::Settled(terminal) => match &terminal.terminal {
+            Some(Terminal::Failed { error }) => Some(agent_message(record, error.clone())),
+            None => Some(agent_message(
+                record,
+                "the task ended in a state this server does not recognize".to_string(),
+            )),
+            _ => None,
+        },
+        _ => None,
+    };
+    TaskStatus {
+        state: standing.state(),
+        message,
+        timestamp: timestamp(record.status_ms()),
+    }
+}
+
+/// The completed task's answer, as the artifact a caller reads it from.
+pub(crate) fn result_artifact(standing: &Standing) -> Option<Artifact> {
+    let Standing::Settled(terminal) = standing else {
+        return None;
+    };
+    let Some(Terminal::Succeeded { result }) = &terminal.terminal else {
+        return None;
+    };
+    Some(Artifact {
+        artifact_id: RESULT_ARTIFACT.to_string(),
+        name: Some(RESULT_ARTIFACT.to_string()),
+        description: terminal
+            .result_truncated
+            .then(|| "truncated by the task layer's result bound".to_string()),
+        parts: vec![Part::text(result.clone())],
+        metadata: None,
+        extensions: None,
+    })
+}
+
+/// The exchange so far: the caller's message, as sent. What the agent
+/// answered is the artifact, not history.
+fn history(record: &Record, history_length: Option<usize>) -> Option<Vec<Message>> {
+    if history_length == Some(0) {
+        return None;
+    }
+    Some(vec![Message {
+        message_id: record.message_id.clone(),
+        context_id: Some(record.context_id.clone()),
+        task_id: Some(record.id.clone()),
+        role: Role::User,
+        parts: vec![Part::text(record.text.clone())],
+        metadata: None,
+        extensions: None,
+        reference_task_ids: None,
+    }])
+}
+
+/// A message from the agent about this task — a progress note, or why it
+/// failed.
+pub(crate) fn agent_message(record: &Record, text: String) -> Message {
+    Message {
+        context_id: Some(record.context_id.clone()),
+        task_id: Some(record.id.clone()),
+        ..Message::new(Role::Agent, vec![Part::text(text)])
+    }
+}
+
+pub(crate) fn timestamp(ms: u64) -> Option<DateTime<Utc>> {
+    DateTime::from_timestamp_millis(i64::try_from(ms).ok()?)
+}
+
+/// A failure of this server's own, not the caller's: logged in full where
+/// the operator can read it, reported to the caller without paths or
+/// anything else of the host's.
+pub(crate) fn internal(error: impl std::fmt::Display) -> A2AError {
+    eprintln!("basis-a2a: {error}");
+    A2AError::internal("the server could not complete the request")
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use basis_tasks::TaskHandle;
+    use serde_json::json;
+
+    fn record() -> Record {
+        let handle = TaskHandle::parse(format!("{}/{}", "0".repeat(16), "a".repeat(32))).unwrap();
+        Record::new(&handle, "ctx".into(), "m1".into(), "hi".into(), 1_000)
+    }
+
+    fn settled(raw: serde_json::Value) -> Standing {
+        Standing::Settled(TerminalRecord {
+            terminal: serde_json::from_value(raw.clone()).ok(),
+            raw,
+            stopped_by: None,
+            usage: None,
+            result_truncated: false,
+        })
+    }
+
+    #[test]
+    fn a_succeeded_task_is_completed_with_its_result_as_the_artifact() {
+        let standing = settled(json!({"state": "succeeded", "result": "42"}));
+        let task = task(&record(), &standing, View::full(None));
+        assert_eq!(task.status.state, TaskState::Completed);
+        let artifacts = task.artifacts.expect("a completed task carries its result");
+        assert_eq!(artifacts[0].parts[0].as_text(), Some("42"));
+        assert!(task.status.message.is_none());
+    }
+
+    #[test]
+    fn a_failed_task_says_why_in_its_status() {
+        let standing = settled(json!({"state": "failed", "error": "boom"}));
+        let task = task(&record(), &standing, View::full(None));
+        assert_eq!(task.status.state, TaskState::Failed);
+        assert_eq!(task.status.message.unwrap().text(), Some("boom"));
+        assert!(task.artifacts.is_none());
+    }
+
+    #[test]
+    fn an_unknown_terminal_state_is_a_failure_not_a_success() {
+        let standing = settled(json!({"state": "from_the_future"}));
+        assert_eq!(standing.state(), TaskState::Failed);
+    }
+
+    #[test]
+    fn cancelled_is_canceled() {
+        assert_eq!(
+            settled(json!({"state": "cancelled"})).state(),
+            TaskState::Canceled
+        );
+    }
+
+    #[test]
+    fn history_length_zero_omits_the_history() {
+        let task = task(&record(), &Standing::Working, View::full(Some(0)));
+        assert!(task.history.is_none());
+        let task = super::task(&record(), &Standing::Working, View::full(None));
+        assert_eq!(task.history.unwrap()[0].message_id, "m1");
+    }
+
+    #[test]
+    fn a_negative_history_length_is_refused() {
+        assert!(history_length(Some(-1)).is_err());
+        assert_eq!(history_length(Some(3)).unwrap(), Some(3));
+    }
+
+    #[test]
+    fn listing_without_artifacts_omits_the_field_entirely() {
+        let standing = settled(json!({"state": "succeeded", "result": "42"}));
+        let view = View {
+            history_length: None,
+            include_artifacts: false,
+        };
+        let task = task(&record(), &standing, view);
+        assert!(task.artifacts.is_none());
+        assert!(
+            serde_json::to_value(&task)
+                .unwrap()
+                .get("artifacts")
+                .is_none()
+        );
+    }
+}

@@ -1,5 +1,5 @@
 [workspace]
-members = ["basis", "basis-acp", "basis-cli", "basis-host", "basis-tasks"]
+members = ["basis", "basis-a2a", "basis-acp", "basis-cli", "basis-host", "basis-tasks"]
 resolver = "3"
 
 [workspace.package]
@@ -17,6 +17,7 @@ homepage = "https://github.com/oops-rs/basis"
 # The layers of ADR-0011, named here so each crate states which of them it is
 # built on and cargo resolves one version of each.
 basis = { version = "0.12", path = "basis" }
+basis-a2a = { version = "0.12", path = "basis-a2a" }
 basis-acp = { version = "0.12", path = "basis-acp" }
 basis-host = { version = "0.12", path = "basis-host" }
 # The durable task layer (ADR-0017 over ADR-0019's substrate, D8): one crate
@@ -302,6 +303,20 @@ tokio-tungstenite = { version = "0.28", default-features = false, features = [
 # was a second breaking overhaul, so a caret range here would silently change
 # the shape of the whole server. Re-check deliberately on upgrade (ADR-0002).
 agent-client-protocol = "=2.0.0"
+
+# A2A's wire types, from the official SDK's types-only crate (ADR-0028):
+# serde, chrono, uuid, base64 and nothing else. Its client and server crates
+# are deliberately not named — both pull tonic, prost and a vendored protoc
+# for a gRPC binding basis does not serve, and a reqwest beside mentra's.
+a2a-lf = "0.4.1"
+# The one HTTP server in the workspace, and only `basis-a2a` names it: `basis`
+# links no transport (ADR-0011). hyper and tower are already in the tree via
+# reqwest; default features off so it brings no HTTP/2, no form parsing and
+# no tracing it would not use.
+axum = { version = "0.8", default-features = false, features = ["http1", "json", "query", "tokio"] }
+# A2A timestamps are `chrono` values in `a2a-lf`'s own types. Already in the
+# tree via `a2a-lf`; named for the one conversion `basis-a2a` makes.
+chrono = { version = "0.4", default-features = false, features = ["clock", "std"] }
 
 # A release binary that is mostly debug symbols and duplicated codegen is
 # nobody's intent; it is just cargo's default. These four settings take basis

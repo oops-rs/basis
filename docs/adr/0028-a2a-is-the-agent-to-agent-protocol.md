@@ -78,8 +78,8 @@ JSON-RPC.**
    means the same thing in every host.
 
 3. **basis owns the server, as a sixth crate.** `basis-a2a` depends on
-   `basis-host` and `basis-tasks` and serves the JSON-RPC binding with SSE
-   streaming over axum. It is the only crate that links an HTTP server; `basis`
+   `basis-tasks` (and through it `basis-host`'s approval policy) and serves the
+   JSON-RPC binding with SSE streaming over axum. It is the only crate that links an HTTP server; `basis`
    still links no transport (ADR-0011). The projection:
 
    | A2A | basis-tasks |
