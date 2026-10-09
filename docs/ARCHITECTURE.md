@@ -1,6 +1,6 @@
 # basis — Architecture
 
-> rev 16 · 2026-10-09 · **basis** — the minimal set everything else is built from
+> rev 17 · 2026-10-09 · **basis** — the minimal set everything else is built from
 > The *how*. For the *why* — problem, idea, bets — see [`PROPOSAL.md`](PROPOSAL.md);
 > locked decisions live in [`adr/`](adr/); deferred ideas in [`proposals/`](proposals/);
 > research grounding in [`p0-groundwork.md`](p0-groundwork.md).
@@ -33,7 +33,8 @@
 > now supply typed hooks and declared tools without file discovery. A2A became the
 > agent-to-agent protocol beside ACP (ADR-0028): a sixth crate, `basis-a2a`, serves any
 > workspace's agent to other agents over durable `basis-tasks`, and mentra's A2A client,
-> configured by `.basis/a2a.json`, puts remote agents in the roster. The closed ledger and
+> configured by `.basis/a2a.json`, makes each remote agent a `spawn` target — `@<agent>
+> <task>`, one delegation door for local and remote alike (ADR-0029). The closed ledger and
 > phases are in [`archive/REDESIGN.md`](archive/REDESIGN.md).
 > Reference bar: [pi](https://github.com/earendil-works/pi) (earendil-works) — minimal core, complete harness.
 > General-purpose: no domain assumptions. Periodic bug-checking is one use case, never a design input.
@@ -344,8 +345,11 @@ flowchart LR
   a restart costs a turn, never a task. What A2A adds — ids, the caller's message — is an index
   under `Tasks::host_dir("a2a")`, never inside a task directory. Inbound runs never prompt
   (`InboundApproval` has no such variant), have no shell unless granted, and a non-loopback bind
-  needs a bearer token. The other direction is mentra's client: each agent in `.basis/a2a.json`
-  is one `a2a__<name>` tool with `External` side effects, so the approval gate sees every call.
+  needs a bearer token. The other direction is mentra's client behind `spawn` (ADR-0029): each
+  agent in `.basis/a2a.json` is a target, `@<name> <task>`, routed per calling agent through the
+  agent ledger and declared `External`, so the approval gate sees every call; basis keeps each
+  conversation's ids beside the session's store, so a resumed task picks up remote work rather
+  than sending it twice.
 - **The host kit moves behavior; it does not generalize it** (ADR-0025). `ApprovalPolicy`
   and its session-scoped remembered answers are shared by ACP, tasks, and the CLI, and
   `PolicyGate` beside them is what a host with a *switchable* mode installs on a live session so

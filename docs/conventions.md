@@ -255,8 +255,9 @@ from, not just this file.
 ### `.basis/a2a.json`
 
 The remote agents this workspace can hand work to over
-[A2A](adr/0028-a2a-is-the-agent-to-agent-protocol.md), each bridged into the
-model's roster as one tool, `a2a__{agent}`:
+[A2A](adr/0028-a2a-is-the-agent-to-agent-protocol.md), each one a target of
+`spawn` — `@nous <task>` hands it a task, `@nous` alone waits on one it is
+still working on ([ADR-0029](adr/0029-a-remote-agent-is-a-spawn-target.md)):
 
 ```json
 {"agents": {"nous": {"url": "https://nous.example.com", "headers": {"Authorization": "Bearer ${NOUS_TOKEN}"}}}}
@@ -282,13 +283,16 @@ refused too — the client speaks `1.0` and says so itself.
 
 Each card is fetched once, at open. An agent that cannot be reached warns and
 the open continues; it is still named in `run_started`'s `a2a_agents`, beside
-`a2a_files`, and in `Workspace::a2a_agents`. A name another workspace on the
-same runtime already holds comes back suffixed, as a server name does. A
-second open of the same directory that did not name the agent is not offered
-its tool, and a call to it is refused — the tool carries this open's
-credential. Every call reaches the approval gate as an `External` side effect,
-like an external MCP tool's. A repository's declared tools may not take the
-`a2a__` prefix.
+`a2a_files`, and in `Workspace::a2a_agents`, by the name configured — an agent
+is not a tool on the shared registry, so nothing is suffixed. Reach is decided
+per agent: only the sessions this open mints or resumes, and their delegated
+children, are told about these agents and can route to them, so a second open
+of the same directory that did not name an agent can neither see nor reach it.
+Every call reaches the approval gate as an `External` side effect, like an
+external MCP tool's, under the one name `spawn` with the agent as `target`.
+basis keeps each conversation's ids for the model, beside the session's store
+in `a2a-conversations/`, so a resumed session picks up a task it had handed
+off rather than sending it twice.
 
 ### Memory files
 

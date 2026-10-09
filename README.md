@@ -297,8 +297,9 @@ an Agent Card at `/.well-known/agent-card.json`
 ([ADR-0028](docs/adr/0028-a2a-is-the-agent-to-agent-protocol.md)). An A2A task *is* a durable
 basis task, so it survives the server restarting and `basis list` shows it; a `contextId` is a
 conversation, continued by the next message that names it. The other direction needs no command:
-name a remote agent in `.basis/a2a.json` and the model gets it as one tool, `a2a__<name>`, put to
-the approver like any external call. ACP is how a person drives an agent, MCP is how an agent
+name a remote agent in `.basis/a2a.json` and the model hands it work through `spawn`, the same
+tool it delegates with locally — `@<name> <task>` ([ADR-0029](docs/adr/0029-a-remote-agent-is-a-spawn-target.md)) —
+put to the approver like any external call. ACP is how a person drives an agent, MCP is how an agent
 calls tools, A2A is how one agent hands work to another.
 
 The CLI is one small grammar ([ADR-0015](docs/adr/0015-cli-grammar.md)). A positional argument that
