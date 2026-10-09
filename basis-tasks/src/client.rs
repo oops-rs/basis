@@ -138,6 +138,21 @@ impl Tasks {
         data.resolve_store_dir(workspace).map_err(Error::new)
     }
 
+    /// A private directory for one host's own records about this workspace's
+    /// tasks — what an adapter keeps that a task directory does not, such as
+    /// which protocol-level ids it handed out for which handles.
+    ///
+    /// `<data root>/workspaces/<key>/hosts/<host>`, created `0700` on first
+    /// use. `host` is one path component of lowercase ASCII letters, digits,
+    /// and `-`, so a name can never reach outside its own directory. Nothing
+    /// in this crate reads it; deleting it loses the host's index, never a
+    /// task.
+    pub fn host_dir(&self, host: &str) -> Result<PathBuf, Error> {
+        self.data
+            .resolve_host_dir(&self.workspace, host)
+            .map_err(Error::new)
+    }
+
     fn ctx(&self, live: Option<Arc<dyn LiveSink>>) -> DriveContext {
         DriveContext::new(live, self.prompt_host.clone())
     }

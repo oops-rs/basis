@@ -180,6 +180,41 @@ impl DataDir {
         let key = self.ensure_workspace(workspace)?;
         Ok(self.store_dir(&key))
     }
+
+    /// One host's own private directory for `workspace`, created `0700` with
+    /// its parent: `<workspace dir>/hosts/<host>`. Beside `agents/` and
+    /// `store/`, never inside either — what a host keeps about the tasks it
+    /// minted is the host's, and a task directory stays exactly what this
+    /// crate writes.
+    pub(crate) fn resolve_host_dir(&self, workspace: &Path, host: &str) -> Result<PathBuf, String> {
+        if !valid_host_name(host) {
+            return Err(format!(
+                "`{host}` is not a host name: use 1 to {MAX_HOST_NAME} lowercase ASCII \
+                 letters, digits, or `-`"
+            ));
+        }
+        let key = self.ensure_workspace(workspace)?;
+        let hosts = self.workspace_dir(&key).join("hosts");
+        let dir = hosts.join(host);
+        fs::create_dir_all(&dir).map_err(|error| format!("create host directory: {error}"))?;
+        for path in [&hosts, &dir] {
+            restrict_directory(path)
+                .map_err(|error| format!("restrict host directory: {error}"))?;
+        }
+        Ok(dir)
+    }
+}
+
+/// The longest name [`DataDir::resolve_host_dir`] accepts.
+const MAX_HOST_NAME: usize = 64;
+
+/// A host name is one path component by construction: no separator, no dot,
+/// nothing a platform reads specially.
+fn valid_host_name(host: &str) -> bool {
+    (1..=MAX_HOST_NAME).contains(&host.len())
+        && host
+            .bytes()
+            .all(|byte| byte.is_ascii_lowercase() || byte.is_ascii_digit() || byte == b'-')
 }
 
 /// Every per-agent file, from one directory.
@@ -473,6 +508,49 @@ mod tests {
             .expect("resolves on a second call too");
 
         assert_eq!(resolved, data.store_dir(&key));
+    }
+
+    #[test]
+    fn a_host_dir_is_private_and_beside_the_tasks_not_inside_them() {
+        let dir = tempfile::tempdir().unwrap();
+        let data = DataDir::from_path(dir.path()).unwrap();
+        let repo = tempfile::tempdir().unwrap();
+
+        let key = data.ensure_workspace(repo.path()).unwrap();
+        let host = data.resolve_host_dir(repo.path(), "a2a").unwrap();
+
+        assert_eq!(host, data.workspace_dir(&key).join("hosts").join("a2a"));
+        assert!(host.is_dir());
+        assert!(!host.starts_with(data.agents_dir(&key)));
+        assert!(!host.starts_with(data.store_dir(&key)));
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            let mode = fs::metadata(&host).unwrap().permissions().mode();
+            assert_eq!(mode & 0o777, 0o700);
+        }
+    }
+
+    #[test]
+    fn a_host_name_is_one_plain_path_component() {
+        let dir = tempfile::tempdir().unwrap();
+        let data = DataDir::from_path(dir.path()).unwrap();
+        let repo = tempfile::tempdir().unwrap();
+
+        for refused in [
+            "",
+            "..",
+            "a/b",
+            "A2A",
+            "a.b",
+            &"x".repeat(MAX_HOST_NAME + 1),
+        ] {
+            assert!(
+                data.resolve_host_dir(repo.path(), refused).is_err(),
+                "`{refused}` must be refused"
+            );
+        }
+        assert!(data.resolve_host_dir(repo.path(), "my-host-2").is_ok());
     }
 
     #[test]
