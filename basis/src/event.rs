@@ -265,6 +265,12 @@ pub struct ContextFile {
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[serde(tag = "type", rename_all = "snake_case")]
 #[non_exhaustive]
+#[allow(
+    clippy::large_enum_variant,
+    reason = "`RunStarted` is the one large variant, written once per run; boxing it would \
+              change the shape every consumer of this public enum matches on, to save padding \
+              that is small beside the strings every collected line already owns"
+)]
 pub enum Event {
     /// Always the first line. Carries the schema version.
     RunStarted {
@@ -304,6 +310,21 @@ pub enum Event {
         /// is the same no-echo rule `McpError` follows.
         #[serde(default, skip_serializing_if = "Vec::is_empty")]
         mcp_servers: Vec<String>,
+        /// A2A configuration files in effect (`.basis/a2a.json`, the global
+        /// `a2a.json`), named for `mcp_files`' reason: such a file says which
+        /// remote agents may be handed this repository's work, and with which
+        /// credential.
+        ///
+        /// Additive and omitted when empty, so a schema-2 reader written
+        /// before the field existed reads a stream that has it, and a stream
+        /// written before it existed reads as naming none — no version bump.
+        #[serde(default, skip_serializing_if = "Vec::is_empty")]
+        a2a_files: Vec<ContextFile>,
+        /// The agents bridged as `a2a__{agent}` tools, by the names that took
+        /// effect. Names only — a URL or a header is configuration, and this
+        /// line travels into logs.
+        #[serde(default, skip_serializing_if = "Vec::is_empty")]
+        a2a_agents: Vec<String>,
     },
 
     UserMessage {
@@ -621,6 +642,8 @@ mod tests {
                 templates: Vec::new(),
                 mcp_files: Vec::new(),
                 mcp_servers: Vec::new(),
+                a2a_files: Vec::new(),
+                a2a_agents: Vec::new(),
             },
         );
         let json = serde_json::to_value(&line).expect("serializes");
@@ -696,6 +719,8 @@ mod tests {
                 templates: Vec::new(),
                 mcp_files: Vec::new(),
                 mcp_servers: Vec::new(),
+                a2a_files: Vec::new(),
+                a2a_agents: Vec::new(),
             },
         );
         let json = serde_json::to_value(&line).expect("serializes");
@@ -846,6 +871,8 @@ mod tests {
                     scope: "workspace".to_string(),
                 }],
                 mcp_servers: vec!["github".to_string()],
+                a2a_files: Vec::new(),
+                a2a_agents: Vec::new(),
             },
         );
         let text = serde_json::to_string(&line).expect("serializes");

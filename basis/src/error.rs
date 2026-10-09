@@ -11,6 +11,8 @@
 
 use thiserror::Error;
 
+#[cfg(feature = "a2a")]
+use crate::a2a::A2aError;
 #[cfg(feature = "mcp")]
 use crate::mcp::McpError;
 use crate::{context::ContextError, provider::ProviderError};
@@ -253,6 +255,10 @@ pub enum RunError {
     #[error(transparent)]
     #[cfg(feature = "mcp")]
     Mcp(#[from] McpError),
+
+    #[error(transparent)]
+    #[cfg(feature = "a2a")]
+    A2a(#[from] A2aError),
 
     #[error("failed to load prompt templates: {0}")]
     Templates(#[from] crate::templates::TemplateError),

@@ -46,6 +46,7 @@
 //!
 //! Nothing read here is ever repeated back: see [`A2aError`].
 
+pub(crate) mod connections;
 mod file;
 
 use std::path::{Path, PathBuf};

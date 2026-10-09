@@ -48,6 +48,13 @@ pub(crate) const MAX_NAME_LENGTH: usize = 64;
 /// The prefix mentra bridges MCP tools under, which nothing else may claim.
 pub(crate) const MCP_PREFIX: &str = "mcp__";
 
+/// The prefix mentra bridges a remote A2A agent under (ADR-0028), refused for
+/// [`MCP_PREFIX`]'s reason. Unconditional, like that one: the namespace is
+/// mentra's whether or not this build bridges agents, and a repository's
+/// `a2a__nous` must not mean a local program in one build and a remote agent
+/// in the next.
+pub(crate) const A2A_PREFIX: &str = "a2a__";
+
 /// How much of the world a declared tool may touch.
 ///
 /// **There is no read-only variant, and that is the point.** A declared tool
@@ -573,7 +580,8 @@ fn check_timeout(timeout_ms: Option<u64>) -> Result<(), String> {
 ///
 /// The charset is the one every provider accepts. `mcp__` is refused because
 /// mentra parses that prefix to find a bridged tool's server, so a tool wearing
-/// it would be a workspace naming a server it does not own.
+/// it would be a workspace naming a server it does not own; `a2a__` likewise,
+/// for a remote agent.
 ///
 /// Shared with the native binding (`crate::tools::host`) rather than copied
 /// there, because the rules are one rule: what may be a tool name on this
@@ -610,6 +618,13 @@ pub(crate) fn check_name(name: &str) -> Result<(), String> {
         return Err(format!(
             "has a name starting with `{MCP_PREFIX}`, which is how mentra names a bridged MCP \
              server's tools"
+        ));
+    }
+
+    if name.starts_with(A2A_PREFIX) {
+        return Err(format!(
+            "has a name starting with `{A2A_PREFIX}`, which is how mentra names a bridged A2A \
+             agent's tool"
         ));
     }
 

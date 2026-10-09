@@ -85,6 +85,15 @@ pub(crate) struct AgentTools {
     /// sibling is bridged, and it does not change while the workspace lives.
     #[cfg(feature = "mcp")]
     pub(crate) mcp_servers: Vec<String>,
+    /// The effective A2A agent names this agent's workspace claimed — what
+    /// [`Workspace::a2a_agents`](crate::Workspace::a2a_agents) reports.
+    ///
+    /// [`ForeignToolGuard`]'s input for `a2a__*` names, for the server list's
+    /// reason and with more at stake: a sibling's bridged agent carries the
+    /// sibling's credential, so reaching it is handing work to a remote agent
+    /// as somebody else.
+    #[cfg(feature = "a2a")]
+    pub(crate) a2a_agents: Vec<String>,
     /// The native tools this agent's workspace supplied
     /// ([`WorkspaceBuilder::with_tool`](crate::WorkspaceBuilder::with_tool)) —
     /// what [`Workspace::host_tools`](crate::Workspace::host_tools) reports.
@@ -349,6 +358,20 @@ pub(crate) struct ForeignToolGuard {
     claims: crate::runtime::ToolClaims,
 }
 
+impl AgentTools {
+    /// Whether `owner` is a name this agent's workspace claimed on `bridge`.
+    #[cfg(any(feature = "mcp", feature = "a2a"))]
+    fn claimed(&self, bridge: crate::runtime::Bridge, owner: &str) -> bool {
+        let own = match bridge {
+            #[cfg(feature = "mcp")]
+            crate::runtime::Bridge::Mcp => &self.mcp_servers,
+            #[cfg(feature = "a2a")]
+            crate::runtime::Bridge::A2a => &self.a2a_agents,
+        };
+        own.iter().any(|name| name == owner)
+    }
+}
+
 impl ForeignToolGuard {
     pub(crate) fn new(agents: Arc<AgentRegistry>, claims: crate::runtime::ToolClaims) -> Self {
         Self { agents, claims }
@@ -367,27 +390,32 @@ impl crate::hooks::Interceptor for ForeignToolGuard {
     ) -> Result<crate::hooks::HookOutcome, crate::hooks::InterceptorError> {
         let tools = self.agents.of(&call.agent_id);
 
-        // mentra's own parser, so a name a suffixed claim assembled
-        // (`claim_mcp_server` resolves a collision with `-<hash>`, which holds
-        // no `__`) splits here exactly as it was put together there.
+        // mentra's own parsers (`Bridge::owner_of`), so a name a suffixed
+        // claim assembled (`claim_bridged` resolves a collision with
+        // `-<hash>`, which holds no `__`) splits here exactly as it was put
+        // together there. One arm for both bridges, because the question is
+        // one question: did the caller's own workspace claim this name?
         //
         // A missing row allows: an agent basis did not make is unjudged, which
         // is the posture `Workspace`'s own docs describe for a session driven
         // straight through `Runtime::mentra_runtime`. A host driving mentra
-        // itself can legitimately own a bridged server, so there is a real
-        // caller behind that default.
-        #[cfg(feature = "mcp")]
-        if let Some((server, _)) = mentra::mcp::parse_mcp_tool_name(&call.tool_name) {
+        // itself can legitimately own a bridged server or agent, so there is a
+        // real caller behind that default.
+        #[cfg(any(feature = "mcp", feature = "a2a"))]
+        for &bridge in crate::runtime::Bridge::ALL {
+            let Some(owner) = bridge.owner_of(&call.tool_name) else {
+                continue;
+            };
             let Some(tools) = tools.as_ref() else {
                 return Ok(crate::hooks::HookOutcome::Allow);
             };
-            return Ok(if tools.mcp_servers.iter().any(|own| own == server) {
+            return Ok(if tools.claimed(bridge, owner) {
                 crate::hooks::HookOutcome::Allow
             } else {
                 crate::hooks::HookOutcome::Deny(format!(
-                    "'{}' belongs to the MCP server '{server}', which this workspace did not \
-                     configure",
-                    call.tool_name
+                    "'{}' belongs to the {} '{owner}', which this workspace did not configure",
+                    call.tool_name,
+                    bridge.noun()
                 ))
             });
         }
@@ -431,6 +459,8 @@ mod tests {
             hidden: hidden.iter().map(|name| (*name).to_string()).collect(),
             #[cfg(feature = "mcp")]
             mcp_servers: Vec::new(),
+            #[cfg(feature = "a2a")]
+            a2a_agents: Vec::new(),
             host_tools: Vec::new(),
         }
     }
@@ -447,6 +477,8 @@ mod tests {
             AgentTools {
                 hidden: BTreeSet::new(),
                 mcp_servers: vec!["prod-db".to_string()],
+                #[cfg(feature = "a2a")]
+                a2a_agents: Vec::new(),
                 host_tools: Vec::new(),
             },
         );
@@ -501,6 +533,59 @@ mod tests {
                 HookOutcome::Allow
             ),
             "a session basis never minted carries no workspace's guards at all"
+        );
+    }
+
+    /// The bridged arm, asked of an `a2a__*` name: the same question, the
+    /// caller's own claimed agents rather than its servers.
+    #[cfg(feature = "a2a")]
+    #[tokio::test]
+    async fn the_guard_judges_a_bridged_agent_by_the_callers_own_agents() {
+        use crate::hooks::{HookEvent, HookOutcome, HookRequest, Interceptor};
+
+        let registry = Arc::new(AgentRegistry::default());
+        let _owner = registry.record_for_workspace(
+            "owner",
+            AgentTools {
+                a2a_agents: vec!["nous".to_string()],
+                ..tools(&[])
+            },
+        );
+        let _stranger = registry.record_for_workspace("stranger", tools(&[]));
+
+        let guard = ForeignToolGuard::new(registry, crate::runtime::ToolClaims::default());
+        let call = |agent: &str| HookRequest {
+            hook_schema: 1,
+            event: HookEvent::PreToolUse,
+            workspace: std::path::PathBuf::from("/repo"),
+            agent_id: agent.to_string(),
+            tool_call_id: "call-0".to_string(),
+            tool_name: "a2a__nous".to_string(),
+            input: serde_json::json!({"message": "hello"}),
+            output: None,
+            is_error: None,
+        };
+
+        assert!(matches!(
+            guard.intercept(&call("owner")).await.expect("decides"),
+            HookOutcome::Allow
+        ));
+        match guard.intercept(&call("stranger")).await.expect("decides") {
+            HookOutcome::Deny(reason) => assert!(
+                reason.contains("A2A agent 'nous'"),
+                "the refusal names what was reached for: {reason}"
+            ),
+            other => panic!("the open that named no agent reached the other's: {other:?}"),
+        }
+        assert!(
+            matches!(
+                guard
+                    .intercept(&call("host-session"))
+                    .await
+                    .expect("decides"),
+                HookOutcome::Allow
+            ),
+            "an agent basis did not make is unjudged, as for a bridged server"
         );
     }
 

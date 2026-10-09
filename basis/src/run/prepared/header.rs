@@ -38,6 +38,11 @@ pub struct RunContext {
     /// The servers those files produced, after layering. Names only: the
     /// header must not echo a command or a credential.
     pub mcp_servers: Vec<String>,
+    /// A2A configuration files in effect, most specific first.
+    pub a2a_files: Vec<ContextFile>,
+    /// The remote agents those files and the host named, after layering, by
+    /// the names that took effect. Names only, for `mcp_servers`'s reason.
+    pub a2a_agents: Vec<String>,
 }
 
 /// A skill available to the run, without its body.
@@ -109,6 +114,8 @@ pub(super) fn header_for(session_id: &str, run: &RunContext) -> Event {
             .collect(),
         mcp_files: run.mcp_files.clone(),
         mcp_servers: run.mcp_servers.clone(),
+        a2a_files: run.a2a_files.clone(),
+        a2a_agents: run.a2a_agents.clone(),
     }
 }
 

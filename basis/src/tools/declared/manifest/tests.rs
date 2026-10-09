@@ -420,6 +420,16 @@ fn a_workspace_cannot_declare_a_tool_into_mcps_namespace() {
 }
 
 #[test]
+fn a_workspace_cannot_declare_a_tool_into_a2as_namespace() {
+    let error = parsed(&one_tool("a2a__nous", "./x")).expect_err("rejected");
+
+    assert!(
+        matches!(error, DeclaredToolError::Invalid { .. }),
+        "mentra names a bridged remote agent under that prefix: {error}"
+    );
+}
+
+#[test]
 fn a_schema_that_is_not_an_object_is_refused() {
     for schema in [r#""string""#, "[]", r#"{"type": "array"}"#] {
         let body = format!(

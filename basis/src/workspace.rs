@@ -65,8 +65,12 @@ pub use spec::RunSpec;
 pub(crate) use builder::load_templates;
 use lifecycle::MintPosture;
 
+#[cfg(feature = "a2a")]
+use crate::a2a::connections::A2aConnections;
 #[cfg(feature = "mcp")]
 use crate::mcp::connections::McpConnections;
+#[cfg(any(feature = "mcp", feature = "a2a"))]
+use crate::runtime::Bridge;
 use crate::{
     config::Config,
     context::WorkspaceContext,
@@ -169,6 +173,8 @@ pub struct Workspace {
     templates: Vec<Template>,
     mcp_files: Vec<ContextFile>,
     mcp_servers: Vec<String>,
+    a2a_files: Vec<ContextFile>,
+    a2a_agents: Vec<String>,
     declared_tool_files: Vec<ContextFile>,
     declared_tools: Vec<String>,
     /// Keeps this workspace's declared tools claimed on the runtime's single
@@ -200,6 +206,9 @@ pub struct Workspace {
     #[cfg(feature = "mcp")]
     #[allow(dead_code, reason = "held for its Drop")]
     mcp_connections: McpConnections,
+    #[cfg(feature = "a2a")]
+    #[allow(dead_code, reason = "held for its Drop")]
+    a2a_connections: A2aConnections,
 }
 
 /// Hand-written because neither the runtime nor the registration is `Debug`
@@ -218,6 +227,7 @@ impl std::fmt::Debug for Workspace {
             .field("skills", &self.skills.len())
             .field("templates", &self.templates.len())
             .field("mcp_servers", &self.mcp_servers)
+            .field("a2a_agents", &self.a2a_agents)
             .field("declared_tools", &self.declared_tools)
             .field("host_tools", &self.host_tools)
             .finish_non_exhaustive()
@@ -497,6 +507,19 @@ impl Workspace {
         &self.mcp_servers
     }
 
+    /// The remote A2A agents bridged at open, by the names that took effect —
+    /// each one is the model's `a2a__{name}` tool. The configured name, unless
+    /// another workspace on the shared runtime already held it, in which case
+    /// it carries a deterministic suffix, as a server name does.
+    ///
+    /// Every configured agent is listed, reachable at open or not, so a host
+    /// can see what the workspace asked for. Names only, for
+    /// [`mcp_servers`](Self::mcp_servers)'s reason: nothing here echoes a URL
+    /// or a credential.
+    pub fn a2a_agents(&self) -> &[String] {
+        &self.a2a_agents
+    }
+
     /// The tools this workspace's manifests declared, by name, after layering
     /// — this workspace's own first, name-ordered within each manifest.
     ///
@@ -583,8 +606,10 @@ impl Workspace {
     /// tool registered globally under an `mcp__`-shaped name is visible to
     /// every audience by the rule that makes globals global. Neither is a
     /// server this workspace configured, so neither is offered.
-    /// [`Runtime::foreign_mcp_tools`](crate::runtime::Runtime::foreign_mcp_tools)
-    /// is the whole rule.
+    /// [`Runtime::foreign_bridged_tools`](crate::runtime::Runtime::foreign_bridged_tools)
+    /// is the whole rule, and it is asked again for `a2a__*` names: a
+    /// same-directory sibling's bridged agent, or a global shaped like one, is
+    /// hidden by the same reasoning.
     ///
     /// Per mint rather than per open, because the shared registry moves as
     /// siblings come and go, and a roster is honest only about the registry it
@@ -612,10 +637,18 @@ impl Workspace {
         let mut agent = profile.apply_to(self.agent.clone());
 
         #[cfg(feature = "mcp")]
-        agent
-            .tool_profile
-            .hidden_tools
-            .extend(self.runtime.foreign_mcp_tools(&self.mcp_servers));
+        agent.tool_profile.hidden_tools.extend(
+            self.runtime
+                .foreign_bridged_tools(Bridge::Mcp, &self.mcp_servers),
+        );
+        // The same two cases for a bridged remote agent, which is worse to
+        // leak than most: the sibling's `a2a__*` tool carries the sibling's
+        // credential.
+        #[cfg(feature = "a2a")]
+        agent.tool_profile.hidden_tools.extend(
+            self.runtime
+                .foreign_bridged_tools(Bridge::A2a, &self.a2a_agents),
+        );
 
         // The third case an audience cannot express, and the one that is not
         // `mcp__`-shaped: a native tool a *sibling open of this directory*
@@ -642,6 +675,8 @@ impl Workspace {
             hidden: agent.tool_profile.hidden_tools.clone(),
             #[cfg(feature = "mcp")]
             mcp_servers: self.mcp_servers.clone(),
+            #[cfg(feature = "a2a")]
+            a2a_agents: self.a2a_agents.clone(),
             host_tools: self.host_tools.clone(),
         }
     }
@@ -659,7 +694,15 @@ impl Workspace {
         let mut hidden = session.config().tool_profile.hidden_tools.clone();
 
         #[cfg(feature = "mcp")]
-        hidden.extend(self.runtime.foreign_mcp_tools(&self.mcp_servers));
+        hidden.extend(
+            self.runtime
+                .foreign_bridged_tools(Bridge::Mcp, &self.mcp_servers),
+        );
+        #[cfg(feature = "a2a")]
+        hidden.extend(
+            self.runtime
+                .foreign_bridged_tools(Bridge::A2a, &self.a2a_agents),
+        );
 
         hidden.extend(
             self.runtime
@@ -670,6 +713,8 @@ impl Workspace {
             hidden,
             #[cfg(feature = "mcp")]
             mcp_servers: self.mcp_servers.clone(),
+            #[cfg(feature = "a2a")]
+            a2a_agents: self.a2a_agents.clone(),
             host_tools: self.host_tools.clone(),
         }
     }
@@ -702,6 +747,8 @@ impl Workspace {
                 templates: self.templates.clone(),
                 mcp_files: self.mcp_files.clone(),
                 mcp_servers: self.mcp_servers.clone(),
+                a2a_files: self.a2a_files.clone(),
+                a2a_agents: self.a2a_agents.clone(),
             },
         )
         .with_bounds(bounds)

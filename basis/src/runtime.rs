@@ -69,9 +69,11 @@ use mentra::ModelSelector;
 pub use builder::{GatewayMember, RuntimeBuilder};
 pub use tool_results::ToolResultPolicy;
 
+#[cfg(any(feature = "mcp", feature = "a2a"))]
+pub(crate) use claims::Bridge;
+#[cfg(any(feature = "mcp", feature = "a2a"))]
+use claims::BridgedClaim;
 pub(crate) use claims::DeclaredToolOrigin;
-#[cfg(feature = "mcp")]
-use claims::McpClaim;
 pub(crate) use claims::ToolClaims;
 use interception::HookChainClaim;
 pub(crate) use interception::HookChainHold;
@@ -323,11 +325,13 @@ pub struct Runtime {
     /// `None` when the host registered no interceptors.
     #[allow(dead_code, reason = "held for its Drop")]
     host_interceptors: Option<mentra::runtime::ExecutionHookRegistration>,
-    /// Which workspace owns each MCP server name on this runtime's single tool
-    /// registry — bridged tools are namespaced by server, so two workspaces
-    /// configuring one name must be told apart here.
-    #[cfg(feature = "mcp")]
-    mcp_claims: Mutex<HashMap<String, McpClaim>>,
+    /// Which workspace owns each bridged name — an MCP server's, an A2A
+    /// agent's — on this runtime's single tool registry: bridged tools are
+    /// namespaced by that name, so two workspaces configuring one name must be
+    /// told apart here. Keyed by bridge too, because the two namespaces never
+    /// collide with each other (`claims::Bridge`).
+    #[cfg(any(feature = "mcp", feature = "a2a"))]
+    bridged_claims: Mutex<HashMap<(Bridge, String), BridgedClaim>>,
     /// Which workspace owns each tool name a workspace registered on the same
     /// single registry. See [`Runtime::claim_declared_tool`] for why this
     /// exists.

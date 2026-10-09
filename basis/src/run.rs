@@ -479,7 +479,7 @@ pub fn prepare_with_session(
             provider: provider.into(),
             model: model.into(),
             context: discovered,
-            // The caller owns the runtime, so it owns skill and MCP
+            // The caller owns the runtime, so it owns skill, MCP and A2A
             // registration too.
             skills_dirs: Vec::new(),
             skills: Vec::new(),
@@ -487,6 +487,8 @@ pub fn prepare_with_session(
             templates,
             mcp_files: Vec::new(),
             mcp_servers: Vec::new(),
+            a2a_files: Vec::new(),
+            a2a_agents: Vec::new(),
         },
     )
     .with_bounds(spec.turn_options());
