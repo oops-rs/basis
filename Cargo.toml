@@ -3,9 +3,9 @@ members = ["basis", "basis-a2a", "basis-acp", "basis-cli", "basis-host", "basis-
 resolver = "3"
 
 [workspace.package]
-# One version across the five: they are one product split by dependency
-# weight (ADR-0011), not five things that release on their own schedules.
-version = "0.12.4"
+# One version across the six: they are one product split by dependency
+# weight (ADR-0011), not six things that release on their own schedules.
+version = "0.13.0"
 edition = "2024"
 rust-version = "1.88"
 license = "MIT"
@@ -16,14 +16,14 @@ homepage = "https://github.com/oops-rs/basis"
 [workspace.dependencies]
 # The layers of ADR-0011, named here so each crate states which of them it is
 # built on and cargo resolves one version of each.
-basis = { version = "0.12", path = "basis" }
-basis-a2a = { version = "0.12", path = "basis-a2a" }
-basis-acp = { version = "0.12", path = "basis-acp" }
-basis-host = { version = "0.12", path = "basis-host" }
+basis = { version = "0.13", path = "basis" }
+basis-a2a = { version = "0.13", path = "basis-a2a" }
+basis-acp = { version = "0.13", path = "basis-acp" }
+basis-host = { version = "0.13", path = "basis-host" }
 # The durable task layer (ADR-0017 over ADR-0019's substrate, D8): one crate
 # so the rules live once and are reachable from Rust, not only from the CLI
 # that is now merely their first client.
-basis-tasks = { version = "0.12", path = "basis-tasks" }
+basis-tasks = { version = "0.13", path = "basis-tasks" }
 
 # The 0.28 floor's reason is the same shape as 0.27's: one host-observable,
 # source-breaking addition basis's code does not compile against unmodified.
@@ -247,7 +247,9 @@ basis-tasks = { version = "0.12", path = "basis-tasks" }
 # conversation scope underneath it: before 0.28.5 every agent in a process
 # shared one response chain and one turn-state, so a host running a
 # conversation per chat had each chat reading the others'.
-mentra = { version = "0.28.5", default-features = false }
+# The 0.28.6 floor is mentra's `a2a` feature, which `basis`'s own `a2a`
+# feature enables: the A2A client and the `a2a__{agent}` tool (ADR-0028 §1).
+mentra = { version = "0.28.6", default-features = false }
 
 async-trait = "0.1"
 # ACP carries an image in a prompt as base64; basis's `PromptPart` carries the
@@ -336,14 +338,3 @@ strip = true
 opt-level = "s"
 lto = true
 codegen-units = 1
-
-# TEMPORARY: builds `basis` against the unreleased mentra branch that adds the
-# `a2a` feature (ADR-0028, Decision §1). mentra on crates.io is still 0.28.5
-# without it, and the branch keeps that version, so the `mentra` requirement
-# above is unchanged and resolves here. mentra-provider needs no patch of its
-# own: basis never names it, and mentra reaches it by path. Remove this
-# section once mentra releases with `a2a` — before basis releases, because a
-# published crate cannot carry a path patch and `cargo publish` would build
-# against the registry mentra that has no `a2a` feature to enable.
-[patch.crates-io]
-mentra = { path = "../mentra/mentra" }
