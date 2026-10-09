@@ -99,12 +99,26 @@ delegation — local or remote — is the one tool, `spawn`.**
    alone waits on it again, `@<agent> <text>` answers a task waiting for input,
    and a new task while one is still working is refused with that instruction
    rather than sent, because a remote agent's conversation runs one task at a
-   time. The ids live in memory for the session; a resumed session starts a new
-   conversation with each agent.
+   time.
+
+   **The record outlives the process**, because a basis task does: a session
+   resumed after a restart that had forgotten its outstanding task would hand
+   the same work off twice. For every agent a workspace mints or resumes, the
+   record — one `contextId` and at most one outstanding task id per remote
+   agent — is written beside the store that holds the session
+   (`a2a-conversations/<agent id>.json`), replaced whole on every change, and
+   read back when a resumed session first delegates. The task id is written
+   the moment the remote agent returns it, *before* the wait begins, so a
+   process that dies mid-wait comes back knowing the task exists; mentra's
+   exchange is exposed as `submit` and `settle` for exactly that gap.
+   Forgetting a conversation removes its record. A delegated child, which is
+   never resumed, and every agent on a runtime that keeps no history, keep the
+   record in memory only.
 
 6. **mentra keeps the protocol.** The client, the send-and-wait exchange —
    submit with `returnImmediately`, poll to a settled state within the bound,
-   cancel when the run is cancelled — and the framing that marks a remote
+   cancel when the run is cancelled, whole or as its `submit` and `settle`
+   halves — and the framing that marks a remote
    agent's words as its own are mentra's, exposed as data (mentra#61) so basis
    writes only `spawn`'s guidance around them. mentra's `A2aAgentTool` stays,
    built on the same exchange, for harnesses that want a tool per agent.
@@ -125,9 +139,9 @@ delegation — local or remote — is the one tool, `spawn`.**
   suffixed.
 - A prompt that begins with `@` to mean something else is now a target name or
   a refusal that names the `@@` escape — the same trade ADR-0016 made for `!`.
-- The model never sees a task or context id, so it cannot resume a task across
-  a session resume; that is the price of not asking it to carry ids, and the
-  first thing to revisit if long remote tasks become common.
+- The model never sees a task or context id; basis carries them, and carries
+  them across a restart, so a resumed task picks up remote work it had
+  handed off — `@<agent>` alone waits on it — rather than sending it again.
 - Each agent that can reach remote agents costs one exact-agent registration,
   dropped with the agent.
 
