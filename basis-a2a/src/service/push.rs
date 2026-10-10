@@ -156,7 +156,7 @@ impl A2aService {
             .ok_or_else(|| no_such_config(&request.id))
     }
 
-    /// `ListTaskPushNotificationConfigs`: at most [`MAX_CONFIGS`], so one
+    /// `ListTaskPushNotificationConfigs`: a task holds at most eight, so one
     /// page always holds them all and no page token is ever issued.
     pub fn list_push_configs(
         &self,
