@@ -96,8 +96,8 @@ pub mod workspace;
 
 #[cfg(feature = "a2a")]
 pub use a2a::{
-    A2aAgent, A2aAgentConfig, A2aConfig, A2aError, A2aLimits, A2aSource, DEFAULT_GLOBAL_A2A_FILE,
-    DEFAULT_WORKSPACE_A2A_FILE,
+    A2aAgent, A2aAgentConfig, A2aConfig, A2aError, A2aLimits, A2aReload, A2aSource, A2aWatch,
+    DEFAULT_A2A_WATCH_INTERVAL, DEFAULT_GLOBAL_A2A_FILE, DEFAULT_WORKSPACE_A2A_FILE,
 };
 // `ToolSideEffectLevel` is mentra's, and comes to the root under the same rule
 // as `CancellationToken` below: `is_consequential` and

@@ -5,11 +5,13 @@
 //! already draws: everything here exists only with `a2a` on, and the live set
 //! itself is [`crate::a2a::live`]'s.
 
+use std::time::Duration;
+
 use mentra::Session;
 
 use super::Workspace;
 use crate::{
-    a2a::{A2aError, A2aReload},
+    a2a::{A2aError, A2aReload, A2aWatch},
     event::ContextFile,
 };
 
@@ -58,6 +60,30 @@ impl Workspace {
     /// names the file, the agent and the field, never a value read.
     pub async fn reload_a2a(&self) -> Result<A2aReload, A2aError> {
         self.a2a.reload().await
+    }
+
+    /// Watches this workspace's A2A files — the workspace's `.basis/a2a.json`
+    /// and the global `a2a.json` — and reloads whenever one changes
+    /// (ADR-0031 §4), until the returned handle is dropped.
+    ///
+    /// Polls every `interval` ([`DEFAULT_A2A_WATCH_INTERVAL`] is what basis's
+    /// own long-running hosts use) for each file's existence, length and
+    /// modification time, so a file that did not exist at open is noticed
+    /// when it appears and one deleted is noticed when it goes. Host-supplied
+    /// agents have no file and are never reloaded by a watch; a host that
+    /// changes its own list says so with [`reload_a2a`](Self::reload_a2a).
+    ///
+    /// A reload that fails is reported on stderr — naming the file and the
+    /// field, never a value — and changes nothing; the poll carries on and
+    /// tries again when the file next changes. The watch holds this
+    /// workspace's A2A state weakly, so it never keeps a workspace alive.
+    ///
+    /// Must be called from within a Tokio runtime: the poll is a task on it.
+    /// A one-shot run has no use for one, and basis starts none on its own.
+    ///
+    /// [`DEFAULT_A2A_WATCH_INTERVAL`]: crate::a2a::DEFAULT_A2A_WATCH_INTERVAL
+    pub fn watch_a2a(&self, interval: Duration) -> A2aWatch {
+        self.a2a.watch(interval)
     }
 
     /// Gives a freshly minted or resumed session the copy of `spawn` bound to

@@ -914,7 +914,8 @@ impl WorkspaceBuilder {
         // refuses the open should refuse it before a child process exists to
         // be torn down again.
         #[cfg(feature = "a2a")]
-        let a2a_discovered = crate::a2a::live::discovered(&path, &self.a2a)?;
+        let a2a_discovered =
+            crate::a2a::live::discovered(&path, &self.a2a).map_err(|(_, error)| error)?;
         #[cfg(feature = "mcp")]
         let (mcp_connections, mcp_files, mcp_servers) = {
             let (files, servers) = discovered_mcp(&path, &self.mcp)?;

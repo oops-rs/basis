@@ -14,6 +14,7 @@
 mod live;
 mod support;
 mod teaching;
+mod watching;
 
 use std::{path::PathBuf, sync::Arc};
 
