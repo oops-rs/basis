@@ -148,6 +148,7 @@ pub struct ServeConfig {
     pub(crate) push_notifications: bool,
     pub(crate) private_webhooks: bool,
     pub(crate) hop_cap: u32,
+    pub(crate) trust_anonymous: bool,
 }
 
 impl ServeConfig {
@@ -169,6 +170,7 @@ impl ServeConfig {
             push_notifications: false,
             private_webhooks: false,
             hop_cap: crate::DEFAULT_HOP_CAP,
+            trust_anonymous: false,
         }
     }
 
@@ -269,6 +271,22 @@ impl ServeConfig {
     #[must_use]
     pub fn with_hop_cap(self, hop_cap: u32) -> Self {
         Self { hop_cap, ..self }
+    }
+
+    /// Lets a server with no token serve push notifications and ask its
+    /// caller anyway. Without a token every local process is the one
+    /// anonymous caller, so any of them could register a webhook this server
+    /// then calls, or answer its questions; [`A2aService::open`] refuses
+    /// either feature on such a server unless the operator says, with this,
+    /// that every local process is trusted.
+    ///
+    /// [`A2aService::open`]: crate::A2aService::open
+    #[must_use]
+    pub fn with_trusted_anonymous_callers(self) -> Self {
+        Self {
+            trust_anonymous: true,
+            ..self
+        }
     }
 
     /// Keeps tasks under an explicit data root rather than the one

@@ -85,6 +85,13 @@ pub enum OpenError {
     /// authenticated callers, and a server with no token has none.
     #[error("an extended card needs a token to serve it to; configure one")]
     ExtendedCardWithoutToken,
+    /// Push notifications or asking the caller, on a server where every
+    /// local process is the same anonymous caller.
+    #[error(
+        "{0} on a server with no token lets any local process — or a web page that reaches it — \
+         use it; configure a token, or trust anonymous callers explicitly"
+    )]
+    NeedsToken(&'static str),
 }
 
 /// One served agent's A2A operations. Cheap to clone; every clone is the
@@ -130,10 +137,19 @@ impl A2aService {
             push_notifications,
             private_webhooks,
             hop_cap,
+            trust_anonymous,
         } = config;
         let principals = Principals::new(tokens)?;
         if extended_card.is_some() && !principals.any() {
             return Err(OpenError::ExtendedCardWithoutToken);
+        }
+        if !principals.any() && !trust_anonymous {
+            if push_notifications {
+                return Err(OpenError::NeedsToken("push notifications"));
+            }
+            if matches!(approval, InboundApproval::AskCaller { .. }) {
+                return Err(OpenError::NeedsToken("asking the caller"));
+            }
         }
         let tasks = match data_dir {
             Some(data_dir) => Tasks::open_at(data_dir, workspace)?,

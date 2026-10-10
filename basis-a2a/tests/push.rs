@@ -323,6 +323,8 @@ fn an_undelivered_change_is_delivered_by_the_next_life() {
         base_config(workspace.path(), data.path(), &model)
             .with_push_notifications()
             .with_private_webhooks()
+            // Called in-process as the anonymous principal; nothing listens.
+            .with_trusted_anonymous_callers()
     };
 
     let first_life = tokio::runtime::Runtime::new().unwrap();

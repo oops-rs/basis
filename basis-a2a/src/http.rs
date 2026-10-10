@@ -86,7 +86,7 @@ impl A2aServer {
         let endpoint = service
             .public_url()
             .map_or_else(|| format!("http://{local_addr}/"), str::to_owned);
-        let router = router(service, &endpoint);
+        let router = routes(service, &endpoint, address.ip().is_loopback());
         Ok(Self {
             listener: BoundedListener::new(listener),
             local_addr,
@@ -137,12 +137,35 @@ impl A2aServer {
 /// Every request passes the [`gate`](crate::gate) first — a concurrency
 /// limit, authentication, then a bounded body read. A host serving these
 /// routes on a listener of its own bounds its connections itself.
+///
+/// `Host` is checked as for a loopback bind when `endpoint` names a loopback
+/// address — see the gate's notes on web pages.
 pub fn router(service: A2aService, endpoint: &str) -> Router {
+    let loopback = reqwest::Url::parse(endpoint)
+        .ok()
+        .and_then(|url| url.host_str().map(str::to_owned))
+        .is_some_and(|host| {
+            host == "localhost"
+                || host
+                    .trim_start_matches('[')
+                    .trim_end_matches(']')
+                    .parse::<std::net::IpAddr>()
+                    .is_ok_and(|ip| ip.is_loopback())
+        });
+    routes(service, endpoint, loopback)
+}
+
+fn routes(service: A2aService, endpoint: &str, loopback: bool) -> Router {
     let cards = Arc::new(Cards::of(&service, endpoint));
+    let advertised: Vec<&str> = [Some(endpoint), service.public_url()]
+        .into_iter()
+        .flatten()
+        .collect();
+    let gate = Gate::new(loopback, &advertised);
     let state = AppState {
         service,
         cards,
-        gate: Gate::new(),
+        gate,
     };
     Router::new()
         .route(AGENT_CARD_PATH, get(agent_card))
