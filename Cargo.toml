@@ -7,7 +7,9 @@ resolver = "3"
 # weight (ADR-0011), not six things that release on their own schedules.
 version = "0.15.0"
 edition = "2024"
-rust-version = "1.88"
+# Rust 1.95 stabilizes the `if let` match guards used by spawn and
+# AtomicU64::try_update used by the shared budget counter.
+rust-version = "1.95"
 license = "MIT"
 readme = "README.md"
 repository = "https://github.com/oops-rs/basis"

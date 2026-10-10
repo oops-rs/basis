@@ -7,7 +7,8 @@ Releases before 0.15.0 are described by their tags and ADRs only.
 
 ## 0.15.0 — 2026-10-10
 
-Built on mentra 0.29.0.
+Built on mentra 0.29.0. The published crates declare `rust-version = "1.88"`;
+main raises it to 1.95 for the next release (#2).
 
 ### A2A in full ([ADR-0030](docs/adr/0030-a2a-is-spoken-in-full.md))
 

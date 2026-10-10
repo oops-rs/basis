@@ -525,7 +525,7 @@ not against the ecosystem. The six workspace crates share one version. A2A was c
 the official Python SDK (`a2a-sdk` 1.2.2) in both directions over both bindings — every method,
 streaming, push, the extended card, cancel, hops and asking the caller — but that run is not in CI. CI
 runs fmt, clippy at `-D warnings`, and the full suite on Linux, macOS and Windows, plus MSRV
-(1.88, edition 2024).
+(1.95, edition 2024).
 
 Every addition faces one check: does it make embedding cheaper for a Rust host, is it a convention
 other agents already speak, or is it a seam? If none of the three, it is the host's code, the
