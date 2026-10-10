@@ -9,11 +9,15 @@
 use std::collections::HashMap;
 
 use a2a::{
-    AgentCapabilities, AgentCard, AgentInterface, AgentSkill, HttpAuthSecurityScheme,
+    A2AError, AgentCapabilities, AgentCard, AgentInterface, AgentSkill, HttpAuthSecurityScheme,
     SecurityScheme, TRANSPORT_PROTOCOL_HTTP_JSON, TRANSPORT_PROTOCOL_JSONRPC,
 };
 
-use crate::{config::AgentIdentity, rest, service::INPUT_MODES};
+use crate::{
+    config::{AgentIdentity, ExtendedCard, Principal},
+    rest,
+    service::{A2aService, INPUT_MODES},
+};
 
 /// The well-known path the spec puts the card at.
 pub const AGENT_CARD_PATH: &str = "/.well-known/agent-card.json";
@@ -24,7 +28,18 @@ pub(crate) const TEXT: &str = "text/plain";
 /// The scheme name the card's security requirement refers to.
 const BEARER: &str = "bearer";
 
-pub(crate) fn build(identity: &AgentIdentity, endpoint: &str, authenticated: bool) -> AgentCard {
+/// Which optional features a service serves — each is claimed on the card
+/// when, and only when, it is on (ADR-0030 §10).
+#[derive(Debug, Clone, Copy, Default)]
+pub(crate) struct Features {
+    /// At least one token is configured.
+    pub(crate) authenticated: bool,
+    pub(crate) extended_card: bool,
+}
+
+/// The public card, at the well-known path.
+pub(crate) fn build(identity: &AgentIdentity, endpoint: &str, features: Features) -> AgentCard {
+    let authenticated = features.authenticated;
     let skills = if identity.skills.is_empty() {
         vec![AgentSkill {
             id: "general".to_string(),
@@ -66,7 +81,7 @@ pub(crate) fn build(identity: &AgentIdentity, endpoint: &str, authenticated: boo
             streaming: Some(true),
             push_notifications: Some(false),
             extensions: None,
-            extended_agent_card: Some(false),
+            extended_agent_card: Some(features.extended_card),
         },
         default_input_modes: INPUT_MODES.iter().map(|mode| mode.to_string()).collect(),
         default_output_modes: vec![TEXT.to_string()],
@@ -80,6 +95,58 @@ pub(crate) fn build(identity: &AgentIdentity, endpoint: &str, authenticated: boo
     }
 }
 
+/// Both cards one server serves, built once from its service and endpoint.
+#[derive(Debug, Clone)]
+pub(crate) struct Cards {
+    pub(crate) public: AgentCard,
+    pub(crate) extended: Option<AgentCard>,
+}
+
+impl Cards {
+    pub(crate) fn of(service: &A2aService, endpoint: &str) -> Self {
+        let public = build(service.identity(), endpoint, service.features());
+        let extended = service
+            .extended_card()
+            .map(|extended| extend(&public, extended));
+        Self { public, extended }
+    }
+
+    /// `GetExtendedAgentCard`, for `caller`. A card that declares none answers
+    /// `UnsupportedOperationError`, as the spec requires (§13.3); one that
+    /// does serves it to an authenticated caller only — and a server with an
+    /// extended card refuses every unauthenticated request before it gets
+    /// here, so the second refusal is for a host calling the service with an
+    /// anonymous principal of its own.
+    pub(crate) fn extended_for(&self, caller: &Principal) -> Result<&AgentCard, A2AError> {
+        let extended = self
+            .extended
+            .as_ref()
+            .ok_or_else(|| A2AError::unsupported_operation("this agent has no extended card"))?;
+        if caller.is_authenticated() {
+            Ok(extended)
+        } else {
+            Err(A2AError::unsupported_operation(
+                "the extended card is served to authenticated callers only",
+            ))
+        }
+    }
+}
+
+/// The extended card: the public one, with the operator's longer
+/// description and the skills it adds.
+pub(crate) fn extend(public: &AgentCard, extended: &ExtendedCard) -> AgentCard {
+    let mut skills = public.skills.clone();
+    skills.extend(extended.skills.iter().cloned());
+    AgentCard {
+        description: extended
+            .description
+            .clone()
+            .unwrap_or_else(|| public.description.clone()),
+        skills,
+        ..public.clone()
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -87,7 +154,7 @@ mod tests {
     #[test]
     fn the_card_advertises_json_rpc_then_http_json_and_only_what_is_served() {
         let identity = AgentIdentity::new("helper", "Answers questions.");
-        let card = build(&identity, "http://127.0.0.1:1/", false);
+        let card = build(&identity, "http://127.0.0.1:1/", Features::default());
         assert_eq!(card.supported_interfaces[0].url, "http://127.0.0.1:1/");
         assert_eq!(
             card.supported_interfaces[0].protocol_binding,
@@ -110,7 +177,11 @@ mod tests {
     #[test]
     fn a_token_puts_the_bearer_scheme_on_the_card() {
         let identity = AgentIdentity::new("helper", "Answers questions.");
-        let card = build(&identity, "http://127.0.0.1:1/", true);
+        let features = Features {
+            authenticated: true,
+            ..Features::default()
+        };
+        let card = build(&identity, "http://127.0.0.1:1/", features);
         assert!(card.security_schemes.unwrap().contains_key(BEARER));
         assert!(card.security_requirements.unwrap()[0].contains_key(BEARER));
     }

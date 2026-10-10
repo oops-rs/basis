@@ -16,7 +16,7 @@ use futures::stream::BoxStream;
 use serde::de::DeserializeOwned;
 use serde_json::Value;
 
-use crate::{config::Principal, service::A2aService};
+use crate::{card::Cards, config::Principal, service::A2aService};
 
 /// One request, parsed.
 #[derive(Debug)]
@@ -74,6 +74,7 @@ impl Operation {
 /// Answers `operation` for `caller`.
 pub(crate) async fn perform(
     service: &A2aService,
+    cards: &Cards,
     caller: &Principal,
     operation: Operation,
 ) -> Result<Outcome, A2AError> {
@@ -92,11 +93,7 @@ pub(crate) async fn perform(
         | Operation::GetPushConfig(_)
         | Operation::ListPushConfigs(_)
         | Operation::DeletePushConfig(_) => Err(A2AError::push_notification_not_supported()),
-        // The card does not declare an extended card, and the spec answers
-        // that with `UnsupportedOperationError`, not "not configured".
-        Operation::GetExtendedAgentCard => Err(A2AError::unsupported_operation(
-            "this agent has no extended card",
-        )),
+        Operation::GetExtendedAgentCard => value(cards.extended_for(caller)?),
     }
 }
 

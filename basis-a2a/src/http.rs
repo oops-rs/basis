@@ -28,7 +28,7 @@ use serde_json::Value;
 use tokio::net::TcpListener;
 
 use crate::{
-    card::{self, AGENT_CARD_PATH},
+    card::{AGENT_CARD_PATH, Cards},
     config::Principal,
     rest::{self, HTTP_JSON_PATH},
     rpc::{self, Reply},
@@ -55,7 +55,7 @@ pub enum BindError {
 #[derive(Clone)]
 pub(crate) struct AppState {
     pub(crate) service: A2aService,
-    card: Arc<AgentCard>,
+    pub(crate) cards: Arc<Cards>,
 }
 
 /// A bound, not yet serving, A2A server.
@@ -129,21 +129,17 @@ impl A2aServer {
 /// interface is advertised, and served, under it at
 /// [`HTTP_JSON_PATH`](crate::HTTP_JSON_PATH).
 pub fn router(service: A2aService, endpoint: &str) -> Router {
-    let card = Arc::new(card::build(
-        service.identity(),
-        endpoint,
-        service.principals().any(),
-    ));
+    let cards = Arc::new(Cards::of(&service, endpoint));
     Router::new()
         .route(AGENT_CARD_PATH, get(agent_card))
         .route("/", post(json_rpc))
         .route(&format!("{HTTP_JSON_PATH}/{{*path}}"), any(rest::handle))
         .layer(DefaultBodyLimit::max(MAX_BODY))
-        .with_state(AppState { service, card })
+        .with_state(AppState { service, cards })
 }
 
 async fn agent_card(State(state): State<AppState>) -> Json<AgentCard> {
-    Json(AgentCard::clone(&state.card))
+    Json(state.cards.public.clone())
 }
 
 async fn json_rpc(
@@ -156,7 +152,15 @@ async fn json_rpc(
         return unauthorized();
     };
     let version = version(&headers, Some(&query));
-    match rpc::dispatch(&state.service, &caller, version.as_deref(), &body).await {
+    let reply = rpc::dispatch(
+        &state.service,
+        &state.cards,
+        &caller,
+        version.as_deref(),
+        &body,
+    )
+    .await;
+    match reply {
         Reply::Json(response) => Json(response).into_response(),
         Reply::Stream(id, updates) => sse(updates, move |update| {
             let result = serde_json::to_value(update).unwrap_or_default();

@@ -58,8 +58,8 @@ mod stream;
 pub use a2a;
 pub use card::AGENT_CARD_PATH;
 pub use config::{
-    AgentIdentity, BearerToken, DEFAULT_PRINCIPAL, InboundApproval, Principal, PrincipalError,
-    RunDefaults, ServeConfig,
+    AgentIdentity, BearerToken, DEFAULT_PRINCIPAL, ExtendedCard, InboundApproval, Principal,
+    PrincipalError, RunDefaults, ServeConfig,
 };
 pub use http::{A2aServer, BindError, router};
 pub use rest::HTTP_JSON_PATH;

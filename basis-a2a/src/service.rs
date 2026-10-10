@@ -38,9 +38,10 @@ use futures::stream::BoxStream;
 use tokio::sync::watch;
 
 use crate::{
+    card::Features,
     config::{
-        AgentIdentity, InboundApproval, Principal, PrincipalError, Principals, RunDefaults,
-        ServeConfig,
+        AgentIdentity, ExtendedCard, InboundApproval, Principal, PrincipalError, Principals,
+        RunDefaults, ServeConfig,
     },
     index::{Index, Record},
     project::{self, Standing, View, internal},
@@ -69,6 +70,10 @@ pub enum OpenError {
     Index(#[from] std::io::Error),
     #[error("configure the server's principals: {0}")]
     Principals(#[from] PrincipalError),
+    /// The spec requires the extended card to be served only to
+    /// authenticated callers, and a server with no token has none.
+    #[error("an extended card needs a token to serve it to; configure one")]
+    ExtendedCardWithoutToken,
 }
 
 /// One served agent's A2A operations. Cheap to clone; every clone is the
@@ -87,6 +92,7 @@ struct Inner {
     identity: AgentIdentity,
     principals: Principals,
     public_url: Option<String>,
+    extended_card: Option<ExtendedCard>,
     /// One receiver per task this process is driving, flipped to `true` when
     /// its driver returns. Absent for a task nobody here is driving.
     drivers: Mutex<HashMap<String, watch::Receiver<bool>>>,
@@ -106,8 +112,12 @@ impl A2aService {
             tokens,
             public_url,
             data_dir,
+            extended_card,
         } = config;
         let principals = Principals::new(tokens)?;
+        if extended_card.is_some() && !principals.any() {
+            return Err(OpenError::ExtendedCardWithoutToken);
+        }
         let tasks = match data_dir {
             Some(data_dir) => Tasks::open_at(data_dir, workspace)?,
             None => Tasks::open(workspace)?,
@@ -123,6 +133,7 @@ impl A2aService {
                 identity,
                 principals,
                 public_url,
+                extended_card,
                 drivers: Mutex::new(HashMap::new()),
             }),
         };
@@ -136,6 +147,18 @@ impl A2aService {
 
     pub(crate) fn principals(&self) -> &Principals {
         &self.inner.principals
+    }
+
+    pub(crate) fn extended_card(&self) -> Option<&ExtendedCard> {
+        self.inner.extended_card.as_ref()
+    }
+
+    /// What the card may claim: exactly what this service serves.
+    pub(crate) fn features(&self) -> Features {
+        Features {
+            authenticated: self.inner.principals.any(),
+            extended_card: self.inner.extended_card.is_some(),
+        }
     }
 
     pub(crate) fn public_url(&self) -> Option<&str> {

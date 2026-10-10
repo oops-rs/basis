@@ -86,7 +86,7 @@ pub(crate) async fn handle(
         Err(Refusal::Method) => return method_not_allowed(),
         Err(Refusal::Error(error)) => return error::response(error),
     };
-    match ops::perform(&state.service, &caller, operation).await {
+    match ops::perform(&state.service, &state.cards, &caller, operation).await {
         Ok(Outcome::Value(value)) => Json(value).into_response(),
         Ok(Outcome::Stream(stream)) => sse(stream),
         Err(error) => error::response(error),

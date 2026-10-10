@@ -9,15 +9,16 @@
 //! the first consequential call.
 
 mod auth;
+mod identity;
 
 use std::{path::PathBuf, time::Duration};
 
-use a2a::AgentSkill;
 use basis::{Effort, SystemPrompt};
 use basis_tasks::Approve;
 
 pub(crate) use auth::Principals;
 pub use auth::{BearerToken, DEFAULT_PRINCIPAL, Principal, PrincipalError};
+pub use identity::{AgentIdentity, ExtendedCard};
 
 /// How a served task's consequential calls are answered. There is no third
 /// option: see the module docs.
@@ -37,47 +38,6 @@ impl From<InboundApproval> for Approve {
             InboundApproval::Never => Approve::Never,
             InboundApproval::Always => Approve::Always,
         }
-    }
-}
-
-/// What the Agent Card says this agent is.
-#[derive(Debug, Clone)]
-pub struct AgentIdentity {
-    pub(crate) name: String,
-    pub(crate) description: String,
-    pub(crate) version: String,
-    pub(crate) skills: Vec<AgentSkill>,
-}
-
-impl AgentIdentity {
-    /// A card names an agent and says what it does; both are required by the
-    /// spec, and a caller choosing among agents reads nothing else first.
-    pub fn new(name: impl Into<String>, description: impl Into<String>) -> Self {
-        Self {
-            name: name.into(),
-            description: description.into(),
-            version: env!("CARGO_PKG_VERSION").to_string(),
-            skills: Vec::new(),
-        }
-    }
-
-    /// The agent's own version, when it has one other than basis's.
-    #[must_use]
-    pub fn with_version(self, version: impl Into<String>) -> Self {
-        Self {
-            version: version.into(),
-            ..self
-        }
-    }
-
-    /// Adds a skill to the card. With none, the card advertises one general
-    /// skill described by the agent's own description, because a card must
-    /// list what the agent can be asked to do.
-    #[must_use]
-    pub fn with_skill(self, skill: AgentSkill) -> Self {
-        let mut skills = self.skills;
-        skills.push(skill);
-        Self { skills, ..self }
     }
 }
 
@@ -177,6 +137,7 @@ pub struct ServeConfig {
     pub(crate) tokens: Vec<(Principal, BearerToken)>,
     pub(crate) public_url: Option<String>,
     pub(crate) data_dir: Option<PathBuf>,
+    pub(crate) extended_card: Option<ExtendedCard>,
 }
 
 impl ServeConfig {
@@ -194,6 +155,7 @@ impl ServeConfig {
             tokens: Vec::new(),
             public_url: None,
             data_dir: None,
+            extended_card: None,
         }
     }
 
@@ -247,6 +209,18 @@ impl ServeConfig {
     pub fn with_public_url(self, public_url: impl Into<String>) -> Self {
         Self {
             public_url: Some(public_url.into()),
+            ..self
+        }
+    }
+
+    /// Serves `extended` to authenticated callers and declares it on the
+    /// public card (ADR-0030 §5). Needs at least one token:
+    /// [`A2aService::open`](crate::A2aService::open) refuses an extended card
+    /// on a server nobody authenticates to, since nobody could be served it.
+    #[must_use]
+    pub fn with_extended_card(self, extended: ExtendedCard) -> Self {
+        Self {
+            extended_card: Some(extended),
             ..self
         }
     }

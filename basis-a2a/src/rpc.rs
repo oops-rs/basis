@@ -10,6 +10,7 @@ use futures::stream::BoxStream;
 use serde_json::Value;
 
 use crate::{
+    card::Cards,
     config::Principal,
     ops::{self, Operation, Outcome},
     service::A2aService,
@@ -31,6 +32,7 @@ impl Reply {
 /// `A2A-Version`, from its header or query parameter.
 pub(crate) async fn dispatch(
     service: &A2aService,
+    cards: &Cards,
     caller: &Principal,
     version: Option<&str>,
     body: &[u8],
@@ -67,7 +69,7 @@ pub(crate) async fn dispatch(
         Ok(operation) => operation,
         Err(error) => return Reply::error(id, error),
     };
-    match ops::perform(service, caller, operation).await {
+    match ops::perform(service, cards, caller, operation).await {
         Ok(Outcome::Value(result)) => Reply::Json(JsonRpcResponse::success(id, result)),
         Ok(Outcome::Stream(stream)) => Reply::Stream(id, stream),
         Err(error) => Reply::error(id, error),
