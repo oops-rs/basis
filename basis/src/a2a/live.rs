@@ -93,25 +93,35 @@ impl LiveA2a {
     /// as they were: a half-typed file never drops an agent (ADR-0031 §1).
     pub(crate) async fn reload(&self) -> Result<A2aReload, A2aError> {
         let _serial = self.reloading.lock().await;
-        let discovery = discovered(&self.root, &self.config);
-        // Recorded whether or not the read succeeded: a watch should try a
-        // broken file again when it changes, not on every poll.
-        let (seen, read) = match discovery {
-            Ok(discovery) => (discovery.seen.clone(), Ok(discovery)),
-            Err((seen, error)) => (seen, Err(error)),
+        let discovery = match discovered(&self.root, &self.config) {
+            Ok(discovery) => discovery,
+            // Recorded at once for a read that failed: there is nothing to
+            // apply, and a watch should try a broken file again when it
+            // changes, not on every poll.
+            Err((seen, error)) => {
+                self.saw(seen);
+                return Err(error);
+            }
         };
-        *self
-            .seen
-            .lock()
-            .unwrap_or_else(|poisoned| poisoned.into_inner()) = seen;
-        let discovery = read?;
 
         let report = self.remote.reload(discovery.agents).await;
         *self
             .files
             .write()
             .unwrap_or_else(|poisoned| poisoned.into_inner()) = discovery.files;
+        // Recorded only once the set is swapped: a reload cancelled while it
+        // connected — a host's timeout, a watch dropped mid-reload — applied
+        // nothing, so the edit it read must still look unseen to the next
+        // poll rather than be skipped for good.
+        self.saw(discovery.seen);
         Ok(report)
+    }
+
+    fn saw(&self, seen: Vec<Stamp>) {
+        *self
+            .seen
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner()) = seen;
     }
 
     /// What the sources looked like just before the last read.
@@ -210,3 +220,6 @@ impl std::fmt::Debug for LiveA2a {
             .finish_non_exhaustive()
     }
 }
+
+#[cfg(test)]
+mod tests;
