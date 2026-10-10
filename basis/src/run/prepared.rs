@@ -419,17 +419,56 @@ impl PreparedRun {
         .await
     }
 
-    /// One turn, start to finish: header, forwarded events, outcome.
-    async fn turn<S: EventSink, A: Approver>(
+    /// Whether this conversation ends inside a turn a crash interrupted after
+    /// the model had acted on it: tool calls ran, and the model has not
+    /// answered since.
+    ///
+    /// Read off a resumed run before sending anything. Recovery closed any
+    /// call that was still running with an error result saying its effect is
+    /// unknown — it is never run again by itself — so the conversation is
+    /// valid as it stands, and the turn is finished with
+    /// [`continue_interrupted_with_options`](Self::continue_interrupted_with_options)
+    /// rather than by asking its prompt a second time. A turn the crash cut
+    /// off before the model committed anything is not one of these: it rolled
+    /// back, and asking its prompt again is the way to re-drive it.
+    pub fn has_interrupted_turn(&self) -> bool {
+        self.session.has_interrupted_turn()
+    }
+
+    /// Finishes an interrupted turn (see
+    /// [`has_interrupted_turn`](Self::has_interrupted_turn)) from where the
+    /// conversation ends, without sending a prompt: the model is asked again
+    /// with what the turn already did, and the turn runs on exactly as one
+    /// [`send_with_options`](Self::send_with_options) starts — the same
+    /// header, forwarded events, approver, hooks, bounds and report.
+    ///
+    /// A conversation with no interrupted turn fails the turn with mentra's
+    /// `NoInterruptedTurn`, reported like any failed turn.
+    pub async fn continue_interrupted_with_options<S: EventSink, A: Approver>(
         &mut self,
-        parts: Vec<PromptPart>,
         sink: S,
         approver: A,
         options: TurnOptions,
     ) -> Result<RunReport<S>, RunError> {
+        self.turn(TurnInput::Continue, sink, approver, options)
+            .await
+    }
+
+    /// One turn, start to finish: header, forwarded events, outcome.
+    async fn turn<S: EventSink, A: Approver>(
+        &mut self,
+        input: impl Into<TurnInput>,
+        sink: S,
+        approver: A,
+        options: TurnOptions,
+    ) -> Result<RunReport<S>, RunError> {
+        let input = input.into();
         let options = bounded(options, &self.bounds);
         drawable(&options)?;
-        let turn = self.begin(&parts, sink, approver)?;
+        let turn = match &input {
+            TurnInput::Prompt(parts) => self.begin(parts, sink, approver)?,
+            TurnInput::Continue => self.open_turn(sink, approver)?,
+        };
         let (usage, usage_tap) = self.observe_usage();
 
         // Kept rather than passed straight in: mentra takes the options by
@@ -438,10 +477,14 @@ impl PreparedRun {
         let run_options = self.run_options(options);
         let observed = run_options.clone();
 
-        let result = self
-            .session
-            .append_turn_with_options(prompt::into_blocks(parts), run_options)
-            .await;
+        let result = match input {
+            TurnInput::Prompt(parts) => {
+                self.session
+                    .append_turn_with_options(prompt::into_blocks(parts), run_options)
+                    .await
+            }
+            TurnInput::Continue => self.session.continue_interrupted(run_options).await,
+        };
         let usage = Self::finish_usage(usage, usage_tap);
 
         let ended = match &result {
@@ -472,7 +515,17 @@ impl PreparedRun {
         if prompt::says_nothing(parts) {
             return Err(RunError::EmptyPrompt);
         }
+        self.open_turn(sink, approver)
+    }
 
+    /// [`begin`](Self::begin) past the prompt check: emits the header and
+    /// starts forwarding. A continuation opens here directly — it sends no
+    /// prompt, so there is none to check.
+    fn open_turn<S: EventSink, A: Approver>(
+        &self,
+        sink: S,
+        approver: A,
+    ) -> Result<Turn<S>, RunError> {
         let permissions = self.session.permission_handle();
         let session_id = self.session.id().to_string();
         let receiver = self.session.subscribe();
@@ -569,6 +622,19 @@ impl PreparedRun {
             usage,
             sink,
         })
+    }
+}
+
+/// What a turn sends: a prompt, or nothing at all because it finishes an
+/// interrupted one.
+enum TurnInput {
+    Prompt(Vec<PromptPart>),
+    Continue,
+}
+
+impl From<Vec<PromptPart>> for TurnInput {
+    fn from(parts: Vec<PromptPart>) -> Self {
+        Self::Prompt(parts)
     }
 }
 
