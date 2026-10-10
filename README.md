@@ -496,7 +496,7 @@ protocol and its official client library, not against the ecosystem. The six wor
 share one version; `basis-a2a` joins the published ones only when the user performs the next
 release, and A2A is likewise verified against the official SDK's wire types and its own tests, not
 yet against a third-party agent. CI runs fmt, clippy at
-`-D warnings`, and the full suite on Linux, macOS and Windows, plus MSRV (1.88, edition 2024).
+`-D warnings`, and the full suite on Linux, macOS and Windows, plus MSRV (1.95, edition 2024).
 
 Every addition faces one check: does it make embedding cheaper for a Rust host, is it a convention
 other agents already speak, or is it a seam? If none of the three, it is the host's code, the
