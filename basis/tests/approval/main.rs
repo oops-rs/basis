@@ -19,6 +19,7 @@
 //! second, third and fourth `tests/*.rs` would each compile and link their own
 //! copy of the scripted-provider harness below.
 
+mod interrupted;
 mod scoped_rules;
 mod side_effect_classification;
 #[cfg(unix)]

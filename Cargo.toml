@@ -343,6 +343,6 @@ opt-level = "s"
 lto = true
 codegen-units = 1
 
-# Development only: unreleased mentra (#62, #63). Removed at release.
+# Development only: unreleased mentra (#62, #63, #64). Removed at release.
 [patch.crates-io]
-mentra = { path = "/Users/wendell/developer/oops-rs/mentra/mentra" }
+mentra = { path = "/Users/wendell/developer/oops-rs/mentra-recovery/mentra" }

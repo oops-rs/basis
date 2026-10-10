@@ -237,8 +237,9 @@ fn restart_config(data: &std::path::Path, workspace: &std::path::Path, model: &s
 
 /// The first life of [`a_restart_never_honors_the_dead_questions_answer`]:
 /// run as a child process, which the test kills while its question is open.
-/// A crash has to be a real one — a runtime shut down in-process leaves the
-/// task's blocking driver thread running, which is not what a restart is.
+/// A crash has to be a real one: shutting a service down in-process is the
+/// graceful path, which [`a_shutdown_while_asking_records_nothing_and_the_next_start_asks_again`]
+/// covers.
 #[test]
 #[ignore = "run as a child process by a_restart_never_honors_the_dead_questions_answer"]
 fn first_life_that_crashes_while_asking() {
@@ -314,27 +315,11 @@ fn a_restart_never_honors_the_dead_questions_answer() {
             &model.base_url,
         ))
         .unwrap();
-        // The restarted server drives the task again. Whether that re-runs
-        // the turn and asks anew, or settles it, is `basis-tasks`' resume
-        // rule's to decide (today a turn whose tool call was already
-        // committed counts as answered); either way it stops waiting on the
-        // dead question.
-        let deadline = Instant::now() + Duration::from_secs(30);
-        let task = loop {
-            let task = service
-                .get_task(
-                    &caller,
-                    serde_json::from_value(json!({"id": task_id})).unwrap(),
-                )
-                .unwrap();
-            let task = serde_json::to_value(task).unwrap();
-            let state = task["status"]["state"].as_str().unwrap().to_string();
-            if state != "TASK_STATE_SUBMITTED" && state != "TASK_STATE_WORKING" {
-                break task;
-            }
-            assert!(Instant::now() < deadline, "never driven again: {task}");
-            tokio::time::sleep(Duration::from_millis(50)).await;
-        };
+        // The restarted server drives the task again. The turn died with its
+        // call committed and unanswered, so it is not finished: it is
+        // continued, with the call closed as having an unknown effect, and
+        // the model's next attempt at the call asks again (ADR-0030 §7).
+        let task = asked_again(&service, &caller, task_id).await;
 
         // No answer outlives the question it was given for.
         let stale = service
@@ -346,18 +331,129 @@ fn a_restart_never_honors_the_dead_questions_answer() {
             "the call was never made on an answer nobody can give"
         );
 
-        if task["status"]["state"] == "TASK_STATE_INPUT_REQUIRED" {
-            let new_id = call_id(&task);
-            assert_ne!(new_id, old_id, "a re-run question has a fresh call id");
-            let answered = service
-                .send_message(&caller, reply_to(format!("approve {new_id}")))
-                .await
-                .unwrap();
-            let answered = serde_json::to_value(answered).unwrap();
-            assert_eq!(
-                answered["task"]["status"]["state"], "TASK_STATE_COMPLETED",
-                "{answered}"
-            );
-        }
+        let new_id = call_id(&task);
+        assert_ne!(new_id, old_id, "a re-run question has a fresh call id");
+        let answered = service
+            .send_message(&caller, reply_to(format!("approve {new_id}")))
+            .await
+            .unwrap();
+        let answered = serde_json::to_value(answered).unwrap();
+        assert_eq!(
+            answered["task"]["status"]["state"], "TASK_STATE_COMPLETED",
+            "{answered}"
+        );
+        assert_eq!(harness::artifact_text(&answered["task"]), "finished");
+        assert_eq!(
+            std::fs::read_to_string(workspace.path().join("note.txt")).unwrap(),
+            "approved"
+        );
     });
+}
+
+/// Polls `task_id` until it is asking, which it must come to.
+async fn asked_again(service: &A2aService, caller: &Principal, task_id: &str) -> Value {
+    let deadline = Instant::now() + Duration::from_secs(30);
+    loop {
+        let task = service
+            .get_task(
+                caller,
+                serde_json::from_value(json!({"id": task_id})).unwrap(),
+            )
+            .unwrap();
+        let task = serde_json::to_value(task).unwrap();
+        let state = task["status"]["state"].as_str().unwrap().to_string();
+        if state == "TASK_STATE_INPUT_REQUIRED" {
+            return task;
+        }
+        assert!(
+            state == "TASK_STATE_SUBMITTED" || state == "TASK_STATE_WORKING",
+            "the task settled instead of asking again: {task}"
+        );
+        assert!(Instant::now() < deadline, "never asked again: {task}");
+        tokio::time::sleep(Duration::from_millis(50)).await;
+    }
+}
+
+#[tokio::test]
+async fn a_shutdown_while_asking_records_nothing_and_the_next_start_asks_again() {
+    harness::isolate_environment();
+    let write = Reply::ToolCall {
+        name: "write".to_string(),
+        arguments: json!({"path": "note.txt", "content": "approved"}),
+    };
+    let model = ScriptedEndpoint::scripted(
+        false,
+        vec![write.clone(), write, Reply::Text("finished".to_string())],
+    );
+    let data = tempfile::tempdir().unwrap();
+    let workspace = tempfile::tempdir().unwrap();
+    let config = || restart_config(data.path(), workspace.path(), &model.base_url);
+    let caller = Principal::anonymous();
+
+    let service = A2aService::open(config()).unwrap();
+    let request =
+        serde_json::from_value(json!({"message": user_message("write it", None)})).unwrap();
+    let asked = service.send_message(&caller, request).await.unwrap();
+    let asked = serde_json::to_value(asked).unwrap()["task"].clone();
+    let task_id = asked["id"].as_str().unwrap().to_string();
+    let old_id = call_id(&asked);
+
+    tokio::time::timeout(Duration::from_secs(10), service.shutdown())
+        .await
+        .expect("a shutdown does not wait on the open question");
+    let reply_to = |text: String| -> basis_a2a::a2a::SendMessageRequest {
+        serde_json::from_value(reply(&json!({"id": task_id}), json!([{"text": text}]))).unwrap()
+    };
+    assert!(
+        service
+            .send_message(&caller, reply_to(format!("approve {old_id}")))
+            .await
+            .is_err(),
+        "the interrupted question takes no answer"
+    );
+    let tasks = basis_tasks::Tasks::open_at(data.path(), workspace.path()).unwrap();
+    let handle = basis_tasks::TaskHandle::parse(&tasks.list().unwrap()[0].task).unwrap();
+    assert!(
+        tasks.terminal(&handle).unwrap().is_none(),
+        "no terminal state was recorded"
+    );
+    let standing = serde_json::to_value(
+        service
+            .get_task(
+                &caller,
+                serde_json::from_value(json!({"id": task_id})).unwrap(),
+            )
+            .unwrap(),
+    )
+    .unwrap();
+    assert!(
+        ![
+            "TASK_STATE_COMPLETED",
+            "TASK_STATE_FAILED",
+            "TASK_STATE_CANCELED"
+        ]
+        .contains(&standing["status"]["state"].as_str().unwrap()),
+        "{standing}"
+    );
+    assert!(!workspace.path().join("note.txt").exists());
+    drop(service);
+
+    let service = A2aService::open(config()).unwrap();
+    let task = asked_again(&service, &caller, &task_id).await;
+    let new_id = call_id(&task);
+    assert_ne!(new_id, old_id);
+    let answered = service
+        .send_message(&caller, reply_to(format!("approve {new_id}")))
+        .await
+        .unwrap();
+    let answered = serde_json::to_value(answered).unwrap();
+    assert_eq!(
+        answered["task"]["status"]["state"], "TASK_STATE_COMPLETED",
+        "{answered}"
+    );
+    assert_eq!(
+        std::fs::read_to_string(workspace.path().join("note.txt")).unwrap(),
+        "approved"
+    );
+    service.shutdown().await;
 }

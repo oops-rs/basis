@@ -7,8 +7,13 @@
 //! not exist, and every crash before it resolves toward resumable.
 //!
 //! **Re-driving a turn may repeat its tool side effects.** A checkpoint
-//! restores state, never effects — a shell command that ran, ran. A message
-//! left in flight by a crash reverts to pending and is driven again.
+//! restores state, never effects — a shell command that ran, ran. A turn a
+//! crash cut off before the model committed anything rolled back, and its
+//! prompt or message is driven again. One cut off after the model acted is
+//! *continued* instead (see [`resume`]): the calls that were running are
+//! closed as having an unknown effect, never re-executed by basis, and the
+//! model is asked to finish the turn — it is not answered, so it does not
+//! settle, and it is not asked again, so the prompt is not repeated.
 //!
 //! A parent's executor may not write its terminal record while an attached
 //! child lacks one: the settle pass here is the scope rule as one ordering
@@ -67,6 +72,7 @@ use basis::{
 use serde_json::Value;
 use tokio::time::{self, Instant};
 
+use self::resume::{Recovered, Work, recover};
 use crate::{
     Error,
     approve::Approve,
@@ -139,7 +145,9 @@ pub(crate) async fn wait_for_terminal(
         if let Some(terminal) = poll_once(data.clone(), task.to_string(), ctx.clone()).await? {
             return Ok(WaitOutcome::Terminal(TerminalRecord::from_raw(terminal)));
         }
-        if deadline.is_some_and(|deadline| Instant::now() >= deadline) {
+        // A host going away stops waiting at once, as if its time were up:
+        // the task is left to whoever attaches next.
+        if ctx.is_stopping() || deadline.is_some_and(|deadline| Instant::now() >= deadline) {
             return Ok(WaitOutcome::TimedOut {
                 attached: is_attached(data, task).await?,
             });
@@ -173,6 +181,9 @@ async fn poll_once(
         let paths = resolve(&data, &task)?;
         if let Some(terminal) = read_terminal(&paths)? {
             return Ok(Some(terminal));
+        }
+        if ctx.is_stopping() {
+            return Ok(None);
         }
         match try_attach(&paths)? {
             Some(guard) => handle.block_on(drive(&data, &task, guard, &ctx)),
@@ -224,10 +235,10 @@ pub(crate) async fn wait_for_message(
     task: &str,
     message_id: &str,
     timeout: Duration,
-    prompt_host: Option<Arc<dyn crate::approve::PromptHost>>,
+    ctx: DriveContext,
 ) -> Result<WaitOutcome, String> {
     let deadline = Instant::now().checked_add(timeout);
-    let ctx = DriveContext::new(None, prompt_host).until(deadline.map(Instant::into_std));
+    let ctx = ctx.until(deadline.map(Instant::into_std));
     loop {
         match poll_message_once(
             data.clone(),
@@ -247,7 +258,7 @@ pub(crate) async fn wait_for_message(
             MessagePoll::Drove => continue,
             MessagePoll::Idle => {}
         }
-        if deadline.is_some_and(|deadline| Instant::now() >= deadline) {
+        if ctx.is_stopping() || deadline.is_some_and(|deadline| Instant::now() >= deadline) {
             return Ok(WaitOutcome::TimedOut {
                 attached: is_attached(data, task).await?,
             });
@@ -291,6 +302,7 @@ async fn poll_message_once(
             return Ok(MessagePoll::Resolved(payload));
         }
         if terminal.is_none()
+            && !ctx.is_stopping()
             && let Some(guard) = try_attach(&paths)?
         {
             // `None` is a drive that made no progress — its conversation
@@ -427,7 +439,7 @@ pub(crate) async fn drive(
             return Ok(None);
         }
     }
-    Ok(Some(settle(data, &paths, &mut meta, ctx).await?))
+    settle(data, &paths, &mut meta, ctx).await
 }
 
 /// How [`run_model`]'s turn loop ended.
@@ -437,8 +449,9 @@ enum Turns {
     /// turns it into the terminal record.
     Recorded,
     /// The waiter's own deadline passed at a turn boundary with work still
-    /// queued. Nothing is recorded, nothing is settled: the next attach picks
-    /// the task up at exactly this boundary.
+    /// queued, or the host is going away. Nothing is recorded, nothing is
+    /// settled: the next attach picks the task up at exactly this boundary —
+    /// or, for a turn the host abandoned, wherever its conversation stands.
     Yielded,
 }
 
@@ -487,6 +500,11 @@ async fn run_model(
     meta: &mut TaskMeta,
     ctx: &DriveContext,
 ) -> Result<Turns, String> {
+    // A host going away records nothing, not even a deadline or a cancel
+    // that is already due: those land on the next attach just the same.
+    if ctx.is_stopping() {
+        return Ok(Turns::Yielded);
+    }
     if meta.deadline_passed() {
         return record_pending(
             paths,
@@ -502,7 +520,7 @@ async fn run_model(
     if cancel_requested(paths) {
         return record_pending(paths, meta, Terminal::Cancelled, None);
     }
-    inbox::revert_in_flight(paths)?;
+    let reverted = inbox::revert_in_flight(paths)?;
 
     let events = match EventLog::open(paths) {
         Ok(log) => Arc::new(Mutex::new(log)),
@@ -570,26 +588,27 @@ async fn run_model(
         save_meta(paths, meta)?;
     }
 
-    // Resume recovery: an assistant turn committed *past what this task
-    // inherited* means the recorded prompt was already answered, and
-    // re-executing it would duplicate the conversation. The last committed
-    // assistant text stands in for the crashed process's unrecorded result.
-    let mut initial_done = false;
-    let mut last_result = String::new();
+    let Recovered {
+        mut initial_done,
+        mut interrupted,
+        mut last_result,
+    } = if reattached {
+        recover(paths, meta, &run, &reverted)?
+    } else {
+        Recovered::default()
+    };
     let mut last_stopped_by: Option<Bound> = None;
-    if reattached {
-        initial_done = run.answered_turns() > meta.answered_before;
-        if let Some(text) = run.last_assistant_text() {
-            last_result = text;
-        }
-    }
 
     let cancellation = CancellationToken::default();
     loop {
         // The turn boundary: cancel markers and deadlines — the task's and
         // the waiter's — are honored here, and only here. A turn already
         // running is never cut short by any of them except the task's own
-        // deadline (below, around the execution itself).
+        // deadline (below, around the execution itself) — and the host
+        // going away, which records nothing at all.
+        if ctx.is_stopping() {
+            return yielded(paths, meta);
+        }
         if cancel_requested(paths) {
             return record_pending(paths, meta, Terminal::Cancelled, None);
         }
@@ -612,21 +631,22 @@ async fn run_model(
         // usual — a finished task is not kept unsettled by an impatient
         // observer. Checked before `start_next`, which would otherwise mark
         // a message in flight that this process is not going to drive.
-        if ctx.waiter_expired() && (!initial_done || inbox::has_pending(paths)?) {
-            meta.updated_ms = now_ms();
-            save_meta(paths, meta)?;
-            return Ok(Turns::Yielded);
+        if ctx.waiter_expired()
+            && (!initial_done || interrupted.is_some() || inbox::has_pending(paths)?)
+        {
+            return yielded(paths, meta);
         }
-        let message = if initial_done {
-            inbox::start_next(paths)?
+        let work = if let Some(message) = interrupted.take() {
+            Work::Continue(message)
+        } else if !initial_done {
+            Work::Prompt
+        } else if let Some((id, body)) = inbox::start_next(paths)? {
+            Work::Message(id, body)
         } else {
-            None
-        };
-        if initial_done && message.is_none() {
             let (result, truncated) = bounded_text(last_result, MAX_RESULT_BYTES);
             meta.result_truncated = truncated;
             return record_pending(paths, meta, Terminal::Succeeded { result }, last_stopped_by);
-        }
+        };
 
         let mut turn = TurnOptions::default().with_cancel(cancellation.clone());
         // The recorded instant itself, not what was left of it a moment ago:
@@ -644,35 +664,55 @@ async fn run_model(
             log: Arc::clone(&events),
             ctx: ctx.clone(),
         };
-        let completed_message = message.as_ref().map(|(id, _)| id.clone());
+        let completed_message = work.message_id().map(str::to_owned);
         let execution = async {
-            match message {
-                Some((_, body)) => run.send_with_options(body, sink, approver, turn).await,
-                None => {
+            match work {
+                Work::Message(_, body) => run.send_with_options(body, sink, approver, turn).await,
+                Work::Prompt => {
                     run.execute_with_approver_and_options(sink, approver, turn)
+                        .await
+                }
+                Work::Continue(_) => {
+                    run.continue_interrupted_with_options(sink, approver, turn)
                         .await
                 }
             }
         };
-        let report = match remaining {
-            Some(remaining) => match time::timeout(remaining, execution).await {
-                Ok(report) => report,
-                Err(_) => {
-                    cancellation.cancel();
-                    return record_pending(
-                        paths,
-                        meta,
-                        Terminal::Failed {
-                            error: "task deadline elapsed during the turn".to_string(),
-                        },
-                        Some(Bound::Deadline),
-                    );
-                }
-            },
-            None => execution.await,
+        let bounded = async {
+            match remaining {
+                Some(remaining) => time::timeout(remaining, execution).await.ok(),
+                None => Some(execution.await),
+            }
+        };
+        // The host going away abandons the turn where it stands, exactly as
+        // a crash would: what it committed stays in the conversation for the
+        // next attach to continue (or roll back and re-drive), and nothing
+        // about it is recorded here. The stop is looked at first: a host
+        // whose runtime is being torn down must not poll the turn again, and
+        // a turn that finished in the same instant is read back off its
+        // conversation by the next attach all the same.
+        let report = tokio::select! {
+            biased;
+            () = ctx.stopping() => {
+                cancellation.cancel();
+                return yielded(paths, meta);
+            }
+            report = bounded => report,
+        };
+        let Some(report) = report else {
+            cancellation.cancel();
+            return record_pending(
+                paths,
+                meta,
+                Terminal::Failed {
+                    error: "task deadline elapsed during the turn".to_string(),
+                },
+                Some(Bound::Deadline),
+            );
         };
         let report = match report {
             Ok(report) => report,
+            Err(_) if ctx.is_stopping() => return yielded(paths, meta),
             Err(error) => return record_failure(paths, meta, error.to_string(), None),
         };
         // Banked per turn, not per attach: a task settles under one terminal
@@ -684,6 +724,9 @@ async fn run_model(
 
         let stopped_by = report.stopped_by;
         match report.outcome {
+            // Failed as the host went away, quite possibly because it did: not
+            // an outcome anyone may be told. mentra rolled the turn back.
+            RunOutcome::Error { .. } if ctx.is_stopping() => return yielded(paths, meta),
             RunOutcome::Error { message } => {
                 return if cancel_requested(paths) {
                     record_pending(paths, meta, Terminal::Cancelled, None)
@@ -722,6 +765,14 @@ async fn run_model(
             }
         }
     }
+}
+
+/// Ends this attach at a turn boundary with nothing recorded: `meta` saved
+/// as it stands, the task as resumable as before.
+fn yielded(paths: &AgentPaths, meta: &mut TaskMeta) -> Result<Turns, String> {
+    meta.updated_ms = now_ms();
+    save_meta(paths, meta)?;
+    Ok(Turns::Yielded)
 }
 
 /// Records a completion on `meta`, durably. Always [`Turns::Recorded`] on
@@ -765,15 +816,23 @@ fn record_failure(
 /// attach's `meta.pending_terminal` sends it straight back here — see
 /// [`inbox::finish_unanswered_durably`] for why the order is the other way
 /// round from how it reads.
+///
+/// `None` when the host is going away: nothing is written, and the
+/// completion already on `meta` is settled by the next attach.
 async fn settle(
     data: &DataDir,
     paths: &AgentPaths,
     meta: &mut TaskMeta,
     ctx: &DriveContext,
-) -> Result<Value, String> {
+) -> Result<Option<Value>, String> {
+    if ctx.is_stopping() {
+        return Ok(None);
+    }
     reconsider_cancel(paths, meta)?;
     let cancel_children = !matches!(meta.pending_terminal, Some(Terminal::Succeeded { .. }));
-    settle_children(data, meta, cancel_children, ctx).await?;
+    if !settle_children(data, meta, cancel_children, ctx).await? {
+        return Ok(None);
+    }
     // A cancel that arrived while children settled still lands before the
     // terminal record, exactly as the daemon replaced a pending completion.
     reconsider_cancel(paths, meta)?;
@@ -783,7 +842,7 @@ async fn settle(
         .expect("a completion was recorded before settling");
     let _inbox_lock = inbox::finish_unanswered_durably(paths)?;
     write_terminal(paths, &payload)?;
-    Ok(payload)
+    Ok(Some(payload))
 }
 
 fn reconsider_cancel(paths: &AgentPaths, meta: &mut TaskMeta) -> Result<(), String> {
@@ -798,14 +857,18 @@ fn reconsider_cancel(paths: &AgentPaths, meta: &mut TaskMeta) -> Result<(), Stri
 /// its own subtree; children with live executors are observed. A failing or
 /// cancelled parent cancels its children first; a parent past its own
 /// deadline stops waiting politely and cancels too (its children's deadlines
-/// can only be narrower, so this converges).
+/// can only be narrower, so this converges). `false` when the host went away
+/// before they all had.
 async fn settle_children(
     data: &DataDir,
     meta: &TaskMeta,
     cancel_children: bool,
     ctx: &DriveContext,
-) -> Result<(), String> {
+) -> Result<bool, String> {
     loop {
+        if ctx.is_stopping() {
+            return Ok(false);
+        }
         let mut unfinished = Vec::new();
         for child in children_of(data, &meta.id)? {
             let Some(paths) = data.agent_dir(&child).filter(AgentPaths::exists) else {
@@ -816,7 +879,7 @@ async fn settle_children(
             }
         }
         if unfinished.is_empty() {
-            return Ok(());
+            return Ok(true);
         }
         let cancel = cancel_children || meta.deadline_passed();
         let mut remaining = false;
@@ -1010,5 +1073,6 @@ impl EventSink for FileSink {
     }
 }
 
+mod resume;
 #[cfg(test)]
 mod tests;

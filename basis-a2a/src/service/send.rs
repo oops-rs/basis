@@ -215,6 +215,10 @@ impl A2aService {
                 Unanswered::Mismatch { open } => A2AError::invalid_params(format!(
                     "{call_id} is not the open question; it is {open}"
                 )),
+                Unanswered::Closed => A2AError::invalid_params(format!(
+                    "the question {call_id} closed before this answer arrived, so the answer \
+                     was not taken; the task carries on without it"
+                )),
             })?;
         Ok(record)
     }

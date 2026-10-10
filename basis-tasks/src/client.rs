@@ -35,6 +35,7 @@ use crate::{
     lock, policy,
     spec::{Continuation, DEFAULT_DEADLINE, RunSpec},
     state::{self, InboxRecord, RunOptions, TaskMeta, TerminalRecord},
+    stop::Stop,
     tasks::{self, TaskSummary},
     watch::EventCursor,
 };
@@ -67,6 +68,7 @@ pub struct Tasks {
     data: DataDir,
     workspace: PathBuf,
     prompt_host: Option<Arc<dyn PromptHost>>,
+    stop: Option<Stop>,
 }
 
 impl Tasks {
@@ -83,6 +85,7 @@ impl Tasks {
             data,
             workspace: workspace.into(),
             prompt_host: None,
+            stop: None,
         })
     }
 
@@ -103,6 +106,7 @@ impl Tasks {
             data,
             workspace: workspace.into(),
             prompt_host: None,
+            stop: None,
         })
     }
 
@@ -114,6 +118,19 @@ impl Tasks {
     pub fn with_prompt_host(self, prompt_host: Arc<dyn PromptHost>) -> Self {
         Self {
             prompt_host: Some(prompt_host),
+            ..self
+        }
+    }
+
+    /// Supplies the host's [`Stop`]: once it is flipped, every task this
+    /// `Tasks` is driving is abandoned where it stands — the turn in flight
+    /// included, never recorded as an outcome — and left resumable, and every
+    /// wait and ask driving under it returns as timed out. What a server
+    /// shutting down gives the tasks it drives (see [`Stop`]).
+    #[must_use]
+    pub fn with_stop(self, stop: Stop) -> Self {
+        Self {
+            stop: Some(stop),
             ..self
         }
     }
@@ -154,7 +171,7 @@ impl Tasks {
     }
 
     fn ctx(&self, live: Option<Arc<dyn LiveSink>>) -> DriveContext {
-        DriveContext::new(live, self.prompt_host.clone())
+        DriveContext::new(live, self.prompt_host.clone()).stopping_on(self.stop.clone())
     }
 
     /// Mints a task and returns its handle immediately. Durable and resumable
@@ -432,7 +449,7 @@ impl Tasks {
             handle.as_str(),
             &message_id,
             timeout,
-            self.prompt_host.clone(),
+            self.ctx(None),
         )
         .await
         .map_err(Error::new)?;
@@ -492,7 +509,7 @@ impl Tasks {
                 handle.as_str(),
                 message_id,
                 timeout,
-                self.prompt_host.clone(),
+                self.ctx(None),
             )
             .await
             .map_err(Error::new),

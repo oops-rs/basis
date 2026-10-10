@@ -68,6 +68,7 @@ pub struct A2aServer {
     local_addr: SocketAddr,
     endpoint: String,
     router: Router,
+    service: A2aService,
 }
 
 impl A2aServer {
@@ -86,12 +87,13 @@ impl A2aServer {
         let endpoint = service
             .public_url()
             .map_or_else(|| format!("http://{local_addr}/"), str::to_owned);
-        let router = routes(service, &endpoint, address.ip().is_loopback());
+        let router = routes(service.clone(), &endpoint, address.ip().is_loopback());
         Ok(Self {
             listener: BoundedListener::new(listener),
             local_addr,
             endpoint,
             router,
+            service,
         })
     }
 
@@ -117,15 +119,19 @@ impl A2aServer {
         axum::serve(self.listener, self.router).await
     }
 
-    /// Serves until `signal` resolves, then stops accepting and lets
-    /// in-flight requests finish.
+    /// Serves until `signal` resolves, then stops accepting, lets in-flight
+    /// requests finish, and [shuts the service down](A2aService::shutdown):
+    /// every task it was driving is left resumable, with nothing recorded
+    /// about the turn it was in, and no driver outlives this.
     pub async fn serve_until(
         self,
         signal: impl Future<Output = ()> + Send + 'static,
     ) -> io::Result<()> {
-        axum::serve(self.listener, self.router)
+        let served = axum::serve(self.listener, self.router)
             .with_graceful_shutdown(signal)
-            .await
+            .await;
+        self.service.shutdown().await;
+        served
     }
 }
 

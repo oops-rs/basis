@@ -331,8 +331,8 @@ fn a_restarted_server_resumes_driving_the_tasks_it_accepted() {
         .unwrap()
     };
 
-    // First life: the task is accepted and its turn is in flight when the
-    // process's runtime goes away underneath it.
+    // First life: the task is accepted, and the server shuts down while its
+    // turn is in flight.
     let first_life = tokio::runtime::Runtime::new().unwrap();
     let id = first_life.block_on(async {
         let service = A2aService::open(config()).unwrap();
@@ -351,10 +351,25 @@ fn a_restarted_server_resumes_driving_the_tasks_it_accepted() {
             );
             tokio::time::sleep(Duration::from_millis(20)).await;
         }
+        service.shutdown().await;
         task.id
     });
-    first_life.shutdown_timeout(Duration::from_millis(200));
+    // The first life's request is answered now, with its runtime still up:
+    // had its driver outlived the shutdown, this is the answer it would go
+    // on to record, and there is time here for it to.
     model.release();
+    std::thread::sleep(Duration::from_millis(500));
+    let tasks = basis_tasks::Tasks::open_at(data.path(), workspace.path()).unwrap();
+    let summaries = tasks.list().unwrap();
+    assert_eq!(summaries.len(), 1);
+    assert!(
+        tasks
+            .terminal(&basis_tasks::TaskHandle::parse(&summaries[0].task).unwrap())
+            .unwrap()
+            .is_none(),
+        "the shutdown recorded nothing about the turn it cut off"
+    );
+    drop(first_life);
 
     // Second life: opening the service is all it takes to pick the task back
     // up — nobody sends anything.
@@ -374,7 +389,11 @@ fn a_restarted_server_resumes_driving_the_tasks_it_accepted() {
                     .as_text()
                     .unwrap()
                     .to_string();
-                assert!(text.starts_with("reply-"), "{text}");
+                assert_eq!(
+                    text, "reply-2",
+                    "the second life's own turn answered, not the first life's"
+                );
+                assert_eq!(model.requests().len(), 2, "the turn was driven again");
                 return;
             }
             assert!(
