@@ -535,7 +535,10 @@ async fn run_model(
     // so an agent the operator adds, moves or re-credentials meanwhile should
     // be heard without a restart (ADR-0031 §4). Held to the end of this
     // attach; dropping it stops the poll.
-    let _a2a_watch = workspace.watch_a2a(basis::DEFAULT_A2A_WATCH_INTERVAL);
+    let _a2a_watch = workspace
+        .watch_a2a(basis::DEFAULT_A2A_WATCH_INTERVAL)
+        .inspect_err(|error| eprintln!("Warning: {error}; A2A files will not be watched"))
+        .ok();
     // The run carries the workspace through the whole turn loop below, not
     // just the mint: the workspace's hook registration and MCP connections
     // end when it drops, and a task's `.basis/hooks.json` must keep its say over

@@ -11,7 +11,7 @@ use mentra::Session;
 
 use super::Workspace;
 use crate::{
-    a2a::{A2aError, A2aReload, A2aWatch},
+    a2a::{A2aError, A2aReload, A2aWatch, A2aWatchError},
     event::ContextFile,
 };
 
@@ -78,11 +78,12 @@ impl Workspace {
     /// tries again when the file next changes. The watch holds this
     /// workspace's A2A state weakly, so it never keeps a workspace alive.
     ///
-    /// Must be called from within a Tokio runtime: the poll is a task on it.
-    /// A one-shot run has no use for one, and basis starts none on its own.
+    /// The poll is a task on the Tokio runtime this is called from; called on
+    /// a thread with none, it is [`A2aWatchError`] rather than a panic. A
+    /// one-shot run has no use for a watch, and basis starts none on its own.
     ///
     /// [`DEFAULT_A2A_WATCH_INTERVAL`]: crate::a2a::DEFAULT_A2A_WATCH_INTERVAL
-    pub fn watch_a2a(&self, interval: Duration) -> A2aWatch {
+    pub fn watch_a2a(&self, interval: Duration) -> Result<A2aWatch, A2aWatchError> {
         self.a2a.watch(interval)
     }
 

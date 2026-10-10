@@ -181,10 +181,17 @@ impl ConfiguredSource {
             .get_or_try_init(|| async move {
                 let runtime = Arc::clone(self.runtime().await?);
                 let workspace = Arc::new(builder.with_runtime(runtime).open().await?);
-                let a2a_watch = self
-                    .template
-                    .a2a_watch_interval()
-                    .map(|interval| workspace.watch_a2a(interval));
+                let a2a_watch = self.template.a2a_watch_interval().and_then(|interval| {
+                    match workspace.watch_a2a(interval) {
+                        Ok(watch) => Some(watch),
+                        // Opened inside the runtime the server runs on, so
+                        // this is a host wired unusually: say so and serve on.
+                        Err(error) => {
+                            eprintln!("Warning: {error}; A2A files will not be watched");
+                            None
+                        }
+                    }
+                });
 
                 Ok::<_, RunError>(Opened {
                     workspace,

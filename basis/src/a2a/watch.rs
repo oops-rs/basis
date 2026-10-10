@@ -44,6 +44,17 @@ pub const DEFAULT_A2A_WATCH_INTERVAL: Duration = Duration::from_secs(2);
 /// The shortest interval a watch polls at. A zero interval would spin.
 const MIN_INTERVAL: Duration = Duration::from_millis(10);
 
+/// Why a watch could not start: the poll is a task on a Tokio runtime, and
+/// [`Workspace::watch_a2a`](crate::Workspace::watch_a2a) was called on a
+/// thread that is not in one.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, thiserror::Error)]
+#[error(
+    "watching A2A files needs a Tokio runtime, and this thread is not running in one; call \
+     `watch_a2a` from within the runtime the host serves on"
+)]
+#[non_exhaustive]
+pub struct A2aWatchError;
+
 /// A running watch of one workspace's A2A files. Dropping it stops the poll.
 #[must_use = "the watch stops as soon as this handle is dropped"]
 pub struct A2aWatch {
@@ -128,8 +139,13 @@ impl Settling {
 ///
 /// Holds the state weakly, so the watch never keeps a workspace's A2A state
 /// alive; the poll ends on its own once nothing else holds it.
-pub(crate) fn start(live: Weak<LiveA2a>, paths: Vec<PathBuf>, interval: Duration) -> A2aWatch {
-    let poll = tokio::spawn(async move {
+pub(crate) fn start(
+    live: Weak<LiveA2a>,
+    paths: Vec<PathBuf>,
+    interval: Duration,
+) -> Result<A2aWatch, A2aWatchError> {
+    let runtime = tokio::runtime::Handle::try_current().map_err(|_| A2aWatchError)?;
+    let poll = runtime.spawn(async move {
         let mut ticks = tokio::time::interval(interval.max(MIN_INTERVAL));
         ticks.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Delay);
         let mut settling = Settling::default();
@@ -150,7 +166,7 @@ pub(crate) fn start(live: Weak<LiveA2a>, paths: Vec<PathBuf>, interval: Duration
             }
         }
     });
-    A2aWatch { poll }
+    Ok(A2aWatch { poll })
 }
 
 #[cfg(test)]

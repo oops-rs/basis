@@ -37,7 +37,7 @@ async fn a_watch_notices_a_file_that_did_not_exist_at_open() {
         .open()
         .await
         .expect("opens with nothing configured");
-    let _watch = workspace.watch_a2a(INTERVAL);
+    let _watch = workspace.watch_a2a(INTERVAL).expect("in a runtime");
 
     write(
         &dir.path().join(".basis/a2a.json"),
@@ -62,7 +62,7 @@ async fn a_change_made_before_the_watch_started_is_still_noticed() {
         &a2a_file(&[("nous", &server.base)]),
     );
 
-    let _watch = workspace.watch_a2a(INTERVAL);
+    let _watch = workspace.watch_a2a(INTERVAL).expect("in a runtime");
 
     settles_on(&workspace, &["nous"]).await;
 }
@@ -77,7 +77,7 @@ async fn a_watch_keeps_the_set_through_a_save_that_does_not_parse() {
         .open()
         .await
         .expect("opens");
-    let _watch = workspace.watch_a2a(INTERVAL);
+    let _watch = workspace.watch_a2a(INTERVAL).expect("in a runtime");
 
     write(&file, r#"{"agents":{"nous":{"url":"#);
     several_polls().await;
@@ -102,7 +102,7 @@ async fn dropping_the_watch_stops_it() {
         .open()
         .await
         .expect("opens");
-    drop(workspace.watch_a2a(INTERVAL));
+    drop(workspace.watch_a2a(INTERVAL).expect("in a runtime"));
 
     write(
         &dir.path().join(".basis/a2a.json"),
@@ -127,7 +127,7 @@ async fn a_save_that_renames_the_file_away_and_writes_a_new_one_never_drops_an_a
         .await
         .expect("opens");
     let interval = Duration::from_millis(100);
-    let _watch = workspace.watch_a2a(interval);
+    let _watch = workspace.watch_a2a(interval).expect("in a runtime");
 
     for _ in 0..5 {
         std::fs::rename(&file, dir.path().join(".basis/a2a.json~")).unwrap();
@@ -142,4 +142,23 @@ async fn a_save_that_renames_the_file_away_and_writes_a_new_one_never_drops_an_a
         &a2a_file(&[("nous", &server.base), ("scout", &server.base)]),
     );
     settles_on(&workspace, &["nous", "scout"]).await;
+}
+
+#[tokio::test]
+async fn watching_outside_a_runtime_is_an_error_not_a_panic() {
+    let dir = tempfile::tempdir().unwrap();
+    let workspace = pinned(dir.path(), offline_runtime())
+        .open()
+        .await
+        .expect("opens");
+
+    let outside = std::thread::scope(|scope| {
+        scope
+            .spawn(|| workspace.watch_a2a(INTERVAL).map(|_| ()))
+            .join()
+            .expect("no panic")
+    });
+
+    let error = outside.expect_err("no runtime on that thread");
+    assert!(error.to_string().contains("Tokio runtime"), "{error}");
 }

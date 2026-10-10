@@ -89,7 +89,7 @@ pub use mentra::a2a::{A2aAgentConfig, A2aLimits};
 pub use mentra::mcp::SecretString;
 pub use reload::A2aReload;
 pub use remote::A2A_RETRY_BACKOFF;
-pub use watch::{A2aWatch, DEFAULT_A2A_WATCH_INTERVAL};
+pub use watch::{A2aWatch, A2aWatchError, DEFAULT_A2A_WATCH_INTERVAL};
 
 /// Where basis looks inside a workspace, relative to its root.
 pub const DEFAULT_WORKSPACE_A2A_FILE: &str = ".basis/a2a.json";

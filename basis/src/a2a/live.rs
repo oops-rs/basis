@@ -20,7 +20,7 @@ use std::{
 use super::{
     A2aAgent, A2aConfig, A2aError, A2aReload, DEFAULT_GLOBAL_A2A_FILE,
     remote::{OnChange, RemoteAgents},
-    watch::{self, A2aWatch, Stamp},
+    watch::{self, A2aWatch, A2aWatchError, Stamp},
 };
 use crate::{event::ContextFile, runtime::Runtime};
 
@@ -134,7 +134,7 @@ impl LiveA2a {
 
     /// Starts polling this open's A2A files every `interval`, reloading on a
     /// change. See [`Workspace::watch_a2a`](crate::Workspace::watch_a2a).
-    pub(crate) fn watch(self: &Arc<Self>, interval: Duration) -> A2aWatch {
+    pub(crate) fn watch(self: &Arc<Self>, interval: Duration) -> Result<A2aWatch, A2aWatchError> {
         watch::start(Arc::downgrade(self), self.paths.clone(), interval)
     }
 }
