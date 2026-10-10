@@ -153,6 +153,17 @@ pub struct SessionTemplate {
     pub(crate) effort: Option<Effort>,
     pub(crate) session_name: Option<String>,
     pub(crate) discovery: Discovery,
+    pub(crate) a2a_watch: A2aWatchPolicy,
+}
+
+/// Whether each workspace's A2A files are watched, and how often.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub(crate) enum A2aWatchPolicy {
+    /// Every [`basis::DEFAULT_A2A_WATCH_INTERVAL`].
+    #[default]
+    Default,
+    Every(std::time::Duration),
+    Off,
 }
 
 impl SessionTemplate {
@@ -214,5 +225,29 @@ impl SessionTemplate {
     /// Points every session's discovery somewhere else — see [`Discovery`].
     pub fn with_discovery(self, discovery: Discovery) -> Self {
         Self { discovery, ..self }
+    }
+
+    /// How often each workspace's A2A files are polled for a change
+    /// ([`Workspace::watch_a2a`](basis::Workspace::watch_a2a), ADR-0031 §4),
+    /// or `None` not to watch them at all.
+    ///
+    /// On by default, every [`basis::DEFAULT_A2A_WATCH_INTERVAL`]: a server
+    /// holds a workspace for as long as an editor has the repository open,
+    /// and an operator who adds an agent, rotates its credential or moves its
+    /// URL should not have to restart it to be heard.
+    pub fn with_a2a_watch(self, interval: Option<std::time::Duration>) -> Self {
+        Self {
+            a2a_watch: interval.map_or(A2aWatchPolicy::Off, A2aWatchPolicy::Every),
+            ..self
+        }
+    }
+
+    /// The interval each workspace's A2A files are polled at, if at all.
+    pub(crate) fn a2a_watch_interval(&self) -> Option<std::time::Duration> {
+        match self.a2a_watch {
+            A2aWatchPolicy::Default => Some(basis::DEFAULT_A2A_WATCH_INTERVAL),
+            A2aWatchPolicy::Every(interval) => Some(interval),
+            A2aWatchPolicy::Off => None,
+        }
     }
 }
