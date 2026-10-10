@@ -124,6 +124,109 @@ async fn a_cancel_denies_the_open_question_and_every_later_one() {
     assert_eq!(later.decision, ApprovalDecision::Deny);
 }
 
+/// A cancel racing a question as it opens either finds it open or keeps it
+/// from opening; it never leaves the turn parked until the deadline. Raced
+/// many times on separate threads, since the window is a few instructions.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn a_cancel_racing_a_question_as_it_opens_never_leaves_it_parked() {
+    for _ in 0..500 {
+        let questions = Arc::new(Questions::new());
+        let asking = {
+            let questions = Arc::clone(&questions);
+            tokio::spawn(async move {
+                questions
+                    .ask(&request("write"), Duration::from_secs(30))
+                    .await
+            })
+        };
+        let canceling = {
+            let questions = Arc::clone(&questions);
+            tokio::spawn(async move { questions.cancel() })
+        };
+        canceling.await.unwrap();
+        let answer = tokio::time::timeout(Duration::from_secs(5), asking)
+            .await
+            .expect("the cancel reached the question, wherever it was")
+            .unwrap();
+        assert_eq!(answer.decision, ApprovalDecision::Deny);
+        assert!(answer.reason.unwrap().contains("canceled"));
+    }
+}
+
+/// An answer the caller was told was taken was taken: one racing the
+/// deadline either reaches the turn or is refused as too late, never
+/// acknowledged and then dropped.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn an_answer_racing_the_deadline_is_taken_or_refused_never_lost() {
+    let mut taken = 0;
+    let mut refused = 0;
+    for _ in 0..200 {
+        let questions = Arc::new(Questions::new());
+        let asking = {
+            let questions = Arc::clone(&questions);
+            tokio::spawn(async move {
+                questions
+                    .ask(&request("write"), Duration::from_millis(5))
+                    .await
+            })
+        };
+        let asked = open_question(&questions).await;
+        let answering = {
+            let questions = Arc::clone(&questions);
+            tokio::task::spawn_blocking(move || {
+                // Answer as close to the deadline as this thread can manage.
+                std::thread::sleep(Duration::from_millis(5));
+                questions.answer(&asked.call_id, true)
+            })
+        };
+        let answer = asking.await.unwrap();
+        match answering.await.unwrap() {
+            Ok(()) => {
+                taken += 1;
+                assert_eq!(
+                    answer.decision,
+                    ApprovalDecision::Allow,
+                    "an acknowledged answer reaches the turn"
+                );
+            }
+            Err(Unanswered::Closed | Unanswered::NotAsking) => {
+                refused += 1;
+                assert_eq!(answer.decision, ApprovalDecision::Deny);
+                assert!(answer.reason.unwrap().contains("did not answer"));
+            }
+            Err(other) => panic!("unexpected refusal: {other:?}"),
+        }
+    }
+    assert_eq!(taken + refused, 200);
+}
+
+#[tokio::test]
+async fn an_interrupt_resolves_the_open_question_and_every_later_one() {
+    let questions = Arc::new(Questions::new());
+    let asking = {
+        let questions = Arc::clone(&questions);
+        tokio::spawn(async move {
+            questions
+                .ask(&request("write"), Duration::from_secs(30))
+                .await
+        })
+    };
+    let asked = open_question(&questions).await;
+    questions.interrupt();
+    let answer = asking.await.unwrap();
+    assert_eq!(answer.decision, ApprovalDecision::Deny);
+    assert!(answer.reason.unwrap().contains("asked again"));
+    assert!(questions.asked().is_none());
+    assert_eq!(
+        questions.answer(&asked.call_id, true),
+        Err(Unanswered::NotAsking)
+    );
+    let later = questions
+        .ask(&request("write"), Duration::from_secs(30))
+        .await;
+    assert!(later.reason.unwrap().contains("asked again"));
+}
+
 fn message(parts: Vec<Part>) -> Message {
     Message::new(Role::User, parts)
 }

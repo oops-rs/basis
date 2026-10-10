@@ -19,16 +19,19 @@
 //! - **The deadline answers `deny`.**
 //! - **A cancel while parked cancels.** [`Questions::cancel`] denies the open
 //!   question and every later one, so the turn ends and the cancel lands at
-//!   its boundary.
+//!   its boundary. A question being opened as the cancel lands is refused
+//!   too: both happen under one lock.
 //! - **No answer outlives its question.** Call ids are minted per question
 //!   and held only in memory: a restart re-drives the turn, which asks again
-//!   under a new id, and an answer to the old one is refused.
+//!   under a new id, and an answer to the old one is refused. So is an answer
+//!   that arrives as the deadline closes the question: the caller is told it
+//!   came too late rather than that it was taken.
+//! - **A shutdown records nothing.** [`Questions::interrupt`] resolves the
+//!   open question and every later one as interrupted; the server's driver
+//!   has already abandoned the turn, which the next start re-drives.
 
 use std::{
-    sync::{
-        Arc, Mutex, MutexGuard,
-        atomic::{AtomicBool, Ordering},
-    },
+    sync::{Arc, Mutex, MutexGuard},
     time::Duration,
 };
 
@@ -58,29 +61,42 @@ pub(crate) struct Asked {
 pub(crate) struct Questions {
     /// Held for the life of a question: the one-at-a-time rule.
     asking: tokio::sync::Mutex<()>,
-    open: Mutex<Option<(String, oneshot::Sender<ApprovalAnswer>)>>,
+    open: Mutex<Open>,
     asked: watch::Sender<Option<Asked>>,
-    cancelled: AtomicBool,
 }
 
-/// Why an answer was refused. The question stays open in both cases.
+/// The open question, and whether questions are still being taken — one
+/// lock, so a question cannot open after a cancel has looked for it.
+#[derive(Default)]
+struct Open {
+    question: Option<(String, oneshot::Sender<ApprovalAnswer>)>,
+    /// Once set, every question is answered with this at once: the task is
+    /// being canceled, or the server is going away.
+    closed: Option<ApprovalAnswer>,
+}
+
+/// Why an answer was refused.
 #[derive(Debug, PartialEq, Eq)]
 pub(crate) enum Unanswered {
+    /// No question is open. It stays that way.
     NotAsking,
+    /// Another question is open. It stays open.
     Mismatch { open: String },
+    /// The question had closed — its deadline passed — as the answer
+    /// arrived, so the answer was not taken.
+    Closed,
 }
 
 impl Questions {
     pub(crate) fn new() -> Self {
         Self {
             asking: tokio::sync::Mutex::new(()),
-            open: Mutex::new(None),
+            open: Mutex::new(Open::default()),
             asked: watch::channel(None).0,
-            cancelled: AtomicBool::new(false),
         }
     }
 
-    fn open(&self) -> MutexGuard<'_, Option<(String, oneshot::Sender<ApprovalAnswer>)>> {
+    fn open(&self) -> MutexGuard<'_, Open> {
         self.open
             .lock()
             .unwrap_or_else(|poisoned| poisoned.into_inner())
@@ -103,29 +119,43 @@ impl Questions {
         request: &ApprovalRequest,
         deadline: Duration,
     ) -> ApprovalAnswer {
-        if self.is_cancelled() {
-            return canceled();
+        if let Some(answer) = self.open().closed.clone() {
+            return answer;
         }
         let _turn = self.asking.lock().await;
-        if self.is_cancelled() {
-            return canceled();
-        }
         let call_id = uuid::Uuid::new_v4().simple().to_string();
-        let (sender, receiver) = oneshot::channel();
-        *self.open() = Some((call_id.clone(), sender));
+        let (sender, mut receiver) = oneshot::channel();
+        {
+            // Checked under the lock `cancel` and `interrupt` take, so one
+            // landing now either finds this question open or keeps it from
+            // opening — never misses it.
+            let mut open = self.open();
+            if let Some(answer) = open.closed.clone() {
+                return answer;
+            }
+            open.question = Some((call_id.clone(), sender));
+        }
         self.asked.send_replace(Some(Asked {
             call_id: call_id.clone(),
             tool: request.tool_name.clone(),
             preview: preview(request),
         }));
-        let answer = match tokio::time::timeout(deadline, receiver).await {
+        let answer = match tokio::time::timeout(deadline, &mut receiver).await {
             Ok(Ok(answer)) => answer,
             Ok(Err(_)) => ApprovalAnswer::new(ApprovalDecision::Deny)
                 .because("the question was withdrawn before the caller answered it"),
-            Err(_) => ApprovalAnswer::new(ApprovalDecision::Deny).because(format!(
-                "the caller did not answer within {}s, so the call was not made",
-                deadline.as_secs()
-            )),
+            // Closing the receiver settles the race with an answer arriving
+            // right now: one sent before this is taken, and one after is
+            // refused to whoever sent it, who is told it came too late.
+            Err(_) => {
+                receiver.close();
+                receiver.try_recv().unwrap_or_else(|_| {
+                    ApprovalAnswer::new(ApprovalDecision::Deny).because(format!(
+                        "the caller did not answer within {}s, so the call was not made",
+                        deadline.as_secs()
+                    ))
+                })
+            }
         };
         self.close(&call_id);
         answer
@@ -133,9 +163,13 @@ impl Questions {
 
     /// Answers the open question, when `call_id` is the one it was asked
     /// under.
+    ///
+    /// [`Unanswered::Closed`] when the question's deadline closed it as this
+    /// arrived: the answer was not taken, and the caller must not be told it
+    /// was.
     pub(crate) fn answer(&self, call_id: &str, approve: bool) -> Result<(), Unanswered> {
         let mut open = self.open();
-        let Some((open_id, _)) = open.as_ref() else {
+        let Some((open_id, _)) = open.question.as_ref() else {
             return Err(Unanswered::NotAsking);
         };
         if !open_id.eq_ignore_ascii_case(call_id.trim()) {
@@ -143,7 +177,7 @@ impl Questions {
                 open: open_id.clone(),
             });
         }
-        let (open_id, sender) = open.take().expect("checked above");
+        let (open_id, sender) = open.question.take().expect("checked above");
         drop(open);
         self.clear(&open_id);
         let answer = if approve {
@@ -151,29 +185,48 @@ impl Questions {
         } else {
             ApprovalAnswer::new(ApprovalDecision::Deny).because("the caller denied this call")
         };
-        let _ = sender.send(answer);
-        Ok(())
+        sender.send(answer).map_err(|_| Unanswered::Closed)
     }
 
     /// Denies the open question and every later one: the task is being
     /// canceled, and its turn must end for the cancel to land.
     pub(crate) fn cancel(&self) {
-        self.cancelled.store(true, Ordering::SeqCst);
-        if let Some((call_id, sender)) = self.open().take() {
-            self.clear(&call_id);
-            let _ = sender.send(canceled());
-        }
+        self.close_all(canceled());
     }
 
-    fn is_cancelled(&self) -> bool {
-        self.cancelled.load(Ordering::SeqCst)
+    /// Resolves the open question and every later one as interrupted: the
+    /// server is going away, and its driver has abandoned the turn. Nothing
+    /// is made of the answer — the turn it would have gone to is gone — so
+    /// all it does is let whatever was waiting on the question return.
+    pub(crate) fn interrupt(&self) {
+        self.close_all(ApprovalAnswer::new(ApprovalDecision::Deny).because(
+            "the server stopped while this question was open; the call was not made, and it \
+             will be asked again when the task resumes",
+        ));
+    }
+
+    /// Answers the open question, and every later one, with `answer` — or
+    /// with whatever an earlier call here already settled on.
+    fn close_all(&self, answer: ApprovalAnswer) {
+        let mut open = self.open();
+        let answer = open.closed.get_or_insert(answer).clone();
+        let question = open.question.take();
+        drop(open);
+        if let Some((call_id, sender)) = question {
+            self.clear(&call_id);
+            let _ = sender.send(answer);
+        }
     }
 
     /// Closes `call_id`'s question if it is still the open one.
     fn close(&self, call_id: &str) {
         let mut open = self.open();
-        if open.as_ref().is_some_and(|(open_id, _)| open_id == call_id) {
-            *open = None;
+        if open
+            .question
+            .as_ref()
+            .is_some_and(|(open_id, _)| open_id == call_id)
+        {
+            open.question = None;
         }
         drop(open);
         self.clear(call_id);
