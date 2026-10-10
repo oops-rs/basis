@@ -133,6 +133,12 @@ impl RunDefaults {
     }
 }
 
+/// How many unsettled tasks one principal may have at once when the
+/// operator names no other number. The workspace holds at most
+/// `basis_tasks::MAX_TASKS` (1024), settled ones included; a quota per
+/// caller keeps any one of them from filling it for the rest.
+pub const DEFAULT_LIVE_TASK_QUOTA: usize = 32;
+
 /// One served agent.
 #[derive(Debug, Clone)]
 pub struct ServeConfig {
@@ -149,6 +155,7 @@ pub struct ServeConfig {
     pub(crate) private_webhooks: bool,
     pub(crate) hop_cap: u32,
     pub(crate) trust_anonymous: bool,
+    pub(crate) live_task_quota: usize,
 }
 
 impl ServeConfig {
@@ -171,6 +178,7 @@ impl ServeConfig {
             private_webhooks: false,
             hop_cap: crate::DEFAULT_HOP_CAP,
             trust_anonymous: false,
+            live_task_quota: DEFAULT_LIVE_TASK_QUOTA,
         }
     }
 
@@ -285,6 +293,17 @@ impl ServeConfig {
     pub fn with_trusted_anonymous_callers(self) -> Self {
         Self {
             trust_anonymous: true,
+            ..self
+        }
+    }
+
+    /// Lets each principal have at most `quota` tasks that have not
+    /// settled; a send past it is refused until one does. Defaults to
+    /// [`DEFAULT_LIVE_TASK_QUOTA`].
+    #[must_use]
+    pub fn with_live_task_quota(self, quota: usize) -> Self {
+        Self {
+            live_task_quota: quota,
             ..self
         }
     }

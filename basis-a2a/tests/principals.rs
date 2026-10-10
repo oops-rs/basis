@@ -151,3 +151,43 @@ async fn a_name_given_twice_fails_the_open() {
         Err(OpenError::Principals(_))
     ));
 }
+
+#[tokio::test]
+async fn one_principal_cannot_hold_more_live_tasks_than_its_quota() {
+    let served = Served::start_with(ScriptedEndpoint::start(true), |config| {
+        config.with_live_task_quota(1).with_principal(
+            Principal::new("bob").unwrap(),
+            BearerToken::new(BOB).unwrap(),
+        )
+    })
+    .await;
+    let later = |text: &str| {
+        json!({
+            "message": user_message(text, None),
+            "configuration": {"returnImmediately": true},
+        })
+    };
+    let first = served.result("SendMessage", later("one")).await;
+    let refused = served.call("SendMessage", later("two")).await;
+    assert_eq!(refused["error"]["code"], error_code::UNSUPPORTED_OPERATION);
+    assert!(
+        refused["error"]["message"]
+            .as_str()
+            .unwrap()
+            .contains("still running"),
+        "{refused}"
+    );
+    served
+        .as_token(BOB)
+        .result("SendMessage", later("bob's own"))
+        .await;
+
+    served.model.release();
+    served
+        .wait_for(
+            first["task"]["id"].as_str().unwrap(),
+            "TASK_STATE_COMPLETED",
+        )
+        .await;
+    served.result("SendMessage", later("three")).await;
+}

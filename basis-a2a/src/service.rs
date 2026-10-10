@@ -114,6 +114,9 @@ struct Inner {
     /// Present when push notifications are on.
     push: Option<Push>,
     hop_cap: u32,
+    live_task_quota: usize,
+    /// Serializes the live-task quota check with the insertion it admits.
+    admission: tokio::sync::Mutex<()>,
     /// Every task this process is driving. Absent for a task nobody here is
     /// driving.
     drivers: Mutex<HashMap<String, Driver>>,
@@ -138,6 +141,7 @@ impl A2aService {
             private_webhooks,
             hop_cap,
             trust_anonymous,
+            live_task_quota,
         } = config;
         let principals = Principals::new(tokens)?;
         if extended_card.is_some() && !principals.any() {
@@ -181,6 +185,8 @@ impl A2aService {
                 extended_card,
                 push,
                 hop_cap,
+                live_task_quota,
+                admission: tokio::sync::Mutex::new(()),
                 drivers: Mutex::new(HashMap::new()),
             }),
         };

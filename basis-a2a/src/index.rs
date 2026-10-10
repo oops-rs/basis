@@ -189,6 +189,15 @@ impl Index {
         self.records().values().cloned().collect()
     }
 
+    /// `caller`'s tasks this server has not yet seen settle.
+    pub(crate) fn unsettled_owned(&self, caller: &Principal) -> Vec<Record> {
+        self.records()
+            .values()
+            .filter(|record| record.finished_ms.is_none() && caller.owns(&record.principal))
+            .cloned()
+            .collect()
+    }
+
     /// Every record `caller` owns.
     pub(crate) fn all_owned(&self, caller: &Principal) -> Vec<Record> {
         self.records()
