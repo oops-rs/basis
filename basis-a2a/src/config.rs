@@ -156,6 +156,7 @@ pub struct ServeConfig {
     pub(crate) hop_cap: u32,
     pub(crate) trust_anonymous: bool,
     pub(crate) live_task_quota: usize,
+    pub(crate) stream_cap: usize,
 }
 
 impl ServeConfig {
@@ -179,6 +180,7 @@ impl ServeConfig {
             hop_cap: crate::DEFAULT_HOP_CAP,
             trust_anonymous: false,
             live_task_quota: DEFAULT_LIVE_TASK_QUOTA,
+            stream_cap: crate::DEFAULT_STREAM_CAP,
         }
     }
 
@@ -304,6 +306,17 @@ impl ServeConfig {
     pub fn with_live_task_quota(self, quota: usize) -> Self {
         Self {
             live_task_quota: quota,
+            ..self
+        }
+    }
+
+    /// Lets each principal hold at most `cap` streams open at once —
+    /// `SendStreamingMessage` and `SubscribeToTask` alike, on either binding.
+    /// Defaults to [`DEFAULT_STREAM_CAP`](crate::DEFAULT_STREAM_CAP).
+    #[must_use]
+    pub fn with_stream_cap(self, cap: usize) -> Self {
+        Self {
+            stream_cap: cap,
             ..self
         }
     }

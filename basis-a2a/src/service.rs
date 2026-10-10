@@ -24,12 +24,16 @@ mod hops;
 mod parts;
 mod push;
 mod send;
+mod streams;
 
 pub(crate) use ask::{APPROVAL_EXTENSION, Asked};
 pub use hops::DEFAULT_HOP_CAP;
 pub(crate) use hops::HOPS_EXTENSION;
 pub(crate) use parts::INPUT_MODES;
 pub(crate) use push::Push;
+pub use streams::DEFAULT_STREAM_CAP;
+pub(crate) use streams::StreamSlot;
+use streams::Streams;
 
 use std::{
     collections::HashMap,
@@ -115,6 +119,7 @@ struct Inner {
     push: Option<Push>,
     hop_cap: u32,
     live_task_quota: usize,
+    streams: Arc<Streams>,
     /// Serializes the live-task quota check with the insertion it admits.
     admission: tokio::sync::Mutex<()>,
     /// Every task this process is driving. Absent for a task nobody here is
@@ -142,6 +147,7 @@ impl A2aService {
             hop_cap,
             trust_anonymous,
             live_task_quota,
+            stream_cap,
         } = config;
         let principals = Principals::new(tokens)?;
         if extended_card.is_some() && !principals.any() {
@@ -186,6 +192,7 @@ impl A2aService {
                 push,
                 hop_cap,
                 live_task_quota,
+                streams: Streams::new(stream_cap),
                 admission: tokio::sync::Mutex::new(()),
                 drivers: Mutex::new(HashMap::new()),
             }),
@@ -251,8 +258,10 @@ impl A2aService {
         caller: &Principal,
         request: SendMessageRequest,
     ) -> Result<BoxStream<'static, StreamResponse>, A2AError> {
+        // Taken first, so a caller at its cap starts no task it cannot watch.
+        let slot = self.inner.streams.take(caller)?;
         let accepted = self.accept(caller, request).await?;
-        stream::follow(self.clone(), accepted.record, accepted.history_length)
+        stream::follow(self.clone(), accepted.record, accepted.history_length, slot)
     }
 
     /// `GetTask`.
@@ -390,7 +399,8 @@ impl A2aService {
                 record.id
             )));
         }
-        stream::follow(self.clone(), record, None)
+        let slot = self.inner.streams.take(caller)?;
+        stream::follow(self.clone(), record, None, slot)
     }
 
     /// Where `record`'s task stands now, as the status update that says so,
