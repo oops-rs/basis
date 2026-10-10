@@ -18,11 +18,13 @@
 //! Every spawn is `detached`: a served task is an independent root, never a
 //! child of whatever task the serving process might itself be running as.
 
+mod ask;
 mod drive;
 mod parts;
 mod push;
 mod send;
 
+pub(crate) use ask::{APPROVAL_EXTENSION, Asked};
 pub(crate) use parts::INPUT_MODES;
 pub(crate) use push::Push;
 
@@ -39,7 +41,6 @@ use a2a::{
 };
 use basis_tasks::Tasks;
 use futures::stream::BoxStream;
-use tokio::sync::watch;
 
 use crate::{
     card::Features,
@@ -52,6 +53,8 @@ use crate::{
     push::PushStore,
     stream,
 };
+use ask::NobodyHost;
+use drive::Driver;
 
 /// The name `Tasks::host_dir` files this crate's index under.
 const HOST: &str = "a2a";
@@ -100,9 +103,9 @@ struct Inner {
     extended_card: Option<ExtendedCard>,
     /// Present when push notifications are on.
     push: Option<Push>,
-    /// One receiver per task this process is driving, flipped to `true` when
-    /// its driver returns. Absent for a task nobody here is driving.
-    drivers: Mutex<HashMap<String, watch::Receiver<bool>>>,
+    /// Every task this process is driving. Absent for a task nobody here is
+    /// driving.
+    drivers: Mutex<HashMap<String, Driver>>,
 }
 
 impl A2aService {
@@ -130,6 +133,12 @@ impl A2aService {
         let tasks = match data_dir {
             Some(data_dir) => Tasks::open_at(data_dir, workspace)?,
             None => Tasks::open(workspace)?,
+        };
+        // `basis-tasks` spawns a task that will ask only from a `Tasks` that
+        // can; each is then driven through a host of its own (`drive`).
+        let tasks = match approval {
+            InboundApproval::AskCaller { .. } => tasks.with_prompt_host(Arc::new(NobodyHost)),
+            InboundApproval::Never | InboundApproval::Always => tasks,
         };
         let host_dir = tasks.host_dir(HOST)?;
         let index = Index::open(&host_dir)?;
@@ -176,6 +185,7 @@ impl A2aService {
             authenticated: self.inner.principals.any(),
             extended_card: self.inner.extended_card.is_some(),
             push_notifications: self.inner.push.is_some(),
+            ask_caller: matches!(self.inner.approval, InboundApproval::AskCaller { .. }),
         }
     }
 
@@ -196,9 +206,9 @@ impl A2aService {
     ) -> Result<SendMessageResponse, A2AError> {
         let accepted = self.accept(caller, request).await?;
         if !accepted.return_immediately {
-            self.settled(&accepted.record.id).await;
+            self.settled_or_asking(&accepted.record.id).await;
         }
-        let standing = Standing::read(self.tasks(), &accepted.record)?;
+        let standing = self.standing(&accepted.record)?;
         Ok(SendMessageResponse::Task(project::task(
             &accepted.record,
             &standing,
@@ -221,7 +231,7 @@ impl A2aService {
     pub fn get_task(&self, caller: &Principal, request: GetTaskRequest) -> Result<Task, A2AError> {
         let history_length = project::history_length(request.history_length)?;
         let record = self.record(caller, &request.id)?;
-        let standing = Standing::read(self.tasks(), &record)?;
+        let standing = self.standing(&record)?;
         Ok(project::task(
             &record,
             &standing,
@@ -273,7 +283,7 @@ impl A2aService {
             {
                 continue;
             }
-            let standing = Standing::read(self.tasks(), &record)?;
+            let standing = self.standing(&record)?;
             if request
                 .status
                 .as_ref()
@@ -319,7 +329,7 @@ impl A2aService {
         request: CancelTaskRequest,
     ) -> Result<Task, A2AError> {
         let record = self.record(caller, &request.id)?;
-        if Standing::read(self.tasks(), &record)?.is_terminal() {
+        if self.standing(&record)?.is_terminal() {
             return Err(A2AError::task_not_cancelable(&request.id));
         }
         let tasks = self.tasks().clone();
@@ -328,8 +338,13 @@ impl A2aService {
             .await
             .map_err(internal)?
             .map_err(internal)?;
+        // A turn parked on a question would never reach the boundary the
+        // cancel lands at: the question is denied, and so is every later one.
+        if let Some(questions) = self.questions(&record.id) {
+            questions.cancel();
+        }
         let _ = tokio::time::timeout(CANCEL_GRACE, self.settled(&record.id)).await;
-        let standing = Standing::read(self.tasks(), &record)?;
+        let standing = self.standing(&record)?;
         Ok(project::task(&record, &standing, View::full(None)))
     }
 
@@ -341,7 +356,7 @@ impl A2aService {
         request: SubscribeToTaskRequest,
     ) -> Result<BoxStream<'static, StreamResponse>, A2AError> {
         let record = self.record(caller, &request.id)?;
-        if Standing::read(self.tasks(), &record)?.is_terminal() {
+        if self.standing(&record)?.is_terminal() {
             return Err(A2AError::unsupported_operation(format!(
                 "task {} has settled; GetTask returns its result",
                 record.id
@@ -357,13 +372,28 @@ impl A2aService {
         &self,
         record: &Record,
     ) -> Result<(String, TaskStatusUpdateEvent), A2AError> {
-        let standing = Standing::read(self.tasks(), record)?;
+        let standing = self.standing(record)?;
         let update = project::status_update(record, &standing);
-        let key = serde_json::to_value(&update.status.state)
+        let state = serde_json::to_value(&update.status.state)
             .ok()
             .and_then(|state| state.as_str().map(str::to_owned))
             .unwrap_or_default();
+        // Two questions in a row are two changes, though both are
+        // `INPUT_REQUIRED`.
+        let key = match &standing {
+            Standing::Asking(asked) => format!("{state}:{}", asked.call_id),
+            _ => state,
+        };
         Ok((key, update))
+    }
+
+    /// Where `record`'s task stands: what `basis-tasks` says, with the
+    /// question this process holds open for it, if any.
+    pub(crate) fn standing(&self, record: &Record) -> Result<Standing, A2AError> {
+        let asked = self
+            .questions(&record.id)
+            .and_then(|questions| questions.asked());
+        Ok(Standing::read(self.tasks(), record)?.asking(asked))
     }
 
     /// The task `id` names, when `caller` owns it; another principal's task

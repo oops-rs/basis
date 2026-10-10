@@ -2,11 +2,10 @@
 //! about it, how its runs are bounded, and who may call it.
 //!
 //! Everything here is decided once, before the first request, and none of it
-//! changes while serving. That is what lets [`InboundApproval`] have no
-//! `Prompt` variant at all (ADR-0028 §4): a served agent's callers are other
-//! agents, so a question about a tool call has nobody to put it to, and a
-//! policy that would ask is refused by the type rather than discovered on
-//! the first consequential call.
+//! changes while serving. [`InboundApproval`] has no `Prompt` variant
+//! (ADR-0028 §4): there is no person at this server to put a question to.
+//! What it has instead is [`InboundApproval::AskCaller`] (ADR-0030 §7), which
+//! puts the question to the one party there is — whoever sent the task.
 
 mod auth;
 mod identity;
@@ -20,8 +19,7 @@ pub(crate) use auth::Principals;
 pub use auth::{BearerToken, DEFAULT_PRINCIPAL, Principal, PrincipalError};
 pub use identity::{AgentIdentity, ExtendedCard};
 
-/// How a served task's consequential calls are answered. There is no third
-/// option: see the module docs.
+/// How a served task's consequential calls are answered.
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
 pub enum InboundApproval {
     /// Every consequential call is refused. The default: an agent reachable
@@ -30,6 +28,11 @@ pub enum InboundApproval {
     Never,
     /// Every consequential call is allowed.
     Always,
+    /// Every consequential call is put to the caller: the task moves to
+    /// `INPUT_REQUIRED` with the call's id, tool and preview, and the call
+    /// is made only if the caller answers `approve` within `deadline` — see
+    /// `docs/a2a/approval-v1.md`. Silence past the deadline is `deny`.
+    AskCaller { deadline: Duration },
 }
 
 impl From<InboundApproval> for Approve {
@@ -37,6 +40,10 @@ impl From<InboundApproval> for Approve {
         match approval {
             InboundApproval::Never => Approve::Never,
             InboundApproval::Always => Approve::Always,
+            // `basis-tasks` asks whichever process drives the task, and this
+            // server drives every task it accepts — through a host that puts
+            // the question to the task's caller.
+            InboundApproval::AskCaller { .. } => Approve::Prompt,
         }
     }
 }
@@ -271,9 +278,15 @@ mod tests {
     use super::*;
 
     #[test]
-    fn inbound_approval_maps_onto_the_two_policies_that_ask_nobody() {
+    fn inbound_approval_maps_onto_the_task_layers_policies() {
         assert_eq!(Approve::from(InboundApproval::Never), Approve::Never);
         assert_eq!(Approve::from(InboundApproval::Always), Approve::Always);
+        assert_eq!(
+            Approve::from(InboundApproval::AskCaller {
+                deadline: Duration::from_secs(60)
+            }),
+            Approve::Prompt
+        );
         assert_eq!(InboundApproval::default(), InboundApproval::Never);
     }
 }

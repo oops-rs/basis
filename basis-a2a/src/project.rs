@@ -11,8 +11,13 @@
 //! | `Failed { error }` | `FAILED`, the error as the status message |
 //! | `Cancelled` | `CANCELED` |
 //! | a terminal state this build does not know | `FAILED`, saying so |
+//! | no terminal, a question open to the caller | `INPUT_REQUIRED`, the question as the status message |
 //! | no terminal, attached | `WORKING` |
 //! | no terminal, not attached | `SUBMITTED` |
+//!
+//! The question is the one fact here that is not on disk: it lives in the
+//! driving process (see `service::ask`), which overlays it with
+//! [`Standing::asking`].
 //!
 //! The final answer is an artifact, never a message: the spec reserves
 //! messages for the exchange, and a caller reading only artifacts must still
@@ -24,7 +29,10 @@ use a2a::{
 use basis_tasks::{Tasks, Terminal, TerminalRecord};
 use chrono::{DateTime, Utc};
 
-use crate::index::Record;
+use crate::{
+    index::Record,
+    service::{APPROVAL_EXTENSION, Asked},
+};
 
 /// The id of the one artifact a completed task carries.
 pub(crate) const RESULT_ARTIFACT: &str = "result";
@@ -64,6 +72,8 @@ pub(crate) fn history_length(requested: Option<i32>) -> Result<Option<usize>, A2
 pub(crate) enum Standing {
     Submitted,
     Working,
+    /// Parked on a question to the caller (ADR-0030 §7).
+    Asking(Asked),
     Settled(TerminalRecord),
 }
 
@@ -80,14 +90,31 @@ impl Standing {
         })
     }
 
+    /// This standing, with `asked` open: a question a task that has not
+    /// settled is parked on.
+    pub(crate) fn asking(self, asked: Option<Asked>) -> Self {
+        match (self, asked) {
+            (Self::Settled(terminal), _) => Self::Settled(terminal),
+            (_, Some(asked)) => Self::Asking(asked),
+            (standing, None) => standing,
+        }
+    }
+
     pub(crate) fn is_terminal(&self) -> bool {
         matches!(self, Self::Settled(_))
+    }
+
+    /// Terminal, or waiting on the caller: where a blocking send answers and
+    /// a stream closes (spec §3.1.1, §11.7).
+    pub(crate) fn is_interrupted_or_terminal(&self) -> bool {
+        matches!(self, Self::Settled(_) | Self::Asking(_))
     }
 
     pub(crate) fn state(&self) -> TaskState {
         match self {
             Self::Submitted => TaskState::Submitted,
             Self::Working => TaskState::Working,
+            Self::Asking(_) => TaskState::InputRequired,
             Self::Settled(record) => match &record.terminal {
                 Some(Terminal::Succeeded { .. }) => TaskState::Completed,
                 Some(Terminal::Cancelled) => TaskState::Canceled,
@@ -138,12 +165,36 @@ fn status(record: &Record, standing: &Standing) -> TaskStatus {
             )),
             _ => None,
         },
+        Standing::Asking(asked) => Some(question(record, asked)),
         _ => None,
     };
     TaskStatus {
         state: standing.state(),
         message,
         timestamp: timestamp(record.status_ms()),
+    }
+}
+
+/// A question as its status message: words a model can act on, and the same
+/// facts as a data part under the approval extension (`docs/a2a/approval-v1.md`).
+fn question(record: &Record, asked: &Asked) -> Message {
+    let text = format!(
+        "Approval needed: the agent wants to call `{tool}`.\n{preview}\nReply `approve {id}` or \
+         `deny {id}`.",
+        tool = asked.tool,
+        preview = asked.preview,
+        id = asked.call_id,
+    );
+    let data = Part::data(serde_json::json!({
+        APPROVAL_EXTENSION: {
+            "callId": asked.call_id,
+            "tool": asked.tool,
+            "preview": asked.preview,
+        }
+    }));
+    Message {
+        extensions: Some(vec![APPROVAL_EXTENSION.to_string()]),
+        ..agent_message_parts(record, vec![Part::text(text), data])
     }
 }
 
@@ -191,10 +242,14 @@ fn history(record: &Record, history_length: Option<usize>) -> Option<Vec<Message
 /// A message from the agent about this task — a progress note, or why it
 /// failed.
 pub(crate) fn agent_message(record: &Record, text: String) -> Message {
+    agent_message_parts(record, vec![Part::text(text)])
+}
+
+fn agent_message_parts(record: &Record, parts: Vec<Part>) -> Message {
     Message {
         context_id: Some(record.context_id.clone()),
         task_id: Some(record.id.clone()),
-        ..Message::new(Role::Agent, vec![Part::text(text)])
+        ..Message::new(Role::Agent, parts)
     }
 }
 

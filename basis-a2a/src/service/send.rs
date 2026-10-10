@@ -4,7 +4,11 @@
 use a2a::{A2AError, Message, SendMessageRequest};
 use basis_tasks::{Continuation, Hint, RunSpec, now_ms};
 
-use super::{A2aService, parts};
+use super::{
+    A2aService,
+    ask::{self, Unanswered},
+    parts,
+};
 use crate::{card::TEXT, config::Principal, index::Record, project::internal};
 
 /// The output modes a caller may accept for this server to be able to answer.
@@ -45,6 +49,22 @@ impl A2aService {
             return Err(A2AError::content_type_not_supported());
         }
         let history_length = crate::project::history_length(configuration.history_length)?;
+        let return_immediately = configuration.return_immediately.unwrap_or(false);
+        if let Some(task_id) = &message.task_id {
+            // A message naming a task is a reply to it: here, only ever the
+            // answer to a question it has open (ADR-0030 §7).
+            if configuration.task_push_notification_config.is_some() {
+                return Err(A2AError::invalid_params(
+                    "an answer to a question carries no push config; create one on the task",
+                ));
+            }
+            let record = self.answer(caller, task_id, &message)?;
+            return Ok(Accepted {
+                record,
+                history_length,
+                return_immediately,
+            });
+        }
         let rendered = parts::render(&message)?;
         let (context_id, continuation) = self.conversation(caller, &message)?;
 
@@ -91,35 +111,64 @@ impl A2aService {
         Ok(Accepted {
             record,
             history_length,
-            return_immediately: configuration.return_immediately.unwrap_or(false),
+            return_immediately,
         })
     }
 
+    /// Answers the question `task_id` has open with `message`. A task with
+    /// none open is refused as it always was: the reply belongs in a new
+    /// message on its context. An answer naming another call, or giving no
+    /// decision, is refused and the question stays open.
+    fn answer(
+        &self,
+        caller: &Principal,
+        task_id: &str,
+        message: &Message,
+    ) -> Result<Record, A2AError> {
+        if message.role != a2a::Role::User || message.message_id.trim().is_empty() {
+            return Err(A2AError::invalid_params(
+                "a message to an agent has role ROLE_USER and a messageId",
+            ));
+        }
+        let record = self.record(caller, task_id)?;
+        if message
+            .context_id
+            .as_ref()
+            .is_some_and(|context| *context != record.context_id)
+        {
+            return Err(A2AError::invalid_params(
+                "contextId does not match the task's context",
+            ));
+        }
+        let not_waiting = || {
+            A2AError::unsupported_operation(format!(
+                "task {task_id} is not waiting for input; send a message with its contextId and \
+                 no taskId to continue the conversation"
+            ))
+        };
+        let questions = self
+            .questions(&record.id)
+            .filter(|questions| questions.asked().is_some())
+            .ok_or_else(not_waiting)?;
+        let (call_id, approve) = ask::answer_of(message)?;
+        questions
+            .answer(&call_id, approve)
+            .map_err(|unanswered| match unanswered {
+                Unanswered::NotAsking => not_waiting(),
+                Unanswered::Mismatch { open } => A2AError::invalid_params(format!(
+                    "{call_id} is not the open question; it is {open}"
+                )),
+            })?;
+        Ok(record)
+    }
+
     /// Which conversation `message` belongs to: the one its `contextId`
-    /// names, or a new one. A message naming a task is a reply to a task
-    /// waiting for input, and no task this server runs ever waits for input
-    /// (ADR-0028 §4), so it is refused with the reason.
+    /// names, or a new one.
     fn conversation(
         &self,
         caller: &Principal,
         message: &Message,
     ) -> Result<(String, Continuation), A2AError> {
-        if let Some(task_id) = &message.task_id {
-            let record = self.record(caller, task_id)?;
-            if message
-                .context_id
-                .as_ref()
-                .is_some_and(|context| *context != record.context_id)
-            {
-                return Err(A2AError::invalid_params(
-                    "contextId does not match the task's context",
-                ));
-            }
-            return Err(A2AError::unsupported_operation(format!(
-                "task {task_id} is not waiting for input; send a message with its contextId and \
-                 no taskId to continue the conversation"
-            )));
-        }
         match &message.context_id {
             None => Ok((a2a::new_context_id(), Continuation::New)),
             Some(context_id) => {

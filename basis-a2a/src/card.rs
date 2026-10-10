@@ -9,14 +9,15 @@
 use std::collections::HashMap;
 
 use a2a::{
-    A2AError, AgentCapabilities, AgentCard, AgentInterface, AgentSkill, HttpAuthSecurityScheme,
-    SecurityScheme, TRANSPORT_PROTOCOL_HTTP_JSON, TRANSPORT_PROTOCOL_JSONRPC,
+    A2AError, AgentCapabilities, AgentCard, AgentExtension, AgentInterface, AgentSkill,
+    HttpAuthSecurityScheme, SecurityScheme, TRANSPORT_PROTOCOL_HTTP_JSON,
+    TRANSPORT_PROTOCOL_JSONRPC,
 };
 
 use crate::{
     config::{AgentIdentity, ExtendedCard, Principal},
     rest,
-    service::{A2aService, INPUT_MODES},
+    service::{A2aService, APPROVAL_EXTENSION, INPUT_MODES},
 };
 
 /// The well-known path the spec puts the card at.
@@ -36,6 +37,8 @@ pub(crate) struct Features {
     pub(crate) authenticated: bool,
     pub(crate) extended_card: bool,
     pub(crate) push_notifications: bool,
+    /// Consequential calls are put to the caller (the approval extension).
+    pub(crate) ask_caller: bool,
 }
 
 /// The public card, at the well-known path.
@@ -81,7 +84,7 @@ pub(crate) fn build(identity: &AgentIdentity, endpoint: &str, features: Features
         capabilities: AgentCapabilities {
             streaming: Some(true),
             push_notifications: Some(features.push_notifications),
-            extensions: None,
+            extensions: extensions(features),
             extended_agent_card: Some(features.extended_card),
         },
         default_input_modes: INPUT_MODES.iter().map(|mode| mode.to_string()).collect(),
@@ -94,6 +97,24 @@ pub(crate) fn build(identity: &AgentIdentity, endpoint: &str, features: Features
         security_requirements,
         signatures: None,
     }
+}
+
+/// The extensions this server speaks, each declared only when on.
+fn extensions(features: Features) -> Option<Vec<AgentExtension>> {
+    let mut extensions = Vec::new();
+    if features.ask_caller {
+        extensions.push(AgentExtension {
+            uri: APPROVAL_EXTENSION.to_string(),
+            description: Some(
+                "A consequential tool call is put to the caller as INPUT_REQUIRED; answer with \
+                 `approve <call id>` or `deny <call id>`."
+                    .to_string(),
+            ),
+            required: Some(false),
+            params: None,
+        });
+    }
+    (!extensions.is_empty()).then_some(extensions)
 }
 
 /// Both cards one server serves, built once from its service and endpoint.
