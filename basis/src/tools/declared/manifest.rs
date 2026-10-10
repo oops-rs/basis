@@ -482,7 +482,7 @@ impl RawTool {
                 .map_err(|reason| invalid(format!("has a `{field}` value that {reason}")))
         };
 
-        check_name(&name).map_err(&invalid)?;
+        check_name(&name).map_err(invalid)?;
 
         let description = self.description.ok_or_else(|| {
             invalid(
@@ -491,13 +491,13 @@ impl RawTool {
                 .to_string(),
             )
         })?;
-        check_description(&description).map_err(&invalid)?;
+        check_description(&description).map_err(invalid)?;
         let description = description.trim().to_string();
 
         let input_schema = self
             .input_schema
             .ok_or_else(|| invalid("has no `input_schema`".to_string()))?;
-        check_schema(&input_schema).map_err(&invalid)?;
+        check_schema(&input_schema).map_err(invalid)?;
         let command = self
             .command
             .ok_or_else(|| invalid("has no `command` to run".to_string()))?
@@ -505,8 +505,8 @@ impl RawTool {
             .enumerate()
             .map(|(index, argument)| expanded(&format!("command[{index}]"), argument))
             .collect::<Result<Vec<_>, _>>()?;
-        check_command(&command).map_err(&invalid)?;
-        check_timeout(self.timeout_ms).map_err(&invalid)?;
+        check_command(&command).map_err(invalid)?;
+        check_timeout(self.timeout_ms).map_err(invalid)?;
 
         Ok(DeclaredToolSpec {
             description,

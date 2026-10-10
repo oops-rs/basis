@@ -270,11 +270,11 @@ impl BudgetPool {
         let tokens = usage.total_tokens();
         let previous = self
             .spent
-            .fetch_update(Ordering::SeqCst, Ordering::SeqCst, |spent| {
+            .try_update(Ordering::SeqCst, Ordering::SeqCst, |spent| {
                 Some(spent.saturating_add(tokens))
             })
             // The closure returns `Some` unconditionally, so the update cannot
-            // fail; `fetch_update` retries on contention rather than giving up.
+            // fail; `try_update` retries on contention rather than giving up.
             .unwrap_or_else(|spent| spent);
 
         previous.saturating_add(tokens)

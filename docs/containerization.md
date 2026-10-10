@@ -81,7 +81,7 @@ the next section something to mount. Two stages, so the Rust toolchain does
 not ride along into the runtime.
 
 ```dockerfile
-FROM rust:1.88-slim-bookworm AS build
+FROM rust:1.95-slim-bookworm AS build
 
 WORKDIR /src
 
