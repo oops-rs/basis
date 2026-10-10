@@ -10,11 +10,19 @@
 //!
 //! **Sending it.** A task with undelivered changes has one deliverer, which
 //! sends each config its next change in order and records the delivery
-//! before moving on. A failure is retried with exponential backoff, from
-//! [`FIRST_RETRY`] doubling to [`LAST_RETRY`], and given up on — logged, and
-//! recorded as had — after [`ATTEMPTS`] tries; spec §4.3.3 allows stopping
-//! after a number of failures, and a webhook that has been down for minutes
-//! should not hold back the changes after it forever.
+//! before moving on. Delivery is at least once (proposal 0005 §3): a failure
+//! is retried with exponential backoff, from [`FIRST_RETRY`] doubling to
+//! [`LAST_RETRY`] and then every [`LAST_RETRY`], for as long as
+//! [`RETRY_HORIZON`] from that change's first failure.
+//!
+//! Past the horizon the change is given up on: logged, and recorded as had,
+//! so the config's later changes — the task's terminal one above all — are
+//! still sent, each with a horizon of its own. The horizon's clock is this
+//! process's: a server restarted while a webhook is down starts it afresh
+//! for the change it re-delivers, so a webhook is tried for at least the
+//! horizon, never less. A delivery that lands but cannot be recorded is
+//! retried on the same backoff, never at once: sending it again is the
+//! at-least-once promise, sending it in a loop is not.
 
 use std::{
     collections::HashMap,
@@ -39,8 +47,36 @@ use crate::{
 };
 
 const FIRST_RETRY: Duration = Duration::from_millis(500);
-const LAST_RETRY: Duration = Duration::from_secs(30);
-const ATTEMPTS: u32 = 8;
+const LAST_RETRY: Duration = Duration::from_secs(5 * 60);
+/// How long one change is retried for before it is given up on: a day, long
+/// enough to outlast a webhook's deploy, an outage, or a night.
+pub(crate) const RETRY_HORIZON: Duration = Duration::from_secs(24 * 60 * 60);
+
+/// Where one config's failing delivery stands.
+#[derive(Debug, Clone, Copy)]
+struct Retry {
+    attempts: u32,
+    /// When the change it is trying first failed.
+    since: Instant,
+    /// When to try again.
+    at: Instant,
+}
+
+/// What to do after a delivery that has failed `attempts` times, for
+/// `failing_for` so far.
+#[derive(Debug, PartialEq, Eq)]
+enum AfterFailure {
+    RetryIn(Duration),
+    GiveUp,
+}
+
+fn after_failure(attempts: u32, failing_for: Duration) -> AfterFailure {
+    if failing_for >= RETRY_HORIZON {
+        AfterFailure::GiveUp
+    } else {
+        AfterFailure::RetryIn(backoff(attempts))
+    }
+}
 
 /// The push half of a service, present only when the operator turned push
 /// notifications on.
@@ -285,7 +321,7 @@ impl A2aService {
         let Some(push) = &self.inner.push else {
             return;
         };
-        let mut retries: HashMap<String, (u32, Instant)> = HashMap::new();
+        let mut retries: HashMap<String, Retry> = HashMap::new();
         loop {
             let pending = push.store.pending(&task);
             if pending.is_empty() {
@@ -302,38 +338,70 @@ impl A2aService {
             let mut next_wake: Option<Instant> = None;
             for (config, change) in pending {
                 let id = config.id.clone().unwrap_or_default();
-                if let Some((_, at)) = retries.get(&id)
-                    && *at > Instant::now()
+                if let Some(retry) = retries.get(&id)
+                    && retry.at > Instant::now()
                 {
-                    next_wake = Some(next_wake.map_or(*at, |wake| wake.min(*at)));
+                    next_wake = Some(next_wake.map_or(retry.at, |wake| wake.min(retry.at)));
                     continue;
                 }
                 let outcome = deliver::deliver(&config, &change.update, push.allow_private).await;
-                let give_up = match outcome {
+                let now = Instant::now();
+                let previous = retries.get(&id).copied();
+                let attempts = previous.map_or(0, |retry| retry.attempts) + 1;
+                let since = previous.map_or(now, |retry| retry.since);
+                let had = match outcome {
                     Ok(()) => true,
                     Err(error) => {
-                        let attempts = retries.get(&id).map_or(0, |(attempts, _)| *attempts) + 1;
                         eprintln!(
                             "basis-a2a: push config {id} of task {task}, attempt {attempts}: {error}"
                         );
-                        if attempts >= ATTEMPTS {
-                            eprintln!(
-                                "basis-a2a: push config {id} of task {task}: giving up on change {}",
-                                change.seq
-                            );
-                            true
-                        } else {
-                            let at = Instant::now() + backoff(attempts);
-                            retries.insert(id.clone(), (attempts, at));
-                            next_wake = Some(next_wake.map_or(at, |wake| wake.min(at)));
-                            false
+                        match after_failure(attempts, now.duration_since(since)) {
+                            AfterFailure::GiveUp => {
+                                eprintln!(
+                                    "basis-a2a: push config {id} of task {task}: giving up on \
+                                     change {} after {}h of failures",
+                                    change.seq,
+                                    RETRY_HORIZON.as_secs() / 3600
+                                );
+                                true
+                            }
+                            AfterFailure::RetryIn(wait) => {
+                                retries.insert(
+                                    id.clone(),
+                                    Retry {
+                                        attempts,
+                                        since,
+                                        at: now + wait,
+                                    },
+                                );
+                                next_wake =
+                                    Some(next_wake.map_or(now + wait, |wake| wake.min(now + wait)));
+                                false
+                            }
                         }
                     }
                 };
-                if give_up {
-                    retries.remove(&id);
-                    if let Err(error) = push.store.delivered(&task, &id, change.seq) {
+                if !had {
+                    continue;
+                }
+                match push.store.delivered(&task, &id, change.seq) {
+                    Ok(()) => {
+                        retries.remove(&id);
+                    }
+                    // Not recorded, so still pending: wait before sending it
+                    // again rather than re-POSTing in a tight loop.
+                    Err(error) => {
                         eprintln!("basis-a2a: record a push delivery for task {task}: {error}");
+                        let at = now + backoff(attempts);
+                        retries.insert(
+                            id.clone(),
+                            Retry {
+                                attempts,
+                                since,
+                                at,
+                            },
+                        );
+                        next_wake = Some(next_wake.map_or(at, |wake| wake.min(at)));
                     }
                 }
             }
@@ -382,6 +450,21 @@ mod tests {
         assert_eq!(backoff(2), FIRST_RETRY * 2);
         assert_eq!(backoff(3), FIRST_RETRY * 4);
         assert_eq!(backoff(30), LAST_RETRY);
+        assert_eq!(backoff(u32::MAX), LAST_RETRY);
+    }
+
+    #[test]
+    fn a_failing_change_is_retried_for_the_horizon_whatever_the_attempt_count() {
+        assert_eq!(
+            after_failure(1, Duration::ZERO),
+            AfterFailure::RetryIn(FIRST_RETRY)
+        );
+        assert_eq!(
+            after_failure(10_000, RETRY_HORIZON - Duration::from_secs(1)),
+            AfterFailure::RetryIn(LAST_RETRY),
+            "many attempts are no reason to stop"
+        );
+        assert_eq!(after_failure(3, RETRY_HORIZON), AfterFailure::GiveUp);
     }
 
     #[test]
