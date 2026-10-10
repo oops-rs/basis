@@ -1,10 +1,13 @@
 //! Watching a workspace's A2A files, by polling (ADR-0031 §4).
 //!
 //! A poll of each source's path — does it exist, how long is it, when was it
-//! last modified — rather than a filesystem notifier: it needs no dependency,
-//! it is the same on every platform, and it notices a file that did not exist
-//! at open, which a notifier watching that file could not. The cost is a few
-//! `stat` calls per interval.
+//! last modified, what does it hold — rather than a filesystem notifier: it
+//! needs no dependency, it is the same on every platform, and it notices a
+//! file that did not exist at open, which a notifier watching that file could
+//! not. The content is hashed because an edit that keeps the length and lands
+//! within one tick of the filesystem's clock changes nothing else a `stat`
+//! reports; these files are a few hundred bytes, so reading them each
+//! interval costs about what the `stat` does.
 //!
 //! What a poll compares against is what the last read *saw*, stamped just
 //! before that read, not what the previous poll saw. So a file edited between
@@ -21,6 +24,7 @@
 //! stay missing for a whole interval before its agents are let go.
 
 use std::{
+    hash::{Hash, Hasher},
     path::{Path, PathBuf},
     sync::Weak,
     time::{Duration, SystemTime},
@@ -68,6 +72,11 @@ pub(crate) enum Stamp {
     Present {
         len: u64,
         modified: Option<SystemTime>,
+        /// A hash of the content, or `None` when it could not be read. Only
+        /// ever compared with another stamp in this process, so the
+        /// standard library's hasher — which promises no stability across
+        /// releases — is enough.
+        content: Option<u64>,
     },
 }
 
@@ -81,6 +90,11 @@ fn stamp(path: &Path) -> Stamp {
         Ok(metadata) => Stamp::Present {
             len: metadata.len(),
             modified: metadata.modified().ok(),
+            content: std::fs::read(path).ok().map(|bytes| {
+                let mut hasher = std::hash::DefaultHasher::new();
+                bytes.hash(&mut hasher);
+                hasher.finish()
+            }),
         },
         Err(_) => Stamp::Missing,
     }

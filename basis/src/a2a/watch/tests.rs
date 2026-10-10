@@ -27,7 +27,30 @@ fn present(len: u64) -> Vec<Stamp> {
     vec![Stamp::Present {
         len,
         modified: None,
+        content: None,
     }]
+}
+
+#[test]
+fn an_edit_that_keeps_the_length_and_the_modification_time_is_still_a_change() {
+    let dir = tempfile::tempdir().unwrap();
+    let path = dir.path().join("a2a.json");
+    let paths = vec![path.clone()];
+    std::fs::write(&path, r#"{"agents":{"aaaa":{}}}"#).unwrap();
+    let modified = std::fs::metadata(&path).unwrap().modified().unwrap();
+    let before = stamps(&paths);
+
+    std::fs::write(&path, r#"{"agents":{"bbbb":{}}}"#).unwrap();
+    // Within one tick of a coarse clock, the second write would carry the
+    // first one's time; pin it so the test does not depend on the clock.
+    std::fs::File::options()
+        .write(true)
+        .open(&path)
+        .unwrap()
+        .set_modified(modified)
+        .unwrap();
+
+    assert_ne!(stamps(&paths), before);
 }
 
 #[test]
