@@ -35,6 +35,14 @@ pub(crate) enum Route {
     Unknown,
 }
 
+/// What [`RemoteAgents::reach`] hands back: the client to talk to, and which
+/// endpoint its configuration names.
+#[derive(Debug)]
+pub(crate) struct Reached {
+    pub(crate) client: Arc<A2aClient>,
+    pub(crate) endpoint: String,
+}
+
 /// Why [`RemoteAgents::reach`] has no client to hand back.
 #[derive(Debug)]
 pub(crate) enum Unreached {
@@ -102,7 +110,7 @@ impl RemoteAgents {
     /// this one (ADR-0031 §6). A retry that succeeds is put into the set, and
     /// the set says it changed, so every agent holding it is taught the agent
     /// is reachable again.
-    pub(crate) async fn reach(&self, name: &str) -> Result<Arc<A2aClient>, Unreached> {
+    pub(crate) async fn reach(&self, name: &str) -> Result<Reached, Unreached> {
         let roster = self.snapshot();
         let Some(agent) = roster.get(name) else {
             return Err(match roster.absent(name) {
@@ -110,8 +118,12 @@ impl RemoteAgents {
                 _ => Unreached::Unknown,
             });
         };
+        let endpoint = agent.agent.endpoint();
         if let Some(client) = &agent.client {
-            return Ok(Arc::clone(client));
+            return Ok(Reached {
+                client: Arc::clone(client),
+                endpoint,
+            });
         }
         agent
             .claim_retry(self.backoff)
@@ -127,7 +139,7 @@ impl RemoteAgents {
         if self.install(agent, &client) {
             self.changed();
         }
-        Ok(client)
+        Ok(Reached { client, endpoint })
     }
 
     /// Puts `client` into the set for `agent` — unless the set no longer holds

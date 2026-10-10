@@ -31,6 +31,13 @@ pub(crate) struct Conversation {
 pub(crate) struct Outstanding {
     pub(crate) task_id: String,
     pub(crate) waiting_for: Waiting,
+    /// The endpoint the task was handed to ([`A2aAgent::endpoint`]), so a
+    /// call after the agent moved can tell that the task belongs to the old
+    /// one. `None` on a record written before basis kept it.
+    ///
+    /// [`A2aAgent::endpoint`]: crate::a2a::A2aAgent
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub(crate) endpoint: Option<String>,
 }
 
 /// What an outstanding task is waiting for.

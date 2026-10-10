@@ -11,6 +11,8 @@ use crate::a2a::remote::testing::{agent_at, free_port, serve_card};
 
 const AGENT: &str = "reviewer";
 const OUTPUT_BYTES: usize = 64 * 1024;
+/// The endpoint every exchange here is sent to.
+const ENDPOINT: &str = "endpoint-1";
 
 fn task(state: TaskState, answer: Option<&str>) -> Task {
     Task {
@@ -42,6 +44,7 @@ fn outstanding(waiting_for: Waiting) -> Conversation {
         outstanding: Some(Outstanding {
             task_id: "task-1".to_string(),
             waiting_for,
+            endpoint: Some(ENDPOINT.to_string()),
         }),
     }
 }
@@ -114,6 +117,7 @@ fn a_completed_task_is_the_answer_and_leaves_nothing_outstanding() {
             Some("looks good"),
         ))),
         OUTPUT_BYTES,
+        ENDPOINT,
     );
 
     let text = result.expect("completed");
@@ -141,6 +145,7 @@ fn a_task_still_working_is_kept_and_the_model_is_told_how_to_wait() {
             reason: A2aStillWorking::WaitBound(Duration::from_secs(300)),
         }),
         OUTPUT_BYTES,
+        ENDPOINT,
     );
 
     let text = result.expect("not an error: the work continues");
@@ -163,6 +168,7 @@ fn a_question_from_the_agent_is_kept_and_the_model_is_told_how_to_answer() {
             Some("which branch?"),
         ))),
         OUTPUT_BYTES,
+        ENDPOINT,
     );
 
     let text = result.expect("a question is not a failure");
@@ -178,6 +184,7 @@ fn a_failed_task_is_an_error_and_ends_what_was_outstanding() {
         outstanding(Waiting::Agent),
         Ok(A2aExchange::Settled(task(TaskState::Failed, None))),
         OUTPUT_BYTES,
+        ENDPOINT,
     );
 
     let error = result.expect_err("the work was not done");
@@ -234,6 +241,7 @@ fn an_outstanding_task_the_agent_no_longer_knows_is_forgotten_and_said_so() {
         outstanding(Waiting::Agent),
         Err(A2aExchangeError::Send(not_found("GetTask"))),
         OUTPUT_BYTES,
+        ENDPOINT,
     );
 
     let error = result.expect_err("the work was not done");
@@ -256,6 +264,7 @@ fn a_task_that_vanishes_mid_wait_is_forgotten_too() {
             error: not_found("GetTask"),
         }),
         OUTPUT_BYTES,
+        ENDPOINT,
     );
 
     assert!(result.is_err());
@@ -276,6 +285,7 @@ fn a_new_task_refused_as_unknown_with_nothing_outstanding_keeps_the_conversation
         settled.clone(),
         Err(A2aExchangeError::Send(not_found("SendMessage"))),
         OUTPUT_BYTES,
+        ENDPOINT,
     );
 
     assert!(result.expect_err("failed").contains("Handing the task"));
@@ -324,11 +334,134 @@ async fn an_outstanding_task_follows_its_agent_to_a_new_address() {
     let report = agents.reload(vec![agent_at(AGENT, moved_to)]).await;
     assert_eq!(report.changed, [AGENT]);
 
-    let client = agents.reach(AGENT).await.expect("the new address answers");
-    assert_eq!(client.card_url().port(), Some(moved_to));
+    let reached = agents.reach(AGENT).await.expect("the new address answers");
+    assert_eq!(reached.client.card_url().port(), Some(moved_to));
     assert_eq!(
         request(AGENT, "", &agents.conversation("agent-1", AGENT, false)),
         Ok(A2aRequest::resume("task-1")),
         "`@reviewer` alone waits on the same task, now asked of the new address"
     );
+}
+
+#[test]
+fn a_moved_agent_that_cannot_pick_up_its_task_ends_the_record_whatever_it_answered() {
+    // The task was handed to `endpoint-0`; the agent has since moved, and its
+    // new endpoint answers the resume with something other than
+    // `TaskNotFound`. Keeping the record would wedge the conversation.
+    let recorded = Conversation {
+        context_id: Some("context-1".to_string()),
+        outstanding: Some(Outstanding {
+            task_id: "task-1".to_string(),
+            waiting_for: Waiting::Agent,
+            endpoint: Some("endpoint-0".to_string()),
+        }),
+    };
+    let answers = [
+        ClientError::Decode { method: "GetTask" },
+        ClientError::Rpc {
+            method: "GetTask",
+            error: A2aRpcError::InvalidParams,
+        },
+        ClientError::InvalidId { method: "GetTask" },
+    ];
+
+    for answer in answers {
+        let (next, result) = settle(
+            AGENT,
+            recorded.clone(),
+            Err(A2aExchangeError::Send(answer)),
+            OUTPUT_BYTES,
+            ENDPOINT,
+        );
+
+        let error = result.expect_err("the task was not picked up");
+        assert!(error.contains("has moved to a new address"), "{error}");
+        assert!(error.contains("`@reviewer <task>`"), "{error}");
+        assert!(
+            !error.contains("task-1") && !error.contains("context-1"),
+            "{error}"
+        );
+        assert_eq!(next, Conversation::default());
+    }
+}
+
+#[test]
+fn an_agent_that_did_not_move_keeps_its_task_through_a_failed_check() {
+    // The same endpoint failing to answer is a hiccup, not a move: the task
+    // may still be running, so the record stands.
+    let (next, result) = settle(
+        AGENT,
+        outstanding(Waiting::Agent),
+        Err(A2aExchangeError::Send(ClientError::Transport(
+            "connection reset",
+        ))),
+        OUTPUT_BYTES,
+        ENDPOINT,
+    );
+
+    assert!(result.is_err());
+    assert_eq!(next, outstanding(Waiting::Agent));
+}
+
+#[test]
+fn a_record_from_before_endpoints_were_kept_is_not_taken_to_have_moved() {
+    let legacy = Conversation {
+        context_id: Some("context-1".to_string()),
+        outstanding: Some(Outstanding {
+            task_id: "task-1".to_string(),
+            waiting_for: Waiting::Agent,
+            endpoint: None,
+        }),
+    };
+
+    let (next, _) = settle(
+        AGENT,
+        legacy.clone(),
+        Err(A2aExchangeError::Send(ClientError::Connect)),
+        OUTPUT_BYTES,
+        ENDPOINT,
+    );
+
+    assert_eq!(next, legacy);
+}
+
+#[test]
+fn a_task_left_outstanding_records_the_endpoint_it_was_handed_to() {
+    let (next, _) = settle(
+        AGENT,
+        Conversation::default(),
+        Ok(A2aExchange::StillWorking {
+            task: task(TaskState::Working, None),
+            reason: A2aStillWorking::WaitBound(Duration::from_secs(1)),
+        }),
+        OUTPUT_BYTES,
+        ENDPOINT,
+    );
+
+    assert_eq!(
+        next.outstanding
+            .and_then(|outstanding| outstanding.endpoint),
+        Some(ENDPOINT.to_string())
+    );
+}
+
+#[test]
+fn an_endpoint_fingerprint_follows_the_url_and_header_names_but_not_values() {
+    use crate::a2a::A2aAgent;
+    let agent = |url: &str, token: &str| {
+        A2aAgent::new(
+            mentra::a2a::A2aAgentConfig::new(AGENT, url).with_header("Authorization", token),
+        )
+    };
+
+    let here = agent("https://a.example", "Bearer one");
+    assert_eq!(
+        here.endpoint(),
+        agent("https://a.example", "Bearer two").endpoint()
+    );
+    assert_ne!(
+        here.endpoint(),
+        agent("https://b.example", "Bearer one").endpoint()
+    );
+    assert!(!here.endpoint().contains("one"));
 }

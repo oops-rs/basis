@@ -72,7 +72,7 @@ use mentra::a2a::{A2aClient, A2aError as ClientError};
 use super::A2aAgent;
 
 pub(crate) use conversation::{Conversation, Outstanding, Waiting, forget};
-pub(crate) use retry::{Route, Unreached};
+pub(crate) use retry::{Reached, Route, Unreached};
 
 /// How long an unreachable agent is left alone after a connect attempt
 /// before `@<agent>` tries it again (ADR-0031 §2).

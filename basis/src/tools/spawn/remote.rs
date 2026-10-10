@@ -16,7 +16,9 @@ use mentra::a2a::{
 use mentra::tool::{ParallelToolContext, ToolContext, ToolResult};
 
 use super::{describe::listed, no_remote_agents};
-use crate::a2a::remote::{Conversation, Outstanding, RemoteAgents, Route, Unreached, Waiting};
+use crate::a2a::remote::{
+    Conversation, Outstanding, Reached, RemoteAgents, Route, Unreached, Waiting,
+};
 
 /// Whether `@<name>` can go anywhere, asked in the preview — before the
 /// approver, and without waiting on the network.
@@ -101,7 +103,7 @@ pub(super) async fn delegate(
     // Held to the end of this call: a reload that swaps the set meanwhile
     // changes what the *next* `@<agent>` reaches, never this exchange
     // (ADR-0031 §6). An unreachable agent due a retry is connected here.
-    let client = agents
+    let Reached { client, endpoint } = agents
         .reach(name)
         .await
         .map_err(|why| unreached(agents, name, why))?;
@@ -136,6 +138,7 @@ pub(super) async fn delegate(
                 outstanding: Some(Outstanding {
                     task_id: task.id.clone(),
                     waiting_for: Waiting::Agent,
+                    endpoint: Some(endpoint.clone()),
                 }),
             };
             save(conversation.clone());
@@ -152,7 +155,7 @@ pub(super) async fn delegate(
     };
 
     let max_output_bytes = client.limits().max_output_bytes;
-    let (next, result) = settle(name, conversation, outcome, max_output_bytes);
+    let (next, result) = settle(name, conversation, outcome, max_output_bytes, &endpoint);
     save(next);
     result
 }
@@ -197,13 +200,22 @@ fn send(body: &str, task_id: Option<&str>, context_id: Option<&str>) -> A2aReque
 }
 
 /// Where the conversation stands after this exchange, and what the model
-/// reads about it.
+/// reads about it. `endpoint` is the one this exchange was sent to, recorded
+/// with any task left outstanding.
 fn settle(
     name: &str,
     before: Conversation,
     outcome: Result<A2aExchange, A2aExchangeError>,
     max_output_bytes: usize,
+    endpoint: &str,
 ) -> (Conversation, ToolResult) {
+    let outstanding = |task_id: String, waiting_for: Waiting| {
+        Some(Outstanding {
+            task_id,
+            waiting_for,
+            endpoint: Some(endpoint.to_string()),
+        })
+    };
     match outcome {
         Ok(A2aExchange::Reply(message)) => (
             Conversation {
@@ -222,10 +234,7 @@ fn settle(
                 TaskState::InputRequired => (
                     Conversation {
                         context_id,
-                        outstanding: Some(Outstanding {
-                            task_id: task.id.clone(),
-                            waiting_for: Waiting::Input,
-                        }),
+                        outstanding: outstanding(task.id.clone(), Waiting::Input),
                     },
                     Ok(said(
                         format!(
@@ -287,10 +296,7 @@ fn settle(
             (
                 Conversation {
                     context_id: Some(task.context_id.clone()),
-                    outstanding: Some(Outstanding {
-                        task_id: task.id.clone(),
-                        waiting_for: Waiting::Agent,
-                    }),
+                    outstanding: outstanding(task.id.clone(), Waiting::Agent),
                 },
                 Ok(said(
                     format!(
@@ -312,6 +318,21 @@ fn settle(
         // task was outstanding (ADR-0031 §5). Waiting on it again could only
         // fail again, so the record ends here, and the conversation with it:
         // its context is the old endpoint's too.
+        // The agent moved since this task was handed over, and the new
+        // endpoint could not pick it up — whatever it answered: one that does
+        // not know a task need not say `TaskNotFound` (an HTTP 404, an
+        // invalid-params refusal). Waiting again would fail the same way for
+        // good, so the record ends here, and nothing is sent again.
+        Err(error) if moved(&before, endpoint) && cause(&error).is_some() => (
+            Conversation::default(),
+            Err(format!(
+                "Remote agent `{name}` has moved to a new address since it was handed the task it \
+                 was working on, and the new address could not pick that task up ({}), so it is \
+                 forgotten and the conversation with it starts over. Hand it the task again with \
+                 `@{name} <task>` if it still needs doing.",
+                cause(&error).expect("checked by the guard")
+            )),
+        ),
         Err(error) if before.outstanding.is_some() && task_not_found(&error) => (
             Conversation::default(),
             Err(format!(
@@ -329,10 +350,7 @@ fn settle(
         ),
         Err(A2aExchangeError::Poll { task_id, error }) => (
             Conversation {
-                outstanding: Some(Outstanding {
-                    task_id,
-                    waiting_for: Waiting::Agent,
-                }),
+                outstanding: outstanding(task_id, Waiting::Agent),
                 ..before
             },
             Err(format!(
@@ -362,6 +380,26 @@ fn settle(
                 "Remote agent `{name}` could not be reached: {error}"
             )),
         ),
+    }
+}
+
+/// Whether the outstanding task in `conversation` was handed to an endpoint
+/// other than `endpoint`. A record that predates the field cannot say, and is
+/// taken not to have moved.
+fn moved(conversation: &Conversation, endpoint: &str) -> bool {
+    conversation
+        .outstanding
+        .as_ref()
+        .and_then(|outstanding| outstanding.endpoint.as_deref())
+        .is_some_and(|recorded| recorded != endpoint)
+}
+
+/// The client's own error behind a request or a poll that failed — which
+/// names no task id, unlike the exchange error around it.
+fn cause(error: &A2aExchangeError) -> Option<&ClientError> {
+    match error {
+        A2aExchangeError::Send(error) | A2aExchangeError::Poll { error, .. } => Some(error),
+        _ => None,
     }
 }
 

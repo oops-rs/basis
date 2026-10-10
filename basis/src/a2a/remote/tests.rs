@@ -14,6 +14,7 @@ fn working() -> Conversation {
         outstanding: Some(Outstanding {
             task_id: "task-1".to_string(),
             waiting_for: Waiting::Agent,
+            endpoint: None,
         }),
     }
 }

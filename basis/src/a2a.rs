@@ -131,6 +131,31 @@ impl A2aAgent {
         self.0
     }
 
+    /// Which endpoint this configuration reaches, as a short fingerprint — what
+    /// an outstanding task records, so a later call can tell that the agent
+    /// moved since the task was handed over (ADR-0031 §5).
+    ///
+    /// The name, the URL and the header *names*, FNV-1a hashed: stable across
+    /// processes and Rust releases, because the record it goes into is read
+    /// back after a restart. Header values are left out on purpose — a
+    /// credential rotated at the same endpoint does not move a task, and a
+    /// value, even hashed, has no business in a file beside the transcript.
+    pub(crate) fn endpoint(&self) -> String {
+        const OFFSET: u64 = 0xcbf2_9ce4_8422_2325;
+        const PRIME: u64 = 0x0000_0100_0000_01b3;
+        let parts = [self.0.name.as_str(), self.0.url.as_str()]
+            .into_iter()
+            .chain(self.0.headers.keys().map(String::as_str));
+        let mut hash = OFFSET;
+        for part in parts {
+            // A separator no part can contain, so `a`+`bc` and `ab`+`c` differ.
+            for byte in part.bytes().chain([0xff]) {
+                hash = (hash ^ u64::from(byte)).wrapping_mul(PRIME);
+            }
+        }
+        format!("{hash:016x}")
+    }
+
     /// Whether `other` reaches the same agent the same way: the same name,
     /// URL, headers, plaintext override and limits. What a reload asks to
     /// decide between fetching a card again and reconnecting (ADR-0031 §1).
