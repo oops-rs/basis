@@ -200,7 +200,7 @@ pub(crate) struct ServeArgs {
     pub(crate) bridge: bool,
 
     /// Serve this workspace's agent to other agents over A2A, listening on
-    /// ADDR. Anything but loopback needs --token-env.
+    /// ADDR. Anything but loopback needs --token-env or --principal.
     #[arg(
         long,
         value_name = "ADDR",
@@ -215,8 +215,10 @@ pub(crate) struct ServeArgs {
     #[command(flatten)]
     pub(crate) bridge_args: BridgeArgs,
 
+    // Boxed: the A2A knobs outweigh every other command's arguments, and
+    // `Command` is as large as its largest variant.
     #[command(flatten)]
-    pub(crate) a2a_args: A2aArgs,
+    pub(crate) a2a_args: Box<A2aArgs>,
 }
 
 /// Knobs for `serve --a2a` (ADR-0028). Unlike ACP, the caller here is another
@@ -237,9 +239,39 @@ pub(crate) struct A2aArgs {
     pub(crate) description: Option<String>,
 
     /// Environment variable holding the bearer token every caller must send.
-    /// Required for any address but loopback.
+    /// Required for any address but loopback, unless --principal names one.
     #[arg(long, value_name = "VAR", requires = "a2a")]
     pub(crate) token_env: Option<String>,
+
+    /// A caller of its own, NAME=VAR: whoever sends the token in environment
+    /// variable VAR is NAME, and sees only the tasks it created. Repeatable.
+    #[arg(long = "principal", value_name = "NAME=VAR", requires = "a2a")]
+    pub(crate) principals: Vec<String>,
+
+    /// With --approve prompt, how long a question to the caller stays open
+    /// before it is answered `deny`: 90s, 30m, 2h. Defaults to 10m.
+    #[arg(long, value_name = "DURATION", requires = "a2a")]
+    pub(crate) ask_deadline: Option<DurationArg>,
+
+    /// Serve push notifications: callers may register webhooks this server
+    /// calls on every status change of their task.
+    #[arg(long, requires = "a2a")]
+    pub(crate) push: bool,
+
+    /// Let webhooks point at loopback, private and link-local addresses, for
+    /// callers on this server's own network.
+    #[arg(long, requires = "push")]
+    pub(crate) allow_private_webhooks: bool,
+
+    /// A JSON file of what authenticated callers are additionally told:
+    /// {"description": "...", "skills": [AgentSkill, ...]}. Needs a token.
+    #[arg(long, value_name = "FILE", requires = "a2a")]
+    pub(crate) extended_card: Option<PathBuf>,
+
+    /// Refuse messages more than N agent-to-agent hops from their top-level
+    /// caller. Defaults to 8.
+    #[arg(long, value_name = "N", requires = "a2a")]
+    pub(crate) hop_cap: Option<u32>,
 
     /// The URL callers reach this server at, as the card advertises it — the
     /// https:// address of the proxy in front, when there is one.
@@ -293,16 +325,28 @@ impl ServeArgs {
             name,
             description,
             token_env,
+            principals,
+            ask_deadline,
+            push,
+            allow_private_webhooks,
+            extended_card,
+            hop_cap,
             public_url,
             shell,
             deadline,
             tool_budget,
             token_budget,
-        } = &self.a2a_args;
+        } = &*self.a2a_args;
         workspace.is_some()
             || name.is_some()
             || description.is_some()
             || token_env.is_some()
+            || !principals.is_empty()
+            || ask_deadline.is_some()
+            || *push
+            || *allow_private_webhooks
+            || extended_card.is_some()
+            || hop_cap.is_some()
             || public_url.is_some()
             || *shell
             || deadline.is_some()
@@ -989,6 +1033,9 @@ mod tests {
             ["--token-env", "T"],
             ["--name", "x"],
             ["--shell", "--no-shell"],
+            ["--principal", "a=T"],
+            ["--hop-cap", "3"],
+            ["--push", "--no-shell"],
         ] {
             let mut argv = vec!["basis", "serve", "--acp"];
             argv.extend(flag);
@@ -1000,6 +1047,55 @@ mod tests {
             };
             assert!(serve.has_a2a_options(), "{flag:?} is refused without --a2a");
         }
+    }
+
+    #[test]
+    fn a2a_takes_principals_push_the_extended_card_and_the_hop_cap() {
+        let Some(Command::Serve(serve)) = Cli::try_parse_from([
+            "basis",
+            "serve",
+            "--a2a",
+            "127.0.0.1:8080",
+            "--principal",
+            "alice=ALICE_TOKEN",
+            "--principal",
+            "bob=BOB_TOKEN",
+            "--approve",
+            "prompt",
+            "--ask-deadline",
+            "5m",
+            "--push",
+            "--allow-private-webhooks",
+            "--extended-card",
+            "/card.json",
+            "--hop-cap",
+            "3",
+        ])
+        .expect("parses")
+        .command
+        else {
+            panic!("serve command should parse");
+        };
+        let args = &serve.a2a_args;
+        assert_eq!(args.principals, ["alice=ALICE_TOKEN", "bob=BOB_TOKEN"]);
+        assert_eq!(
+            args.ask_deadline.map(DurationArg::duration),
+            Some(std::time::Duration::from_secs(300))
+        );
+        assert!(args.push && args.allow_private_webhooks);
+        assert_eq!(args.extended_card, Some(PathBuf::from("/card.json")));
+        assert_eq!(args.hop_cap, Some(3));
+        assert!(
+            Cli::try_parse_from([
+                "basis",
+                "serve",
+                "--a2a",
+                "127.0.0.1:0",
+                "--allow-private-webhooks"
+            ])
+            .is_err(),
+            "private webhooks mean nothing without push"
+        );
     }
 
     #[test]

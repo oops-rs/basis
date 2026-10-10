@@ -35,7 +35,9 @@ use crate::{
 const BUFFER: usize = 64;
 
 /// Streams `record`'s task: its current state, then its progress, ending at
-/// its terminal state.
+/// its terminal state — or at a question to its caller, the interrupted
+/// state the spec closes a stream at too (§11.7). The caller answers, then
+/// subscribes again.
 pub(crate) fn follow(
     service: A2aService,
     record: Record,
@@ -44,7 +46,7 @@ pub(crate) fn follow(
     let mut cursor = service.tasks().watch(&record.handle()).map_err(internal)?;
     // Everything journaled so far is what the snapshot below already says.
     cursor.poll().map_err(internal)?;
-    let standing = Standing::read(service.tasks(), &record)?;
+    let standing = service.standing(&record)?;
     let snapshot = StreamResponse::Task(project::task(
         &record,
         &standing,
@@ -52,7 +54,7 @@ pub(crate) fn follow(
     ));
 
     let (sender, receiver) = mpsc::channel(BUFFER);
-    if !standing.is_terminal() {
+    if !standing.is_interrupted_or_terminal() {
         let working = matches!(standing, Standing::Working);
         tokio::spawn(produce(service, record, cursor, working, sender));
     }
@@ -93,7 +95,7 @@ async fn produce(
                 return;
             }
         }
-        let standing = match Standing::read(service.tasks(), &record) {
+        let standing = match service.standing(&record) {
             Ok(standing) => standing,
             Err(_) => return,
         };
@@ -104,6 +106,12 @@ async fn produce(
                         return;
                     }
                 }
+                return;
+            }
+            Standing::Asking(_) => {
+                let update =
+                    StreamResponse::StatusUpdate(project::status_update(&record, &standing));
+                let _ = sender.send(update).await;
                 return;
             }
             Standing::Working if !announced_working => {
@@ -167,7 +175,14 @@ mod tests {
 
     fn record() -> Record {
         let handle = TaskHandle::parse(format!("{}/{}", "0".repeat(16), "a".repeat(32))).unwrap();
-        Record::new(&handle, "ctx".into(), "m1".into(), "hi".into(), 1)
+        Record::new(
+            &handle,
+            &crate::config::Principal::anonymous(),
+            "ctx".into(),
+            "m1".into(),
+            "hi".into(),
+            1,
+        )
     }
 
     #[test]

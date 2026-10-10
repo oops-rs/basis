@@ -1,15 +1,18 @@
 //! `basis serve --a2a`: this workspace's agent, served to other agents.
 //!
 //! Everything a caller cannot say is said here, by the operator, once: the
-//! workspace, the card, the bounds, the token. What a caller *can* say is a
-//! message, and `basis-a2a` turns each into one durable task (ADR-0028).
+//! workspace, the card, the bounds, who may call and what each is shown.
+//! What a caller *can* say is a message, and `basis-a2a` turns each into one
+//! durable task (ADR-0028, ADR-0030).
 
-use std::{net::SocketAddr, path::Path, process::ExitCode};
+use std::{net::SocketAddr, path::Path, process::ExitCode, time::Duration};
 
 use basis_a2a::{
-    A2aServer, A2aService, AgentIdentity, BearerToken, InboundApproval, RunDefaults, ServeConfig,
+    A2aServer, A2aService, AgentIdentity, BearerToken, ExtendedCard, InboundApproval, Principal,
+    RunDefaults, ServeConfig, a2a::AgentSkill,
 };
 use basis_host::ApprovalPolicy;
+use serde::Deserialize;
 
 use crate::{
     cli::{self, A2aArgs, AcpArgs},
@@ -33,6 +36,7 @@ pub(crate) async fn serve_a2a(acp: AcpArgs, args: A2aArgs, bind: SocketAddr) -> 
         Err(error) => return failed(&format!("a2a: {error}")),
     };
     eprintln!("basis: a2a listening on {}", server.endpoint());
+    eprintln!("basis: a2a HTTP+JSON at {}", server.http_json_url());
     eprintln!(
         "basis: a2a card at http://{}{}",
         server.local_addr(),
@@ -53,20 +57,26 @@ fn failed(message: &str) -> ExitCode {
     ExitCode::from(EXIT_FAILED)
 }
 
-/// The served agent, from the flags. `--approve prompt` is refused here,
-/// before anything listens: an A2A caller has nobody behind it to ask.
+/// How long a question to the caller stays open when `--ask-deadline` does
+/// not say: long enough for a caller to relay it to its own person, short
+/// enough that a caller that went away does not hold a turn for good.
+const DEFAULT_ASK_DEADLINE: Duration = Duration::from_secs(10 * 60);
+
+/// The served agent, from the flags. `--approve prompt` asks the caller
+/// (ADR-0030 §7): the one party behind an A2A request is whoever sent it.
 fn a2a_config(acp: AcpArgs, args: A2aArgs) -> Result<ServeConfig, String> {
     let approval = match acp.approve {
         None | Some(ApprovalPolicy::Never) => InboundApproval::Never,
         Some(ApprovalPolicy::Always) => InboundApproval::Always,
-        Some(ApprovalPolicy::Prompt) => {
-            return Err(
-                "--approve prompt cannot serve A2A: the caller is another agent, with nobody \
-                 behind it to answer; use never or always"
-                    .to_string(),
-            );
-        }
+        Some(ApprovalPolicy::Prompt) => InboundApproval::AskCaller {
+            deadline: args
+                .ask_deadline
+                .map_or(DEFAULT_ASK_DEADLINE, |deadline| deadline.duration()),
+        },
     };
+    if args.ask_deadline.is_some() && !matches!(approval, InboundApproval::AskCaller { .. }) {
+        return Err("--ask-deadline bounds questions to the caller; add --approve prompt".into());
+    }
     let workspace = match args.workspace {
         Some(workspace) => workspace,
         None => std::env::current_dir()
@@ -112,6 +122,22 @@ fn a2a_config(acp: AcpArgs, args: A2aArgs) -> Result<ServeConfig, String> {
     if let Some(variable) = args.token_env {
         config = config.with_token(token_from(&variable)?);
     }
+    for principal in &args.principals {
+        let (principal, token) = principal_from(principal)?;
+        config = config.with_principal(principal, token);
+    }
+    if args.push {
+        config = config.with_push_notifications();
+    }
+    if args.allow_private_webhooks {
+        config = config.with_private_webhooks();
+    }
+    if let Some(path) = &args.extended_card {
+        config = config.with_extended_card(extended_card_from(path)?);
+    }
+    if let Some(hop_cap) = args.hop_cap {
+        config = config.with_hop_cap(hop_cap);
+    }
     if let Some(public_url) = args.public_url {
         config = config.with_public_url(public_url);
     }
@@ -124,6 +150,46 @@ fn token_from(variable: &str) -> Result<BearerToken, String> {
     let value = std::env::var(variable)
         .map_err(|_| format!("--token-env names {variable}, which is not set"))?;
     BearerToken::new(value).ok_or_else(|| format!("{variable} is empty; a token must be set"))
+}
+
+/// A `--principal NAME=VAR`: the name, and the token read from `VAR`.
+fn principal_from(argument: &str) -> Result<(Principal, BearerToken), String> {
+    let (name, variable) = argument
+        .split_once('=')
+        .filter(|(name, variable)| !name.is_empty() && !variable.is_empty())
+        .ok_or_else(|| format!("--principal takes NAME=VAR, not {argument:?}"))?;
+    let principal = Principal::new(name).ok_or_else(|| {
+        format!("principal name {name:?} must be 1-64 letters, digits, '-', '_' or '.'")
+    })?;
+    let value = std::env::var(variable)
+        .map_err(|_| format!("--principal {name} names {variable}, which is not set"))?;
+    let token = BearerToken::new(value)
+        .ok_or_else(|| format!("{variable} is empty; principal {name} needs a token"))?;
+    Ok((principal, token))
+}
+
+/// What `--extended-card FILE` holds.
+#[derive(Debug, Deserialize)]
+#[serde(deny_unknown_fields)]
+struct ExtendedCardFile {
+    description: Option<String>,
+    #[serde(default)]
+    skills: Vec<AgentSkill>,
+}
+
+fn extended_card_from(path: &Path) -> Result<ExtendedCard, String> {
+    let bytes = std::fs::read(path)
+        .map_err(|error| format!("read --extended-card {}: {error}", path.display()))?;
+    let file: ExtendedCardFile = serde_json::from_slice(&bytes)
+        .map_err(|error| format!("--extended-card {}: {error}", path.display()))?;
+    let mut card = ExtendedCard::new();
+    if let Some(description) = file.description {
+        card = card.with_description(description);
+    }
+    Ok(file
+        .skills
+        .into_iter()
+        .fold(card, |card, skill| card.with_skill(skill)))
 }
 
 fn directory_name(workspace: &Path) -> String {
@@ -143,13 +209,49 @@ mod tests {
     use super::*;
 
     #[test]
-    fn prompt_is_refused_before_anything_listens() {
+    fn prompt_asks_the_caller_and_the_deadline_needs_it() {
         let acp = AcpArgs {
             approve: Some(ApprovalPolicy::Prompt),
             ..AcpArgs::default()
         };
-        let error = a2a_config(acp, A2aArgs::default()).unwrap_err();
-        assert!(error.contains("nobody"), "{error}");
+        assert!(a2a_config(acp, A2aArgs::default()).is_ok());
+
+        let args = A2aArgs {
+            ask_deadline: Some("5m".parse().unwrap()),
+            ..A2aArgs::default()
+        };
+        let error = a2a_config(AcpArgs::default(), args).unwrap_err();
+        assert!(error.contains("--approve prompt"), "{error}");
+    }
+
+    #[test]
+    fn a_principal_is_name_equals_variable_and_its_token_never_prints() {
+        for bad in ["alice", "=VAR", "alice=", "a b=VAR"] {
+            assert!(principal_from(bad).is_err(), "{bad}");
+        }
+        let error = principal_from("alice=BASIS_A2A_TEST_PRINCIPAL_THAT_IS_NOT_SET").unwrap_err();
+        assert!(
+            error.contains("BASIS_A2A_TEST_PRINCIPAL_THAT_IS_NOT_SET"),
+            "{error}"
+        );
+    }
+
+    #[test]
+    fn an_extended_card_file_is_a_description_and_skills() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("card.json");
+        std::fs::write(
+            &path,
+            r#"{"description": "More.", "skills": [{"id": "audit", "name": "Audit",
+                "description": "Audits.", "tags": ["security"]}]}"#,
+        )
+        .unwrap();
+        assert!(extended_card_from(&path).is_ok());
+        std::fs::write(&path, r#"{"descriptoin": "typo"}"#).unwrap();
+        assert!(
+            extended_card_from(&path).is_err(),
+            "unknown fields are refused"
+        );
     }
 
     #[test]

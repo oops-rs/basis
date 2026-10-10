@@ -52,6 +52,7 @@ pub struct RunSpec {
     pub(crate) token_budget: Option<u64>,
     pub(crate) detached: bool,
     pub(crate) continuation: Continuation,
+    pub(crate) hop: u32,
 }
 
 impl RunSpec {
@@ -70,6 +71,7 @@ impl RunSpec {
             token_budget: None,
             detached: false,
             continuation: Continuation::default(),
+            hop: 0,
         }
     }
 
@@ -155,6 +157,17 @@ impl RunSpec {
             detached: true,
             ..self
         }
+    }
+
+    /// How many agent-to-agent hops away from a top-level caller this task's
+    /// work arrived — `0` (the default) for work nobody handed over a wire.
+    /// A host serving tasks to other agents records the hop a request came
+    /// in at, so the task's own delegations can say how far along they are
+    /// (ADR-0030 §9). Recorded at spawn, published to the task's commands as
+    /// [`BASIS_HOP`](crate::BASIS_HOP), and inherited by its children, which
+    /// are the same work one level down in-process, not a hop further.
+    pub fn with_hop(self, hop: u32) -> Self {
+        Self { hop, ..self }
     }
 
     /// Picks up an existing conversation instead of opening a new one.

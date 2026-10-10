@@ -18,28 +18,46 @@
 //! Every spawn is `detached`: a served task is an independent root, never a
 //! child of whatever task the serving process might itself be running as.
 
+mod ask;
+mod drive;
+mod hops;
+mod parts;
+mod push;
 mod send;
+
+pub(crate) use ask::{APPROVAL_EXTENSION, Asked};
+pub use hops::DEFAULT_HOP_CAP;
+pub(crate) use hops::HOPS_EXTENSION;
+pub(crate) use parts::INPUT_MODES;
+pub(crate) use push::Push;
 
 use std::{
     collections::HashMap,
-    sync::{Arc, Mutex, MutexGuard},
+    sync::{Arc, Mutex},
     time::Duration,
 };
 
 use a2a::{
     A2AError, CancelTaskRequest, GetTaskRequest, ListTasksRequest, ListTasksResponse,
     SendMessageRequest, SendMessageResponse, StreamResponse, SubscribeToTaskRequest, Task,
+    TaskStatusUpdateEvent,
 };
-use basis_tasks::{Tasks, WaitOutcome, now_ms};
+use basis_tasks::Tasks;
 use futures::stream::BoxStream;
-use tokio::sync::watch;
 
 use crate::{
-    config::{AgentIdentity, BearerToken, InboundApproval, RunDefaults, ServeConfig},
+    card::Features,
+    config::{
+        AgentIdentity, ExtendedCard, InboundApproval, Principal, PrincipalError, Principals,
+        RunDefaults, ServeConfig,
+    },
     index::{Index, Record},
     project::{self, Standing, View, internal},
+    push::PushStore,
     stream,
 };
+use ask::NobodyHost;
+use drive::Driver;
 
 /// The name `Tasks::host_dir` files this crate's index under.
 const HOST: &str = "a2a";
@@ -61,6 +79,12 @@ pub enum OpenError {
     Tasks(#[from] basis_tasks::Error),
     #[error("read the A2A task index: {0}")]
     Index(#[from] std::io::Error),
+    #[error("configure the server's principals: {0}")]
+    Principals(#[from] PrincipalError),
+    /// The spec requires the extended card to be served only to
+    /// authenticated callers, and a server with no token has none.
+    #[error("an extended card needs a token to serve it to; configure one")]
+    ExtendedCardWithoutToken,
 }
 
 /// One served agent's A2A operations. Cheap to clone; every clone is the
@@ -77,11 +101,15 @@ struct Inner {
     shell: bool,
     run: RunDefaults,
     identity: AgentIdentity,
-    token: Option<BearerToken>,
+    principals: Principals,
     public_url: Option<String>,
-    /// One receiver per task this process is driving, flipped to `true` when
-    /// its driver returns. Absent for a task nobody here is driving.
-    drivers: Mutex<HashMap<String, watch::Receiver<bool>>>,
+    extended_card: Option<ExtendedCard>,
+    /// Present when push notifications are on.
+    push: Option<Push>,
+    hop_cap: u32,
+    /// Every task this process is driving. Absent for a task nobody here is
+    /// driving.
+    drivers: Mutex<HashMap<String, Driver>>,
 }
 
 impl A2aService {
@@ -95,15 +123,35 @@ impl A2aService {
             approval,
             shell,
             run,
-            token,
+            tokens,
             public_url,
             data_dir,
+            extended_card,
+            push_notifications,
+            private_webhooks,
+            hop_cap,
         } = config;
+        let principals = Principals::new(tokens)?;
+        if extended_card.is_some() && !principals.any() {
+            return Err(OpenError::ExtendedCardWithoutToken);
+        }
         let tasks = match data_dir {
             Some(data_dir) => Tasks::open_at(data_dir, workspace)?,
             None => Tasks::open(workspace)?,
         };
-        let index = Index::open(&tasks.host_dir(HOST)?)?;
+        // `basis-tasks` spawns a task that will ask only from a `Tasks` that
+        // can; each is then driven through a host of its own (`drive`).
+        let tasks = match approval {
+            InboundApproval::AskCaller { .. } => tasks.with_prompt_host(Arc::new(NobodyHost)),
+            InboundApproval::Never | InboundApproval::Always => tasks,
+        };
+        let host_dir = tasks.host_dir(HOST)?;
+        let index = Index::open(&host_dir)?;
+        let push = if push_notifications {
+            Some(Push::new(PushStore::open(&host_dir)?, private_webhooks))
+        } else {
+            None
+        };
         let service = Self {
             inner: Arc::new(Inner {
                 tasks,
@@ -112,12 +160,16 @@ impl A2aService {
                 shell,
                 run,
                 identity,
-                token,
+                principals,
                 public_url,
+                extended_card,
+                push,
+                hop_cap,
                 drivers: Mutex::new(HashMap::new()),
             }),
         };
         service.resume_unsettled();
+        service.resume_push();
         Ok(service)
     }
 
@@ -125,8 +177,22 @@ impl A2aService {
         &self.inner.identity
     }
 
-    pub(crate) fn token(&self) -> Option<&BearerToken> {
-        self.inner.token.as_ref()
+    pub(crate) fn principals(&self) -> &Principals {
+        &self.inner.principals
+    }
+
+    pub(crate) fn extended_card(&self) -> Option<&ExtendedCard> {
+        self.inner.extended_card.as_ref()
+    }
+
+    /// What the card may claim: exactly what this service serves.
+    pub(crate) fn features(&self) -> Features {
+        Features {
+            authenticated: self.inner.principals.any(),
+            extended_card: self.inner.extended_card.is_some(),
+            push_notifications: self.inner.push.is_some(),
+            ask_caller: matches!(self.inner.approval, InboundApproval::AskCaller { .. }),
+        }
     }
 
     pub(crate) fn public_url(&self) -> Option<&str> {
@@ -141,13 +207,14 @@ impl A2aService {
     /// answered at once — waits for it to settle.
     pub async fn send_message(
         &self,
+        caller: &Principal,
         request: SendMessageRequest,
     ) -> Result<SendMessageResponse, A2AError> {
-        let accepted = self.accept(request).await?;
+        let accepted = self.accept(caller, request).await?;
         if !accepted.return_immediately {
-            self.settled(&accepted.record.id).await;
+            self.settled_or_asking(&accepted.record.id).await;
         }
-        let standing = Standing::read(self.tasks(), &accepted.record)?;
+        let standing = self.standing(&accepted.record)?;
         Ok(SendMessageResponse::Task(project::task(
             &accepted.record,
             &standing,
@@ -159,17 +226,18 @@ impl A2aService {
     /// first, then its progress, ending at its terminal state.
     pub async fn send_streaming_message(
         &self,
+        caller: &Principal,
         request: SendMessageRequest,
     ) -> Result<BoxStream<'static, StreamResponse>, A2AError> {
-        let accepted = self.accept(request).await?;
+        let accepted = self.accept(caller, request).await?;
         stream::follow(self.clone(), accepted.record, accepted.history_length)
     }
 
     /// `GetTask`.
-    pub fn get_task(&self, request: GetTaskRequest) -> Result<Task, A2AError> {
+    pub fn get_task(&self, caller: &Principal, request: GetTaskRequest) -> Result<Task, A2AError> {
         let history_length = project::history_length(request.history_length)?;
-        let record = self.record(&request.id)?;
-        let standing = Standing::read(self.tasks(), &record)?;
+        let record = self.record(caller, &request.id)?;
+        let standing = self.standing(&record)?;
         Ok(project::task(
             &record,
             &standing,
@@ -177,8 +245,12 @@ impl A2aService {
         ))
     }
 
-    /// `ListTasks`: this server's tasks, most recently changed first.
-    pub fn list_tasks(&self, request: ListTasksRequest) -> Result<ListTasksResponse, A2AError> {
+    /// `ListTasks`: the caller's tasks, most recently changed first.
+    pub fn list_tasks(
+        &self,
+        caller: &Principal,
+        request: ListTasksRequest,
+    ) -> Result<ListTasksResponse, A2AError> {
         let page_size = match request.page_size {
             None => DEFAULT_PAGE_SIZE,
             Some(size) => usize::try_from(size)
@@ -204,7 +276,7 @@ impl A2aService {
             .map(|after| after.timestamp_millis());
 
         let mut matching = Vec::new();
-        for record in self.inner.index.all() {
+        for record in self.inner.index.all_owned(caller) {
             if request
                 .context_id
                 .as_ref()
@@ -217,7 +289,7 @@ impl A2aService {
             {
                 continue;
             }
-            let standing = Standing::read(self.tasks(), &record)?;
+            let standing = self.standing(&record)?;
             if request
                 .status
                 .as_ref()
@@ -257,9 +329,13 @@ impl A2aService {
     /// `CancelTask`: asks the task to stop at its next turn boundary and
     /// answers with where it stands once that lands, or once
     /// [`CANCEL_GRACE`] has passed.
-    pub async fn cancel_task(&self, request: CancelTaskRequest) -> Result<Task, A2AError> {
-        let record = self.record(&request.id)?;
-        if Standing::read(self.tasks(), &record)?.is_terminal() {
+    pub async fn cancel_task(
+        &self,
+        caller: &Principal,
+        request: CancelTaskRequest,
+    ) -> Result<Task, A2AError> {
+        let record = self.record(caller, &request.id)?;
+        if self.standing(&record)?.is_terminal() {
             return Err(A2AError::task_not_cancelable(&request.id));
         }
         let tasks = self.tasks().clone();
@@ -268,8 +344,13 @@ impl A2aService {
             .await
             .map_err(internal)?
             .map_err(internal)?;
+        // A turn parked on a question would never reach the boundary the
+        // cancel lands at: the question is denied, and so is every later one.
+        if let Some(questions) = self.questions(&record.id) {
+            questions.cancel();
+        }
         let _ = tokio::time::timeout(CANCEL_GRACE, self.settled(&record.id)).await;
-        let standing = Standing::read(self.tasks(), &record)?;
+        let standing = self.standing(&record)?;
         Ok(project::task(&record, &standing, View::full(None)))
     }
 
@@ -277,10 +358,11 @@ impl A2aService {
     /// state. A settled task has nothing left to stream.
     pub fn subscribe_to_task(
         &self,
+        caller: &Principal,
         request: SubscribeToTaskRequest,
     ) -> Result<BoxStream<'static, StreamResponse>, A2AError> {
-        let record = self.record(&request.id)?;
-        if Standing::read(self.tasks(), &record)?.is_terminal() {
+        let record = self.record(caller, &request.id)?;
+        if self.standing(&record)?.is_terminal() {
             return Err(A2AError::unsupported_operation(format!(
                 "task {} has settled; GetTask returns its result",
                 record.id
@@ -289,75 +371,43 @@ impl A2aService {
         stream::follow(self.clone(), record, None)
     }
 
-    fn record(&self, id: &str) -> Result<Record, A2AError> {
+    /// Where `record`'s task stands now, as the status update that says so,
+    /// and the key two observations of it compare equal under exactly when
+    /// nothing a caller would be told about has changed.
+    pub(crate) fn status_now(
+        &self,
+        record: &Record,
+    ) -> Result<(String, TaskStatusUpdateEvent), A2AError> {
+        let standing = self.standing(record)?;
+        let update = project::status_update(record, &standing);
+        let state = serde_json::to_value(&update.status.state)
+            .ok()
+            .and_then(|state| state.as_str().map(str::to_owned))
+            .unwrap_or_default();
+        // Two questions in a row are two changes, though both are
+        // `INPUT_REQUIRED`.
+        let key = match &standing {
+            Standing::Asking(asked) => format!("{state}:{}", asked.call_id),
+            _ => state,
+        };
+        Ok((key, update))
+    }
+
+    /// Where `record`'s task stands: what `basis-tasks` says, with the
+    /// question this process holds open for it, if any.
+    pub(crate) fn standing(&self, record: &Record) -> Result<Standing, A2AError> {
+        let asked = self
+            .questions(&record.id)
+            .and_then(|questions| questions.asked());
+        Ok(Standing::read(self.tasks(), record)?.asking(asked))
+    }
+
+    /// The task `id` names, when `caller` owns it; another principal's task
+    /// is refused with the very error a missing one is.
+    fn record(&self, caller: &Principal, id: &str) -> Result<Record, A2AError> {
         self.inner
             .index
-            .get(id)
+            .owned(caller, id)
             .ok_or_else(|| A2AError::task_not_found(id))
-    }
-
-    fn drivers(&self) -> MutexGuard<'_, HashMap<String, watch::Receiver<bool>>> {
-        self.inner
-            .drivers
-            .lock()
-            .unwrap_or_else(|poisoned| poisoned.into_inner())
-    }
-
-    /// Returns once this process's driver for `id` has returned — at once
-    /// when there is none.
-    pub(crate) async fn settled(&self, id: &str) {
-        let receiver = self.drivers().get(id).cloned();
-        if let Some(mut receiver) = receiver {
-            let _ = receiver.wait_for(|done| *done).await;
-        }
-    }
-
-    /// Drives `record`'s task to its terminal on a task of its own.
-    fn drive(&self, record: &Record) {
-        let (done, receiver) = watch::channel(false);
-        self.drivers().insert(record.id.clone(), receiver);
-        let service = self.clone();
-        let id = record.id.clone();
-        let handle = record.handle();
-        tokio::spawn(async move {
-            // `Duration::MAX` is "until it settles": the task's own deadline
-            // bounds the run, and a wait is only ever an observation of it.
-            match service
-                .tasks()
-                .wait(&handle, None, Duration::MAX, None)
-                .await
-            {
-                Ok(WaitOutcome::Terminal(_)) => {
-                    if let Err(error) = service.inner.index.finish(&id, now_ms()) {
-                        eprintln!("basis-a2a: record task {id} settling: {error}");
-                    }
-                }
-                Ok(WaitOutcome::TimedOut { .. }) => {
-                    eprintln!("basis-a2a: task {id} stopped being driven before it settled");
-                }
-                Err(error) => eprintln!("basis-a2a: drive task {id}: {error}"),
-            }
-            service.drivers().remove(&id);
-            let _ = done.send(true);
-        });
-    }
-
-    fn resume_unsettled(&self) {
-        for record in self.inner.index.all() {
-            if record.finished_ms.is_some() {
-                continue;
-            }
-            match self.tasks().terminal(&record.handle()) {
-                // Settled while nobody here was watching: the time is when we
-                // noticed, the closest fact there is.
-                Ok(Some(_)) => {
-                    if let Err(error) = self.inner.index.finish(&record.id, now_ms()) {
-                        eprintln!("basis-a2a: record task {} settling: {error}", record.id);
-                    }
-                }
-                Ok(None) => self.drive(&record),
-                Err(error) => eprintln!("basis-a2a: resume task {}: {error}", record.id),
-            }
-        }
     }
 }

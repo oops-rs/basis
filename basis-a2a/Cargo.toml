@@ -28,10 +28,15 @@ serde_json.workspace = true
 tempfile.workspace = true
 thiserror.workspace = true
 tokio.workspace = true
+# Push notifications (ADR-0030 §4) POST to callers' webhooks. The very
+# reqwest mentra links, with the same rustls features, so no second copy and
+# no native-tls enter the tree. `url` is reqwest's own, named for the host
+# kinds the webhook guard tells apart.
+reqwest = { version = "0.12", default-features = false, features = ["json", "rustls-tls"] }
+url = "2"
+# A push config's id, when the caller names none.
+uuid.workspace = true
 
 [dev-dependencies]
-# The HTTP client the integration tests call the server with. Already in the
-# tree via mentra; plain HTTP to loopback, so no TLS features.
-reqwest = { version = "0.12", default-features = false, features = ["json"] }
 tempfile.workspace = true
 tokio = { workspace = true, features = ["time"] }

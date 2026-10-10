@@ -904,6 +904,9 @@ fn task_runtime(data: &DataDir, task: &str, meta: &TaskMeta) -> Result<RuntimeBu
     if let Some(parent) = &meta.parent {
         runtime = runtime.with_command_environment(crate::BASIS_PARENT_TASK_ID, parent);
     }
+    if meta.hop > 0 {
+        runtime = runtime.with_command_environment(crate::BASIS_HOP, meta.hop.to_string());
+    }
     Ok(runtime)
 }
 
