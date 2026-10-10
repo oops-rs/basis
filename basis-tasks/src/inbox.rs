@@ -162,14 +162,35 @@ pub(crate) fn finish(
 
 /// A message left in flight by a crash reverts to pending on attach; the
 /// re-driven turn may repeat tool side effects (ADR-0019 states this in bold).
-pub(crate) fn revert_in_flight(paths: &AgentPaths) -> Result<(), String> {
+/// Returns the ids it reverted, in inbox order — the attach that finds the
+/// conversation inside an interrupted turn knows from them whose turn that
+/// was, and [`claim`]s it back.
+pub(crate) fn revert_in_flight(paths: &AgentPaths) -> Result<Vec<String>, String> {
     update(paths, |messages| {
+        let mut reverted = Vec::new();
         for message in messages.iter_mut() {
             if message.state == MessageState::InFlight {
                 message.state = MessageState::Pending;
+                reverted.push(message.id.clone());
             }
         }
-        Ok(())
+        Ok(reverted)
+    })
+}
+
+/// Marks message `id` in flight again: the turn it started is being
+/// continued rather than asked anew, so the reply it gets is that turn's.
+/// `false` when no pending message has that id.
+pub(crate) fn claim(paths: &AgentPaths, id: &str) -> Result<bool, String> {
+    update(paths, |messages| {
+        let Some(message) = messages
+            .iter_mut()
+            .find(|message| message.id == id && message.state == MessageState::Pending)
+        else {
+            return Ok(false);
+        };
+        message.state = MessageState::InFlight;
+        Ok(true)
     })
 }
 
@@ -414,8 +435,24 @@ mod tests {
         let (paths, task) = agent(&dir);
         let id = enqueue(&paths, &task, "in flight".to_string()).unwrap();
         start_next(&paths).unwrap();
-        revert_in_flight(&paths).unwrap();
+        assert_eq!(revert_in_flight(&paths).unwrap(), vec![id.clone()]);
         let (again, _) = start_next(&paths).unwrap().expect("re-driveable");
         assert_eq!(again, id);
+    }
+
+    #[test]
+    fn a_reverted_message_can_be_claimed_back_for_its_continued_turn() {
+        let dir = tempfile::tempdir().unwrap();
+        let (paths, task) = agent(&dir);
+        let id = enqueue(&paths, &task, "in flight".to_string()).unwrap();
+        let later = enqueue(&paths, &task, "queued behind it".to_string()).unwrap();
+        start_next(&paths).unwrap();
+        revert_in_flight(&paths).unwrap();
+
+        assert!(claim(&paths, &id).unwrap());
+        assert!(!claim(&paths, &id).unwrap(), "already in flight");
+        assert!(!claim(&paths, "no-such-message").unwrap());
+        let (next, _) = start_next(&paths).unwrap().expect("the queue moves on");
+        assert_eq!(next, later, "the claimed message is not handed out twice");
     }
 }

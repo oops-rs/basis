@@ -7,8 +7,13 @@
 //! not exist, and every crash before it resolves toward resumable.
 //!
 //! **Re-driving a turn may repeat its tool side effects.** A checkpoint
-//! restores state, never effects — a shell command that ran, ran. A message
-//! left in flight by a crash reverts to pending and is driven again.
+//! restores state, never effects — a shell command that ran, ran. A turn a
+//! crash cut off before the model committed anything rolled back, and its
+//! prompt or message is driven again. One cut off after the model acted is
+//! *continued* instead (see [`resume`]): the calls that were running are
+//! closed as having an unknown effect, never re-executed by basis, and the
+//! model is asked to finish the turn — it is not answered, so it does not
+//! settle, and it is not asked again, so the prompt is not repeated.
 //!
 //! A parent's executor may not write its terminal record while an attached
 //! child lacks one: the settle pass here is the scope rule as one ordering
@@ -67,6 +72,7 @@ use basis::{
 use serde_json::Value;
 use tokio::time::{self, Instant};
 
+use self::resume::{Recovered, Work, recover};
 use crate::{
     Error,
     approve::Approve,
@@ -502,7 +508,7 @@ async fn run_model(
     if cancel_requested(paths) {
         return record_pending(paths, meta, Terminal::Cancelled, None);
     }
-    inbox::revert_in_flight(paths)?;
+    let reverted = inbox::revert_in_flight(paths)?;
 
     let events = match EventLog::open(paths) {
         Ok(log) => Arc::new(Mutex::new(log)),
@@ -570,19 +576,16 @@ async fn run_model(
         save_meta(paths, meta)?;
     }
 
-    // Resume recovery: an assistant turn committed *past what this task
-    // inherited* means the recorded prompt was already answered, and
-    // re-executing it would duplicate the conversation. The last committed
-    // assistant text stands in for the crashed process's unrecorded result.
-    let mut initial_done = false;
-    let mut last_result = String::new();
+    let Recovered {
+        mut initial_done,
+        mut interrupted,
+        mut last_result,
+    } = if reattached {
+        recover(paths, meta, &run, &reverted)?
+    } else {
+        Recovered::default()
+    };
     let mut last_stopped_by: Option<Bound> = None;
-    if reattached {
-        initial_done = run.answered_turns() > meta.answered_before;
-        if let Some(text) = run.last_assistant_text() {
-            last_result = text;
-        }
-    }
 
     let cancellation = CancellationToken::default();
     loop {
@@ -612,21 +615,24 @@ async fn run_model(
         // usual — a finished task is not kept unsettled by an impatient
         // observer. Checked before `start_next`, which would otherwise mark
         // a message in flight that this process is not going to drive.
-        if ctx.waiter_expired() && (!initial_done || inbox::has_pending(paths)?) {
+        if ctx.waiter_expired()
+            && (!initial_done || interrupted.is_some() || inbox::has_pending(paths)?)
+        {
             meta.updated_ms = now_ms();
             save_meta(paths, meta)?;
             return Ok(Turns::Yielded);
         }
-        let message = if initial_done {
-            inbox::start_next(paths)?
+        let work = if let Some(message) = interrupted.take() {
+            Work::Continue(message)
+        } else if !initial_done {
+            Work::Prompt
+        } else if let Some((id, body)) = inbox::start_next(paths)? {
+            Work::Message(id, body)
         } else {
-            None
-        };
-        if initial_done && message.is_none() {
             let (result, truncated) = bounded_text(last_result, MAX_RESULT_BYTES);
             meta.result_truncated = truncated;
             return record_pending(paths, meta, Terminal::Succeeded { result }, last_stopped_by);
-        }
+        };
 
         let mut turn = TurnOptions::default().with_cancel(cancellation.clone());
         // The recorded instant itself, not what was left of it a moment ago:
@@ -644,12 +650,16 @@ async fn run_model(
             log: Arc::clone(&events),
             ctx: ctx.clone(),
         };
-        let completed_message = message.as_ref().map(|(id, _)| id.clone());
+        let completed_message = work.message_id().map(str::to_owned);
         let execution = async {
-            match message {
-                Some((_, body)) => run.send_with_options(body, sink, approver, turn).await,
-                None => {
+            match work {
+                Work::Message(_, body) => run.send_with_options(body, sink, approver, turn).await,
+                Work::Prompt => {
                     run.execute_with_approver_and_options(sink, approver, turn)
+                        .await
+                }
+                Work::Continue(_) => {
+                    run.continue_interrupted_with_options(sink, approver, turn)
                         .await
                 }
             }
@@ -1010,5 +1020,6 @@ impl EventSink for FileSink {
     }
 }
 
+mod resume;
 #[cfg(test)]
 mod tests;
