@@ -13,10 +13,11 @@ use std::{
 
 use a2a::{AgentCard, JsonRpcResponse, SVC_PARAM_VERSION, StreamResponse};
 use axum::{
-    Json, Router,
+    Extension, Json, Router,
     body::Bytes,
     extract::{DefaultBodyLimit, Query, State},
     http::{HeaderMap, StatusCode, header},
+    middleware,
     response::{
         IntoResponse, Response,
         sse::{Event, KeepAlive, Sse},
@@ -30,6 +31,8 @@ use tokio::net::TcpListener;
 use crate::{
     card::{AGENT_CARD_PATH, Cards},
     config::Principal,
+    gate::{self, Gate},
+    listener::BoundedListener,
     rest::{self, HTTP_JSON_PATH},
     rpc::{self, Reply},
     service::A2aService,
@@ -37,7 +40,7 @@ use crate::{
 
 /// The largest request body accepted. A prompt is bounded at 256 KiB by
 /// `basis-tasks`; this leaves room for the envelope and nothing more.
-const MAX_BODY: usize = 512 * 1024;
+pub(crate) const MAX_BODY: usize = 512 * 1024;
 
 /// Why a server could not be bound.
 #[derive(Debug, thiserror::Error)]
@@ -56,11 +59,12 @@ pub enum BindError {
 pub(crate) struct AppState {
     pub(crate) service: A2aService,
     pub(crate) cards: Arc<Cards>,
+    pub(crate) gate: Gate,
 }
 
 /// A bound, not yet serving, A2A server.
 pub struct A2aServer {
-    listener: TcpListener,
+    listener: BoundedListener,
     local_addr: SocketAddr,
     endpoint: String,
     router: Router,
@@ -84,7 +88,7 @@ impl A2aServer {
             .map_or_else(|| format!("http://{local_addr}/"), str::to_owned);
         let router = router(service, &endpoint);
         Ok(Self {
-            listener,
+            listener: BoundedListener::new(listener),
             local_addr,
             endpoint,
             router,
@@ -107,7 +111,8 @@ impl A2aServer {
         rest::interface_url(&self.endpoint)
     }
 
-    /// Serves until the process ends.
+    /// Serves until the process ends. Connections are bounded as
+    /// [`listener`](crate::listener) describes.
     pub async fn serve(self) -> io::Result<()> {
         axum::serve(self.listener, self.router).await
     }
@@ -128,14 +133,24 @@ impl A2aServer {
 /// `endpoint` is the JSON-RPC URL the card advertises; the HTTP+JSON
 /// interface is advertised, and served, under it at
 /// [`HTTP_JSON_PATH`](crate::HTTP_JSON_PATH).
+///
+/// Every request passes the [`gate`](crate::gate) first — a concurrency
+/// limit, authentication, then a bounded body read. A host serving these
+/// routes on a listener of its own bounds its connections itself.
 pub fn router(service: A2aService, endpoint: &str) -> Router {
     let cards = Arc::new(Cards::of(&service, endpoint));
+    let state = AppState {
+        service,
+        cards,
+        gate: Gate::new(),
+    };
     Router::new()
         .route(AGENT_CARD_PATH, get(agent_card))
         .route("/", post(json_rpc))
         .route(&format!("{HTTP_JSON_PATH}/{{*path}}"), any(rest::handle))
         .layer(DefaultBodyLimit::max(MAX_BODY))
-        .with_state(AppState { service, cards })
+        .layer(middleware::from_fn_with_state(state.clone(), gate::gate))
+        .with_state(state)
 }
 
 async fn agent_card(State(state): State<AppState>) -> Json<AgentCard> {
@@ -144,13 +159,11 @@ async fn agent_card(State(state): State<AppState>) -> Json<AgentCard> {
 
 async fn json_rpc(
     State(state): State<AppState>,
+    Extension(caller): Extension<Principal>,
     headers: HeaderMap,
     Query(query): Query<HashMap<String, String>>,
     body: Bytes,
 ) -> Response {
-    let Some(caller) = authenticate(&state.service, &headers) else {
-        return unauthorized();
-    };
     let version = version(&headers, Some(&query));
     let reply = rpc::dispatch(
         &state.service,
@@ -199,9 +212,8 @@ pub(crate) fn sse(
         .into_response()
 }
 
-/// Who sent `headers`, if anyone this server accepts. Checked before any
-/// body is parsed, so an unauthenticated caller learns nothing of what the
-/// server would have said.
+/// Who sent `headers`, if anyone this server accepts. Checked by the
+/// [`gate`](crate::gate) before any body is read.
 pub(crate) fn authenticate(service: &A2aService, headers: &HeaderMap) -> Option<Principal> {
     let presented = headers
         .get(header::AUTHORIZATION)
