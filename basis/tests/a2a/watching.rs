@@ -162,3 +162,27 @@ async fn watching_outside_a_runtime_is_an_error_not_a_panic() {
     let error = outside.expect_err("no runtime on that thread");
     assert!(error.to_string().contains("Tokio runtime"), "{error}");
 }
+
+#[tokio::test]
+async fn the_watch_stops_once_the_workspace_drops() {
+    // The poll holds the workspace's A2A state weakly: a host that drops the
+    // workspace and forgets the handle leaks no task.
+    let dir = tempfile::tempdir().unwrap();
+    let workspace = pinned(dir.path(), offline_runtime())
+        .open()
+        .await
+        .expect("opens");
+    let watch = workspace.watch_a2a(INTERVAL).expect("in a runtime");
+    assert!(format!("{watch:?}").contains("running: true"), "{watch:?}");
+
+    drop(workspace);
+
+    let deadline = tokio::time::Instant::now() + Duration::from_secs(5);
+    while !format!("{watch:?}").contains("running: false") {
+        assert!(
+            tokio::time::Instant::now() < deadline,
+            "the poll outlived its workspace: {watch:?}"
+        );
+        tokio::time::sleep(INTERVAL).await;
+    }
+}

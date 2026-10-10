@@ -238,3 +238,29 @@ async fn a_failed_fetch_never_keeps_a_connection_made_with_another_configuration
         "a moved agent is not reached at its old address"
     );
 }
+
+#[tokio::test]
+async fn an_exchange_in_flight_keeps_its_client_across_a_reload() {
+    // ADR-0031 §6: a delegation holds what `reach` handed it for its whole
+    // exchange; a reload that moves the agent meanwhile changes what the
+    // *next* call reaches, never this one.
+    let (old, new) = (testing::free_port(), testing::free_port());
+    testing::serve_card(old);
+    testing::serve_card(new);
+    let agents = RemoteAgents::connect(vec![down("reviewer", old)], None).await;
+    let in_flight = agents.reach("reviewer").await.expect("connected");
+
+    agents.reload(vec![down("reviewer", new)]).await;
+    agents.reload(Vec::new()).await;
+    agents.reload(vec![down("reviewer", new)]).await;
+
+    assert_eq!(
+        in_flight.client.card_url().port(),
+        Some(old),
+        "still the client it started with, alive and unchanged"
+    );
+    let next = agents.reach("reviewer").await.expect("connected");
+    assert_eq!(next.client.card_url().port(), Some(new));
+    assert!(!Arc::ptr_eq(&in_flight.client, &next.client));
+    assert_ne!(in_flight.endpoint, next.endpoint);
+}
