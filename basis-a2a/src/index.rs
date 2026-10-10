@@ -29,6 +29,8 @@ use basis_tasks::TaskHandle;
 use serde::{Deserialize, Serialize};
 use tempfile::NamedTempFile;
 
+use crate::config::{DEFAULT_PRINCIPAL, Principal};
+
 /// One task this server accepted.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub(crate) struct Record {
@@ -36,6 +38,11 @@ pub(crate) struct Record {
     pub(crate) id: String,
     /// The full basis handle, `<workspace key>/<id>`.
     pub(crate) handle: String,
+    /// The name of the principal whose message created the task, recorded
+    /// here rather than inferred later (proposal 0005 §4). A record written
+    /// before principals existed belongs to the one caller there was.
+    #[serde(default = "default_principal")]
+    pub(crate) principal: String,
     pub(crate) context_id: String,
     /// The caller's `messageId` for the message that started the task.
     pub(crate) message_id: String,
@@ -50,6 +57,7 @@ pub(crate) struct Record {
 impl Record {
     pub(crate) fn new(
         handle: &TaskHandle,
+        principal: &Principal,
         context_id: String,
         message_id: String,
         text: String,
@@ -58,6 +66,7 @@ impl Record {
         Self {
             id: task_id_of(handle).to_string(),
             handle: handle.as_str().to_string(),
+            principal: principal.name().to_string(),
             context_id,
             message_id,
             text,
@@ -75,6 +84,10 @@ impl Record {
     pub(crate) fn status_ms(&self) -> u64 {
         self.finished_ms.unwrap_or(self.created_ms)
     }
+}
+
+fn default_principal() -> String {
+    DEFAULT_PRINCIPAL.to_string()
 }
 
 /// The handle's task part — what A2A calls the task id.
@@ -127,20 +140,38 @@ impl Index {
             .unwrap_or_else(|poisoned| poisoned.into_inner())
     }
 
+    /// The record `id` names, whoever owns it — for this server's own
+    /// bookkeeping. A caller's lookup goes through [`owned`](Self::owned).
     pub(crate) fn get(&self, id: &str) -> Option<Record> {
         self.records().get(id).cloned()
+    }
+
+    /// The record `id` names, when `caller` owns it. Another principal's task
+    /// is `None` exactly as a missing one is, so "not yours" and "not found"
+    /// cannot be told apart (ADR-0030 §8).
+    pub(crate) fn owned(&self, caller: &Principal, id: &str) -> Option<Record> {
+        self.get(id).filter(|record| caller.owns(&record.principal))
     }
 
     pub(crate) fn all(&self) -> Vec<Record> {
         self.records().values().cloned().collect()
     }
 
-    /// The most recently accepted task in `context_id` — the one a follow-up
-    /// continues from.
-    pub(crate) fn latest_in(&self, context_id: &str) -> Option<Record> {
+    /// Every record `caller` owns.
+    pub(crate) fn all_owned(&self, caller: &Principal) -> Vec<Record> {
         self.records()
             .values()
-            .filter(|record| record.context_id == context_id)
+            .filter(|record| caller.owns(&record.principal))
+            .cloned()
+            .collect()
+    }
+
+    /// The most recently accepted task `caller` owns in `context_id` — the
+    /// one a follow-up continues from.
+    pub(crate) fn latest_in(&self, caller: &Principal, context_id: &str) -> Option<Record> {
+        self.records()
+            .values()
+            .filter(|record| record.context_id == context_id && caller.owns(&record.principal))
             .max_by_key(|record| record.created_ms)
             .cloned()
     }
@@ -192,6 +223,7 @@ mod tests {
     fn record(id: &str, context: &str, created_ms: u64) -> Record {
         Record::new(
             &handle(id),
+            &Principal::anonymous(),
             context.into(),
             format!("m-{id}"),
             "hello".into(),
@@ -237,8 +269,43 @@ mod tests {
         index.insert(record(&"1".repeat(32), "ctx", 1)).unwrap();
         index.insert(record(&"2".repeat(32), "ctx", 3)).unwrap();
         index.insert(record(&"3".repeat(32), "other", 9)).unwrap();
-        assert_eq!(index.latest_in("ctx").unwrap().id, "2".repeat(32));
-        assert!(index.latest_in("missing").is_none());
+        let caller = Principal::anonymous();
+        assert_eq!(index.latest_in(&caller, "ctx").unwrap().id, "2".repeat(32));
+        assert!(index.latest_in(&caller, "missing").is_none());
+    }
+
+    #[test]
+    fn another_principals_record_is_not_found() {
+        let dir = tempfile::tempdir().unwrap();
+        let index = Index::open(dir.path()).unwrap();
+        let id = "d".repeat(32);
+        let alice = Principal::new("alice").unwrap();
+        let bob = Principal::new("bob").unwrap();
+        let mut owned = record(&id, "ctx", 1);
+        owned.principal = alice.name().to_string();
+        index.insert(owned).unwrap();
+        assert!(index.owned(&alice, &id).is_some());
+        assert!(index.owned(&bob, &id).is_none());
+        assert!(index.all_owned(&bob).is_empty());
+        assert!(index.latest_in(&bob, "ctx").is_none());
+    }
+
+    #[test]
+    fn a_record_written_before_principals_belongs_to_the_default_one() {
+        let dir = tempfile::tempdir().unwrap();
+        fs::create_dir_all(dir.path().join("tasks")).unwrap();
+        let id = "e".repeat(32);
+        let legacy = serde_json::json!({
+            "id": id, "handle": format!("{KEY}/{id}"), "context_id": "ctx",
+            "message_id": "m", "text": "hi", "created_ms": 1,
+        });
+        fs::write(
+            dir.path().join(format!("tasks/{id}.json")),
+            legacy.to_string(),
+        )
+        .unwrap();
+        let index = Index::open(dir.path()).unwrap();
+        assert!(index.owned(&Principal::anonymous(), &id).is_some());
     }
 
     #[test]

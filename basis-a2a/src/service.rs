@@ -35,7 +35,10 @@ use futures::stream::BoxStream;
 use tokio::sync::watch;
 
 use crate::{
-    config::{AgentIdentity, BearerToken, InboundApproval, RunDefaults, ServeConfig},
+    config::{
+        AgentIdentity, InboundApproval, Principal, PrincipalError, Principals, RunDefaults,
+        ServeConfig,
+    },
     index::{Index, Record},
     project::{self, Standing, View, internal},
     stream,
@@ -61,6 +64,8 @@ pub enum OpenError {
     Tasks(#[from] basis_tasks::Error),
     #[error("read the A2A task index: {0}")]
     Index(#[from] std::io::Error),
+    #[error("configure the server's principals: {0}")]
+    Principals(#[from] PrincipalError),
 }
 
 /// One served agent's A2A operations. Cheap to clone; every clone is the
@@ -77,7 +82,7 @@ struct Inner {
     shell: bool,
     run: RunDefaults,
     identity: AgentIdentity,
-    token: Option<BearerToken>,
+    principals: Principals,
     public_url: Option<String>,
     /// One receiver per task this process is driving, flipped to `true` when
     /// its driver returns. Absent for a task nobody here is driving.
@@ -95,10 +100,11 @@ impl A2aService {
             approval,
             shell,
             run,
-            token,
+            tokens,
             public_url,
             data_dir,
         } = config;
+        let principals = Principals::new(tokens)?;
         let tasks = match data_dir {
             Some(data_dir) => Tasks::open_at(data_dir, workspace)?,
             None => Tasks::open(workspace)?,
@@ -112,7 +118,7 @@ impl A2aService {
                 shell,
                 run,
                 identity,
-                token,
+                principals,
                 public_url,
                 drivers: Mutex::new(HashMap::new()),
             }),
@@ -125,8 +131,8 @@ impl A2aService {
         &self.inner.identity
     }
 
-    pub(crate) fn token(&self) -> Option<&BearerToken> {
-        self.inner.token.as_ref()
+    pub(crate) fn principals(&self) -> &Principals {
+        &self.inner.principals
     }
 
     pub(crate) fn public_url(&self) -> Option<&str> {
@@ -141,9 +147,10 @@ impl A2aService {
     /// answered at once — waits for it to settle.
     pub async fn send_message(
         &self,
+        caller: &Principal,
         request: SendMessageRequest,
     ) -> Result<SendMessageResponse, A2AError> {
-        let accepted = self.accept(request).await?;
+        let accepted = self.accept(caller, request).await?;
         if !accepted.return_immediately {
             self.settled(&accepted.record.id).await;
         }
@@ -159,16 +166,17 @@ impl A2aService {
     /// first, then its progress, ending at its terminal state.
     pub async fn send_streaming_message(
         &self,
+        caller: &Principal,
         request: SendMessageRequest,
     ) -> Result<BoxStream<'static, StreamResponse>, A2AError> {
-        let accepted = self.accept(request).await?;
+        let accepted = self.accept(caller, request).await?;
         stream::follow(self.clone(), accepted.record, accepted.history_length)
     }
 
     /// `GetTask`.
-    pub fn get_task(&self, request: GetTaskRequest) -> Result<Task, A2AError> {
+    pub fn get_task(&self, caller: &Principal, request: GetTaskRequest) -> Result<Task, A2AError> {
         let history_length = project::history_length(request.history_length)?;
-        let record = self.record(&request.id)?;
+        let record = self.record(caller, &request.id)?;
         let standing = Standing::read(self.tasks(), &record)?;
         Ok(project::task(
             &record,
@@ -177,8 +185,12 @@ impl A2aService {
         ))
     }
 
-    /// `ListTasks`: this server's tasks, most recently changed first.
-    pub fn list_tasks(&self, request: ListTasksRequest) -> Result<ListTasksResponse, A2AError> {
+    /// `ListTasks`: the caller's tasks, most recently changed first.
+    pub fn list_tasks(
+        &self,
+        caller: &Principal,
+        request: ListTasksRequest,
+    ) -> Result<ListTasksResponse, A2AError> {
         let page_size = match request.page_size {
             None => DEFAULT_PAGE_SIZE,
             Some(size) => usize::try_from(size)
@@ -204,7 +216,7 @@ impl A2aService {
             .map(|after| after.timestamp_millis());
 
         let mut matching = Vec::new();
-        for record in self.inner.index.all() {
+        for record in self.inner.index.all_owned(caller) {
             if request
                 .context_id
                 .as_ref()
@@ -257,8 +269,12 @@ impl A2aService {
     /// `CancelTask`: asks the task to stop at its next turn boundary and
     /// answers with where it stands once that lands, or once
     /// [`CANCEL_GRACE`] has passed.
-    pub async fn cancel_task(&self, request: CancelTaskRequest) -> Result<Task, A2AError> {
-        let record = self.record(&request.id)?;
+    pub async fn cancel_task(
+        &self,
+        caller: &Principal,
+        request: CancelTaskRequest,
+    ) -> Result<Task, A2AError> {
+        let record = self.record(caller, &request.id)?;
         if Standing::read(self.tasks(), &record)?.is_terminal() {
             return Err(A2AError::task_not_cancelable(&request.id));
         }
@@ -277,9 +293,10 @@ impl A2aService {
     /// state. A settled task has nothing left to stream.
     pub fn subscribe_to_task(
         &self,
+        caller: &Principal,
         request: SubscribeToTaskRequest,
     ) -> Result<BoxStream<'static, StreamResponse>, A2AError> {
-        let record = self.record(&request.id)?;
+        let record = self.record(caller, &request.id)?;
         if Standing::read(self.tasks(), &record)?.is_terminal() {
             return Err(A2AError::unsupported_operation(format!(
                 "task {} has settled; GetTask returns its result",
@@ -289,10 +306,12 @@ impl A2aService {
         stream::follow(self.clone(), record, None)
     }
 
-    fn record(&self, id: &str) -> Result<Record, A2AError> {
+    /// The task `id` names, when `caller` owns it; another principal's task
+    /// is refused with the very error a missing one is.
+    fn record(&self, caller: &Principal, id: &str) -> Result<Record, A2AError> {
         self.inner
             .index
-            .get(id)
+            .owned(caller, id)
             .ok_or_else(|| A2AError::task_not_found(id))
     }
 

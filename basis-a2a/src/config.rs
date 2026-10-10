@@ -8,11 +8,16 @@
 //! policy that would ask is refused by the type rather than discovered on
 //! the first consequential call.
 
-use std::{fmt, path::PathBuf, time::Duration};
+mod auth;
+
+use std::{path::PathBuf, time::Duration};
 
 use a2a::AgentSkill;
 use basis::{Effort, SystemPrompt};
 use basis_tasks::Approve;
+
+pub(crate) use auth::Principals;
+pub use auth::{BearerToken, DEFAULT_PRINCIPAL, Principal, PrincipalError};
 
 /// How a served task's consequential calls are answered. There is no third
 /// option: see the module docs.
@@ -32,44 +37,6 @@ impl From<InboundApproval> for Approve {
             InboundApproval::Never => Approve::Never,
             InboundApproval::Always => Approve::Always,
         }
-    }
-}
-
-/// The bearer token every call but the public card must carry.
-///
-/// Held privately and never printed: `Debug` redacts it, and nothing in this
-/// crate formats it into an error.
-#[derive(Clone)]
-pub struct BearerToken(String);
-
-impl BearerToken {
-    /// `None` for an empty or all-whitespace token, which would authenticate
-    /// a request carrying `Authorization: Bearer ` and nothing else.
-    pub fn new(token: impl Into<String>) -> Option<Self> {
-        let token = token.into();
-        (!token.trim().is_empty()).then_some(Self(token))
-    }
-
-    /// Whether `presented` is this token, compared in time that depends only
-    /// on the lengths — the bytes of a wrong guess do not change how long it
-    /// takes to refuse.
-    pub(crate) fn matches(&self, presented: &str) -> bool {
-        let expected = self.0.as_bytes();
-        let presented = presented.as_bytes();
-        if expected.len() != presented.len() {
-            return false;
-        }
-        expected
-            .iter()
-            .zip(presented)
-            .fold(0u8, |difference, (left, right)| difference | (left ^ right))
-            == 0
-    }
-}
-
-impl fmt::Debug for BearerToken {
-    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        f.write_str("BearerToken(<redacted>)")
     }
 }
 
@@ -207,7 +174,7 @@ pub struct ServeConfig {
     pub(crate) approval: InboundApproval,
     pub(crate) shell: bool,
     pub(crate) run: RunDefaults,
-    pub(crate) token: Option<BearerToken>,
+    pub(crate) tokens: Vec<(Principal, BearerToken)>,
     pub(crate) public_url: Option<String>,
     pub(crate) data_dir: Option<PathBuf>,
 }
@@ -224,7 +191,7 @@ impl ServeConfig {
             approval: InboundApproval::default(),
             shell: false,
             run: RunDefaults::default(),
-            token: None,
+            tokens: Vec::new(),
             public_url: None,
             data_dir: None,
         }
@@ -252,13 +219,24 @@ impl ServeConfig {
     }
 
     /// Requires `token` on every call but the public card, and declares the
-    /// bearer scheme on the card.
+    /// bearer scheme on the card. Its holder is the [`DEFAULT_PRINCIPAL`]:
+    /// the one-caller server this was before principals existed.
     #[must_use]
     pub fn with_token(self, token: BearerToken) -> Self {
-        Self {
-            token: Some(token),
-            ..self
-        }
+        let principal =
+            Principal::new(DEFAULT_PRINCIPAL).expect("the default principal's name is plain");
+        self.with_principal(principal, token)
+    }
+
+    /// Accepts `token` as `principal` (ADR-0030 §8). Every task a caller
+    /// creates is recorded under its principal, and every task-scoped call
+    /// sees only that principal's own. Names and tokens must each be unique;
+    /// [`A2aService::open`](crate::A2aService::open) refuses a set that is not.
+    #[must_use]
+    pub fn with_principal(self, principal: Principal, token: BearerToken) -> Self {
+        let mut tokens = self.tokens;
+        tokens.push((principal, token));
+        Self { tokens, ..self }
     }
 
     /// The URL callers reach the JSON-RPC endpoint at, as advertised on the
@@ -287,28 +265,6 @@ impl ServeConfig {
 #[cfg(test)]
 mod tests {
     use super::*;
-
-    #[test]
-    fn an_empty_token_is_no_token() {
-        assert!(BearerToken::new("").is_none());
-        assert!(BearerToken::new("  \t").is_none());
-        assert!(BearerToken::new("s3cret").is_some());
-    }
-
-    #[test]
-    fn a_token_matches_only_itself() {
-        let token = BearerToken::new("s3cret").unwrap();
-        assert!(token.matches("s3cret"));
-        assert!(!token.matches("s3cre"));
-        assert!(!token.matches("s3crex"));
-        assert!(!token.matches(""));
-    }
-
-    #[test]
-    fn a_token_never_prints() {
-        let token = BearerToken::new("s3cret").unwrap();
-        assert!(!format!("{token:?}").contains("s3cret"));
-    }
 
     #[test]
     fn inbound_approval_maps_onto_the_two_policies_that_ask_nobody() {

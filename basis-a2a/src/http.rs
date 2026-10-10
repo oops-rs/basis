@@ -26,6 +26,7 @@ use tokio::net::TcpListener;
 
 use crate::{
     card::{self, AGENT_CARD_PATH},
+    config::Principal,
     rpc::{self, Reply},
     service::A2aService,
 };
@@ -65,7 +66,7 @@ impl A2aServer {
     /// Binds `address` for `service`. A non-loopback address is refused when
     /// the service has no token, before anything listens.
     pub async fn bind(address: SocketAddr, service: A2aService) -> Result<Self, BindError> {
-        if !address.ip().is_loopback() && service.token().is_none() {
+        if !address.ip().is_loopback() && !service.principals().any() {
             return Err(BindError::Unauthenticated(address));
         }
         let listener = TcpListener::bind(address)
@@ -119,7 +120,7 @@ pub fn router(service: A2aService, endpoint: &str) -> Router {
     let card = Arc::new(card::build(
         service.identity(),
         endpoint,
-        service.token().is_some(),
+        service.principals().any(),
     ));
     Router::new()
         .route(AGENT_CARD_PATH, get(agent_card))
@@ -138,19 +139,9 @@ async fn json_rpc(
     Query(query): Query<HashMap<String, String>>,
     body: Bytes,
 ) -> Response {
-    if let Some(token) = state.service.token() {
-        let presented = headers
-            .get(header::AUTHORIZATION)
-            .and_then(|value| value.to_str().ok())
-            .and_then(bearer);
-        if !presented.is_some_and(|presented| token.matches(presented)) {
-            return (
-                StatusCode::UNAUTHORIZED,
-                [(header::WWW_AUTHENTICATE, "Bearer")],
-            )
-                .into_response();
-        }
-    }
+    let Some(caller) = authenticate(&state.service, &headers) else {
+        return unauthorized();
+    };
     let version = headers
         .get(SVC_PARAM_VERSION)
         .and_then(|value| value.to_str().ok())
@@ -161,7 +152,7 @@ async fn json_rpc(
                 .find(|(key, _)| key.eq_ignore_ascii_case(SVC_PARAM_VERSION))
                 .map(|(_, value)| value.clone())
         });
-    match rpc::dispatch(&state.service, version.as_deref(), &body).await {
+    match rpc::dispatch(&state.service, &caller, version.as_deref(), &body).await {
         Reply::Json(response) => Json(response).into_response(),
         Reply::Stream(id, updates) => {
             let events = updates.map(move |update| {
@@ -176,6 +167,25 @@ async fn json_rpc(
                 .into_response()
         }
     }
+}
+
+/// Who sent `headers`, if anyone this server accepts. Checked before any
+/// body is parsed, so an unauthenticated caller learns nothing of what the
+/// server would have said.
+fn authenticate(service: &A2aService, headers: &HeaderMap) -> Option<Principal> {
+    let presented = headers
+        .get(header::AUTHORIZATION)
+        .and_then(|value| value.to_str().ok())
+        .and_then(bearer);
+    service.principals().authenticate(presented)
+}
+
+fn unauthorized() -> Response {
+    (
+        StatusCode::UNAUTHORIZED,
+        [(header::WWW_AUTHENTICATE, "Bearer")],
+    )
+        .into_response()
 }
 
 /// The token in an `Authorization: Bearer <token>` value; the scheme is

@@ -10,7 +10,7 @@ use futures::stream::BoxStream;
 use serde::de::DeserializeOwned;
 use serde_json::Value;
 
-use crate::service::A2aService;
+use crate::{config::Principal, service::A2aService};
 
 /// The protocol major version served (ADR-0028 §5). Any minor is accepted,
 /// since nothing here branches on it.
@@ -30,7 +30,12 @@ impl Reply {
 
 /// Handles one JSON-RPC request body. `version` is the caller's
 /// `A2A-Version`, from its header or query parameter.
-pub(crate) async fn dispatch(service: &A2aService, version: Option<&str>, body: &[u8]) -> Reply {
+pub(crate) async fn dispatch(
+    service: &A2aService,
+    caller: &Principal,
+    version: Option<&str>,
+    body: &[u8],
+) -> Reply {
     let value: Value = match serde_json::from_slice(body) {
         Ok(value) => value,
         Err(error) => {
@@ -59,7 +64,7 @@ pub(crate) async fn dispatch(service: &A2aService, version: Option<&str>, body: 
     if let Err(error) = check_version(version) {
         return Reply::error(id, error);
     }
-    match route(service, request.method.as_str(), request.params).await {
+    match route(service, caller, request.method.as_str(), request.params).await {
         Ok(Routed::Value(result)) => Reply::Json(JsonRpcResponse::success(id, result)),
         Ok(Routed::Stream(stream)) => Reply::Stream(id, stream),
         Err(error) => Reply::error(id, error),
@@ -73,20 +78,23 @@ enum Routed {
 
 async fn route(
     service: &A2aService,
+    caller: &Principal,
     method: &str,
     params: Option<Value>,
 ) -> Result<Routed, A2AError> {
     match method {
-        methods::SEND_MESSAGE => value(service.send_message(parse(params)?).await?),
+        methods::SEND_MESSAGE => value(service.send_message(caller, parse(params)?).await?),
         methods::SEND_STREAMING_MESSAGE => Ok(Routed::Stream(
-            service.send_streaming_message(parse(params)?).await?,
+            service
+                .send_streaming_message(caller, parse(params)?)
+                .await?,
         )),
-        methods::GET_TASK => value(service.get_task(parse(params)?)?),
-        methods::LIST_TASKS => value(service.list_tasks(parse_or_default(params)?)?),
-        methods::CANCEL_TASK => value(service.cancel_task(parse(params)?).await?),
-        methods::SUBSCRIBE_TO_TASK => {
-            Ok(Routed::Stream(service.subscribe_to_task(parse(params)?)?))
-        }
+        methods::GET_TASK => value(service.get_task(caller, parse(params)?)?),
+        methods::LIST_TASKS => value(service.list_tasks(caller, parse_or_default(params)?)?),
+        methods::CANCEL_TASK => value(service.cancel_task(caller, parse(params)?).await?),
+        methods::SUBSCRIBE_TO_TASK => Ok(Routed::Stream(
+            service.subscribe_to_task(caller, parse(params)?)?,
+        )),
         methods::CREATE_PUSH_CONFIG
         | methods::GET_PUSH_CONFIG
         | methods::LIST_PUSH_CONFIGS

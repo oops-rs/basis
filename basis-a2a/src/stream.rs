@@ -167,7 +167,14 @@ mod tests {
 
     fn record() -> Record {
         let handle = TaskHandle::parse(format!("{}/{}", "0".repeat(16), "a".repeat(32))).unwrap();
-        Record::new(&handle, "ctx".into(), "m1".into(), "hi".into(), 1)
+        Record::new(
+            &handle,
+            &crate::config::Principal::anonymous(),
+            "ctx".into(),
+            "m1".into(),
+            "hi".into(),
+            1,
+        )
     }
 
     #[test]

@@ -5,7 +5,7 @@ use a2a::{A2AError, Message, PartContent, Role, SendMessageRequest};
 use basis_tasks::{Continuation, Hint, RunSpec, now_ms};
 
 use super::A2aService;
-use crate::{card::TEXT, index::Record, project::internal};
+use crate::{card::TEXT, config::Principal, index::Record, project::internal};
 
 /// The output modes a caller may accept for this server to be able to answer.
 const TEXT_MODES: [&str; 4] = [TEXT, "text/*", "*/*", "text"];
@@ -20,7 +20,11 @@ pub(crate) struct Accepted {
 impl A2aService {
     /// Validates `request`, spawns the task that answers it, records it, and
     /// starts driving it.
-    pub(super) async fn accept(&self, request: SendMessageRequest) -> Result<Accepted, A2AError> {
+    pub(super) async fn accept(
+        &self,
+        caller: &Principal,
+        request: SendMessageRequest,
+    ) -> Result<Accepted, A2AError> {
         let SendMessageRequest {
             message,
             configuration,
@@ -45,7 +49,7 @@ impl A2aService {
         }
         let history_length = crate::project::history_length(configuration.history_length)?;
         let text = text_of(&message)?;
-        let (context_id, continuation) = self.conversation(&message)?;
+        let (context_id, continuation) = self.conversation(caller, &message)?;
 
         let spec = self.run_spec(text.clone(), continuation);
         let tasks = self.tasks().clone();
@@ -62,7 +66,14 @@ impl A2aService {
                 _ => internal(error),
             })?;
 
-        let record = Record::new(&handle, context_id, message.message_id, text, now_ms());
+        let record = Record::new(
+            &handle,
+            caller,
+            context_id,
+            message.message_id,
+            text,
+            now_ms(),
+        );
         self.inner.index.insert(record.clone()).map_err(internal)?;
         self.drive(&record);
         Ok(Accepted {
@@ -76,9 +87,13 @@ impl A2aService {
     /// names, or a new one. A message naming a task is a reply to a task
     /// waiting for input, and no task this server runs ever waits for input
     /// (ADR-0028 §4), so it is refused with the reason.
-    fn conversation(&self, message: &Message) -> Result<(String, Continuation), A2AError> {
+    fn conversation(
+        &self,
+        caller: &Principal,
+        message: &Message,
+    ) -> Result<(String, Continuation), A2AError> {
         if let Some(task_id) = &message.task_id {
-            let record = self.record(task_id)?;
+            let record = self.record(caller, task_id)?;
             if message
                 .context_id
                 .as_ref()
@@ -96,11 +111,17 @@ impl A2aService {
         match &message.context_id {
             None => Ok((a2a::new_context_id(), Continuation::New)),
             Some(context_id) => {
-                let latest = self.inner.index.latest_in(context_id).ok_or_else(|| {
-                    A2AError::invalid_params(format!(
-                        "contextId {context_id} is not one this server issued"
-                    ))
-                })?;
+                // Another principal's context is as unknown as one never
+                // issued: naming it continues nothing and reveals nothing.
+                let latest = self
+                    .inner
+                    .index
+                    .latest_in(caller, context_id)
+                    .ok_or_else(|| {
+                        A2AError::invalid_params(format!(
+                            "contextId {context_id} is not one this server issued"
+                        ))
+                    })?;
                 Ok((context_id.to_string(), Continuation::Named(latest.handle())))
             }
         }
