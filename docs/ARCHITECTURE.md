@@ -152,9 +152,11 @@ renderer — a shell drives, a parent task hands back a handle
 written atomically as the executor's last act, is the completion signal: an
 agent is resumable iff that record does not exist. Nothing is resident, so
 backgrounding belongs to the OS (`&`, `nohup`, tmux, `systemd-run`, CI),
-cancellation is honored at the next turn boundary rather than instantly, and a
-crash mid-turn loses the in-flight round — re-driving it may repeat that turn's
-tool side effects, because a checkpoint restores state and never effects.
+a cancel cuts the running turn short, and a crash mid-turn leaves an
+*interrupted* turn that the next attach continues: each tool call that was
+running is closed as of unknown effect and never re-run, because a checkpoint
+restores state and never effects
+([ADR-0032](adr/0032-an-interrupted-turn-is-continued.md)).
 
 The semantics above that survive from ADR-0017 are unchanged by the substrate.
 `send` appends an opaque message ID to the inbox file, consumed at the next turn

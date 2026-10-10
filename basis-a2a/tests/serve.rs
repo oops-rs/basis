@@ -238,29 +238,14 @@ async fn cancelling_a_running_task_settles_it_canceled() {
         .await;
     let id = result["task"]["id"].as_str().unwrap().to_string();
 
-    // Cancellation lands at a turn boundary (ADR-0019): the held turn has to
-    // end before the task can.
-    let canceller = {
-        let endpoint = served.endpoint.clone();
-        let id = id.clone();
-        tokio::spawn(async move {
-            reqwest::Client::new()
-                .post(&endpoint)
-                .bearer_auth(harness::TOKEN)
-                .header("A2A-Version", "1.0")
-                .json(&json!({"jsonrpc": "2.0", "id": 1, "method": "CancelTask", "params": {"id": id}}))
-                .send()
-                .await
-                .unwrap()
-                .json::<Value>()
-                .await
-                .unwrap()
-        })
-    };
-    tokio::time::sleep(Duration::from_millis(200)).await;
-    served.model.release();
-    let cancelled = canceller.await.unwrap();
-    assert!(cancelled.get("error").is_none(), "{cancelled}");
+    // A cancel cuts the running turn short: the model is never released, and
+    // the task CancelTask hands back already says CANCELED.
+    served.model.reached(1).await;
+    let cancelled = served.result("CancelTask", json!({"id": id})).await;
+    assert_eq!(
+        cancelled["status"]["state"], "TASK_STATE_CANCELED",
+        "{cancelled}"
+    );
 
     served.wait_for(&id, "TASK_STATE_CANCELED").await;
     assert_eq!(

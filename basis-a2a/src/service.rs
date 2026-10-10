@@ -75,9 +75,10 @@ use drive::Driver;
 const HOST: &str = "a2a";
 
 /// How long `CancelTask` waits for the cancel to land before answering with
-/// whatever state the task is in. Cancellation is honored at turn boundaries
-/// (ADR-0019), so a long turn can outlast this; the caller then sees
-/// `WORKING` and a later `GetTask` sees `CANCELED`.
+/// whatever state the task is in. A cancel cuts the running turn short, so
+/// the task normally settles well inside this; a tool that ignores its
+/// cancellation can still outlast it, and the caller then sees `WORKING` and
+/// a later `GetTask` sees `CANCELED`.
 const CANCEL_GRACE: Duration = Duration::from_secs(5);
 
 /// `ListTasks`' page size when the caller names none, and the most it may name.
@@ -387,8 +388,8 @@ impl A2aService {
         })
     }
 
-    /// `CancelTask`: asks the task to stop at its next turn boundary and
-    /// answers with where it stands once that lands, or once
+    /// `CancelTask`: asks the task to stop — cutting its running turn short —
+    /// and answers with where it stands once that lands, or once
     /// [`CANCEL_GRACE`] has passed.
     pub async fn cancel_task(
         &self,

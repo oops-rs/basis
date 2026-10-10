@@ -602,9 +602,9 @@ async fn run_model(
     let cancellation = CancellationToken::default();
     loop {
         // The turn boundary: cancel markers and deadlines — the task's and
-        // the waiter's — are honored here, and only here. A turn already
-        // running is never cut short by any of them except the task's own
-        // deadline (below, around the execution itself) — and the host
+        // the waiter's — are honored here. A turn already running is cut
+        // short by exactly three of them, below, around the execution
+        // itself: the task's own deadline, a cancel marker, and the host
         // going away, which records nothing at all.
         if ctx.is_stopping() {
             return yielded(paths, meta);
@@ -691,6 +691,19 @@ async fn run_model(
         // whose runtime is being torn down must not poll the turn again, and
         // a turn that finished in the same instant is read back off its
         // conversation by the next attach all the same.
+        // A cancel marker cuts the turn short too: a task asked to stop
+        // should not finish an hour-long tool round first, and an A2A
+        // caller's `CancelTask` expects the task it gets back to say
+        // CANCELED. The turn is cancelled, not dropped, so mentra unwinds it
+        // and the outcome below — an error, or a success that won the race —
+        // is read with the marker set, which settles it as cancelled.
+        let cancelled = async {
+            while !cancel_requested(paths) {
+                time::sleep(CANCEL_POLL).await;
+            }
+            cancellation.cancel();
+            std::future::pending::<()>().await
+        };
         let report = tokio::select! {
             biased;
             () = ctx.stopping() => {
@@ -698,6 +711,7 @@ async fn run_model(
                 return yielded(paths, meta);
             }
             report = bounded => report,
+            () = cancelled => unreachable!("the cancel watch never finishes"),
         };
         let Some(report) = report else {
             cancellation.cancel();
@@ -713,6 +727,9 @@ async fn run_model(
         let report = match report {
             Ok(report) => report,
             Err(_) if ctx.is_stopping() => return yielded(paths, meta),
+            Err(_) if cancel_requested(paths) => {
+                return record_pending(paths, meta, Terminal::Cancelled, None);
+            }
             Err(error) => return record_failure(paths, meta, error.to_string(), None),
         };
         // Banked per turn, not per attach: a task settles under one terminal
@@ -1043,6 +1060,11 @@ pub(crate) fn earlier_deadline(left: Option<u64>, right: Option<u64>) -> Option<
         (None, None) => None,
     }
 }
+
+/// How often a running turn looks for a cancel marker: often enough that a
+/// cancel is felt well inside an A2A caller's grace period, rarely enough
+/// that the check — one `stat` — costs nothing.
+const CANCEL_POLL: Duration = Duration::from_millis(100);
 
 fn remaining_deadline(deadline_at: Option<u64>) -> Option<Duration> {
     deadline_at.map(|deadline| Duration::from_millis(deadline.saturating_sub(now_ms())))

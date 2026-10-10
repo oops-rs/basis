@@ -6,6 +6,9 @@
 > the per-workspace daemon — is retired.
 > Builds on [`0018-the-runtime-owns-the-process.md`](0018-the-runtime-owns-the-process.md);
 > related: [`0014-watch-retired-runs-are-boundable.md`](0014-watch-retired-runs-are-boundable.md).
+> Amended by [`0032-an-interrupted-turn-is-continued.md`](0032-an-interrupted-turn-is-continued.md):
+> a cancel now cuts the running turn short, and a crash mid-turn is continued,
+> not lost.
 > Spec: [`docs/spec/2026-08-15-runtime-and-filesystem-coordination.md`](../spec/2026-08-15-runtime-and-filesystem-coordination.md)
 
 ## Context
