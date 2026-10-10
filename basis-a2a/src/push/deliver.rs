@@ -12,8 +12,12 @@ use super::guard::{self, Refused};
 /// 10–30 seconds spec §4.3.3 recommends.
 const TIMEOUT: Duration = Duration::from_secs(10);
 
-/// The header a config's `token` travels in (spec §6.6).
-pub(crate) const TOKEN_HEADER: &str = "X-A2A-Notification-Token";
+/// The headers a config's `token` travels in. Both, because the two
+/// authorities disagree: spec §6.6's example names the first, and the
+/// official SDKs read the second. A receiver of either kind finds its token,
+/// and the token is the receiver's own, so saying it twice tells no one
+/// anything new.
+pub(crate) const TOKEN_HEADERS: [&str; 2] = ["X-A2A-Notification-Token", "A2A-Notification-Token"];
 
 /// Why one delivery did not land.
 #[derive(Debug, thiserror::Error)]
@@ -61,7 +65,9 @@ pub(crate) async fn deliver(
         );
     }
     if let Some(token) = config.token.as_deref().filter(|token| !token.is_empty()) {
-        request = request.header(TOKEN_HEADER, token);
+        for header in TOKEN_HEADERS {
+            request = request.header(header, token);
+        }
     }
     let response = request
         .send()

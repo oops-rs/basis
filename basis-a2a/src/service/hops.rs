@@ -17,9 +17,9 @@ use chrono::{DateTime, Utc};
 use serde_json::Value;
 
 /// The hops extension's URI: the card declares it, and a message's metadata
-/// carries `{"hop", "deadline"}` under it.
-pub(crate) const HOPS_EXTENSION: &str =
-    "https://github.com/oops-rs/basis/blob/main/docs/a2a/hops-v1.md";
+/// carries `{"hop", "deadline"}` under it. basis's, because its `spawn`
+/// sends the same object this reads.
+pub(crate) use basis::a2a::HOPS_EXTENSION;
 
 /// The deepest hop served when the operator names no other: deep enough for
 /// any honest chain of delegation, shallow enough that a loop ends long

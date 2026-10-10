@@ -85,10 +85,15 @@ impl A2aService {
             inbound,
             accepted_ms,
         )?;
-        let spec = self
+        let mut spec = self
             .run_spec(rendered.prompt.clone(), continuation)
             .with_deadline(deadline)
             .with_hop(inbound.hop);
+        // The caller's instant as well as the duration it implies, so the
+        // task is never given the few milliseconds spawning takes on top.
+        if let Some(caller_ms) = inbound.deadline_ms {
+            spec = spec.with_not_after_ms(caller_ms);
+        }
         let tasks = self.tasks().clone();
         let handle = tokio::task::spawn_blocking(move || tasks.spawn(spec))
             .await
@@ -103,6 +108,16 @@ impl A2aService {
                 _ => internal(error),
             })?;
 
+        // The instant the task actually runs under, read back rather than
+        // recomputed: `basis-tasks` anchored the relative deadline when it
+        // minted the task, a moment after `accepted_ms`, and what this task
+        // tells anyone it delegates to must never be later than that.
+        let deadline_ms = match self.tasks().deadline_at_ms(&handle) {
+            Ok(Some(deadline_ms)) => deadline_ms,
+            _ => {
+                accepted_ms.saturating_add(u64::try_from(deadline.as_millis()).unwrap_or(u64::MAX))
+            }
+        };
         let record = Record::new(
             &handle,
             caller,
@@ -112,10 +127,7 @@ impl A2aService {
             accepted_ms,
         )
         .with_parts((!rendered.only_text).then_some(message.parts))
-        .with_hops(
-            inbound.hop,
-            accepted_ms.saturating_add(u64::try_from(deadline.as_millis()).unwrap_or(u64::MAX)),
-        );
+        .with_hops(inbound.hop, deadline_ms);
         self.inner.index.insert(record.clone()).map_err(internal)?;
         // Stored before the task is driven, so its first change of status is
         // already one the webhook hears about. A store that fails still

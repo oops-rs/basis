@@ -264,6 +264,8 @@ pub struct Runtime {
     /// borrows it from. Shared with the executor rather than copied, so there
     /// is one statement and not two.
     command_environment: Arc<std::collections::BTreeMap<String, String>>,
+    /// From [`RuntimeBuilder::with_a2a_hop`].
+    a2a_hop: u32,
     /// The id this runtime's provider is registered under — resolution's
     /// answer, or a host-supplied instance's own descriptor. Models resolve
     /// against it at workspace open, and its string is what workspaces copy
@@ -453,6 +455,12 @@ impl Runtime {
     /// A `Vec` rather than the map it is stored as, because that is the shape
     /// `crate::subprocess::execute` takes and what a declared tool merges its
     /// own `env` over. Sorted, because the map is.
+    /// The hop the work this runtime does arrived at over A2A — zero for a
+    /// top-level caller. See [`RuntimeBuilder::with_a2a_hop`].
+    pub fn a2a_hop(&self) -> u32 {
+        self.a2a_hop
+    }
+
     pub(crate) fn command_environment(&self) -> Vec<(String, String)> {
         self.command_environment
             .iter()

@@ -53,6 +53,7 @@ pub struct RunSpec {
     pub(crate) detached: bool,
     pub(crate) continuation: Continuation,
     pub(crate) hop: u32,
+    pub(crate) not_after_ms: Option<u64>,
 }
 
 impl RunSpec {
@@ -72,6 +73,7 @@ impl RunSpec {
             detached: false,
             continuation: Continuation::default(),
             hop: 0,
+            not_after_ms: None,
         }
     }
 
@@ -130,6 +132,20 @@ impl RunSpec {
     pub fn with_deadline(self, deadline: Duration) -> Self {
         Self {
             deadline: Some(deadline),
+            ..self
+        }
+    }
+
+    /// Never gives the task longer than the instant `not_after_ms`
+    /// (milliseconds since the epoch), whatever [`with_deadline`](Self::with_deadline)
+    /// adds up to.
+    ///
+    /// For a deadline that is someone else's: a caller over A2A says when it
+    /// stops waiting, as an instant, and re-anchoring that as a duration at
+    /// spawn would hand the task a little more than the caller has.
+    pub fn with_not_after_ms(self, not_after_ms: u64) -> Self {
+        Self {
+            not_after_ms: Some(not_after_ms),
             ..self
         }
     }

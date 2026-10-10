@@ -56,7 +56,8 @@ impl LiveA2a {
         let remembered_in = runtime.a2a_conversations_dir().map(Path::to_path_buf);
         let remote = RemoteAgents::connect(discovery.agents, remembered_in)
             .await
-            .with_on_change(refresher(runtime));
+            .with_on_change(refresher(runtime))
+            .with_hop(runtime.a2a_hop());
         Self {
             paths: sources(&root, &config),
             seen: Mutex::new(discovery.seen),

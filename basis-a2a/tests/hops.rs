@@ -118,3 +118,49 @@ async fn a_message_without_the_extension_is_hop_zero() {
         .await;
     assert_eq!(recorded(&sent["task"]).0, 0);
 }
+
+/// The other half of the extension: a served task's own `@agent` delegation is
+/// the next hop, and it tells the agent it reaches when it stops waiting.
+#[tokio::test]
+async fn a_served_task_tells_the_agent_it_delegates_to_the_next_hop() {
+    let downstream = Served::start_anonymous(ScriptedEndpoint::start(false), |config| config).await;
+    let model = ScriptedEndpoint::scripted(
+        false,
+        vec![
+            harness::Reply::ToolCall {
+                name: "spawn".to_string(),
+                arguments: json!({"input": "@downstream relay this"}),
+            },
+            harness::Reply::Text("relayed".to_string()),
+        ],
+    );
+    let upstream = Served::start_with(model, |config| {
+        config.with_approval(basis_a2a::InboundApproval::Always)
+    })
+    .await;
+    std::fs::create_dir_all(upstream.workspace.path().join(".basis")).unwrap();
+    std::fs::write(
+        upstream.workspace.path().join(".basis/a2a.json"),
+        json!({"agents": {"downstream": {"url": downstream.base}}}).to_string(),
+    )
+    .unwrap();
+
+    let sent = upstream
+        .result(
+            "SendMessage",
+            json!({"message": at_hop("relay", 2, None), "configuration": {"returnImmediately": true}}),
+        )
+        .await;
+    let id = sent["task"]["id"].as_str().unwrap().to_string();
+    let settled = upstream.wait_for(&id, "TASK_STATE_COMPLETED").await;
+    let (_, upstream_deadline) = recorded(&settled);
+
+    let listed = downstream.result("ListTasks", json!({})).await;
+    let reached = &listed["tasks"][0];
+    let (hop, deadline) = recorded(reached);
+    assert_eq!(hop, 3, "hop 2 delegating is hop 3: {reached}");
+    assert!(
+        deadline <= upstream_deadline,
+        "a deadline only shrinks across a hop: {deadline} after {upstream_deadline}"
+    );
+}

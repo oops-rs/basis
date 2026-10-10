@@ -76,6 +76,23 @@ impl RuntimeBuilder {
         self.command_environment.insert(name.into(), value.into());
         self
     }
+
+    /// Says the work this runtime does arrived over A2A at `hop` — the
+    /// number of agent-to-agent hands it is from a top-level caller — so the
+    /// remote agents its sessions reach in turn are told `hop + 1`
+    /// (ADR-0030 §9, `docs/a2a/hops-v1.md`).
+    ///
+    /// Zero, the default, is a top-level caller. Runtime-scoped for the
+    /// reason the command environment is: one runtime per task (ADR-0018),
+    /// and a served task's hop is a fact about the whole task. A server
+    /// such as `basis-a2a` sets it from the hop the task was reached at; a
+    /// host driving its own work leaves it alone.
+    pub fn with_a2a_hop(self, hop: u32) -> Self {
+        Self {
+            a2a_hop: hop,
+            ..self
+        }
+    }
 }
 
 /// Refuses a target name basis cannot route on, before a runtime is built

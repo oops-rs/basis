@@ -156,6 +156,13 @@ async fn a_webhook_named_with_the_message_hears_each_change_with_its_credentials
         "{}",
         completed.headers
     );
+    assert!(
+        completed
+            .headers
+            .contains("\na2a-notification-token: caller-check"),
+        "the official SDKs' spelling too: {}",
+        completed.headers
+    );
     assert!(completed.headers.contains("content-type: application/json"));
     let states: Vec<Value> = webhook
         .deliveries()

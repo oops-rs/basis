@@ -79,6 +79,9 @@ pub struct RuntimeBuilder {
     history: Option<History>,
     interceptors: Vec<Arc<dyn Interceptor>>,
     command_environment: BTreeMap<String, String>,
+    /// How many agent-to-agent hands the work this runtime does is from a
+    /// top-level caller ([`with_a2a_hop`](Self::with_a2a_hop)).
+    a2a_hop: u32,
     /// How patiently a run waits out a failing provider, and how many attempts
     /// it gets ([`with_provider_retry`](Self::with_provider_retry) and
     /// [`with_provider_retry_budget`](Self::with_provider_retry_budget) set the
@@ -236,6 +239,7 @@ impl Default for RuntimeBuilder {
             wire: Wire::ChatCompletions,
             file_tools: FileToolProfile::Split,
             command_environment: BTreeMap::new(),
+            a2a_hop: 0,
             command_targets: CommandTargets::new(),
             host_tools: Vec::new(),
             delegation_depth: crate::tools::DEFAULT_DELEGATION_DEPTH,
@@ -690,6 +694,7 @@ impl RuntimeBuilder {
         Ok(Runtime {
             mentra,
             command_environment,
+            a2a_hop: self.a2a_hop,
             provider,
             // Unsaid is the newest the provider offers, which is what this
             // builder has always resolved for a caller that named no model.

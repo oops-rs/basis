@@ -176,6 +176,7 @@ impl Tasks {
             detached,
             continuation,
             hop,
+            not_after_ms,
         } = spec;
         if prompt.trim().is_empty() {
             return Err(Error::new("prompt is empty"));
@@ -242,10 +243,13 @@ impl Tasks {
             .map_err(|error| Error::new(format!("acquire workspace continuation lock: {error}")))?;
         let continues = self.resolve_continuation(&canonical, &key, continuation)?;
 
-        let requested_deadline = Some(
-            state::now_ms()
-                .checked_add(deadline_ms)
-                .ok_or_else(|| Error::new("task deadline exceeds the system clock range"))?,
+        let requested_deadline = attach::earlier_deadline(
+            Some(
+                state::now_ms()
+                    .checked_add(deadline_ms)
+                    .ok_or_else(|| Error::new("task deadline exceeds the system clock range"))?,
+            ),
+            not_after_ms,
         );
         let mut hop = hop;
         let deadline_at = match &parent {
@@ -682,6 +686,14 @@ impl Tasks {
     /// spawn — see [`RunSpec::with_hop`](crate::RunSpec::with_hop).
     pub fn hop(&self, handle: &TaskHandle) -> Result<u32, Error> {
         Ok(self.meta(handle)?.hop)
+    }
+
+    /// When the task gives up, in milliseconds since the epoch, as recorded
+    /// at spawn — the instant every turn is bounded by, so a host that hands
+    /// the deadline on (an A2A server telling a caller, say) states the one
+    /// the task actually runs under. `None` for a task with no deadline.
+    pub fn deadline_at_ms(&self, handle: &TaskHandle) -> Result<Option<u64>, Error> {
+        Ok(self.meta(handle)?.deadline_at_ms)
     }
 
     fn meta(&self, handle: &TaskHandle) -> Result<state::TaskMeta, Error> {
