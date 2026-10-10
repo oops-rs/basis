@@ -11,7 +11,7 @@ use std::{
     collections::HashMap, convert::Infallible, future::Future, io, net::SocketAddr, sync::Arc,
 };
 
-use a2a::{AgentCard, JsonRpcResponse, SVC_PARAM_VERSION, StreamResponse};
+use a2a::{JsonRpcResponse, SVC_PARAM_VERSION, StreamResponse};
 use axum::{
     Extension, Json, Router,
     body::Bytes,
@@ -29,7 +29,7 @@ use serde_json::Value;
 use tokio::net::TcpListener;
 
 use crate::{
-    card::{AGENT_CARD_PATH, Cards},
+    card::{self, AGENT_CARD_PATH, Cards},
     config::Principal,
     gate::{self, Gate},
     listener::BoundedListener,
@@ -176,8 +176,8 @@ fn routes(service: A2aService, endpoint: &str, loopback: bool) -> Router {
         .with_state(state)
 }
 
-async fn agent_card(State(state): State<AppState>) -> Json<AgentCard> {
-    Json(state.cards.public.clone())
+async fn agent_card(State(state): State<AppState>) -> Json<Value> {
+    Json(card::to_wire(&state.cards.public))
 }
 
 async fn json_rpc(
