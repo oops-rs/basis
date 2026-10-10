@@ -521,8 +521,9 @@ the packages convention and provider OAuth; surfacing `team_*`, which stays hidd
 use case asks for it; A2A's gRPC binding, deferred for its weight until a caller needs it
 ([proposal 0005](docs/proposals/0005-a2a-beyond-the-first-cut.md)); and **nobody has driven this
 from Zed or JetBrains yet** — it is verified against the protocol and its official client library,
-not against the ecosystem. The six workspace crates share one version, and A2A is likewise verified
-against the official SDK's wire types and its own tests, not yet against a third-party agent. CI
+not against the ecosystem. The six workspace crates share one version. A2A was checked by hand against
+the official Python SDK (`a2a-sdk` 1.2.2) in both directions over both bindings — every method,
+streaming, push, the extended card, cancel, hops and asking the caller — but that run is not in CI. CI
 runs fmt, clippy at `-D warnings`, and the full suite on Linux, macOS and Windows, plus MSRV
 (1.88, edition 2024).
 
