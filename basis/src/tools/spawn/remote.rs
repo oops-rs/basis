@@ -9,7 +9,7 @@
 //! here is written in `spawn`'s grammar, and none of them mentions an id.
 
 use mentra::a2a::{
-    A2aError as ClientError, A2aExchange, A2aExchangeError, A2aRequest, A2aRpcError,
+    A2aError as ClientError, A2aExchange, A2aExchangeError, A2aRequest, A2aRpcError, A2aSend,
     A2aStillWorking, A2aSubmitted, is_settled, remote_output, remote_reply, settle as settle_task,
     submit, types::TaskState,
 };
@@ -161,9 +161,7 @@ pub(super) async fn delegate(
 /// sends nothing.
 fn request(name: &str, body: &str, conversation: &Conversation) -> Result<A2aRequest, String> {
     match (&conversation.outstanding, body.is_empty()) {
-        (Some(outstanding), true) => Ok(A2aRequest::Resume {
-            task_id: outstanding.task_id.clone(),
-        }),
+        (Some(outstanding), true) => Ok(A2aRequest::resume(&outstanding.task_id)),
         (None, true) => Err(format!(
             "`{name}` has nothing outstanding to wait on; write `@{name} <task>` to hand it one"
         )),
@@ -177,17 +175,25 @@ fn request(name: &str, body: &str, conversation: &Conversation) -> Result<A2aReq
             "`{name}` is still working on the last task you handed it, and takes one task at a \
              time; write `@{name}` alone to keep waiting for that one first"
         )),
-        (Some(outstanding), false) => Ok(A2aRequest::Send {
-            text: body.to_string(),
-            task_id: Some(outstanding.task_id.clone()),
-            context_id: conversation.context_id.clone(),
-        }),
-        (None, false) => Ok(A2aRequest::Send {
-            text: body.to_string(),
-            task_id: None,
-            context_id: conversation.context_id.clone(),
-        }),
+        (Some(outstanding), false) => Ok(send(
+            body,
+            Some(&outstanding.task_id),
+            conversation.context_id.as_deref(),
+        )),
+        (None, false) => Ok(send(body, None, conversation.context_id.as_deref())),
     }
+}
+
+/// A message continuing `context_id`, answering `task_id` when it is set.
+fn send(body: &str, task_id: Option<&str>, context_id: Option<&str>) -> A2aRequest {
+    let mut message = A2aSend::new(body);
+    if let Some(task_id) = task_id {
+        message = message.with_task_id(task_id);
+    }
+    if let Some(context_id) = context_id {
+        message = message.with_context_id(context_id);
+    }
+    message.into()
 }
 
 /// Where the conversation stands after this exchange, and what the model

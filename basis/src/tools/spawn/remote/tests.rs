@@ -50,11 +50,7 @@ fn outstanding(waiting_for: Waiting) -> Conversation {
 fn a_first_task_opens_a_conversation() {
     assert_eq!(
         request(AGENT, "look at this diff", &Conversation::default()),
-        Ok(A2aRequest::Send {
-            text: "look at this diff".to_string(),
-            task_id: None,
-            context_id: None,
-        })
+        Ok(send("look at this diff", None, None))
     );
 }
 
@@ -67,11 +63,7 @@ fn a_later_task_continues_the_same_conversation() {
 
     assert_eq!(
         request(AGENT, "and this one", &settled),
-        Ok(A2aRequest::Send {
-            text: "and this one".to_string(),
-            task_id: None,
-            context_id: Some("context-1".to_string()),
-        })
+        Ok(send("and this one", None, Some("context-1")))
     );
 }
 
@@ -79,9 +71,7 @@ fn a_later_task_continues_the_same_conversation() {
 fn the_agent_named_alone_waits_on_its_outstanding_task() {
     assert_eq!(
         request(AGENT, "", &outstanding(Waiting::Agent)),
-        Ok(A2aRequest::Resume {
-            task_id: "task-1".to_string()
-        })
+        Ok(A2aRequest::resume("task-1"))
     );
 }
 
@@ -106,11 +96,11 @@ fn a_new_task_while_one_is_working_is_refused_not_sent() {
 fn text_for_an_agent_waiting_on_input_answers_its_question() {
     assert_eq!(
         request(AGENT, "yes, the main branch", &outstanding(Waiting::Input)),
-        Ok(A2aRequest::Send {
-            text: "yes, the main branch".to_string(),
-            task_id: Some("task-1".to_string()),
-            context_id: Some("context-1".to_string()),
-        })
+        Ok(send(
+            "yes, the main branch",
+            Some("task-1"),
+            Some("context-1")
+        ))
     );
 }
 
@@ -317,11 +307,7 @@ async fn a_removed_agent_is_refused_by_name_and_continues_when_it_comes_back() {
             "and this one",
             &agents.conversation("agent-1", AGENT, false)
         ),
-        Ok(A2aRequest::Send {
-            text: "and this one".to_string(),
-            task_id: None,
-            context_id: Some("context-1".to_string()),
-        }),
+        Ok(send("and this one", None, Some("context-1"))),
         "the same name, the same conversation"
     );
 }
@@ -342,9 +328,7 @@ async fn an_outstanding_task_follows_its_agent_to_a_new_address() {
     assert_eq!(client.card_url().port(), Some(moved_to));
     assert_eq!(
         request(AGENT, "", &agents.conversation("agent-1", AGENT, false)),
-        Ok(A2aRequest::Resume {
-            task_id: "task-1".to_string()
-        }),
+        Ok(A2aRequest::resume("task-1")),
         "`@reviewer` alone waits on the same task, now asked of the new address"
     );
 }
