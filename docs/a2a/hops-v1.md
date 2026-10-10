@@ -29,7 +29,8 @@ A message carries, in its `metadata`, under the extension's URI:
 }
 ```
 
-- `hop` (required in the object): a non-negative integer, the number of
+- `hop` (required in the object): a non-negative integral number — `2`, or
+  `2.0` as a protobuf `Struct` writes every number — the number of
   agent-to-agent hands the message is from a top-level caller.
 - `deadline` (optional): an RFC 3339 timestamp after which the sender no
   longer waits for the answer.
@@ -64,6 +65,6 @@ and its own deadline, if it has one.
 - The task's own delegations are the next hop: they send `hop` + 1 and the
   task's effective deadline, as a client above.
 
-A malformed object — a `hop` that is not a non-negative integer, a `deadline`
+A malformed object — a `hop` that is not a non-negative integral number, a `deadline`
 that is not RFC 3339 — is refused with `InvalidParams` rather than read as
 absent.

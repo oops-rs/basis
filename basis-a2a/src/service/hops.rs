@@ -55,8 +55,7 @@ pub(crate) fn inbound(message: &Message) -> Result<Inbound, A2AError> {
     };
     let hop = value
         .get("hop")
-        .and_then(Value::as_u64)
-        .and_then(|hop| u32::try_from(hop).ok())
+        .and_then(integral)
         .ok_or_else(|| malformed("a non-negative integer `hop`"))?;
     let deadline_ms = match value.get("deadline") {
         None | Some(Value::Null) => None,
@@ -81,6 +80,19 @@ pub(crate) fn check_cap(inbound: Inbound, cap: u32) -> Result<(), A2AError> {
         )));
     }
     Ok(())
+}
+
+/// A hop count as a JSON number: `2`, or `2.0`. A message's metadata is a
+/// `google.protobuf.Struct`, whose only number is a double, so every
+/// proto-based client — the official SDKs among them — writes `2.0`.
+/// Refusing that would refuse them all; a fraction, a negative, or anything
+/// past `u32` is still refused.
+fn integral(value: &Value) -> Option<u32> {
+    if let Some(hop) = value.as_u64() {
+        return u32::try_from(hop).ok();
+    }
+    let hop = value.as_f64()?;
+    (hop.fract() == 0.0 && (0.0..=f64::from(u32::MAX)).contains(&hop)).then_some(hop as u32)
 }
 
 /// The deadline a task is given: its own, clamped to what its caller has
@@ -137,6 +149,9 @@ mod tests {
         assert_eq!(read.deadline_ms, Some(1_791_633_600_000));
         for bad in [
             json!({"hop": -1}),
+            json!({"hop": -1.0}),
+            json!({"hop": 2.5}),
+            json!({"hop": 5e9}),
             json!({"hop": "two"}),
             json!({}),
             json!({"hop": 1, "deadline": "tomorrow"}),
@@ -147,6 +162,14 @@ mod tests {
                 "{bad}"
             );
         }
+    }
+
+    #[test]
+    fn a_hop_a_protobuf_client_wrote_as_a_double_is_read() {
+        // `Message.metadata` is a `google.protobuf.Struct`: its only number
+        // is a double, so the official SDKs send `2.0`.
+        let read = inbound(&message(Some(json!({"hop": 2.0})))).unwrap();
+        assert_eq!(read.hop, 2);
     }
 
     #[test]
