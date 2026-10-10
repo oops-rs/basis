@@ -207,12 +207,16 @@ impl RemoteAgents {
         }
     }
 
-    /// Makes `roster` the set every reader sees from now on.
-    fn swap(&self, roster: Roster) {
-        *self
+    /// Makes what `next` builds from the set as it stands *now* the set every
+    /// reader sees from now on — decided under the write lock, so nothing
+    /// installed meanwhile (a retry's client, [`retry`]) is overwritten by a
+    /// view taken before it.
+    fn swap_with(&self, next: impl FnOnce(&Roster) -> Roster) {
+        let mut roster = self
             .roster
             .write()
-            .unwrap_or_else(|poisoned| poisoned.into_inner()) = Arc::new(roster);
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
+        *roster = Arc::new(next(&roster));
     }
 
     /// The set as it stands now. Cheap — one `Arc` clone — and consistent: a

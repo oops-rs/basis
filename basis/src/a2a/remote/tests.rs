@@ -3,6 +3,8 @@
 //! And the set they are kept beside is live (ADR-0031): a reload reports what
 //! it changed by name and keeps every conversation whatever it did.
 
+use std::time::{Duration, Instant};
+
 use super::*;
 use crate::a2a::A2aReload;
 
@@ -155,5 +157,83 @@ fn a_reload_report_names_no_value_it_read() {
     assert_eq!(
         format!("{report:?}"),
         "A2aReload { added: [\"nous\"], removed: [], changed: [], refreshed: [], unreachable: [] }"
+    );
+}
+
+#[tokio::test]
+async fn a_client_a_retry_installs_mid_reload_survives_the_reload() {
+    // The reload's card fetch is held; meanwhile a retry reaches the agent
+    // and installs a client; then the reload's fetch fails. The reload must
+    // not put back the `None` it saw before it started.
+    let port = testing::free_port();
+    let stalling = testing::serve_card_stalling_first(port);
+    let agents = Arc::new(RemoteAgents::with_roster(
+        Roster {
+            agents: vec![Arc::new(RemoteAgent::new(down("reviewer", port), None))],
+            removed: BTreeSet::new(),
+        },
+        None,
+    ));
+
+    let reloading = tokio::spawn({
+        let agents = Arc::clone(&agents);
+        async move { agents.reload(vec![down("reviewer", port)]).await }
+    });
+    let first_arrived = stalling.first_arrived;
+    tokio::task::spawn_blocking(move || first_arrived.recv_timeout(Duration::from_secs(5)))
+        .await
+        .unwrap()
+        .expect("the reload's fetch reached the agent");
+
+    *agents.snapshot().agents[0].attempted.lock().unwrap() = Instant::now() - 2 * A2A_RETRY_BACKOFF;
+    agents
+        .reach("reviewer")
+        .await
+        .expect("the retry reaches it");
+    let _ = stalling.release.send(());
+    let report = reloading.await.unwrap();
+
+    assert_eq!(
+        report.unreachable,
+        ["reviewer"],
+        "the reload's own fetch failed"
+    );
+    assert!(
+        agents
+            .snapshot()
+            .get("reviewer")
+            .unwrap()
+            .client()
+            .is_some(),
+        "and the retry's client stands"
+    );
+}
+
+#[tokio::test]
+async fn a_failed_fetch_never_keeps_a_connection_made_with_another_configuration() {
+    let port = testing::free_port();
+    testing::serve_card(port);
+    let agents = RemoteAgents::connect(vec![down("reviewer", port)], None).await;
+    assert!(
+        agents
+            .snapshot()
+            .get("reviewer")
+            .unwrap()
+            .client()
+            .is_some()
+    );
+
+    agents
+        .reload(vec![down("reviewer", testing::free_port())])
+        .await;
+
+    assert!(
+        agents
+            .snapshot()
+            .get("reviewer")
+            .unwrap()
+            .client()
+            .is_none(),
+        "a moved agent is not reached at its old address"
     );
 }

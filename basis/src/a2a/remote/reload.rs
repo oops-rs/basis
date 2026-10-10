@@ -10,6 +10,8 @@
 
 use std::{collections::BTreeSet, sync::Arc};
 
+use mentra::a2a::A2aClient;
+
 use super::{RemoteAgent, RemoteAgents, Roster, connect_each, warned};
 use crate::a2a::{A2aAgent, A2aReload};
 
@@ -17,9 +19,7 @@ use crate::a2a::{A2aAgent, A2aReload};
 enum Fate {
     Added,
     Changed,
-    /// Configured as before; carries what it had, so a failed card fetch can
-    /// keep a working connection.
-    Unchanged(Arc<RemoteAgent>),
+    Unchanged,
 }
 
 impl RemoteAgents {
@@ -30,6 +30,12 @@ impl RemoteAgents {
     /// does), so the difference is always against the set the previous one
     /// left. The swap happens once, after every card is in, so a reader sees
     /// the old set or the new one and never a mixture.
+    ///
+    /// A retry is not serialized with a reload, and may reach an agent while
+    /// this one is connecting. So what a failed card fetch keeps is decided at
+    /// the swap, against the set as it is then: an agent whose fetch failed
+    /// keeps whatever connection the current set holds for it, as long as that
+    /// connection was made with the configuration still wanted.
     pub(crate) async fn reload(&self, agents: Vec<A2aAgent>) -> A2aReload {
         let before = self.snapshot();
 
@@ -37,7 +43,7 @@ impl RemoteAgents {
             .iter()
             .map(|agent| match before.get(agent.name()) {
                 None => Fate::Added,
-                Some(had) if had.agent.connects_like(agent) => Fate::Unchanged(Arc::clone(had)),
+                Some(had) if had.agent.connects_like(agent) => Fate::Unchanged,
                 Some(_) => Fate::Changed,
             })
             .collect();
@@ -60,32 +66,45 @@ impl RemoteAgents {
             .cloned()
             .collect();
 
-        let mut connected = Vec::with_capacity(agents.len());
+        let mut fetched = Vec::with_capacity(agents.len());
         for ((agent, client), fate) in connect_each(agents).await.into_iter().zip(fates) {
             let name = agent.name().to_string();
-            let reached = client.is_ok();
-            let client = warned(&name, client).or_else(|| match &fate {
-                // The configuration it was connected with is the one still
-                // wanted, so the connection it has is still the right one.
-                Fate::Unchanged(had) => had.client.clone(),
-                Fate::Added | Fate::Changed => None,
-            });
             match fate {
                 Fate::Added => report.added.push(name.clone()),
                 Fate::Changed => report.changed.push(name.clone()),
-                Fate::Unchanged(_) => report.refreshed.push(name.clone()),
+                Fate::Unchanged => report.refreshed.push(name.clone()),
             }
-            if !reached {
-                report.unreachable.push(name);
+            if client.is_err() {
+                report.unreachable.push(name.clone());
             }
-            connected.push(Arc::new(RemoteAgent::new(agent, client)));
+            fetched.push((agent, warned(&name, client)));
         }
 
-        self.swap(Roster {
-            agents: connected,
+        self.swap_with(|current| Roster {
+            agents: fetched
+                .into_iter()
+                .map(|(agent, client)| settled(current, agent, client))
+                .collect(),
             removed,
         });
         self.changed();
         report
     }
+}
+
+/// The entry one reloaded agent gets, given the set as it is at the swap.
+///
+/// A fresh card wins. Without one, the current entry stands when it was made
+/// with the configuration still wanted — its connection, whether this reload
+/// saw it or a retry installed it since, still reaches the right agent the
+/// right way. Otherwise there is nothing to send to.
+fn settled(current: &Roster, agent: A2aAgent, client: Option<Arc<A2aClient>>) -> Arc<RemoteAgent> {
+    if client.is_none()
+        && let Some(had) = current.get(agent.name())
+        && had.client.is_some()
+        && had.agent.connects_like(&agent)
+    {
+        return Arc::clone(had);
+    }
+    Arc::new(RemoteAgent::new(agent, client))
 }
