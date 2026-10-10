@@ -12,7 +12,7 @@ use std::{sync::Arc, time::Instant};
 
 use serde_json::Value;
 
-use crate::approve::PromptHost;
+use crate::{approve::PromptHost, stop::Stop};
 
 /// Shown a task's events as they are journaled. `basis-cli`'s own terminal
 /// renderer is the first implementation, but the trait carries no opinion
@@ -44,6 +44,9 @@ pub(crate) struct DriveContext {
     /// child owes the scope rule a finished subtree, whatever the caller's
     /// patience.
     waiter_deadline: Option<Instant>,
+    /// The host's [`Stop`]: once it is flipped, nothing more is driven or
+    /// recorded under this context, and the turn in flight is abandoned.
+    stop: Option<Stop>,
 }
 
 impl DriveContext {
@@ -55,6 +58,27 @@ impl DriveContext {
             live,
             prompt_host,
             waiter_deadline: None,
+            stop: None,
+        }
+    }
+
+    /// This context, answering to the host's `stop`.
+    #[must_use]
+    pub(crate) fn stopping_on(self, stop: Option<Stop>) -> Self {
+        Self { stop, ..self }
+    }
+
+    /// Whether the host this context drives for is going away.
+    pub(crate) fn is_stopping(&self) -> bool {
+        self.stop.as_ref().is_some_and(Stop::is_stopping)
+    }
+
+    /// Resolves once the host is going away; never, for a host with no
+    /// [`Stop`].
+    pub(crate) async fn stopping(&self) {
+        match &self.stop {
+            Some(stop) => stop.stopping().await,
+            None => std::future::pending().await,
         }
     }
 
@@ -74,12 +98,14 @@ impl DriveContext {
     /// deadline is dropped with the sink: the settle pass runs the child to
     /// its record because the parent may not settle before it does
     /// (ADR-0019's ordering constraint), and a child that yielded here would
-    /// only be re-attached by the next pass of the same loop.
+    /// only be re-attached by the next pass of the same loop. The host's
+    /// [`Stop`] is kept: a process going away stops driving children too.
     pub(crate) fn hidden(&self) -> Self {
         Self {
             live: None,
             prompt_host: self.prompt_host.clone(),
             waiter_deadline: None,
+            stop: self.stop.clone(),
         }
     }
 

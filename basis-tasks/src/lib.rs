@@ -57,6 +57,7 @@ mod lock;
 mod policy;
 mod spec;
 mod state;
+mod stop;
 mod tasks;
 mod watch;
 
@@ -72,6 +73,7 @@ pub use state::{
     InboxRecord, MAX_PROMPT, MAX_TASKS, MessageRecord, MessageReply, MessageState, Terminal,
     TerminalRecord, now_ms,
 };
+pub use stop::Stop;
 pub use tasks::{TaskSummary, probe_state};
 pub use watch::{EventCursor, WatchRecord};
 

@@ -9,9 +9,8 @@
 use std::{
     io::{BufRead, BufReader, Read, Write},
     net::{TcpListener, TcpStream},
-    path::Path,
     process::{Command, Stdio},
-    sync::{Arc, Mutex},
+    sync::{Arc, Mutex, OnceLock},
     thread,
     time::{Duration, Instant},
 };
@@ -160,14 +159,22 @@ fn read_http_request(stream: &mut TcpStream) -> String {
     String::from_utf8_lossy(&bytes).into_owned()
 }
 
-/// Keeps both lives off the developer's own credentials and config.
-fn isolate_environment(config: &Path) {
-    // SAFETY: set before any thread of this test reads the environment, and
-    // every test here wants the same values.
-    unsafe {
-        std::env::set_var("BASIS_API_KEY", "test-key");
-        std::env::set_var("BASIS_CONFIG_DIR", config);
-    }
+/// Keeps both lives off the developer's own credentials and config: one
+/// empty config directory for the whole test process, set once. A first
+/// life inherits it through its environment.
+fn isolate_environment() {
+    static CONFIG: OnceLock<tempfile::TempDir> = OnceLock::new();
+    CONFIG.get_or_init(|| {
+        let config = tempfile::tempdir().unwrap();
+        // SAFETY: set once, before any test here reads the environment.
+        unsafe {
+            std::env::set_var("BASIS_API_KEY", "test-key");
+            if std::env::var_os(FIRST_LIFE).is_none() {
+                std::env::set_var("BASIS_CONFIG_DIR", config.path());
+            }
+        }
+        config
+    });
 }
 
 fn spec(prompt: &str, model: &str) -> RunSpec {
@@ -188,7 +195,7 @@ fn first_life_that_dies_mid_tool_round() {
     };
     let setup: Value = serde_json::from_str(&setup).unwrap();
     let field = |name: &str| setup[name].as_str().unwrap().to_string();
-    isolate_environment(Path::new(&field("config")));
+    isolate_environment();
     let tasks = Tasks::open_at(field("data"), field("workspace")).unwrap();
     let handle = tasks
         .spawn(spec(&field("prompt"), &field("model")))
@@ -208,7 +215,6 @@ struct Crashed {
     tasks: Tasks,
     workspace: tempfile::TempDir,
     _data: tempfile::TempDir,
-    _config: tempfile::TempDir,
 }
 
 /// Runs the first life against `model` until the endpoint has seen
@@ -216,10 +222,9 @@ struct Crashed {
 fn crash_after(model: &ScriptedEndpoint, message: Option<&str>, requests: usize) -> Crashed {
     let data = tempfile::tempdir().unwrap();
     let workspace = tempfile::tempdir().unwrap();
-    let config = tempfile::tempdir().unwrap();
-    isolate_environment(config.path());
+    isolate_environment();
     let setup = json!({
-        "data": data.path(), "workspace": workspace.path(), "config": config.path(),
+        "data": data.path(), "workspace": workspace.path(),
         "model": model.base_url, "prompt": "write the note", "message": message,
     });
     let mut child = Command::new(std::env::current_exe().unwrap())
@@ -254,7 +259,6 @@ fn crash_after(model: &ScriptedEndpoint, message: Option<&str>, requests: usize)
         tasks,
         workspace,
         _data: data,
-        _config: config,
     }
 }
 
@@ -352,4 +356,70 @@ async fn a_message_cut_off_mid_tool_round_gets_its_reply_from_the_continued_turn
         1,
         "the message is not sent a second time"
     );
+}
+
+#[tokio::test]
+async fn a_host_that_stops_mid_turn_records_nothing_and_leaves_the_task_resumable() {
+    let model = ScriptedEndpoint::start(vec![Reply::Hold, Reply::Text("after the stop")]);
+    let data = tempfile::tempdir().unwrap();
+    let workspace = tempfile::tempdir().unwrap();
+    isolate_environment();
+    let stop = basis_tasks::Stop::new();
+    let tasks = Tasks::open_at(data.path(), workspace.path())
+        .unwrap()
+        .with_stop(stop.clone());
+    let handle = tasks
+        .spawn(spec("write the note", &model.base_url))
+        .unwrap();
+
+    let waiting = {
+        let (tasks, handle) = (tasks.clone(), handle.clone());
+        tokio::spawn(async move { tasks.wait(&handle, None, Duration::MAX, None).await })
+    };
+    while model.requests().is_empty() {
+        tokio::time::sleep(Duration::from_millis(20)).await;
+    }
+    stop.stop();
+    let outcome = tokio::time::timeout(Duration::from_secs(10), waiting)
+        .await
+        .expect("a stopped host stops waiting at once, mid-turn")
+        .unwrap()
+        .unwrap();
+
+    assert_eq!(outcome, WaitOutcome::TimedOut { attached: false });
+    assert!(
+        tasks.terminal(&handle).unwrap().is_none(),
+        "nothing about the abandoned turn was recorded"
+    );
+    assert!(!tasks.is_attached(&handle).unwrap(), "the lock is released");
+    assert!(
+        matches!(
+            tasks
+                .wait(&handle, None, Duration::from_secs(1), None)
+                .await,
+            Ok(WaitOutcome::TimedOut { .. })
+        ),
+        "a stopped host drives nothing more"
+    );
+    assert_eq!(model.requests().len(), 1);
+
+    // The next host picks the task up: the turn committed nothing, so it
+    // rolled back, and the prompt is asked once more.
+    let next = Tasks::open_at(data.path(), workspace.path()).unwrap();
+    let WaitOutcome::Terminal(record) = next
+        .wait(&handle, None, Duration::from_secs(60), None)
+        .await
+        .unwrap()
+    else {
+        panic!("the next host settles the task");
+    };
+    assert_eq!(
+        record.terminal,
+        Some(Terminal::Succeeded {
+            result: "after the stop".to_string()
+        })
+    );
+    let requests = model.requests();
+    assert_eq!(requests.len(), 2);
+    assert_eq!(occurrences(&requests[1], "write the note"), 1);
 }
