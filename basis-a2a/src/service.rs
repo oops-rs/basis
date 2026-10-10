@@ -24,12 +24,16 @@ mod hops;
 mod parts;
 mod push;
 mod send;
+mod streams;
 
 pub(crate) use ask::{APPROVAL_EXTENSION, Asked};
 pub use hops::DEFAULT_HOP_CAP;
 pub(crate) use hops::HOPS_EXTENSION;
 pub(crate) use parts::INPUT_MODES;
 pub(crate) use push::Push;
+pub use streams::DEFAULT_STREAM_CAP;
+pub(crate) use streams::StreamSlot;
+use streams::Streams;
 
 use std::{
     collections::HashMap,
@@ -85,6 +89,13 @@ pub enum OpenError {
     /// authenticated callers, and a server with no token has none.
     #[error("an extended card needs a token to serve it to; configure one")]
     ExtendedCardWithoutToken,
+    /// Push notifications or asking the caller, on a server where every
+    /// local process is the same anonymous caller.
+    #[error(
+        "{0} on a server with no token lets any local process — or a web page that reaches it — \
+         use it; configure a token, or trust anonymous callers explicitly"
+    )]
+    NeedsToken(&'static str),
 }
 
 /// One served agent's A2A operations. Cheap to clone; every clone is the
@@ -107,6 +118,10 @@ struct Inner {
     /// Present when push notifications are on.
     push: Option<Push>,
     hop_cap: u32,
+    live_task_quota: usize,
+    streams: Arc<Streams>,
+    /// Serializes the live-task quota check with the insertion it admits.
+    admission: tokio::sync::Mutex<()>,
     /// Every task this process is driving. Absent for a task nobody here is
     /// driving.
     drivers: Mutex<HashMap<String, Driver>>,
@@ -130,10 +145,21 @@ impl A2aService {
             push_notifications,
             private_webhooks,
             hop_cap,
+            trust_anonymous,
+            live_task_quota,
+            stream_cap,
         } = config;
         let principals = Principals::new(tokens)?;
         if extended_card.is_some() && !principals.any() {
             return Err(OpenError::ExtendedCardWithoutToken);
+        }
+        if !principals.any() && !trust_anonymous {
+            if push_notifications {
+                return Err(OpenError::NeedsToken("push notifications"));
+            }
+            if matches!(approval, InboundApproval::AskCaller { .. }) {
+                return Err(OpenError::NeedsToken("asking the caller"));
+            }
         }
         let tasks = match data_dir {
             Some(data_dir) => Tasks::open_at(data_dir, workspace)?,
@@ -165,6 +191,9 @@ impl A2aService {
                 extended_card,
                 push,
                 hop_cap,
+                live_task_quota,
+                streams: Streams::new(stream_cap),
+                admission: tokio::sync::Mutex::new(()),
                 drivers: Mutex::new(HashMap::new()),
             }),
         };
@@ -229,8 +258,10 @@ impl A2aService {
         caller: &Principal,
         request: SendMessageRequest,
     ) -> Result<BoxStream<'static, StreamResponse>, A2AError> {
+        // Taken first, so a caller at its cap starts no task it cannot watch.
+        let slot = self.inner.streams.take(caller)?;
         let accepted = self.accept(caller, request).await?;
-        stream::follow(self.clone(), accepted.record, accepted.history_length)
+        stream::follow(self.clone(), accepted.record, accepted.history_length, slot)
     }
 
     /// `GetTask`.
@@ -368,7 +399,8 @@ impl A2aService {
                 record.id
             )));
         }
-        stream::follow(self.clone(), record, None)
+        let slot = self.inner.streams.take(caller)?;
+        stream::follow(self.clone(), record, None, slot)
     }
 
     /// Where `record`'s task stands now, as the status update that says so,

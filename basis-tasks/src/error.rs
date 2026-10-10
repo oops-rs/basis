@@ -41,6 +41,7 @@ pub enum Hint {
 pub struct Error {
     message: String,
     invalid_reference: bool,
+    task_limit: bool,
     hint: Option<Hint>,
 }
 
@@ -49,7 +50,17 @@ impl Error {
         Self {
             message: message.into(),
             invalid_reference: false,
+            task_limit: false,
             hint: None,
+        }
+    }
+
+    /// `spawn` refusing because the workspace already holds
+    /// [`MAX_TASKS`](crate::MAX_TASKS) tasks.
+    pub(crate) fn task_limit(message: impl Into<String>) -> Self {
+        Self {
+            task_limit: true,
+            ..Self::new(message)
         }
     }
 
@@ -62,6 +73,7 @@ impl Error {
         Self {
             message: message.into(),
             invalid_reference: true,
+            task_limit: false,
             hint: None,
         }
     }
@@ -87,6 +99,13 @@ impl Error {
 
     /// The next step this error names, when it names one unambiguously —
     /// see [`Hint`].
+    /// Whether `spawn` refused because the workspace is full — a condition
+    /// a host serving other callers reports as such, not as its own fault,
+    /// and that only archiving settled tasks clears.
+    pub fn is_task_limit(&self) -> bool {
+        self.task_limit
+    }
+
     pub fn hint(&self) -> Option<&Hint> {
         self.hint.as_ref()
     }

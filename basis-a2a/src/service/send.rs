@@ -2,7 +2,7 @@
 //! continues, and spawning the task that answers it.
 
 use a2a::{A2AError, Message, SendMessageRequest};
-use basis_tasks::{Continuation, DEFAULT_DEADLINE, Hint, RunSpec, now_ms};
+use basis_tasks::{Continuation, DEFAULT_DEADLINE, Hint, MAX_TASKS, RunSpec, now_ms};
 
 use super::{
     A2aService,
@@ -77,6 +77,25 @@ impl A2aService {
             self.check_webhook(webhook).await?;
         }
 
+        // Held from the quota check to the record's insertion, so two sends
+        // at once cannot both take the last place.
+        let _admission = self.inner.admission.lock().await;
+        // Read off `basis-tasks` too: a task whose terminal is written has
+        // settled, whether or not its driver has recorded so yet.
+        let live = self
+            .inner
+            .index
+            .unsettled_owned(caller)
+            .iter()
+            .filter(|record| !matches!(self.tasks().terminal(&record.handle()), Ok(Some(_))))
+            .count();
+        if live >= self.inner.live_task_quota {
+            return Err(A2AError::unsupported_operation(format!(
+                "principal {} has {live} tasks still running, the most this agent runs at once \
+                 for one caller; wait for one to settle, or cancel one",
+                caller.name()
+            )));
+        }
         // Clamped here, at spawn, because `basis-tasks` counts a task's
         // deadline from the moment it is minted.
         let accepted_ms = now_ms();
@@ -105,6 +124,15 @@ impl A2aService {
                 Some(Hint::Wait(_)) => A2AError::unsupported_operation(
                     "a task in this context is still working; wait for it to settle, then send again",
                 ),
+                // The operator's to clear, and said so to them in full; the
+                // caller is told what happened and not where on disk.
+                _ if error.is_task_limit() => {
+                    eprintln!("basis-a2a: {error}");
+                    A2AError::unsupported_operation(format!(
+                        "this agent holds the most tasks its workspace can ({MAX_TASKS}); its \
+                         operator must archive settled ones before it takes more"
+                    ))
+                }
                 _ => internal(error),
             })?;
 

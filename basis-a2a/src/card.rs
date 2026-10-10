@@ -8,6 +8,8 @@
 
 use std::collections::HashMap;
 
+use serde_json::{Map, Value, json};
+
 use a2a::{
     A2AError, AgentCapabilities, AgentCard, AgentExtension, AgentInterface, AgentSkill,
     HttpAuthSecurityScheme, SecurityScheme, TRANSPORT_PROTOCOL_HTTP_JSON,
@@ -128,6 +130,46 @@ fn extensions(features: Features) -> Option<Vec<AgentExtension>> {
     (!extensions.is_empty()).then_some(extensions)
 }
 
+/// `card` as it goes on the wire: the spec's v1.0 JSON, which is
+/// `a2a-lf`'s serialization except for security requirements.
+///
+/// The v1.0 proto has `SecurityRequirement { map<string, StringList>
+/// schemes }`, so a requirement is `{"schemes": {"bearer": {"list": []}}}`.
+/// `a2a-lf` 0.4.1 models it as a bare map and writes `{"bearer": []}`,
+/// which a strict client either drops — and then believes no credential is
+/// needed — or refuses to parse. Every card this server answers with goes
+/// through here, the card's own requirements and every skill's alike.
+pub(crate) fn to_wire(card: &AgentCard) -> Value {
+    let mut wire = serde_json::to_value(card).unwrap_or_default();
+    wrap_requirements(&mut wire);
+    if let Some(skills) = wire.get_mut("skills").and_then(Value::as_array_mut) {
+        skills.iter_mut().for_each(wrap_requirements);
+    }
+    wire
+}
+
+fn wrap_requirements(holder: &mut Value) {
+    let Some(requirements) = holder
+        .get_mut("securityRequirements")
+        .and_then(Value::as_array_mut)
+    else {
+        return;
+    };
+    for requirement in requirements {
+        let Value::Object(schemes) = requirement else {
+            continue;
+        };
+        if schemes.contains_key("schemes") {
+            continue;
+        }
+        let wrapped: Map<String, Value> = std::mem::take(schemes)
+            .into_iter()
+            .map(|(scheme, scopes)| (scheme, json!({"list": scopes})))
+            .collect();
+        *requirement = json!({"schemes": wrapped});
+    }
+}
+
 /// Both cards one server serves, built once from its service and endpoint.
 #[derive(Debug, Clone)]
 pub(crate) struct Cards {
@@ -205,6 +247,43 @@ mod tests {
         assert_eq!(card.capabilities.extended_agent_card, Some(false));
         assert!(card.security_schemes.is_none());
         assert_eq!(card.skills.len(), 1, "a card always lists a skill");
+    }
+
+    #[test]
+    fn security_requirements_go_on_the_wire_in_the_v1_shape() {
+        let skill = AgentSkill {
+            id: "audit".into(),
+            name: "Audit".into(),
+            description: "Audits.".into(),
+            tags: vec![],
+            examples: None,
+            input_modes: None,
+            output_modes: None,
+            security_requirements: Some(vec![HashMap::from([(
+                BEARER.to_string(),
+                vec!["audit".to_string()],
+            )])]),
+        };
+        let identity = AgentIdentity::new("helper", "Answers questions.").with_skill(skill);
+        let features = Features {
+            authenticated: true,
+            ..Features::default()
+        };
+        let wire = to_wire(&build(&identity, "http://127.0.0.1:1/", features));
+        assert_eq!(
+            wire["securityRequirements"],
+            json!([{"schemes": {"bearer": {"list": []}}}])
+        );
+        assert_eq!(
+            wire["skills"][0]["securityRequirements"],
+            json!([{"schemes": {"bearer": {"list": ["audit"]}}}])
+        );
+        assert_eq!(
+            wire["securitySchemes"]["bearer"]["httpAuthSecurityScheme"]["scheme"],
+            "Bearer"
+        );
+        let back: AgentCard = serde_json::from_value(wire).expect("a2a-lf reads it back");
+        assert!(back.security_requirements.unwrap()[0].contains_key(BEARER));
     }
 
     #[test]

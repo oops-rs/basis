@@ -133,6 +133,12 @@ impl RunDefaults {
     }
 }
 
+/// How many unsettled tasks one principal may have at once when the
+/// operator names no other number. The workspace holds at most
+/// `basis_tasks::MAX_TASKS` (1024), settled ones included; a quota per
+/// caller keeps any one of them from filling it for the rest.
+pub const DEFAULT_LIVE_TASK_QUOTA: usize = 32;
+
 /// One served agent.
 #[derive(Debug, Clone)]
 pub struct ServeConfig {
@@ -148,6 +154,9 @@ pub struct ServeConfig {
     pub(crate) push_notifications: bool,
     pub(crate) private_webhooks: bool,
     pub(crate) hop_cap: u32,
+    pub(crate) trust_anonymous: bool,
+    pub(crate) live_task_quota: usize,
+    pub(crate) stream_cap: usize,
 }
 
 impl ServeConfig {
@@ -169,6 +178,9 @@ impl ServeConfig {
             push_notifications: false,
             private_webhooks: false,
             hop_cap: crate::DEFAULT_HOP_CAP,
+            trust_anonymous: false,
+            live_task_quota: DEFAULT_LIVE_TASK_QUOTA,
+            stream_cap: crate::DEFAULT_STREAM_CAP,
         }
     }
 
@@ -269,6 +281,44 @@ impl ServeConfig {
     #[must_use]
     pub fn with_hop_cap(self, hop_cap: u32) -> Self {
         Self { hop_cap, ..self }
+    }
+
+    /// Lets a server with no token serve push notifications and ask its
+    /// caller anyway. Without a token every local process is the one
+    /// anonymous caller, so any of them could register a webhook this server
+    /// then calls, or answer its questions; [`A2aService::open`] refuses
+    /// either feature on such a server unless the operator says, with this,
+    /// that every local process is trusted.
+    ///
+    /// [`A2aService::open`]: crate::A2aService::open
+    #[must_use]
+    pub fn with_trusted_anonymous_callers(self) -> Self {
+        Self {
+            trust_anonymous: true,
+            ..self
+        }
+    }
+
+    /// Lets each principal have at most `quota` tasks that have not
+    /// settled; a send past it is refused until one does. Defaults to
+    /// [`DEFAULT_LIVE_TASK_QUOTA`].
+    #[must_use]
+    pub fn with_live_task_quota(self, quota: usize) -> Self {
+        Self {
+            live_task_quota: quota,
+            ..self
+        }
+    }
+
+    /// Lets each principal hold at most `cap` streams open at once —
+    /// `SendStreamingMessage` and `SubscribeToTask` alike, on either binding.
+    /// Defaults to [`DEFAULT_STREAM_CAP`](crate::DEFAULT_STREAM_CAP).
+    #[must_use]
+    pub fn with_stream_cap(self, cap: usize) -> Self {
+        Self {
+            stream_cap: cap,
+            ..self
+        }
     }
 
     /// Keeps tasks under an explicit data root rather than the one

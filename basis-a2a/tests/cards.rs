@@ -21,8 +21,17 @@ fn skill() -> AgentSkill {
         examples: None,
         input_modes: None,
         output_modes: None,
-        security_requirements: None,
+        security_requirements: Some(vec![std::collections::HashMap::from([(
+            "bearer".to_string(),
+            vec!["audit".to_string()],
+        )])]),
     }
+}
+
+/// The v1.0 proto's `SecurityRequirement { map<string, StringList> schemes }`
+/// in JSON — the shape a strict client parses, pinned.
+fn bearer(scopes: &[&str]) -> Value {
+    json!([{"schemes": {"bearer": {"list": scopes}}}])
 }
 
 fn extended() -> ExtendedCard {
@@ -43,6 +52,7 @@ async fn an_extended_card_is_declared_and_served_on_both_bindings() {
         "{public}"
     );
     assert_eq!(public["skills"].as_array().unwrap().len(), 1);
+    assert_eq!(public["securityRequirements"], bearer(&[]), "{public}");
 
     let over_rpc = served.result("GetExtendedAgentCard", json!({})).await;
     assert_eq!(
@@ -52,6 +62,12 @@ async fn an_extended_card_is_declared_and_served_on_both_bindings() {
     let skills: Vec<&Value> = over_rpc["skills"].as_array().unwrap().iter().collect();
     assert_eq!(skills.len(), 2, "{over_rpc}");
     assert_eq!(skills[1]["id"], "audit");
+    assert_eq!(over_rpc["securityRequirements"], bearer(&[]), "{over_rpc}");
+    assert_eq!(
+        skills[1]["securityRequirements"],
+        bearer(&["audit"]),
+        "a skill's requirements take the same shape"
+    );
     assert_eq!(
         over_rpc["supportedInterfaces"], public["supportedInterfaces"],
         "the extended card describes the same agent"

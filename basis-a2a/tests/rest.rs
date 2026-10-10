@@ -187,3 +187,75 @@ async fn streams_are_bare_stream_responses_over_sse() {
     let error: Value = settled.json().await.unwrap();
     assert_eq!(reason(&error), "UNSUPPORTED_OPERATION");
 }
+
+#[tokio::test]
+async fn a_principal_holds_at_most_its_stream_cap() {
+    let served = Served::start_with(ScriptedEndpoint::start(true), |config| {
+        config.with_stream_cap(1)
+    })
+    .await;
+    let url = interface(&served).await;
+    let (_, sent) = rest(
+        &served,
+        Method::POST,
+        "/message:send",
+        Some(json!({
+            "message": user_message("slow", None),
+            "configuration": {"returnImmediately": true},
+        })),
+    )
+    .await;
+    let id = sent["task"]["id"].as_str().unwrap().to_string();
+    let subscribe = || {
+        served
+            .caller()
+            .request(Method::GET, &format!("{url}/tasks/{id}:subscribe"))
+            .send()
+    };
+
+    let open = subscribe().await.unwrap();
+    assert_eq!(open.status(), 200);
+    let second = subscribe().await.unwrap();
+    assert_eq!(second.status(), 400, "one stream is the cap");
+    let error: Value = second.json().await.unwrap();
+    assert!(
+        error["error"]["message"]
+            .as_str()
+            .unwrap()
+            .contains("streams open"),
+        "{error}"
+    );
+    let streamed = served
+        .call(
+            "SendStreamingMessage",
+            json!({"message": user_message("another", None)}),
+        )
+        .await;
+    assert_eq!(
+        streamed["error"]["code"],
+        basis_a2a::a2a::error_code::UNSUPPORTED_OPERATION,
+        "the cap counts both bindings and both methods"
+    );
+
+    // A stream that ends gives its place back.
+    served.model.release();
+    open.text().await.unwrap();
+    let (_, again) = rest(
+        &served,
+        Method::POST,
+        "/message:send",
+        Some(json!({
+            "message": user_message("next", None),
+            "configuration": {"returnImmediately": true},
+        })),
+    )
+    .await;
+    let next = again["task"]["id"].as_str().unwrap();
+    let reopened = served
+        .caller()
+        .request(Method::GET, &format!("{url}/tasks/{next}:subscribe"))
+        .send()
+        .await
+        .unwrap();
+    assert_ne!(reopened.status(), 400, "the place was given back");
+}
