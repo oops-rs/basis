@@ -930,15 +930,8 @@ impl WorkspaceBuilder {
         // because the set is live (ADR-0031) and a reload reads the same
         // sources this open did.
         #[cfg(feature = "a2a")]
-        let a2a = Arc::new(
-            LiveA2a::connect(
-                path.clone(),
-                self.a2a,
-                a2a_discovered,
-                runtime.a2a_conversations_dir().map(Path::to_path_buf),
-            )
-            .await,
-        );
+        let a2a =
+            Arc::new(LiveA2a::connect(path.clone(), self.a2a, a2a_discovered, &runtime).await);
 
         Ok(Workspace {
             // Compaction is two statements from two owners, joined here: the

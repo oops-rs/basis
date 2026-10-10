@@ -75,6 +75,7 @@ impl RemoteAgents {
         }
 
         self.swap(Roster { agents: connected });
+        self.changed();
         report
     }
 }

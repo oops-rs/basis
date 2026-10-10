@@ -12,8 +12,11 @@ use std::{
     sync::{Arc, RwLock},
 };
 
-use super::{A2aAgent, A2aConfig, A2aError, A2aReload, remote::RemoteAgents};
-use crate::event::ContextFile;
+use super::{
+    A2aAgent, A2aConfig, A2aError, A2aReload,
+    remote::{OnChange, RemoteAgents},
+};
+use crate::{event::ContextFile, runtime::Runtime};
 
 /// What a workspace open knows about its remote agents: where it looked, what
 /// it found there, and the live set it connected.
@@ -30,18 +33,23 @@ pub(crate) struct LiveA2a {
 }
 
 impl LiveA2a {
-    /// Connects what [`discovered`] found, and keeps what it took to find it.
+    /// Connects what [`discovered`] found on `runtime`, and keeps what it
+    /// took to find it.
     pub(crate) async fn connect(
         root: PathBuf,
         config: A2aConfig,
         (files, agents): (Vec<ContextFile>, Vec<A2aAgent>),
-        remembered_in: Option<PathBuf>,
+        runtime: &Arc<Runtime>,
     ) -> Self {
+        let remembered_in = runtime.a2a_conversations_dir().map(Path::to_path_buf);
+        let remote = RemoteAgents::connect(agents, remembered_in)
+            .await
+            .with_on_change(refresher(runtime));
         Self {
             root,
             config,
             files: RwLock::new(files),
-            remote: Arc::new(RemoteAgents::connect(agents, remembered_in).await),
+            remote: Arc::new(remote),
             reloading: tokio::sync::Mutex::new(()),
         }
     }
@@ -79,6 +87,23 @@ impl LiveA2a {
             .unwrap_or_else(|poisoned| poisoned.into_inner()) = files;
         Ok(report)
     }
+}
+
+/// Asks mentra to capture every registered tool's description again, so the
+/// next model request of every agent holding the set is told the set as it
+/// is (ADR-0031 §3).
+///
+/// Weak, because the set is held by the `spawn` copies mentra's registry owns:
+/// a strong runtime here would be a cycle through that registry, and the
+/// runtime would never drop — the reason `spawn` reads the agent ledger
+/// through its own `Arc` rather than the runtime's.
+fn refresher(runtime: &Arc<Runtime>) -> OnChange {
+    let runtime = Arc::downgrade(runtime);
+    Box::new(move || {
+        if let Some(runtime) = runtime.upgrade() {
+            runtime.mentra_runtime().refresh_tool_descriptors();
+        }
+    })
 }
 
 /// Discovers the remote agents a workspace can reach, and which files said

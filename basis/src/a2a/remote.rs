@@ -46,10 +46,12 @@
 
 mod conversation;
 mod reload;
+mod retry;
 
 use std::{
     path::PathBuf,
-    sync::{Arc, RwLock},
+    sync::{Arc, Mutex, RwLock},
+    time::{Duration, Instant},
 };
 
 use mentra::a2a::{A2aClient, A2aError as ClientError};
@@ -57,6 +59,21 @@ use mentra::a2a::{A2aClient, A2aError as ClientError};
 use super::A2aAgent;
 
 pub(crate) use conversation::{Conversation, Outstanding, Waiting, forget};
+pub(crate) use retry::{Route, Unreached};
+
+/// How long an unreachable agent is left alone after a connect attempt
+/// before `@<agent>` tries it again (ADR-0031 §2).
+///
+/// Long enough that a model asking for a down agent in a loop costs one
+/// connect attempt rather than one per call; short enough that an agent
+/// which came up is reached within a minute without anybody reloading.
+pub const A2A_RETRY_BACKOFF: Duration = Duration::from_secs(30);
+
+/// What the set calls after it changes — a reload, or an agent reached on a
+/// retry — so the description `spawn` is registered with is captured again
+/// (ADR-0031 §3). Called outside every lock here, because what it does reads
+/// the set.
+pub(crate) type OnChange = Box<dyn Fn() + Send + Sync>;
 
 /// One configured remote agent, connected or not.
 pub(crate) struct RemoteAgent {
@@ -66,11 +83,19 @@ pub(crate) struct RemoteAgent {
     /// configured — and reported, and taught as unreachable — but there is
     /// nothing to send to until a later attempt succeeds.
     client: Option<Arc<A2aClient>>,
+    /// When a connect was last attempted, successful or not: what the retry
+    /// backoff is measured from.
+    attempted: Mutex<Instant>,
 }
 
 impl RemoteAgent {
+    /// An agent whose connect was attempted just now.
     fn new(agent: A2aAgent, client: Option<Arc<A2aClient>>) -> Self {
-        Self { agent, client }
+        Self {
+            agent,
+            client,
+            attempted: Mutex::new(Instant::now()),
+        }
     }
 
     pub(crate) fn name(&self) -> &str {
@@ -109,6 +134,9 @@ impl Roster {
 pub(crate) struct RemoteAgents {
     roster: RwLock<Arc<Roster>>,
     conversations: conversation::Book,
+    /// [`A2A_RETRY_BACKOFF`], but for tests.
+    backoff: Duration,
+    on_change: Option<OnChange>,
 }
 
 impl RemoteAgents {
@@ -134,6 +162,23 @@ impl RemoteAgents {
         Self {
             roster: RwLock::new(Arc::new(roster)),
             conversations: conversation::Book::new(remembered_in),
+            backoff: A2A_RETRY_BACKOFF,
+            on_change: None,
+        }
+    }
+
+    /// Calls `on_change` after every change to the set from now on.
+    pub(crate) fn with_on_change(self, on_change: OnChange) -> Self {
+        Self {
+            on_change: Some(on_change),
+            ..self
+        }
+    }
+
+    /// Says the set changed. Never called with a lock of this type held.
+    fn changed(&self) {
+        if let Some(on_change) = &self.on_change {
+            on_change();
         }
     }
 
@@ -278,5 +323,7 @@ impl RemoteAgents {
     }
 }
 
+#[cfg(test)]
+mod testing;
 #[cfg(test)]
 mod tests;

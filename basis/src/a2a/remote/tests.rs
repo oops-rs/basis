@@ -101,10 +101,7 @@ fn an_id_that_is_not_a_file_name_is_never_made_into_a_path() {
 /// An agent at a port nothing listens on, so connecting fails fast and the
 /// diff is all that is under test.
 fn down(name: &str, port: u16) -> A2aAgent {
-    A2aAgent::new(mentra::a2a::A2aAgentConfig::new(
-        name,
-        format!("http://127.0.0.1:{port}"),
-    ))
+    testing::agent_at(name, port)
 }
 
 #[tokio::test]

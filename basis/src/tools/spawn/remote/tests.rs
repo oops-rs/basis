@@ -194,3 +194,34 @@ fn a_failed_task_is_an_error_and_ends_what_was_outstanding() {
     assert_eq!(next.outstanding, None);
     assert_eq!(next.context_id.as_deref(), Some("context-1"));
 }
+
+#[test]
+fn an_agent_tried_too_recently_is_refused_with_how_long_to_wait() {
+    // Configured, never reached, and its connect was attempted just now.
+    let agents = RemoteAgents::unreachable(&["reviewer"]);
+
+    let refusal = authorize(&agents, AGENT).expect_err("not worth asking yet");
+
+    assert!(refusal.contains("could not be reached"), "{refusal}");
+    assert!(refusal.contains("tries it again in 30s"), "{refusal}");
+}
+
+#[test]
+fn a_name_the_workspace_does_not_configure_is_refused_naming_the_ones_it_does() {
+    let agents = RemoteAgents::unreachable(&["reviewer", "planner"]);
+
+    let refusal = authorize(&agents, "nobody").expect_err("not configured");
+
+    assert!(
+        refusal.contains("`reviewer`, `planner`"),
+        "an unreachable agent is still one the model may ask for: {refusal}"
+    );
+    assert!(refusal.contains("`@@`"), "{refusal}");
+}
+
+#[test]
+fn a_workspace_with_no_agents_says_so() {
+    let refusal = authorize(&RemoteAgents::unreachable(&[]), AGENT).expect_err("none");
+
+    assert!(refusal.contains("no remote agents"), "{refusal}");
+}

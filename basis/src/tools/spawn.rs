@@ -380,40 +380,17 @@ impl SpawnTool {
     ///
     /// A fact, not a judgement, so it is refused in the preview like an
     /// unregistered command target: no approver is asked about an agent that
-    /// is not there.
+    /// is not there, or one tried too recently to be worth trying again.
     #[cfg(feature = "a2a")]
     fn authorize_remote(&self, agent_id: &str, name: &str) -> Result<SpawnDecision, String> {
         let Some(agents) = self.remote_agents_of(agent_id) else {
             return Err(no_remote_agents(name));
         };
-        let roster = agents.snapshot();
-        match roster.get(name) {
-            Some(agent) if agent.client().is_some() => Ok(SpawnDecision::Remote {
-                agents: Arc::clone(&agents),
-                name: name.to_string(),
-            }),
-            Some(_) => Err(format!(
-                "the remote agent `{name}` could not be reached when this workspace opened, so \
-                 there is nothing to hand `@{name}` to"
-            )),
-            None => {
-                let reachable: Vec<String> = roster
-                    .agents()
-                    .iter()
-                    .filter(|agent| agent.client().is_some())
-                    .map(|agent| agent.name().to_string())
-                    .collect();
-                Err(if reachable.is_empty() {
-                    no_remote_agents(name)
-                } else {
-                    format!(
-                        "there is no remote agent named `{name}`; the ones this workspace can \
-                         reach are {}, and `@@` begins a task with a literal `@`",
-                        listed(&reachable)
-                    )
-                })
-            }
-        }
+        remote::authorize(&agents, name)?;
+        Ok(SpawnDecision::Remote {
+            agents,
+            name: name.to_string(),
+        })
     }
 
     #[cfg(not(feature = "a2a"))]
