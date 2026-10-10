@@ -7,6 +7,7 @@ use std::time::Duration;
 use mentra::a2a::types::{Artifact, Part, Task, TaskStatus};
 
 use super::*;
+use crate::a2a::remote::testing::{agent_at, free_port, serve_card};
 
 const AGENT: &str = "reviewer";
 const OUTPUT_BYTES: usize = 64 * 1024;
@@ -193,4 +194,157 @@ fn a_failed_task_is_an_error_and_ends_what_was_outstanding() {
     assert!(error.contains("failed"), "{error}");
     assert_eq!(next.outstanding, None);
     assert_eq!(next.context_id.as_deref(), Some("context-1"));
+}
+
+#[test]
+fn an_agent_tried_too_recently_is_refused_with_how_long_to_wait() {
+    // Configured, never reached, and its connect was attempted just now.
+    let agents = RemoteAgents::unreachable(&["reviewer"]);
+
+    let refusal = authorize(&agents, AGENT).expect_err("not worth asking yet");
+
+    assert!(refusal.contains("could not be reached"), "{refusal}");
+    assert!(refusal.contains("tries it again in 30s"), "{refusal}");
+}
+
+#[test]
+fn a_name_the_workspace_does_not_configure_is_refused_naming_the_ones_it_does() {
+    let agents = RemoteAgents::unreachable(&["reviewer", "planner"]);
+
+    let refusal = authorize(&agents, "nobody").expect_err("not configured");
+
+    assert!(
+        refusal.contains("`reviewer`, `planner`"),
+        "an unreachable agent is still one the model may ask for: {refusal}"
+    );
+    assert!(refusal.contains("`@@`"), "{refusal}");
+}
+
+#[test]
+fn a_workspace_with_no_agents_says_so() {
+    let refusal = authorize(&RemoteAgents::unreachable(&[]), AGENT).expect_err("none");
+
+    assert!(refusal.contains("no remote agents"), "{refusal}");
+}
+
+fn not_found(method: &'static str) -> ClientError {
+    ClientError::Rpc {
+        method,
+        error: A2aRpcError::TaskNotFound,
+    }
+}
+
+#[test]
+fn an_outstanding_task_the_agent_no_longer_knows_is_forgotten_and_said_so() {
+    // The agent moved to a new endpoint while its task was outstanding:
+    // `@reviewer` alone resumes against the new one, which has never heard of
+    // it (ADR-0031 §5).
+    let (next, result) = settle(
+        AGENT,
+        outstanding(Waiting::Agent),
+        Err(A2aExchangeError::Send(not_found("GetTask"))),
+        OUTPUT_BYTES,
+    );
+
+    let error = result.expect_err("the work was not done");
+    assert!(error.contains("no longer knows the task"), "{error}");
+    assert!(error.contains("`@reviewer <task>`"), "{error}");
+    assert!(
+        !error.contains("task-1") && !error.contains("context-1"),
+        "the model never carries an id: {error}"
+    );
+    assert_eq!(next, Conversation::default(), "nothing is left to wait on");
+}
+
+#[test]
+fn a_task_that_vanishes_mid_wait_is_forgotten_too() {
+    let (next, result) = settle(
+        AGENT,
+        outstanding(Waiting::Agent),
+        Err(A2aExchangeError::Poll {
+            task_id: "task-1".to_string(),
+            error: not_found("GetTask"),
+        }),
+        OUTPUT_BYTES,
+    );
+
+    assert!(result.is_err());
+    assert_eq!(next, Conversation::default());
+}
+
+#[test]
+fn a_new_task_refused_as_unknown_with_nothing_outstanding_keeps_the_conversation() {
+    // Only an *outstanding* record is ended by not-found: a fresh send that
+    // fails says why and leaves the conversation where it was.
+    let settled = Conversation {
+        context_id: Some("context-1".to_string()),
+        outstanding: None,
+    };
+
+    let (next, result) = settle(
+        AGENT,
+        settled.clone(),
+        Err(A2aExchangeError::Send(not_found("SendMessage"))),
+        OUTPUT_BYTES,
+    );
+
+    assert!(result.expect_err("failed").contains("Handing the task"));
+    assert_eq!(next, settled);
+}
+
+#[tokio::test]
+async fn a_removed_agent_is_refused_by_name_and_continues_when_it_comes_back() {
+    let agents = RemoteAgents::unreachable(&["reviewer"]);
+    let settled = Conversation {
+        context_id: Some("context-1".to_string()),
+        outstanding: None,
+    };
+    agents
+        .record("agent-1", AGENT, settled.clone(), false)
+        .expect("in memory");
+
+    agents.reload(Vec::new()).await;
+    let refusal = authorize(&agents, AGENT).expect_err("removed");
+    assert!(
+        refusal.contains("`reviewer` is no longer configured"),
+        "{refusal}"
+    );
+
+    agents.reload(vec![agent_at(AGENT, free_port())]).await;
+    assert_eq!(
+        request(
+            AGENT,
+            "and this one",
+            &agents.conversation("agent-1", AGENT, false)
+        ),
+        Ok(A2aRequest::Send {
+            text: "and this one".to_string(),
+            task_id: None,
+            context_id: Some("context-1".to_string()),
+        }),
+        "the same name, the same conversation"
+    );
+}
+
+#[tokio::test]
+async fn an_outstanding_task_follows_its_agent_to_a_new_address() {
+    let agents = RemoteAgents::unreachable(&["reviewer"]);
+    agents
+        .record("agent-1", AGENT, outstanding(Waiting::Agent), false)
+        .expect("in memory");
+    let moved_to = free_port();
+    serve_card(moved_to);
+
+    let report = agents.reload(vec![agent_at(AGENT, moved_to)]).await;
+    assert_eq!(report.changed, [AGENT]);
+
+    let client = agents.reach(AGENT).await.expect("the new address answers");
+    assert_eq!(client.card_url().port(), Some(moved_to));
+    assert_eq!(
+        request(AGENT, "", &agents.conversation("agent-1", AGENT, false)),
+        Ok(A2aRequest::Resume {
+            task_id: "task-1".to_string()
+        }),
+        "`@reviewer` alone waits on the same task, now asked of the new address"
+    );
 }

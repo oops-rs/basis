@@ -530,6 +530,12 @@ async fn run_model(
         Ok(workspace) => Arc::new(workspace),
         Err(error) => return record_failure(paths, meta, error.to_string(), None),
     };
+    // An attach drives turns for as long as the inbox has work — the CLI's
+    // attended session and every task the A2A server accepts both run here —
+    // so an agent the operator adds, moves or re-credentials meanwhile should
+    // be heard without a restart (ADR-0031 §4). Held to the end of this
+    // attach; dropping it stops the poll.
+    let _a2a_watch = workspace.watch_a2a(basis::DEFAULT_A2A_WATCH_INTERVAL);
     // The run carries the workspace through the whole turn loop below, not
     // just the mint: the workspace's hook registration and MCP connections
     // end when it drops, and a task's `.basis/hooks.json` must keep its say over

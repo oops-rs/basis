@@ -5,8 +5,33 @@
 //! sending a task and waiting on it — and basis owns the convention half:
 //! which file names an agent, where that file lives, and what its fields mean.
 //! The model reaches a named agent through `spawn` (`@<agent> <task>`,
-//! ADR-0029); [`remote`] holds what an open connected, and `spawn` does the
+//! ADR-0029); `remote` holds the agents an open reaches, and `spawn` does the
 //! talking.
+//!
+//! # The set is live
+//!
+//! ADR-0031: what an open connected is not fixed for its lifetime, because a
+//! host that runs for weeks outlives the configuration it opened with.
+//!
+//! - **[`Workspace::reload_a2a`](crate::Workspace::reload_a2a)** reads the
+//!   same three sources again, under every rule below, and applies the
+//!   difference by name — an added agent connects, a removed one stops being
+//!   routable, a changed one reconnects, an unchanged one has its card
+//!   fetched again — and reports it as an [`A2aReload`]. A source that fails
+//!   to read or validate changes nothing: a typo never drops an agent.
+//! - **[`Workspace::watch_a2a`](crate::Workspace::watch_a2a)** polls the two
+//!   files' paths and reloads on a change, until its [`A2aWatch`] is dropped.
+//!   basis's long-running hosts turn it on at [`DEFAULT_A2A_WATCH_INTERVAL`];
+//!   a one-shot run does not.
+//! - **An unreachable agent is retried when it is asked for**, at most once
+//!   per [`A2A_RETRY_BACKOFF`], so one that came up after the open is reached
+//!   without a reload.
+//!
+//! Every agent a workspace mints or resumes holds the live set, so routing
+//! follows a change at once and what `spawn` teaches follows it from the next
+//! model request on — mentra captures tool descriptions at registration, and
+//! basis asks it to capture them again after every change. A delegation
+//! already in flight keeps the connection it started with.
 //!
 //! # The format is basis's
 //!
@@ -49,7 +74,10 @@
 //! Nothing read here is ever repeated back: see [`A2aError`].
 
 mod file;
+pub(crate) mod live;
+mod reload;
 pub(crate) mod remote;
+mod watch;
 
 use std::path::{Path, PathBuf};
 
@@ -59,6 +87,9 @@ use crate::context::ContextScope;
 
 pub use mentra::a2a::{A2aAgentConfig, A2aLimits};
 pub use mentra::mcp::SecretString;
+pub use reload::A2aReload;
+pub use remote::A2A_RETRY_BACKOFF;
+pub use watch::{A2aWatch, DEFAULT_A2A_WATCH_INTERVAL};
 
 /// Where basis looks inside a workspace, relative to its root.
 pub const DEFAULT_WORKSPACE_A2A_FILE: &str = ".basis/a2a.json";
@@ -98,6 +129,29 @@ impl A2aAgent {
 
     pub fn into_config(self) -> A2aAgentConfig {
         self.0
+    }
+
+    /// Whether `other` reaches the same agent the same way: the same name,
+    /// URL, headers, plaintext override and limits. What a reload asks to
+    /// decide between fetching a card again and reconnecting (ADR-0031 §1).
+    ///
+    /// Compared field by field rather than through a derived `PartialEq`,
+    /// because mentra's configuration derives none — and so that a field
+    /// mentra adds later is a compile error here rather than a difference
+    /// quietly ignored.
+    pub(crate) fn connects_like(&self, other: &Self) -> bool {
+        let A2aAgentConfig {
+            name,
+            url,
+            headers,
+            allow_plaintext_credentials,
+            limits,
+        } = &self.0;
+        *name == other.0.name
+            && *url == other.0.url
+            && *headers == other.0.headers
+            && *allow_plaintext_credentials == other.0.allow_plaintext_credentials
+            && *limits == other.0.limits
     }
 }
 

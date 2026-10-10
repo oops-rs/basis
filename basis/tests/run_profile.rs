@@ -37,6 +37,7 @@ const PROFILE_MODEL: &str = "profile-model";
 const WORKSPACE_SYSTEM: &str = "workspace system";
 const PROFILE_SYSTEM: &str = "profile system";
 const VISIBLE_TOOL: &str = "profile_visible";
+#[cfg(feature = "mcp")]
 const FOREIGN_TOOL: &str = "mcp__foreign__secret";
 const SECRET_HEADER: &str = "Bearer must-not-reach-debug";
 const COUNTING_TOOL: &str = "counting_tool";

@@ -21,7 +21,9 @@
 //! # What a cached workspace holds open
 //!
 //! Its MCP connections and its hook registrations on the runtime, both of
-//! which have to outlive every session minted from it — a workspace
+//! which have to outlive every session minted from it, and — unless the
+//! template turned it off — a watch on its A2A files, so an agent the
+//! operator adds reaches sessions already running (ADR-0031 §4). A workspace
 //! dropped while a session still runs takes that session's servers and its
 //! `.basis/hooks.json` with it. Nothing here evicts, therefore: `session/close`
 //! reaches basis after the fact, and a turn still unwinding would be the one
@@ -37,8 +39,9 @@ use std::{
 };
 
 use basis::{
-    McpConfig, McpServer, McpSseServerConfig, McpStreamableHttpServerConfig, PersistedSession,
-    PreparedRun, RunError, RunSpec, Runtime, RuntimeBuilder, Workspace, WorkspaceBuilder,
+    A2aWatch, McpConfig, McpServer, McpSseServerConfig, McpStreamableHttpServerConfig,
+    PersistedSession, PreparedRun, RunError, RunSpec, Runtime, RuntimeBuilder, Workspace,
+    WorkspaceBuilder,
     mcp::{McpSseLimits, McpStreamableHttpLimits, SecretString},
 };
 use tokio::sync::OnceCell;
@@ -60,7 +63,15 @@ pub struct ConfiguredSource {
     /// resolve a model over the network, and two clients on two repositories
     /// must not queue behind each other for that. The map lock is only ever
     /// held long enough to look one entry up.
-    workspaces: Mutex<HashMap<WorkspaceKey, Arc<OnceCell<Arc<Workspace>>>>>,
+    workspaces: Mutex<HashMap<WorkspaceKey, Arc<OnceCell<Opened>>>>,
+}
+
+/// One cached workspace, and the watch on its A2A files that lives exactly as
+/// long as it is cached.
+struct Opened {
+    workspace: Arc<Workspace>,
+    /// Held for its `Drop`, which stops the poll.
+    _a2a_watch: Option<A2aWatch>,
 }
 
 impl ConfiguredSource {
@@ -166,15 +177,23 @@ impl ConfiguredSource {
         // openers of different keys never meet. A failed open leaves the cell
         // empty, so the next session tries again rather than inheriting a
         // failure that may have been about the network.
-        let workspace = cell
+        let opened = cell
             .get_or_try_init(|| async move {
                 let runtime = Arc::clone(self.runtime().await?);
+                let workspace = Arc::new(builder.with_runtime(runtime).open().await?);
+                let a2a_watch = self
+                    .template
+                    .a2a_watch_interval()
+                    .map(|interval| workspace.watch_a2a(interval));
 
-                Ok::<_, RunError>(Arc::new(builder.with_runtime(runtime).open().await?))
+                Ok::<_, RunError>(Opened {
+                    workspace,
+                    _a2a_watch: a2a_watch,
+                })
             })
             .await?;
 
-        Ok(Arc::clone(workspace))
+        Ok(Arc::clone(&opened.workspace))
     }
 
     /// The process's runtime, built on the first session that needs one.
@@ -208,9 +227,7 @@ impl ConfiguredSource {
         recipe
     }
 
-    fn lock(
-        &self,
-    ) -> std::sync::MutexGuard<'_, HashMap<WorkspaceKey, Arc<OnceCell<Arc<Workspace>>>>> {
+    fn lock(&self) -> std::sync::MutexGuard<'_, HashMap<WorkspaceKey, Arc<OnceCell<Opened>>>> {
         // Poisoned means some other task panicked mid-insert. The map is still
         // structurally sound, and refusing every later session over one panic
         // would turn it into a dead connection — the same ruling the session
@@ -226,7 +243,7 @@ impl ConfiguredSource {
     pub fn opened(&self) -> Vec<Arc<Workspace>> {
         self.lock()
             .values()
-            .filter_map(|cell| cell.get().map(Arc::clone))
+            .filter_map(|cell| cell.get().map(|opened| Arc::clone(&opened.workspace)))
             .collect()
     }
 }
@@ -512,242 +529,4 @@ fn hash_remote(
 }
 
 #[cfg(test)]
-mod tests {
-    use std::{
-        path::{Path, PathBuf},
-        sync::Arc,
-    };
-
-    use basis::{
-        ContextConfig, McpConfig, McpServer, Runtime, ToolsConfig, hooks::HooksConfig,
-        skills::SkillsConfig, templates::TemplatesConfig,
-    };
-    use mentra::{
-        McpServerConfig, McpSseServerConfig, McpStreamableHttpServerConfig, ModelSelector,
-    };
-
-    use super::{ConfiguredSource, WorkspaceKey, digest};
-    use crate::{Discovery, SessionSource, SessionTemplate};
-
-    #[test]
-    fn two_servers_differing_only_in_transport_hash_apart() {
-        // Without the discriminant in the hash, an SSE server and a Streamable
-        // HTTP server sharing a name and URL would key one workspace, and the
-        // second client's transport would silently become the first's.
-        let sse = McpServer::Sse(McpSseServerConfig::new("api", "https://example.com/mcp"));
-        let http = McpServer::Http(McpStreamableHttpServerConfig::new(
-            "api",
-            "https://example.com/mcp",
-        ));
-
-        assert_ne!(digest(&[sse]), digest(&[http]));
-    }
-
-    #[test]
-    fn the_plaintext_override_reaches_the_digest() {
-        // Latent until basis exposes the knob, armed now: two configs that
-        // differ in where a credential may travel are two authorities.
-        let base = || McpStreamableHttpServerConfig::new("api", "http://127.0.0.1/mcp");
-
-        assert_ne!(
-            digest(&[McpServer::Http(base())]),
-            digest(&[McpServer::Http(base().allowing_plaintext_credentials())]),
-        );
-    }
-
-    #[test]
-    fn the_clients_mcp_servers_reach_the_config() {
-        let source = ConfiguredSource::new(None);
-
-        let built = source.session_mcp(vec![McpServer::Stdio(McpServerConfig {
-            name: "fs".to_string(),
-            command: "/bin/mcp-fs".to_string(),
-            args: Vec::new(),
-            env: Default::default(),
-            cwd: None,
-        })]);
-
-        let supplied: Vec<&str> = built.supplied.iter().map(McpServer::name).collect();
-        assert_eq!(
-            supplied,
-            vec!["fs"],
-            "the session request is where a client says which servers it wants"
-        );
-    }
-
-    fn offline_runtime() -> Arc<Runtime> {
-        Arc::new(
-            Runtime::builder()
-                .with_base_url("http://127.0.0.1:1/v1")
-                .with_api_key("test-key")
-                .with_ephemeral_history()
-                .build()
-                .expect("a runtime builds without touching the network"),
-        )
-    }
-
-    fn offline_template() -> SessionTemplate {
-        SessionTemplate::new().with_model(ModelSelector::Id("test-model".to_string()))
-    }
-
-    fn offline_discovery() -> Discovery {
-        Discovery {
-            context: ContextConfig {
-                file_name: "AGENTS.md".to_string(),
-                global_dir: None,
-                walk_parents: false,
-            },
-            skills: SkillsConfig {
-                workspace_subdir: Some(PathBuf::from(".basis/skills")),
-                shared_workspace_dir: true,
-                global_dir: None,
-                shared_home_dir: false,
-            },
-            templates: TemplatesConfig {
-                workspace_subdir: PathBuf::from(".basis/templates"),
-                global_dir: None,
-            },
-            hooks: HooksConfig {
-                workspace_file: PathBuf::from(".basis/hooks.json"),
-                global_dir: None,
-                supplied: Vec::new(),
-            },
-            tools: ToolsConfig {
-                workspace_file: PathBuf::from(".basis/tools.json"),
-                global_dir: None,
-                supplied: Vec::new(),
-            },
-            mcp: McpConfig {
-                workspace_file: PathBuf::from(".mcp.json"),
-                global_dir: None,
-                supplied: Vec::new(),
-            },
-        }
-    }
-
-    #[tokio::test]
-    async fn two_sessions_on_one_workspace_share_one_runtime() {
-        let repository = tempfile::tempdir().expect("tempdir");
-        let runtime = offline_runtime();
-        let source = ConfiguredSource::on_runtime(
-            Arc::clone(&runtime),
-            Some(offline_template().with_discovery(offline_discovery())),
-        );
-
-        let first = source
-            .create(repository.path().to_path_buf(), Vec::new())
-            .await
-            .expect("the first session opens");
-        let second = source
-            .create(repository.path().to_path_buf(), Vec::new())
-            .await
-            .expect("the second session opens");
-
-        assert_ne!(
-            first.agent_id(),
-            second.agent_id(),
-            "two sessions, not one conversation handed out twice"
-        );
-
-        let opened = source.opened();
-        assert_eq!(
-            opened.len(),
-            1,
-            "one directory is one workspace, however many sessions were minted on it"
-        );
-        assert!(
-            std::ptr::eq(opened[0].mentra_runtime(), runtime.mentra_runtime()),
-            "and both were minted on the one runtime this process built"
-        );
-    }
-
-    /// The claim `list_sessions` is built on, and the one nothing checked: a
-    /// session this source opens is filed under the directory it was opened
-    /// for, so a client asking about that directory gets it back.
-    ///
-    /// Worth a test of its own because the doc beside `list_sessions` asserted
-    /// the opposite for two releases after it stopped being true — the tag is a
-    /// per-session fact now (`Runtime::mint`), and a shared runtime files each
-    /// workspace's conversations apart.
-    ///
-    /// Read through `store::list_in` rather than through `list_sessions`
-    /// itself, which resolves the store root the process would use. Opening
-    /// that directory in a test is a legitimate refusal on any machine that
-    /// ran basis 0.6 (`RunError::LegacyStore`), and that the two roots are one
-    /// path is pinned in `basis`'s own `store` tests.
-    #[tokio::test]
-    async fn a_session_this_source_opens_is_listed_for_its_own_directory() {
-        let store = tempfile::tempdir().expect("tempdir");
-        let repository = tempfile::tempdir().expect("tempdir");
-        let elsewhere = tempfile::tempdir().expect("tempdir");
-        let runtime = Arc::new(
-            Runtime::builder()
-                .with_base_url("http://127.0.0.1:1/v1")
-                .with_api_key("test-key")
-                .with_store_dir(store.path())
-                .build()
-                .expect("a runtime builds without touching the network"),
-        );
-        let source = ConfiguredSource::on_runtime(
-            runtime,
-            Some(offline_template().with_discovery(offline_discovery())),
-        );
-
-        let opened = source
-            .create(repository.path().to_path_buf(), Vec::new())
-            .await
-            .expect("the session opens");
-
-        let listed: Vec<String> = basis::store::list_in(store.path(), repository.path())
-            .expect("lists")
-            .into_iter()
-            .map(|session| session.agent_id)
-            .collect();
-        assert_eq!(
-            listed,
-            vec![opened.agent_id().to_string()],
-            "a client asking about this directory must be handed the session it opened here"
-        );
-        assert!(
-            basis::store::list_in(store.path(), elsewhere.path())
-                .expect("lists")
-                .is_empty(),
-            "and no other directory may claim it"
-        );
-    }
-
-    #[test]
-    fn a_session_that_asked_for_different_servers_is_a_different_workspace() {
-        let server = |command: &str| {
-            vec![McpServer::Stdio(McpServerConfig {
-                name: "fs".to_string(),
-                command: command.to_string(),
-                args: Vec::new(),
-                env: Default::default(),
-                cwd: None,
-            })]
-        };
-        let key = |mcp: Vec<McpServer>| WorkspaceKey::new(Path::new("/repo"), &mcp);
-
-        assert_eq!(
-            key(Vec::new()),
-            key(Vec::new()),
-            "the same directory asked about the same way is one workspace"
-        );
-        assert_ne!(
-            key(Vec::new()),
-            key(server("/bin/mcp-fs")),
-            "a supplied server is not none"
-        );
-        assert_ne!(
-            key(server("/bin/mcp-fs")),
-            key(server("/bin/other-fs")),
-            "one name, two commands: a client that named a different program must get it"
-        );
-        assert_ne!(
-            key(Vec::new()),
-            WorkspaceKey::new(Path::new("/other-repo"), &[]),
-            "and a directory is a key"
-        );
-    }
-}
+mod tests;

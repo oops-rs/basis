@@ -96,14 +96,18 @@ pub(crate) struct AgentTools {
     /// closure the other one supplied. Settled at the open and unchanging, for
     /// the same reason the server list is.
     pub(crate) host_tools: Vec<String>,
-    /// The remote agents this agent's workspace open connected, which is
-    /// exactly the set its `spawn "@<agent> …"` may reach (ADR-0029 §3).
+    /// The live set of remote agents this agent's workspace open holds, which
+    /// is exactly the set its `spawn "@<agent> …"` may reach (ADR-0029 §3) —
+    /// as it stands at each call, since a reload swaps what is inside it
+    /// rather than this row (ADR-0031).
     ///
     /// Read by `spawn` on every remote delegation, by agent id rather than by
     /// audience, because two opens of one directory share an audience and may
     /// carry different agents with different credentials. A delegated child
-    /// inherits it with the rest of this row. `None` when the workspace
-    /// configured no agents.
+    /// inherits it with the rest of this row. Present for every agent a
+    /// workspace mints or resumes, even with nothing configured, so an agent a
+    /// reload adds is reachable without touching the row; `None` only on rows
+    /// no workspace wrote.
     #[cfg(feature = "a2a")]
     pub(crate) remote: Option<Arc<crate::a2a::remote::RemoteAgents>>,
 }

@@ -11,151 +11,18 @@
 
 #![cfg(feature = "a2a")]
 
-use std::{
-    io::{Read, Write},
-    net::TcpListener,
-    path::{Path, PathBuf},
-    sync::{
-        Arc,
-        atomic::{AtomicUsize, Ordering},
-    },
-    thread,
+mod live;
+mod support;
+mod teaching;
+mod watching;
+
+use std::{path::PathBuf, sync::Arc};
+
+use basis::{A2aConfig, Event, ModelSelector, RunError, Runtime, Workspace};
+
+use support::{
+    CardServer, assert_no_agent_tools, no_a2a, offline_runtime, pinned, unreachable_agent, write,
 };
-
-use basis::{
-    A2aAgentConfig, A2aConfig, ContextConfig, Event, MemoryConfig, RunError, Runtime, Workspace,
-    WorkspaceBuilder, skills::SkillsConfig, store, templates::TemplatesConfig,
-};
-use mentra::{ModelSelector, tool::ToolAudience};
-use serde_json::json;
-
-/// A loopback agent that answers every request with its card.
-struct CardServer {
-    base: String,
-    fetches: Arc<AtomicUsize>,
-}
-
-impl CardServer {
-    fn start() -> Self {
-        let listener = TcpListener::bind("127.0.0.1:0").expect("bind");
-        let base = format!("http://{}", listener.local_addr().expect("address"));
-        let card = json!({
-            "name": "Nous",
-            "description": "Investigates questions about the codebase.",
-            "version": "1.0.0",
-            "supportedInterfaces": [
-                {"url": format!("{base}/rpc"), "protocolBinding": "JSONRPC", "protocolVersion": "1.0"},
-            ],
-            "capabilities": {},
-            "defaultInputModes": ["text/plain"],
-            "defaultOutputModes": ["text/plain"],
-            "skills": [],
-        })
-        .to_string();
-        let fetches = Arc::new(AtomicUsize::new(0));
-
-        let counted = Arc::clone(&fetches);
-        thread::spawn(move || {
-            for stream in listener.incoming() {
-                let Ok(mut stream) = stream else { break };
-                // One request per connection: read to the end of the head,
-                // which is all a card fetch has.
-                let mut head = Vec::new();
-                let mut byte = [0_u8; 1];
-                while !head.ends_with(b"\r\n\r\n") && stream.read(&mut byte).unwrap_or(0) == 1 {
-                    head.push(byte[0]);
-                }
-                counted.fetch_add(1, Ordering::SeqCst);
-                let _ = write!(
-                    stream,
-                    "HTTP/1.1 200 OK\r\ncontent-type: application/json\r\ncontent-length: {}\r\n\
-                     connection: close\r\n\r\n{card}",
-                    card.len()
-                );
-            }
-        });
-
-        Self { base, fetches }
-    }
-
-    fn agent(&self, name: &str) -> A2aAgentConfig {
-        A2aAgentConfig::new(name, &self.base)
-    }
-}
-
-/// A port nothing listens on.
-fn unreachable_agent(name: &str) -> A2aAgentConfig {
-    A2aAgentConfig::new(name, "http://127.0.0.1:1")
-}
-
-fn offline_runtime() -> Arc<Runtime> {
-    Arc::new(
-        Runtime::builder()
-            .with_base_url("http://127.0.0.1:1/v1")
-            .with_api_key("test-key")
-            .with_ephemeral_history()
-            .build()
-            .expect("builds without touching the network"),
-    )
-}
-
-/// No global directory, so the developer's own `~/.config/basis/a2a.json`
-/// can never reach this suite.
-fn no_a2a() -> A2aConfig {
-    A2aConfig {
-        global_dir: None,
-        ..A2aConfig::default()
-    }
-}
-
-fn pinned(workspace: &Path, runtime: Arc<Runtime>) -> WorkspaceBuilder {
-    Workspace::builder(workspace)
-        .with_runtime(runtime)
-        .with_model(ModelSelector::Id("test-model".to_string()))
-        .with_context(ContextConfig {
-            file_name: "AGENTS.md".to_string(),
-            global_dir: None,
-            walk_parents: false,
-        })
-        .with_skills(SkillsConfig {
-            workspace_subdir: None,
-            shared_workspace_dir: false,
-            global_dir: None,
-            shared_home_dir: false,
-        })
-        .with_templates(TemplatesConfig {
-            workspace_subdir: PathBuf::from(".basis/templates"),
-            global_dir: None,
-        })
-        .with_memory(MemoryConfig::disabled())
-        .with_a2a(no_a2a())
-}
-
-fn write(path: &Path, body: &str) {
-    std::fs::create_dir_all(path.parent().expect("a parent")).expect("create dir");
-    std::fs::write(path, body).expect("write file");
-}
-
-/// Every tool this directory's audience resolves, global or its own — where a
-/// bridged agent used to appear, and where ADR-0029 says none does.
-fn registered(runtime: &Runtime, root: &Path) -> Vec<String> {
-    runtime
-        .mentra_runtime()
-        .tools_for_audience(Some(&ToolAudience::new(store::runtime_identifier(root))))
-        .into_iter()
-        .map(|descriptor| descriptor.provider.name)
-        .collect()
-}
-
-/// A remote agent is a `spawn` target, never a tool of its own.
-fn assert_no_agent_tools(runtime: &Runtime, root: &Path) {
-    let names = registered(runtime, root);
-    assert!(
-        names.iter().all(|name| !name.starts_with("a2a__")),
-        "a remote agent is not a tool: {names:?}"
-    );
-    assert!(names.iter().any(|name| name == "spawn"), "{names:?}");
-}
 
 #[tokio::test]
 async fn a_supplied_agent_is_named_and_connected_without_registering_a_tool() {
@@ -176,11 +43,7 @@ async fn a_supplied_agent_is_named_and_connected_without_registering_a_tool() {
     assert_eq!(workspace.a2a_agents(), ["nous"]);
     assert_no_agent_tools(&runtime, mine.path());
     assert_no_agent_tools(&runtime, theirs.path());
-    assert_eq!(
-        server.fetches.load(Ordering::SeqCst),
-        1,
-        "the card is fetched once, at open"
-    );
+    assert_eq!(server.fetches(), 1, "the card is fetched once, at open");
 }
 
 #[tokio::test]
@@ -232,7 +95,7 @@ async fn a_supplied_agent_outranks_the_file_by_name() {
 
     assert_eq!(workspace.a2a_agents(), ["nous"], "one name is one agent");
     assert_eq!(
-        server.fetches.load(Ordering::SeqCst),
+        server.fetches(),
         1,
         "the host's agent won, so its card is the one fetched"
     );
@@ -334,5 +197,5 @@ async fn discovery_off_still_connects_a_supplied_agent_and_reads_no_file() {
         ["from-host"],
         "being handed an agent is not finding one"
     );
-    assert_eq!(server.fetches.load(Ordering::SeqCst), 1, "and it connected");
+    assert_eq!(server.fetches(), 1, "and it connected");
 }

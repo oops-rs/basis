@@ -313,16 +313,18 @@ pub enum Event {
         /// A2A configuration files in effect (`.basis/a2a.json`, the global
         /// `a2a.json`), named for `mcp_files`' reason: such a file says which
         /// remote agents may be handed this repository's work, and with which
-        /// credential.
+        /// credential. As of the turn this header opens: the set is live
+        /// (ADR-0031), so a later turn of the same session may name others.
         ///
         /// Additive and omitted when empty, so a schema-2 reader written
         /// before the field existed reads a stream that has it, and a stream
         /// written before it existed reads as naming none — no version bump.
         #[serde(default, skip_serializing_if = "Vec::is_empty")]
         a2a_files: Vec<ContextFile>,
-        /// The remote agents configured for this run's workspace, each one a
-        /// `spawn "@<agent> …"` target (ADR-0029). Names only — a URL or a
-        /// header is configuration, and this line travels into logs.
+        /// The remote agents configured for this run's workspace when this
+        /// turn began, each one a `spawn "@<agent> …"` target (ADR-0029,
+        /// ADR-0031). Names only — a URL or a header is configuration, and
+        /// this line travels into logs.
         #[serde(default, skip_serializing_if = "Vec::is_empty")]
         a2a_agents: Vec<String>,
     },
