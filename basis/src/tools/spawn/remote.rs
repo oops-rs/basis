@@ -29,7 +29,11 @@ pub(super) async fn delegate(
     body: &str,
     remembered: bool,
 ) -> ToolResult {
+    // Cloned out of the snapshot and held to the end of this call: a reload
+    // that swaps the set meanwhile changes what the *next* `@<agent>` reaches,
+    // never this exchange (ADR-0031 §6).
     let client = agents
+        .snapshot()
         .get(name)
         .and_then(|agent| agent.client())
         .cloned()

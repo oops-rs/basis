@@ -1,17 +1,29 @@
-//! The remote agents one workspace open connected, as `spawn` targets.
+//! The remote agents one workspace open reaches, as `spawn` targets — a live
+//! set.
 //!
 //! ADR-0029: a remote agent is a target of a delegation, not a tool. So
 //! nothing here touches the runtime's tool registry — no name is claimed,
 //! nothing is suffixed, nothing needs hiding from a sibling open. A workspace
-//! connects its agents once, at open, and records the result on every agent it
-//! mints or resumes (`runtime::agents`); `spawn` reads the calling agent's row
-//! to route `@<agent>`, so an open reaches exactly its own agents with its own
+//! records its [`RemoteAgents`] on every agent it mints or resumes
+//! (`runtime::agents`); `spawn` reads the calling agent's row to route
+//! `@<agent>`, so an open reaches exactly its own agents with its own
 //! credentials by construction.
 //!
-//! An agent that cannot be reached degrades as it did when it was a tool: a
-//! warning names it, the open continues, and the name is still reported, so a
-//! host can see what was configured. Its card is fetched once, here; nothing
-//! retries it later.
+//! # The set is live
+//!
+//! ADR-0031: what an open connected is not fixed for its lifetime. The agents
+//! sit behind one lock as an immutable [`Roster`], swapped whole when the set
+//! changes, so a reader — routing a call, describing `spawn` — takes one
+//! consistent snapshot and never sees half a reload. Every holder of the
+//! `Arc<RemoteAgents>` sees the swap at once, which is what makes a change
+//! reach every agent of the open without touching a row.
+//!
+//! Each agent keeps the configuration it was connected with, so a reload can
+//! tell a changed agent from an unchanged one, and when a connect was last
+//! attempted, so an unreachable one is retried at most once per backoff
+//! interval. A delegation clones the `Arc<A2aClient>` it starts with and holds
+//! it to the end, so a swap never interrupts an exchange already in flight
+//! (ADR-0031 §6) — it changes what the *next* `@<agent>` reaches.
 //!
 //! # The conversation is basis's
 //!
@@ -32,127 +44,113 @@
 //! nowhere. One writer per file is the attach lock's guarantee (one executor
 //! per conversation), not this module's.
 
+mod conversation;
+
 use std::{
-    collections::{BTreeMap, HashMap},
-    path::{Path, PathBuf},
-    sync::{Arc, Mutex},
+    path::PathBuf,
+    sync::{Arc, RwLock},
 };
 
-use mentra::a2a::A2aClient;
-use serde::{Deserialize, Serialize};
+use mentra::a2a::{A2aClient, A2aError as ClientError};
 
-use super::{A2aAgent, A2aError};
+use super::A2aAgent;
+
+pub(crate) use conversation::{Conversation, Outstanding, Waiting, forget};
 
 /// One configured remote agent, connected or not.
 pub(crate) struct RemoteAgent {
-    name: String,
-    /// `None` when the card could not be fetched at open: the name is still
-    /// configured — and reported — but there is nothing to send to.
+    /// The configuration it was connected with — what a reload diffs against.
+    agent: A2aAgent,
+    /// `None` when the card could not be fetched: the name is still
+    /// configured — and reported, and taught as unreachable — but there is
+    /// nothing to send to until a later attempt succeeds.
     client: Option<Arc<A2aClient>>,
 }
 
 impl RemoteAgent {
+    fn new(agent: A2aAgent, client: Option<Arc<A2aClient>>) -> Self {
+        Self { agent, client }
+    }
+
+    pub(crate) fn name(&self) -> &str {
+        self.agent.name()
+    }
+
     pub(crate) fn client(&self) -> Option<&Arc<A2aClient>> {
         self.client.as_ref()
     }
 }
 
-/// Where one session's conversation with one remote agent stands.
-#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
-pub(crate) struct Conversation {
-    /// The A2A `contextId` the remote agent minted on the first task, sent
-    /// with every later one so they read as one conversation.
-    pub(crate) context_id: Option<String>,
-    /// The task the remote agent has not finished, when there is one.
-    pub(crate) outstanding: Option<Outstanding>,
+/// One consistent view of the set: who is configured, in configuration order.
+#[derive(Default)]
+pub(crate) struct Roster {
+    agents: Vec<Arc<RemoteAgent>>,
 }
 
-/// A task handed back before it settled.
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-pub(crate) struct Outstanding {
-    pub(crate) task_id: String,
-    pub(crate) waiting_for: Waiting,
+impl Roster {
+    pub(crate) fn agents(&self) -> &[Arc<RemoteAgent>] {
+        &self.agents
+    }
+
+    pub(crate) fn get(&self, name: &str) -> Option<&Arc<RemoteAgent>> {
+        self.agents.iter().find(|agent| agent.name() == name)
+    }
+
+    pub(crate) fn names(&self) -> Vec<String> {
+        self.agents
+            .iter()
+            .map(|agent| agent.name().to_string())
+            .collect()
+    }
 }
 
-/// What an outstanding task is waiting for.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(rename_all = "snake_case")]
-pub(crate) enum Waiting {
-    /// The remote agent itself: it is still working, or the last check on it
-    /// failed and it may be.
-    Agent,
-    /// This side: it asked a question, and `@<agent> <answer>` answers it.
-    Input,
-}
-
-/// One workspace open's remote agents, in configuration order.
+/// One workspace open's remote agents, live.
 pub(crate) struct RemoteAgents {
-    agents: Vec<RemoteAgent>,
-    /// Every calling agent's conversations, by its id; loaded from disk the
-    /// first time a remembered agent is asked about.
-    conversations: Mutex<HashMap<String, Conversations>>,
-    /// Where remembered agents' records live, or `None` when history is kept
-    /// nowhere.
-    remembered_in: Option<PathBuf>,
-}
-
-/// One calling agent's conversations, by remote agent name — the file's shape.
-#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
-struct Conversations {
-    agents: BTreeMap<String, Conversation>,
+    roster: RwLock<Arc<Roster>>,
+    conversations: conversation::Book,
 }
 
 impl RemoteAgents {
     /// Connects `agents`, fetching each one's card.
     ///
-    /// One at a time, as the MCP servers are: an open is not latency-critical
-    /// and a host reading warnings wants them in configuration order.
+    /// The cards are fetched concurrently — an open waits for the slowest, not
+    /// the sum — but warnings are said in configuration order, which is what a
+    /// host reading them expects.
     pub(crate) async fn connect(agents: Vec<A2aAgent>, remembered_in: Option<PathBuf>) -> Self {
-        let mut connected = Vec::with_capacity(agents.len());
-        for agent in agents {
-            let config = agent.into_config();
-            let client = match A2aClient::connect(&config).await {
-                Ok(client) => Some(Arc::new(client)),
-                // mentra's error carries no server text and no header value,
-                // and a configuration error that would have quoted the URL was
-                // refused at load (`a2a::file::refused`).
-                Err(error) => {
-                    eprintln!(
-                        "Warning: A2A agent '{}' failed to connect: {error}",
-                        config.name
-                    );
-                    None
-                }
-            };
-            connected.push(RemoteAgent {
-                name: config.name,
-                client,
-            });
-        }
+        let connected = connect_each(agents)
+            .await
+            .into_iter()
+            .map(|(agent, client)| {
+                let client = warned(agent.name(), client);
+                Arc::new(RemoteAgent::new(agent, client))
+            })
+            .collect();
 
+        Self::with_roster(Roster { agents: connected }, remembered_in)
+    }
+
+    fn with_roster(roster: Roster, remembered_in: Option<PathBuf>) -> Self {
         Self {
-            agents: connected,
-            conversations: Mutex::new(HashMap::new()),
-            remembered_in,
+            roster: RwLock::new(Arc::new(roster)),
+            conversations: conversation::Book::new(remembered_in),
         }
+    }
+
+    /// The set as it stands now. Cheap — one `Arc` clone — and consistent: a
+    /// reload swaps the whole roster, so a snapshot is never half of one.
+    pub(crate) fn snapshot(&self) -> Arc<Roster> {
+        Arc::clone(
+            &self
+                .roster
+                .read()
+                .unwrap_or_else(|poisoned| poisoned.into_inner()),
+        )
     }
 
     /// Every configured name, connected or not — what
     /// [`Workspace::a2a_agents`](crate::Workspace::a2a_agents) reports.
     pub(crate) fn names(&self) -> Vec<String> {
-        self.agents.iter().map(|agent| agent.name.clone()).collect()
-    }
-
-    pub(crate) fn get(&self, name: &str) -> Option<&RemoteAgent> {
-        self.agents.iter().find(|agent| agent.name == name)
-    }
-
-    /// The agents a model can actually be offered: the ones whose card came
-    /// back.
-    pub(crate) fn reachable(&self) -> impl Iterator<Item = (&str, &Arc<A2aClient>)> {
-        self.agents
-            .iter()
-            .filter_map(|agent| Some((agent.name.as_str(), agent.client.as_ref()?)))
+        self.snapshot().names()
     }
 
     /// Where `caller`'s conversation with `remote` stands — read from disk
@@ -163,22 +161,7 @@ impl RemoteAgents {
         remote: &str,
         remembered: bool,
     ) -> Conversation {
-        let mut conversations = self
-            .conversations
-            .lock()
-            .expect("A2A conversation map poisoned");
-        if !conversations.contains_key(caller) {
-            let loaded = self
-                .file(caller, remembered)
-                .map(|file| load(&file))
-                .unwrap_or_default();
-            conversations.insert(caller.to_string(), loaded);
-        }
-        conversations
-            .get(caller)
-            .and_then(|own| own.agents.get(remote))
-            .cloned()
-            .unwrap_or_default()
+        self.conversations.get(caller, remote, remembered)
     }
 
     /// Records where `caller`'s conversation with `remote` stands now, and —
@@ -192,94 +175,63 @@ impl RemoteAgents {
         conversation: Conversation,
         remembered: bool,
     ) -> std::io::Result<()> {
-        let mut conversations = self
-            .conversations
-            .lock()
-            .expect("A2A conversation map poisoned");
-        let own = conversations.entry(caller.to_string()).or_default();
-        own.agents.insert(remote.to_string(), conversation);
-        match self.file(caller, remembered) {
-            Some(file) => store(&file, own),
-            None => Ok(()),
-        }
-    }
-
-    /// The file `caller`'s record lives in, when it is kept on disk at all.
-    fn file(&self, caller: &str, remembered: bool) -> Option<PathBuf> {
-        if !remembered || !is_file_safe(caller) {
-            return None;
-        }
-        Some(self.remembered_in.as_ref()?.join(format!("{caller}.json")))
+        self.conversations
+            .record(caller, remote, conversation, remembered)
     }
 }
 
-/// An agent id basis will turn into a file name: mentra's ids are this shape,
-/// and anything else stays in memory rather than become a path.
-fn is_file_safe(id: &str) -> bool {
-    !id.is_empty()
-        && id.len() <= 128
-        && id
-            .chars()
-            .all(|c| c.is_ascii_alphanumeric() || c == '-' || c == '_')
-}
+/// Fetches every agent's card at once and hands the results back in the order
+/// the agents came in.
+///
+/// One task per agent rather than a joined future, so this needs no
+/// dependency beyond tokio; awaiting the handles in order is what keeps the
+/// order. A task that died is reported as a failed connect, which is what it
+/// was.
+async fn connect_each(
+    agents: Vec<A2aAgent>,
+) -> Vec<(A2aAgent, Result<Arc<A2aClient>, ClientError>)> {
+    let pending: Vec<_> = agents
+        .into_iter()
+        .map(|agent| {
+            let config = agent.config().clone();
+            let task = tokio::spawn(async move { A2aClient::connect(&config).await });
+            (agent, task)
+        })
+        .collect();
 
-/// A record on disk, or nothing. A file that cannot be read is said once and
-/// treated as no record: the worst that follows is a new conversation, which
-/// is what having no record already means.
-fn load(file: &Path) -> Conversations {
-    match std::fs::read(file) {
-        Ok(bytes) => serde_json::from_slice(&bytes).unwrap_or_else(|error| {
-            eprintln!(
-                "Warning: ignoring unreadable A2A conversation record {}: {error}",
-                file.display()
-            );
-            Conversations::default()
-        }),
-        Err(error) if error.kind() == std::io::ErrorKind::NotFound => Conversations::default(),
-        Err(error) => {
-            eprintln!(
-                "Warning: ignoring unreadable A2A conversation record {}: {error}",
-                file.display()
-            );
-            Conversations::default()
-        }
+    let mut connected = Vec::with_capacity(pending.len());
+    for (agent, task) in pending {
+        let client = match task.await {
+            Ok(result) => result.map(Arc::new),
+            Err(_) => Err(ClientError::Connect),
+        };
+        connected.push((agent, client));
     }
+    connected
 }
 
-/// Replaces a record whole: written beside it, then renamed over it, so a
-/// crash leaves the old record or the new one and never half of either.
-fn store(file: &Path, conversations: &Conversations) -> std::io::Result<()> {
-    let dir = file.parent().expect("a record file has a directory");
-    std::fs::create_dir_all(dir)?;
-    let bytes = serde_json::to_vec_pretty(conversations).map_err(std::io::Error::other)?;
-    let staged = file.with_extension("json.tmp");
-    std::fs::write(&staged, bytes)?;
-    std::fs::rename(&staged, file)
+/// The client, or — when the connect failed — `None`, after the one warning
+/// a failed connect produces.
+fn warned(name: &str, client: Result<Arc<A2aClient>, ClientError>) -> Option<Arc<A2aClient>> {
+    // mentra's error carries no server text and no header value, and a
+    // configuration error that would have quoted the URL was refused at load
+    // (`a2a::file::refused`).
+    client
+        .inspect_err(|error| eprintln!("Warning: A2A agent '{name}' failed to connect: {error}"))
+        .ok()
 }
 
-/// Removes `agent_id`'s record from `dir`, when it has one — what
-/// [`crate::store::forget`] does for the conversation's remote work.
-pub(crate) fn forget(dir: &Path, agent_id: &str) -> Result<(), A2aError> {
-    if !is_file_safe(agent_id) {
-        return Ok(());
-    }
-    let path = dir.join(format!("{agent_id}.json"));
-    match std::fs::remove_file(&path) {
-        Ok(()) => Ok(()),
-        Err(error) if error.kind() == std::io::ErrorKind::NotFound => Ok(()),
-        Err(source) => Err(A2aError::Forget { path, source }),
-    }
-}
-
-/// Names only: a client's `Debug` is safe, but nothing a host logs needs more
-/// than which agents there are and which came up.
+/// Names and reachability only: a client's `Debug` is safe, but nothing a host
+/// logs needs more than which agents there are and which came up.
 impl std::fmt::Debug for RemoteAgents {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        let roster = self.snapshot();
         f.debug_list()
             .entries(
-                self.agents
+                roster
+                    .agents
                     .iter()
-                    .map(|agent| (&agent.name, agent.client.is_some())),
+                    .map(|agent| (agent.name().to_string(), agent.client.is_some())),
             )
             .finish()
     }
@@ -290,25 +242,30 @@ impl RemoteAgents {
     /// Agents that were configured but never connected — enough to exercise
     /// routing and refusals without a server.
     pub(crate) fn unreachable(names: &[&str]) -> Self {
-        Self {
-            agents: names
-                .iter()
-                .map(|name| RemoteAgent {
-                    name: (*name).to_string(),
-                    client: None,
-                })
-                .collect(),
-            conversations: Mutex::new(HashMap::new()),
-            remembered_in: None,
-        }
+        Self::with_roster(
+            Roster {
+                agents: names
+                    .iter()
+                    .map(|name| {
+                        Arc::new(RemoteAgent::new(
+                            A2aAgent::new(mentra::a2a::A2aAgentConfig::new(
+                                *name,
+                                "http://127.0.0.1:1",
+                            )),
+                            None,
+                        ))
+                    })
+                    .collect(),
+            },
+            None,
+        )
     }
 
     /// The same, remembering under `dir`.
-    pub(crate) fn unreachable_in(names: &[&str], dir: &Path) -> Self {
-        Self {
-            remembered_in: Some(dir.to_path_buf()),
-            ..Self::unreachable(names)
-        }
+    pub(crate) fn unreachable_in(names: &[&str], dir: &std::path::Path) -> Self {
+        let mut agents = Self::unreachable(names);
+        agents.conversations = conversation::Book::new(Some(dir.to_path_buf()));
+        agents
     }
 }
 

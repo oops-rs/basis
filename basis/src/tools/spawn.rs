@@ -339,8 +339,16 @@ impl SpawnTool {
         remote: &crate::a2a::remote::RemoteAgents,
     ) -> Option<Self> {
         let taught: Vec<(String, String)> = remote
-            .reachable()
-            .map(|(name, client)| (name.to_string(), mentra::a2a::card_summary(client.card())))
+            .snapshot()
+            .agents()
+            .iter()
+            .filter_map(|agent| {
+                let client = agent.client()?;
+                Some((
+                    agent.name().to_string(),
+                    mentra::a2a::card_summary(client.card()),
+                ))
+            })
             .collect();
         (!taught.is_empty()).then(|| Self {
             remote: taught,
@@ -378,7 +386,8 @@ impl SpawnTool {
         let Some(agents) = self.remote_agents_of(agent_id) else {
             return Err(no_remote_agents(name));
         };
-        match agents.get(name) {
+        let roster = agents.snapshot();
+        match roster.get(name) {
             Some(agent) if agent.client().is_some() => Ok(SpawnDecision::Remote {
                 agents: Arc::clone(&agents),
                 name: name.to_string(),
@@ -388,9 +397,11 @@ impl SpawnTool {
                  there is nothing to hand `@{name}` to"
             )),
             None => {
-                let reachable: Vec<String> = agents
-                    .reachable()
-                    .map(|(name, _)| name.to_string())
+                let reachable: Vec<String> = roster
+                    .agents()
+                    .iter()
+                    .filter(|agent| agent.client().is_some())
+                    .map(|agent| agent.name().to_string())
                     .collect();
                 Err(if reachable.is_empty() {
                     no_remote_agents(name)
