@@ -31,7 +31,7 @@ use chrono::{DateTime, Utc};
 
 use crate::{
     index::Record,
-    service::{APPROVAL_EXTENSION, Asked},
+    service::{APPROVAL_EXTENSION, Asked, HOPS_EXTENSION},
 };
 
 /// The id of the one artifact a completed task carries.
@@ -141,8 +141,25 @@ pub(crate) fn task(record: &Record, standing: &Standing, view: View) -> Task {
         status,
         artifacts,
         history: history(record, view.history_length),
-        metadata: None,
+        metadata: hops_metadata(record),
     }
+}
+
+/// The hop the task was reached at and its effective deadline, under the
+/// hops extension — what the server decided, for a caller to see.
+fn hops_metadata(record: &Record) -> Option<std::collections::HashMap<String, serde_json::Value>> {
+    let deadline = timestamp(record.deadline_ms?)?;
+    Some(
+        [(
+            HOPS_EXTENSION.to_string(),
+            serde_json::json!({
+                "hop": record.hop,
+                "deadline": deadline.to_rfc3339_opts(chrono::SecondsFormat::Millis, true),
+            }),
+        )]
+        .into_iter()
+        .collect(),
+    )
 }
 
 /// The status update that says where `standing` leaves the task.

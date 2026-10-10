@@ -17,7 +17,7 @@ use a2a::{
 use crate::{
     config::{AgentIdentity, ExtendedCard, Principal},
     rest,
-    service::{A2aService, APPROVAL_EXTENSION, INPUT_MODES},
+    service::{A2aService, APPROVAL_EXTENSION, HOPS_EXTENSION, INPUT_MODES},
 };
 
 /// The well-known path the spec puts the card at.
@@ -101,7 +101,18 @@ pub(crate) fn build(identity: &AgentIdentity, endpoint: &str, features: Features
 
 /// The extensions this server speaks, each declared only when on.
 fn extensions(features: Features) -> Option<Vec<AgentExtension>> {
-    let mut extensions = Vec::new();
+    // Always served: every message is read for it, and a server that reads it
+    // is one a caller can tell how deep its chain already is.
+    let mut extensions = vec![AgentExtension {
+        uri: HOPS_EXTENSION.to_string(),
+        description: Some(
+            "Message metadata may carry {hop, deadline}: a message past this agent's hop cap \
+             is refused, and a task's deadline is clamped to its caller's."
+                .to_string(),
+        ),
+        required: Some(false),
+        params: None,
+    }];
     if features.ask_caller {
         extensions.push(AgentExtension {
             uri: APPROVAL_EXTENSION.to_string(),

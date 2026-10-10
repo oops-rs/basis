@@ -18,8 +18,8 @@
 //!
 //! # The environment protocol
 //!
-//! A task's runtime sets three environment variables for every command its
-//! turns run (ADR-0018), and this is the one place their names and meanings
+//! A task's runtime sets up to four environment variables for every command
+//! its turns run (ADR-0018), and this is the one place their names and meanings
 //! are declared — they are read by tools this crate never sees run, so this
 //! is a protocol this crate publishes rather than an implementation detail
 //! it could rename:
@@ -35,6 +35,10 @@
 //! - [`BASIS_PARENT_TASK_ID`] — the parent's handle, present only when the
 //!   task has one. What lets a deeply nested spawn still name its whole
 //!   ownership chain without walking `meta.json` files to find it.
+//! - [`BASIS_HOP`] — the agent-to-agent hop the task's work arrived at,
+//!   present only when it is not 0 (see `RunSpec::with_hop`). What a client
+//!   run from inside a turn adds one to when it hands work to another agent
+//!   (ADR-0030 §9).
 //!
 //! [`current_task`] reads the first of these back, for a host that wants to
 //! know whether *it* is running as a task's tool call.
@@ -78,6 +82,9 @@ pub const BASIS_TASK_ID: &str = "BASIS_TASK_ID";
 pub const BASIS_DATA_DIR: &str = "BASIS_DATA_DIR";
 /// This task's parent, when it has one — see [`BASIS_PARENT_TASK_ID`].
 pub const BASIS_PARENT_TASK_ID: &str = "BASIS_PARENT_TASK_ID";
+/// The hop this task's work arrived at, when it is not 0 — see
+/// [`BASIS_HOP`].
+pub const BASIS_HOP: &str = "BASIS_HOP";
 
 /// This process's own task, if it is itself running as one — read from
 /// [`BASIS_TASK_ID`]. `None` for a value that is absent, blank, or does not

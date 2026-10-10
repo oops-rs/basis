@@ -147,6 +147,7 @@ pub struct ServeConfig {
     pub(crate) extended_card: Option<ExtendedCard>,
     pub(crate) push_notifications: bool,
     pub(crate) private_webhooks: bool,
+    pub(crate) hop_cap: u32,
 }
 
 impl ServeConfig {
@@ -167,6 +168,7 @@ impl ServeConfig {
             extended_card: None,
             push_notifications: false,
             private_webhooks: false,
+            hop_cap: crate::DEFAULT_HOP_CAP,
         }
     }
 
@@ -259,6 +261,14 @@ impl ServeConfig {
             private_webhooks: true,
             ..self
         }
+    }
+
+    /// Refuses a message more than `hop_cap` agent-to-agent hops from its
+    /// top-level caller (ADR-0030 §9, `docs/a2a/hops-v1.md`). Defaults to
+    /// [`DEFAULT_HOP_CAP`](crate::DEFAULT_HOP_CAP).
+    #[must_use]
+    pub fn with_hop_cap(self, hop_cap: u32) -> Self {
+        Self { hop_cap, ..self }
     }
 
     /// Keeps tasks under an explicit data root rather than the one

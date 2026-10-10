@@ -2,12 +2,12 @@
 //! continues, and spawning the task that answers it.
 
 use a2a::{A2AError, Message, SendMessageRequest};
-use basis_tasks::{Continuation, Hint, RunSpec, now_ms};
+use basis_tasks::{Continuation, DEFAULT_DEADLINE, Hint, RunSpec, now_ms};
 
 use super::{
     A2aService,
     ask::{self, Unanswered},
-    parts,
+    hops, parts,
 };
 use crate::{card::TEXT, config::Principal, index::Record, project::internal};
 
@@ -66,6 +66,8 @@ impl A2aService {
             });
         }
         let rendered = parts::render(&message)?;
+        let inbound = hops::inbound(&message)?;
+        hops::check_cap(inbound, self.inner.hop_cap)?;
         let (context_id, continuation) = self.conversation(caller, &message)?;
 
         // Checked before anything is spawned, so a refused webhook leaves no
@@ -75,7 +77,18 @@ impl A2aService {
             self.check_webhook(webhook).await?;
         }
 
-        let spec = self.run_spec(rendered.prompt.clone(), continuation);
+        // Clamped here, at spawn, because `basis-tasks` counts a task's
+        // deadline from the moment it is minted.
+        let accepted_ms = now_ms();
+        let deadline = hops::effective_deadline(
+            self.inner.run.deadline.unwrap_or(DEFAULT_DEADLINE),
+            inbound,
+            accepted_ms,
+        )?;
+        let spec = self
+            .run_spec(rendered.prompt.clone(), continuation)
+            .with_deadline(deadline)
+            .with_hop(inbound.hop);
         let tasks = self.tasks().clone();
         let handle = tokio::task::spawn_blocking(move || tasks.spawn(spec))
             .await
@@ -96,9 +109,13 @@ impl A2aService {
             context_id,
             message.message_id,
             rendered.prompt,
-            now_ms(),
+            accepted_ms,
         )
-        .with_parts((!rendered.only_text).then_some(message.parts));
+        .with_parts((!rendered.only_text).then_some(message.parts))
+        .with_hops(
+            inbound.hop,
+            accepted_ms.saturating_add(u64::try_from(deadline.as_millis()).unwrap_or(u64::MAX)),
+        );
         self.inner.index.insert(record.clone()).map_err(internal)?;
         // Stored before the task is driven, so its first change of status is
         // already one the webhook hears about. A store that fails still

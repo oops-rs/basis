@@ -55,6 +55,13 @@ pub(crate) struct Record {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub(crate) parts: Option<Vec<Part>>,
     pub(crate) created_ms: u64,
+    /// The hop the message that started the task arrived at (ADR-0030 §9).
+    #[serde(default, skip_serializing_if = "is_zero")]
+    pub(crate) hop: u32,
+    /// When the task gives up: its own deadline, clamped to its caller's.
+    /// Absent on records written before hops existed.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub(crate) deadline_ms: Option<u64>,
     /// When this server saw the task settle. Absent while it runs.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub(crate) finished_ms: Option<u64>,
@@ -77,6 +84,8 @@ impl Record {
             message_id,
             text,
             parts: None,
+            hop: 0,
+            deadline_ms: None,
             created_ms,
             finished_ms: None,
         }
@@ -84,6 +93,14 @@ impl Record {
 
     pub(crate) fn with_parts(self, parts: Option<Vec<Part>>) -> Self {
         Self { parts, ..self }
+    }
+
+    pub(crate) fn with_hops(self, hop: u32, deadline_ms: u64) -> Self {
+        Self {
+            hop,
+            deadline_ms: Some(deadline_ms),
+            ..self
+        }
     }
 
     pub(crate) fn handle(&self) -> TaskHandle {
@@ -95,6 +112,10 @@ impl Record {
     pub(crate) fn status_ms(&self) -> u64 {
         self.finished_ms.unwrap_or(self.created_ms)
     }
+}
+
+fn is_zero(value: &u32) -> bool {
+    *value == 0
 }
 
 fn default_principal() -> String {

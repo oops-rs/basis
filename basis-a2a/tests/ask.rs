@@ -62,9 +62,20 @@ fn reply(task: &Value, parts: Value) -> Value {
 async fn an_approved_call_is_made_and_the_card_declares_the_extension() {
     let served = asking(Duration::from_secs(30), write_then_finish()).await;
     let card = served.card().await;
-    assert_eq!(
-        card["capabilities"]["extensions"][0]["uri"], EXTENSION,
-        "{card}"
+    let declares = |card: &Value| {
+        card["capabilities"]["extensions"]
+            .as_array()
+            .is_some_and(|extensions| {
+                extensions
+                    .iter()
+                    .any(|extension| extension["uri"] == EXTENSION)
+            })
+    };
+    assert!(declares(&card), "{card}");
+    let never = Served::start().await;
+    assert!(
+        !declares(&never.card().await),
+        "a server that never asks does not declare it"
     );
 
     let asked = served

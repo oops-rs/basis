@@ -64,4 +64,4 @@ pub use config::{
 };
 pub use http::{A2aServer, BindError, router};
 pub use rest::HTTP_JSON_PATH;
-pub use service::{A2aService, OpenError};
+pub use service::{A2aService, DEFAULT_HOP_CAP, OpenError};

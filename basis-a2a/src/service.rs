@@ -20,11 +20,14 @@
 
 mod ask;
 mod drive;
+mod hops;
 mod parts;
 mod push;
 mod send;
 
 pub(crate) use ask::{APPROVAL_EXTENSION, Asked};
+pub use hops::DEFAULT_HOP_CAP;
+pub(crate) use hops::HOPS_EXTENSION;
 pub(crate) use parts::INPUT_MODES;
 pub(crate) use push::Push;
 
@@ -103,6 +106,7 @@ struct Inner {
     extended_card: Option<ExtendedCard>,
     /// Present when push notifications are on.
     push: Option<Push>,
+    hop_cap: u32,
     /// Every task this process is driving. Absent for a task nobody here is
     /// driving.
     drivers: Mutex<HashMap<String, Driver>>,
@@ -125,6 +129,7 @@ impl A2aService {
             extended_card,
             push_notifications,
             private_webhooks,
+            hop_cap,
         } = config;
         let principals = Principals::new(tokens)?;
         if extended_card.is_some() && !principals.any() {
@@ -159,6 +164,7 @@ impl A2aService {
                 public_url,
                 extended_card,
                 push,
+                hop_cap,
                 drivers: Mutex::new(HashMap::new()),
             }),
         };

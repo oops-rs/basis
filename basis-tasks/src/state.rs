@@ -241,6 +241,10 @@ pub struct InboxRecord {
     pub messages: Vec<MessageRecord>,
 }
 
+fn is_zero(value: &u32) -> bool {
+    *value == 0
+}
+
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub(crate) struct TaskMeta {
     pub id: String,
@@ -287,6 +291,11 @@ pub(crate) struct TaskMeta {
     #[serde(default)]
     pub usage: RunUsage,
     pub deadline_at_ms: Option<u64>,
+    /// The agent-to-agent hop the task's work arrived at — see
+    /// [`RunSpec::with_hop`](crate::RunSpec::with_hop). Absent is 0, which
+    /// is what every task recorded before hops existed was.
+    #[serde(default, skip_serializing_if = "is_zero")]
+    pub hop: u32,
     pub created_ms: u64,
     /// When this task last advanced, as its executor records it: the attach
     /// that opened its conversation, every turn it banked, and the completion
@@ -330,9 +339,14 @@ impl TaskMeta {
             stopped_by: None,
             usage: RunUsage::default(),
             deadline_at_ms,
+            hop: 0,
             created_ms: now,
             updated_ms: now,
         }
+    }
+
+    pub(crate) fn at_hop(self, hop: u32) -> Self {
+        Self { hop, ..self }
     }
 
     /// Records the conversation this task continues, when it continues one.
