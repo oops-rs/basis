@@ -56,7 +56,7 @@ use std::{
     io,
     path::Path,
     sync::{Arc, Mutex},
-    time::Duration,
+    time::{Duration, UNIX_EPOCH},
 };
 
 use basis::{
@@ -629,8 +629,12 @@ async fn run_model(
         }
 
         let mut turn = TurnOptions::default().with_cancel(cancellation.clone());
-        if let Some(remaining) = remaining {
-            turn = turn.with_deadline(remaining);
+        // The recorded instant itself, not what was left of it a moment ago:
+        // a relative deadline re-anchored at turn start drifts later by
+        // however long the turn took to start, and a task reached over A2A
+        // hands this deadline on, where it may only ever shrink.
+        if let Some(deadline_at) = meta.deadline_at_ms {
+            turn = turn.with_absolute_deadline(UNIX_EPOCH + Duration::from_millis(deadline_at));
         }
         let approver = match approver(meta.options.approve, ctx) {
             Ok(approver) => approver,
@@ -906,6 +910,14 @@ fn task_runtime(data: &DataDir, task: &str, meta: &TaskMeta) -> Result<RuntimeBu
         .with_command_environment(crate::BASIS_DATA_DIR, data.root().to_string_lossy());
     if let Some(parent) = &meta.parent {
         runtime = runtime.with_command_environment(crate::BASIS_PARENT_TASK_ID, parent);
+    }
+    if meta.hop > 0 {
+        // Twice, for two readers: a command the task runs reads the
+        // environment, and the task's own `@agent` delegations read the
+        // runtime, so each remote agent it reaches is told the next hop.
+        runtime = runtime
+            .with_command_environment(crate::BASIS_HOP, meta.hop.to_string())
+            .with_a2a_hop(meta.hop);
     }
     Ok(runtime)
 }

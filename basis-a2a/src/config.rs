@@ -2,20 +2,24 @@
 //! about it, how its runs are bounded, and who may call it.
 //!
 //! Everything here is decided once, before the first request, and none of it
-//! changes while serving. That is what lets [`InboundApproval`] have no
-//! `Prompt` variant at all (ADR-0028 §4): a served agent's callers are other
-//! agents, so a question about a tool call has nobody to put it to, and a
-//! policy that would ask is refused by the type rather than discovered on
-//! the first consequential call.
+//! changes while serving. [`InboundApproval`] has no `Prompt` variant
+//! (ADR-0028 §4): there is no person at this server to put a question to.
+//! What it has instead is [`InboundApproval::AskCaller`] (ADR-0030 §7), which
+//! puts the question to the one party there is — whoever sent the task.
 
-use std::{fmt, path::PathBuf, time::Duration};
+mod auth;
+mod identity;
 
-use a2a::AgentSkill;
+use std::{path::PathBuf, time::Duration};
+
 use basis::{Effort, SystemPrompt};
 use basis_tasks::Approve;
 
-/// How a served task's consequential calls are answered. There is no third
-/// option: see the module docs.
+pub(crate) use auth::Principals;
+pub use auth::{BearerToken, DEFAULT_PRINCIPAL, Principal, PrincipalError};
+pub use identity::{AgentIdentity, ExtendedCard};
+
+/// How a served task's consequential calls are answered.
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
 pub enum InboundApproval {
     /// Every consequential call is refused. The default: an agent reachable
@@ -24,6 +28,11 @@ pub enum InboundApproval {
     Never,
     /// Every consequential call is allowed.
     Always,
+    /// Every consequential call is put to the caller: the task moves to
+    /// `INPUT_REQUIRED` with the call's id, tool and preview, and the call
+    /// is made only if the caller answers `approve` within `deadline` — see
+    /// `docs/a2a/approval-v1.md`. Silence past the deadline is `deny`.
+    AskCaller { deadline: Duration },
 }
 
 impl From<InboundApproval> for Approve {
@@ -31,86 +40,11 @@ impl From<InboundApproval> for Approve {
         match approval {
             InboundApproval::Never => Approve::Never,
             InboundApproval::Always => Approve::Always,
+            // `basis-tasks` asks whichever process drives the task, and this
+            // server drives every task it accepts — through a host that puts
+            // the question to the task's caller.
+            InboundApproval::AskCaller { .. } => Approve::Prompt,
         }
-    }
-}
-
-/// The bearer token every call but the public card must carry.
-///
-/// Held privately and never printed: `Debug` redacts it, and nothing in this
-/// crate formats it into an error.
-#[derive(Clone)]
-pub struct BearerToken(String);
-
-impl BearerToken {
-    /// `None` for an empty or all-whitespace token, which would authenticate
-    /// a request carrying `Authorization: Bearer ` and nothing else.
-    pub fn new(token: impl Into<String>) -> Option<Self> {
-        let token = token.into();
-        (!token.trim().is_empty()).then_some(Self(token))
-    }
-
-    /// Whether `presented` is this token, compared in time that depends only
-    /// on the lengths — the bytes of a wrong guess do not change how long it
-    /// takes to refuse.
-    pub(crate) fn matches(&self, presented: &str) -> bool {
-        let expected = self.0.as_bytes();
-        let presented = presented.as_bytes();
-        if expected.len() != presented.len() {
-            return false;
-        }
-        expected
-            .iter()
-            .zip(presented)
-            .fold(0u8, |difference, (left, right)| difference | (left ^ right))
-            == 0
-    }
-}
-
-impl fmt::Debug for BearerToken {
-    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        f.write_str("BearerToken(<redacted>)")
-    }
-}
-
-/// What the Agent Card says this agent is.
-#[derive(Debug, Clone)]
-pub struct AgentIdentity {
-    pub(crate) name: String,
-    pub(crate) description: String,
-    pub(crate) version: String,
-    pub(crate) skills: Vec<AgentSkill>,
-}
-
-impl AgentIdentity {
-    /// A card names an agent and says what it does; both are required by the
-    /// spec, and a caller choosing among agents reads nothing else first.
-    pub fn new(name: impl Into<String>, description: impl Into<String>) -> Self {
-        Self {
-            name: name.into(),
-            description: description.into(),
-            version: env!("CARGO_PKG_VERSION").to_string(),
-            skills: Vec::new(),
-        }
-    }
-
-    /// The agent's own version, when it has one other than basis's.
-    #[must_use]
-    pub fn with_version(self, version: impl Into<String>) -> Self {
-        Self {
-            version: version.into(),
-            ..self
-        }
-    }
-
-    /// Adds a skill to the card. With none, the card advertises one general
-    /// skill described by the agent's own description, because a card must
-    /// list what the agent can be asked to do.
-    #[must_use]
-    pub fn with_skill(self, skill: AgentSkill) -> Self {
-        let mut skills = self.skills;
-        skills.push(skill);
-        Self { skills, ..self }
     }
 }
 
@@ -207,9 +141,13 @@ pub struct ServeConfig {
     pub(crate) approval: InboundApproval,
     pub(crate) shell: bool,
     pub(crate) run: RunDefaults,
-    pub(crate) token: Option<BearerToken>,
+    pub(crate) tokens: Vec<(Principal, BearerToken)>,
     pub(crate) public_url: Option<String>,
     pub(crate) data_dir: Option<PathBuf>,
+    pub(crate) extended_card: Option<ExtendedCard>,
+    pub(crate) push_notifications: bool,
+    pub(crate) private_webhooks: bool,
+    pub(crate) hop_cap: u32,
 }
 
 impl ServeConfig {
@@ -224,9 +162,13 @@ impl ServeConfig {
             approval: InboundApproval::default(),
             shell: false,
             run: RunDefaults::default(),
-            token: None,
+            tokens: Vec::new(),
             public_url: None,
             data_dir: None,
+            extended_card: None,
+            push_notifications: false,
+            private_webhooks: false,
+            hop_cap: crate::DEFAULT_HOP_CAP,
         }
     }
 
@@ -252,24 +194,81 @@ impl ServeConfig {
     }
 
     /// Requires `token` on every call but the public card, and declares the
-    /// bearer scheme on the card.
+    /// bearer scheme on the card. Its holder is the [`DEFAULT_PRINCIPAL`]:
+    /// the one-caller server this was before principals existed.
     #[must_use]
     pub fn with_token(self, token: BearerToken) -> Self {
-        Self {
-            token: Some(token),
-            ..self
-        }
+        let principal =
+            Principal::new(DEFAULT_PRINCIPAL).expect("the default principal's name is plain");
+        self.with_principal(principal, token)
+    }
+
+    /// Accepts `token` as `principal` (ADR-0030 §8). Every task a caller
+    /// creates is recorded under its principal, and every task-scoped call
+    /// sees only that principal's own. Names and tokens must each be unique;
+    /// [`A2aService::open`](crate::A2aService::open) refuses a set that is not.
+    #[must_use]
+    pub fn with_principal(self, principal: Principal, token: BearerToken) -> Self {
+        let mut tokens = self.tokens;
+        tokens.push((principal, token));
+        Self { tokens, ..self }
     }
 
     /// The URL callers reach the JSON-RPC endpoint at, as advertised on the
     /// card — what a reverse proxy terminating TLS in front of this server
-    /// exposes. Defaults to `http://<bound address>/`.
+    /// exposes. Defaults to `http://<bound address>/`. The HTTP+JSON interface
+    /// is advertised under it, at [`HTTP_JSON_PATH`](crate::HTTP_JSON_PATH).
     #[must_use]
     pub fn with_public_url(self, public_url: impl Into<String>) -> Self {
         Self {
             public_url: Some(public_url.into()),
             ..self
         }
+    }
+
+    /// Serves `extended` to authenticated callers and declares it on the
+    /// public card (ADR-0030 §5). Needs at least one token:
+    /// [`A2aService::open`](crate::A2aService::open) refuses an extended card
+    /// on a server nobody authenticates to, since nobody could be served it.
+    #[must_use]
+    pub fn with_extended_card(self, extended: ExtendedCard) -> Self {
+        Self {
+            extended_card: Some(extended),
+            ..self
+        }
+    }
+
+    /// Serves push notifications (ADR-0030 §4): callers may register
+    /// webhooks, which this server then calls on every status change of
+    /// their task. Off by default, because it makes this server send
+    /// requests to URLs its callers choose; every webhook is checked against
+    /// loopback, private and link-local addresses unless
+    /// [`with_private_webhooks`](Self::with_private_webhooks) says otherwise.
+    #[must_use]
+    pub fn with_push_notifications(self) -> Self {
+        Self {
+            push_notifications: true,
+            ..self
+        }
+    }
+
+    /// Lets webhooks point at loopback, private and link-local addresses —
+    /// for a deployment whose callers live on the same private network. It
+    /// still never sends anywhere but `http` and `https`.
+    #[must_use]
+    pub fn with_private_webhooks(self) -> Self {
+        Self {
+            private_webhooks: true,
+            ..self
+        }
+    }
+
+    /// Refuses a message more than `hop_cap` agent-to-agent hops from its
+    /// top-level caller (ADR-0030 §9, `docs/a2a/hops-v1.md`). Defaults to
+    /// [`DEFAULT_HOP_CAP`](crate::DEFAULT_HOP_CAP).
+    #[must_use]
+    pub fn with_hop_cap(self, hop_cap: u32) -> Self {
+        Self { hop_cap, ..self }
     }
 
     /// Keeps tasks under an explicit data root rather than the one
@@ -289,31 +288,15 @@ mod tests {
     use super::*;
 
     #[test]
-    fn an_empty_token_is_no_token() {
-        assert!(BearerToken::new("").is_none());
-        assert!(BearerToken::new("  \t").is_none());
-        assert!(BearerToken::new("s3cret").is_some());
-    }
-
-    #[test]
-    fn a_token_matches_only_itself() {
-        let token = BearerToken::new("s3cret").unwrap();
-        assert!(token.matches("s3cret"));
-        assert!(!token.matches("s3cre"));
-        assert!(!token.matches("s3crex"));
-        assert!(!token.matches(""));
-    }
-
-    #[test]
-    fn a_token_never_prints() {
-        let token = BearerToken::new("s3cret").unwrap();
-        assert!(!format!("{token:?}").contains("s3cret"));
-    }
-
-    #[test]
-    fn inbound_approval_maps_onto_the_two_policies_that_ask_nobody() {
+    fn inbound_approval_maps_onto_the_task_layers_policies() {
         assert_eq!(Approve::from(InboundApproval::Never), Approve::Never);
         assert_eq!(Approve::from(InboundApproval::Always), Approve::Always);
+        assert_eq!(
+            Approve::from(InboundApproval::AskCaller {
+                deadline: Duration::from_secs(60)
+            }),
+            Approve::Prompt
+        );
         assert_eq!(InboundApproval::default(), InboundApproval::Never);
     }
 }

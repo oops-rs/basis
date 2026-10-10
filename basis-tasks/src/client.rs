@@ -175,6 +175,8 @@ impl Tasks {
             token_budget,
             detached,
             continuation,
+            hop,
+            not_after_ms,
         } = spec;
         if prompt.trim().is_empty() {
             return Err(Error::new("prompt is empty"));
@@ -241,11 +243,15 @@ impl Tasks {
             .map_err(|error| Error::new(format!("acquire workspace continuation lock: {error}")))?;
         let continues = self.resolve_continuation(&canonical, &key, continuation)?;
 
-        let requested_deadline = Some(
-            state::now_ms()
-                .checked_add(deadline_ms)
-                .ok_or_else(|| Error::new("task deadline exceeds the system clock range"))?,
+        let requested_deadline = attach::earlier_deadline(
+            Some(
+                state::now_ms()
+                    .checked_add(deadline_ms)
+                    .ok_or_else(|| Error::new("task deadline exceeds the system clock range"))?,
+            ),
+            not_after_ms,
         );
+        let mut hop = hop;
         let deadline_at = match &parent {
             Some(parent_handle) => {
                 let paths = attach::resolve(&self.data, parent_handle.as_str()).map_err(|_| {
@@ -261,6 +267,9 @@ impl Tasks {
                         "parent task {parent_handle} is no longer running"
                     )));
                 }
+                // A child is its parent's work one level down in-process:
+                // as many hops from the top-level caller, never fewer.
+                hop = hop.max(owner.hop);
                 attach::earlier_deadline(requested_deadline, owner.deadline_at_ms)
             }
             None => requested_deadline,
@@ -304,7 +313,8 @@ impl Tasks {
             options,
             deadline_at,
         )
-        .continuing(continues);
+        .continuing(continues)
+        .at_hop(hop);
         state::save_meta(&paths, &meta).map_err(Error::new)?;
         drop(continue_lock);
 
@@ -669,9 +679,26 @@ impl Tasks {
     /// spawn — not necessarily `Tasks::open`'s own workspace, since a handle
     /// resolves purely from itself.
     pub fn workspace_of(&self, handle: &TaskHandle) -> Result<PathBuf, Error> {
+        Ok(PathBuf::from(self.meta(handle)?.workspace))
+    }
+
+    /// The agent-to-agent hop the task's work arrived at, as recorded at
+    /// spawn — see [`RunSpec::with_hop`](crate::RunSpec::with_hop).
+    pub fn hop(&self, handle: &TaskHandle) -> Result<u32, Error> {
+        Ok(self.meta(handle)?.hop)
+    }
+
+    /// When the task gives up, in milliseconds since the epoch, as recorded
+    /// at spawn — the instant every turn is bounded by, so a host that hands
+    /// the deadline on (an A2A server telling a caller, say) states the one
+    /// the task actually runs under. `None` for a task with no deadline.
+    pub fn deadline_at_ms(&self, handle: &TaskHandle) -> Result<Option<u64>, Error> {
+        Ok(self.meta(handle)?.deadline_at_ms)
+    }
+
+    fn meta(&self, handle: &TaskHandle) -> Result<state::TaskMeta, Error> {
         let paths = attach::resolve(&self.data, handle.as_str()).map_err(Error::new)?;
-        let meta = state::load_meta(&paths).map_err(Error::new)?;
-        Ok(PathBuf::from(meta.workspace))
+        state::load_meta(&paths).map_err(Error::new)
     }
 
     /// Every task recorded for this `Tasks`'s workspace, last worked in

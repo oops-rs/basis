@@ -156,6 +156,10 @@ pub(crate) struct RemoteAgents {
     /// [`A2A_RETRY_BACKOFF`], but for tests.
     backoff: Duration,
     on_change: Option<OnChange>,
+    /// The hop the work behind these delegations arrived at over A2A, from
+    /// the runtime ([`crate::Runtime::a2a_hop`]); every message sent is the
+    /// next one.
+    hop: u32,
 }
 
 impl RemoteAgents {
@@ -189,7 +193,18 @@ impl RemoteAgents {
             conversations: conversation::Book::new(remembered_in),
             backoff: A2A_RETRY_BACKOFF,
             on_change: None,
+            hop: 0,
         }
+    }
+
+    /// Says the work these agents are handed arrived over A2A at `hop`.
+    pub(crate) fn with_hop(self, hop: u32) -> Self {
+        Self { hop, ..self }
+    }
+
+    /// The hop the work behind these delegations arrived at.
+    pub(crate) fn hop(&self) -> u32 {
+        self.hop
     }
 
     /// Calls `on_change` after every change to the set from now on.

@@ -313,6 +313,7 @@ name = "basis"
 version = "0.14.0"
 dependencies = [
  "async-trait",
+ "chrono",
  "dunce",
  "futures",
  "mentra",
@@ -341,6 +342,8 @@ dependencies = [
  "tempfile",
  "thiserror",
  "tokio",
+ "url",
+ "uuid",
 ]
 
 [[package]]

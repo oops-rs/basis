@@ -2,146 +2,20 @@
 //! the card fetched from its well-known path, JSON-RPC posted to the
 //! endpoint the card names, and a scripted model behind it.
 //!
-//! The model endpoint follows the pattern `basis-tasks/tests/lifecycle.rs`
-//! scripts a provider with — a loopback `chat/completions` listener answered
-//! from a fixed script — reimplemented here because each crate's integration
-//! tests are their own process. It also keeps every turn's request body, so
-//! a test can see what the model was sent.
+//! The harness — scripted model, served agent, wire client — is shared with
+//! the other test files in `support/harness.rs`.
 
-use std::{
-    io::{Read, Write},
-    net::{TcpListener, TcpStream},
-    sync::{
-        Arc, Mutex,
-        atomic::{AtomicBool, AtomicUsize, Ordering},
-    },
-    thread,
-    time::{Duration, Instant},
-};
+#[path = "support/harness.rs"]
+mod harness;
 
-use basis_a2a::{
-    A2aServer, A2aService, AgentIdentity, BearerToken, RunDefaults, ServeConfig, a2a::error_code,
+use std::time::{Duration, Instant};
+
+use basis_a2a::{A2aServer, A2aService, AgentIdentity, Principal, ServeConfig, a2a::error_code};
+use harness::{
+    ScriptedEndpoint, Served, artifact_text, base_config, isolate_environment, sse_events,
+    user_message,
 };
 use serde_json::{Value, json};
-
-const TOKEN: &str = "test-token";
-
-/// Everything one served agent needs, kept alive for the test's length.
-struct Served {
-    endpoint: String,
-    card_url: String,
-    model: ScriptedEndpoint,
-    http: reqwest::Client,
-    _data: tempfile::TempDir,
-    _workspace: tempfile::TempDir,
-}
-
-impl Served {
-    async fn start() -> Self {
-        Self::start_with(ScriptedEndpoint::start(false)).await
-    }
-
-    async fn start_with(model: ScriptedEndpoint) -> Self {
-        isolate_environment();
-        let data = tempfile::tempdir().unwrap();
-        let workspace = tempfile::tempdir().unwrap();
-        let config = ServeConfig::new(
-            workspace.path(),
-            AgentIdentity::new("helper", "Answers questions in tests."),
-        )
-        .with_data_dir(data.path())
-        .with_token(BearerToken::new(TOKEN).unwrap())
-        .with_run_defaults(
-            RunDefaults::default()
-                .with_base_url(&model.base_url)
-                .with_model("test-model")
-                .with_deadline(Duration::from_secs(60)),
-        );
-        let service = A2aService::open(config).expect("opens");
-        let server = A2aServer::bind("127.0.0.1:0".parse().unwrap(), service)
-            .await
-            .expect("binds loopback");
-        let endpoint = server.endpoint().to_string();
-        let card_url = format!(
-            "http://{}{}",
-            server.local_addr(),
-            basis_a2a::AGENT_CARD_PATH
-        );
-        tokio::spawn(server.serve());
-        Self {
-            endpoint,
-            card_url,
-            model,
-            http: reqwest::Client::new(),
-            _data: data,
-            _workspace: workspace,
-        }
-    }
-
-    async fn post(&self, body: Value) -> reqwest::Response {
-        self.http
-            .post(&self.endpoint)
-            .bearer_auth(TOKEN)
-            .header("A2A-Version", "1.0")
-            .json(&body)
-            .send()
-            .await
-            .expect("the server answers")
-    }
-
-    async fn call(&self, method: &str, params: Value) -> Value {
-        let response = self
-            .post(json!({"jsonrpc": "2.0", "id": 1, "method": method, "params": params}))
-            .await;
-        assert_eq!(response.status(), 200);
-        response.json().await.unwrap()
-    }
-
-    async fn result(&self, method: &str, params: Value) -> Value {
-        let reply = self.call(method, params).await;
-        assert!(reply.get("error").is_none(), "{method} failed: {reply}");
-        reply["result"].clone()
-    }
-
-    async fn error_code(&self, method: &str, params: Value) -> i32 {
-        let reply = self.call(method, params).await;
-        reply["error"]["code"]
-            .as_i64()
-            .and_then(|code| i32::try_from(code).ok())
-            .unwrap_or_else(|| panic!("{method} should have failed: {reply}"))
-    }
-
-    /// Polls `GetTask` until `id` reaches `state`.
-    async fn wait_for(&self, id: &str, state: &str) -> Value {
-        let deadline = Instant::now() + Duration::from_secs(30);
-        loop {
-            let task = self.result("GetTask", json!({"id": id})).await;
-            if task["status"]["state"] == state {
-                return task;
-            }
-            assert!(Instant::now() < deadline, "never reached {state}: {task}");
-            tokio::time::sleep(Duration::from_millis(50)).await;
-        }
-    }
-}
-
-fn user_message(text: &str, context_id: Option<&str>) -> Value {
-    let mut message = json!({
-        "messageId": format!("m-{text}"),
-        "role": "ROLE_USER",
-        "parts": [{"text": text}],
-    });
-    if let Some(context_id) = context_id {
-        message["contextId"] = json!(context_id);
-    }
-    message
-}
-
-fn artifact_text(task: &Value) -> &str {
-    task["artifacts"][0]["parts"][0]["text"]
-        .as_str()
-        .unwrap_or_else(|| panic!("no text artifact: {task}"))
-}
 
 #[tokio::test]
 async fn the_card_is_public_and_names_the_endpoint_it_is_served_on() {
@@ -177,7 +51,7 @@ async fn a_call_without_the_token_or_the_version_is_refused() {
     let unversioned: Value = served
         .http
         .post(&served.endpoint)
-        .bearer_auth(TOKEN)
+        .bearer_auth(harness::TOKEN)
         .json(&body)
         .send()
         .await
@@ -284,7 +158,7 @@ async fn an_unknown_context_or_a_reply_to_a_settled_task_is_refused() {
 
 #[tokio::test]
 async fn returning_immediately_hands_back_a_task_that_settles_later() {
-    let served = Served::start_with(ScriptedEndpoint::start(true)).await;
+    let served = Served::start_with(ScriptedEndpoint::start(true), |config| config).await;
     let result = served
         .result(
             "SendMessage",
@@ -337,11 +211,7 @@ async fn a_streamed_send_opens_on_the_task_and_closes_on_its_terminal_state() {
             .starts_with("text/event-stream")
     );
     let body = response.text().await.unwrap();
-    let events: Vec<Value> = body
-        .lines()
-        .filter_map(|line| line.strip_prefix("data:"))
-        .map(|data| serde_json::from_str(data.trim()).unwrap())
-        .collect();
+    let events = sse_events(&body);
 
     assert!(events.iter().all(|event| event["id"] == 7));
     assert!(events[0]["result"]["task"].is_object(), "{body}");
@@ -356,7 +226,7 @@ async fn a_streamed_send_opens_on_the_task_and_closes_on_its_terminal_state() {
 
 #[tokio::test]
 async fn cancelling_a_running_task_settles_it_canceled() {
-    let served = Served::start_with(ScriptedEndpoint::start(true)).await;
+    let served = Served::start_with(ScriptedEndpoint::start(true), |config| config).await;
     let result = served
         .result(
             "SendMessage",
@@ -376,7 +246,7 @@ async fn cancelling_a_running_task_settles_it_canceled() {
         tokio::spawn(async move {
             reqwest::Client::new()
                 .post(&endpoint)
-                .bearer_auth(TOKEN)
+                .bearer_auth(harness::TOKEN)
                 .header("A2A-Version", "1.0")
                 .json(&json!({"jsonrpc": "2.0", "id": 1, "method": "CancelTask", "params": {"id": id}}))
                 .send()
@@ -452,19 +322,7 @@ fn a_restarted_server_resumes_driving_the_tasks_it_accepted() {
     let model = ScriptedEndpoint::start(true);
     let data = tempfile::tempdir().unwrap();
     let workspace = tempfile::tempdir().unwrap();
-    let config = || {
-        ServeConfig::new(
-            workspace.path(),
-            AgentIdentity::new("durable", "Survives restarts."),
-        )
-        .with_data_dir(data.path())
-        .with_run_defaults(
-            RunDefaults::default()
-                .with_base_url(&model.base_url)
-                .with_model("test-model")
-                .with_deadline(Duration::from_secs(60)),
-        )
-    };
+    let config = || base_config(workspace.path(), data.path(), &model);
     let request = |text: &str| -> basis_a2a::a2a::SendMessageRequest {
         serde_json::from_value(json!({
             "message": user_message(text, None),
@@ -478,8 +336,10 @@ fn a_restarted_server_resumes_driving_the_tasks_it_accepted() {
     let first_life = tokio::runtime::Runtime::new().unwrap();
     let id = first_life.block_on(async {
         let service = A2aService::open(config()).unwrap();
-        let basis_a2a::a2a::SendMessageResponse::Task(task) =
-            service.send_message(request("survive")).await.unwrap()
+        let basis_a2a::a2a::SendMessageResponse::Task(task) = service
+            .send_message(&Principal::anonymous(), request("survive"))
+            .await
+            .unwrap()
         else {
             panic!("a send answers with a task");
         };
@@ -504,7 +364,10 @@ fn a_restarted_server_resumes_driving_the_tasks_it_accepted() {
         let deadline = Instant::now() + Duration::from_secs(30);
         loop {
             let task = service
-                .get_task(serde_json::from_value(json!({"id": id})).unwrap())
+                .get_task(
+                    &Principal::anonymous(),
+                    serde_json::from_value(json!({"id": id})).unwrap(),
+                )
                 .unwrap();
             if task.status.state == basis_a2a::a2a::TaskState::Completed {
                 let text = task.artifacts.unwrap()[0].parts[0]
@@ -522,139 +385,4 @@ fn a_restarted_server_resumes_driving_the_tasks_it_accepted() {
             tokio::time::sleep(Duration::from_millis(50)).await;
         }
     });
-}
-
-/// The provider's credential is read from the environment, and the global
-/// config directory would otherwise be the developer's own.
-fn isolate_environment() {
-    static ONCE: std::sync::Once = std::sync::Once::new();
-    ONCE.call_once(|| {
-        let config = tempfile::tempdir().unwrap().keep();
-        // SAFETY: set once, before any test in this binary reads either
-        // variable, and every test wants the same values.
-        unsafe {
-            std::env::set_var("BASIS_API_KEY", "test-key");
-            std::env::set_var("BASIS_CONFIG_DIR", config);
-        }
-    });
-}
-
-/// A loopback model endpoint answering every turn `reply-<n>`.
-struct ScriptedEndpoint {
-    base_url: String,
-    held: Arc<AtomicBool>,
-    requests: Arc<Mutex<Vec<String>>>,
-}
-
-impl ScriptedEndpoint {
-    /// `held`: every turn waits at the endpoint until [`release`](Self::release).
-    fn start(held: bool) -> Self {
-        let listener = TcpListener::bind("127.0.0.1:0").expect("bind test endpoint");
-        let address = listener.local_addr().expect("read endpoint address");
-        let held = Arc::new(AtomicBool::new(held));
-        let requests = Arc::new(Mutex::new(Vec::new()));
-        let served = Arc::new(AtomicUsize::new(0));
-        let turns = (Arc::clone(&held), Arc::clone(&requests), served);
-        thread::spawn(move || {
-            while let Ok((stream, _)) = listener.accept() {
-                let turns = (
-                    Arc::clone(&turns.0),
-                    Arc::clone(&turns.1),
-                    Arc::clone(&turns.2),
-                );
-                thread::spawn(move || answer(stream, &turns.0, &turns.1, &turns.2));
-            }
-        });
-        Self {
-            base_url: format!("http://{address}/"),
-            held,
-            requests,
-        }
-    }
-
-    fn release(&self) {
-        self.held.store(false, Ordering::SeqCst);
-    }
-
-    fn requests(&self) -> Vec<String> {
-        self.requests.lock().unwrap().clone()
-    }
-}
-
-fn answer(
-    mut stream: TcpStream,
-    held: &AtomicBool,
-    requests: &Mutex<Vec<String>>,
-    served: &AtomicUsize,
-) {
-    let request = read_http_request(&mut stream);
-    let first_line = request.lines().next().unwrap_or_default();
-    if first_line.starts_with("GET ") && first_line.contains("/models") {
-        let body = r#"{"object":"list","data":[{"id":"test-model","object":"model"}]}"#;
-        let _ = stream.write_all(
-            format!(
-                "HTTP/1.1 200 OK\r\nconnection: close\r\ncontent-type: application/json\r\ncontent-length: {}\r\n\r\n{body}",
-                body.len()
-            )
-            .as_bytes(),
-        );
-        return;
-    }
-    requests.lock().unwrap().push(request);
-    while held.load(Ordering::SeqCst) {
-        thread::sleep(Duration::from_millis(10));
-    }
-    let index = served.fetch_add(1, Ordering::SeqCst) + 1;
-    let id = format!("chatcmpl_{index}");
-    let events = [
-        json!({
-            "id": id, "model": "test-model",
-            "choices": [{"index": 0, "delta": {"role": "assistant", "content": format!("reply-{index}")}}]
-        }),
-        json!({"id": id, "choices": [{"index": 0, "delta": {}, "finish_reason": "stop"}]}),
-    ];
-    let body: String = events
-        .iter()
-        .map(|event| format!("data: {event}\n\n"))
-        .chain(std::iter::once("data: [DONE]\n\n".to_string()))
-        .collect();
-    let _ = stream.write_all(
-        format!(
-            "HTTP/1.1 200 OK\r\nconnection: close\r\ncontent-type: text/event-stream\r\ncontent-length: {}\r\n\r\n{body}",
-            body.len()
-        )
-        .as_bytes(),
-    );
-}
-
-/// Reads a request up to the end of its declared body.
-fn read_http_request(stream: &mut TcpStream) -> String {
-    let mut bytes = Vec::new();
-    let mut buffer = [0_u8; 4096];
-    let mut header_end = None;
-    let mut content_length = 0_usize;
-    while let Ok(read) = stream.read(&mut buffer) {
-        if read == 0 {
-            break;
-        }
-        bytes.extend_from_slice(&buffer[..read]);
-        if header_end.is_none()
-            && let Some(index) = bytes.windows(4).position(|window| window == b"\r\n\r\n")
-        {
-            let end = index + 4;
-            header_end = Some(end);
-            content_length = String::from_utf8_lossy(&bytes[..end])
-                .lines()
-                .find_map(|line| {
-                    let (name, value) = line.split_once(':')?;
-                    name.eq_ignore_ascii_case("content-length")
-                        .then(|| value.trim().parse::<usize>().unwrap_or_default())
-                })
-                .unwrap_or_default();
-        }
-        if header_end.is_some_and(|end| bytes.len() >= end + content_length) {
-            break;
-        }
-    }
-    String::from_utf8_lossy(&bytes).into_owned()
 }

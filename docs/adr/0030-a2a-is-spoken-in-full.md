@@ -63,10 +63,11 @@ JSON-RPC and HTTP+JSON bindings. gRPC stays deferred for its weight.**
    the task it names and survives a restart. Every status change of a task
    with configs is delivered to each, at least once: retried with backoff, and
    re-delivered from the last undelivered state after a restart. The config's
-   `authentication` becomes the `Authorization` header and its `token` the
-   `X-A2A-Notification-Token` header. A webhook URL is checked before anything
-   is sent and again at each delivery: `http` or `https` only, and a host that
-   resolves to a loopback, private, link-local, unspecified or multicast
+   `authentication` becomes the `Authorization` header and its `token` both
+   the `X-A2A-Notification-Token` header (the spec's example) and
+   `A2A-Notification-Token` (what the official SDKs read). A webhook URL is
+   checked before anything is sent and again at each delivery: `http` or
+   `https` only, and a host that resolves to a loopback, private, link-local, unspecified or multicast
    address is refused unless the operator allows private webhooks. mentra's
    client exposes the config methods; basis's own `spawn` does not use push,
    because it holds a stream and persists its task id, and `basis` links no

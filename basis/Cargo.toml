@@ -33,7 +33,7 @@ mcp = []
 # Unlike `mcp`, this one does forward: mentra gates its A2A client behind its
 # own `a2a` feature, so turning this off drops the client and the `a2a-lf`
 # wire types underneath it rather than only basis's half.
-a2a = ["mentra/a2a"]
+a2a = ["mentra/a2a", "dep:chrono"]
 
 # mentra streams the Responses wire format over HTTP+SSE or over a websocket,
 # and the second transport is the only reason tokio-tungstenite was ever in
@@ -55,6 +55,9 @@ responses-websocket = ["mentra/responses-websocket"]
 
 [dependencies]
 mentra.workspace = true
+# The hops extension's deadline is RFC 3339 on the wire (ADR-0030 §9); chrono
+# is already in the tree through `a2a-lf`'s own types.
+chrono = { workspace = true, optional = true }
 
 async-trait.workspace = true
 dunce.workspace = true

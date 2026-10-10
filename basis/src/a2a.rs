@@ -91,6 +91,14 @@ pub use reload::A2aReload;
 pub use remote::A2A_RETRY_BACKOFF;
 pub use watch::{A2aWatch, A2aWatchError, DEFAULT_A2A_WATCH_INTERVAL};
 
+/// The URI of basis's hops extension (`docs/a2a/hops-v1.md`, ADR-0030 §9):
+/// a message carries `{"hop", "deadline"}` under it in its metadata, so a
+/// loop between agents ends at a hop cap or the first deadline.
+///
+/// Both halves are basis's: `spawn` sends it on every `@<agent>` message, and
+/// `basis-a2a` reads it from every message it serves.
+pub const HOPS_EXTENSION: &str = "https://github.com/oops-rs/basis/blob/main/docs/a2a/hops-v1.md";
+
 /// Where basis looks inside a workspace, relative to its root.
 pub const DEFAULT_WORKSPACE_A2A_FILE: &str = ".basis/a2a.json";
 

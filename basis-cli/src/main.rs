@@ -178,7 +178,7 @@ async fn main() -> ExitCode {
             acp_args,
             a2a_args,
             ..
-        })) => serve_a2a(acp_args, a2a_args, bind).await,
+        })) => serve_a2a(acp_args, *a2a_args, bind).await,
         Some(Command::Serve(args)) => serve_bridge(args.acp_args, args.bridge_args).await,
         None => usage(),
     }

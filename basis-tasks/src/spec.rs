@@ -52,6 +52,8 @@ pub struct RunSpec {
     pub(crate) token_budget: Option<u64>,
     pub(crate) detached: bool,
     pub(crate) continuation: Continuation,
+    pub(crate) hop: u32,
+    pub(crate) not_after_ms: Option<u64>,
 }
 
 impl RunSpec {
@@ -70,6 +72,8 @@ impl RunSpec {
             token_budget: None,
             detached: false,
             continuation: Continuation::default(),
+            hop: 0,
+            not_after_ms: None,
         }
     }
 
@@ -132,6 +136,20 @@ impl RunSpec {
         }
     }
 
+    /// Never gives the task longer than the instant `not_after_ms`
+    /// (milliseconds since the epoch), whatever [`with_deadline`](Self::with_deadline)
+    /// adds up to.
+    ///
+    /// For a deadline that is someone else's: a caller over A2A says when it
+    /// stops waiting, as an instant, and re-anchoring that as a duration at
+    /// spawn would hand the task a little more than the caller has.
+    pub fn with_not_after_ms(self, not_after_ms: u64) -> Self {
+        Self {
+            not_after_ms: Some(not_after_ms),
+            ..self
+        }
+    }
+
     pub fn with_tool_budget(self, tool_budget: usize) -> Self {
         Self {
             tool_budget: Some(tool_budget),
@@ -155,6 +173,17 @@ impl RunSpec {
             detached: true,
             ..self
         }
+    }
+
+    /// How many agent-to-agent hops away from a top-level caller this task's
+    /// work arrived — `0` (the default) for work nobody handed over a wire.
+    /// A host serving tasks to other agents records the hop a request came
+    /// in at, so the task's own delegations can say how far along they are
+    /// (ADR-0030 §9). Recorded at spawn, published to the task's commands as
+    /// [`BASIS_HOP`](crate::BASIS_HOP), and inherited by its children, which
+    /// are the same work one level down in-process, not a hop further.
+    pub fn with_hop(self, hop: u32) -> Self {
+        Self { hop, ..self }
     }
 
     /// Picks up an existing conversation instead of opening a new one.

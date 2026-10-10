@@ -10,6 +10,11 @@ use super::*;
 use crate::a2a::remote::testing::{agent_at, free_port, serve_card};
 
 const AGENT: &str = "reviewer";
+/// A top-level caller's first hop, with no deadline.
+const TOP: Hop = Hop {
+    hop: 1,
+    deadline: None,
+};
 const OUTPUT_BYTES: usize = 64 * 1024;
 /// The endpoint every exchange here is sent to.
 const ENDPOINT: &str = "endpoint-1";
@@ -52,8 +57,8 @@ fn outstanding(waiting_for: Waiting) -> Conversation {
 #[test]
 fn a_first_task_opens_a_conversation() {
     assert_eq!(
-        request(AGENT, "look at this diff", &Conversation::default()),
-        Ok(send("look at this diff", None, None))
+        request(AGENT, "look at this diff", &Conversation::default(), TOP),
+        Ok(send("look at this diff", None, None, TOP))
     );
 }
 
@@ -65,22 +70,23 @@ fn a_later_task_continues_the_same_conversation() {
     };
 
     assert_eq!(
-        request(AGENT, "and this one", &settled),
-        Ok(send("and this one", None, Some("context-1")))
+        request(AGENT, "and this one", &settled, TOP),
+        Ok(send("and this one", None, Some("context-1"), TOP))
     );
 }
 
 #[test]
 fn the_agent_named_alone_waits_on_its_outstanding_task() {
     assert_eq!(
-        request(AGENT, "", &outstanding(Waiting::Agent)),
+        request(AGENT, "", &outstanding(Waiting::Agent), TOP),
         Ok(A2aRequest::resume("task-1"))
     );
 }
 
 #[test]
 fn naming_the_agent_alone_with_nothing_outstanding_is_taught_the_task_form() {
-    let refusal = request(AGENT, "", &Conversation::default()).expect_err("nothing to wait on");
+    let refusal =
+        request(AGENT, "", &Conversation::default(), TOP).expect_err("nothing to wait on");
 
     assert!(refusal.contains("`@reviewer <task>`"), "{refusal}");
 }
@@ -89,8 +95,8 @@ fn naming_the_agent_alone_with_nothing_outstanding_is_taught_the_task_form() {
 fn a_new_task_while_one_is_working_is_refused_not_sent() {
     // A remote conversation runs one task at a time; sending would either be
     // refused remotely or start a second task the model never waits on.
-    let refusal =
-        request(AGENT, "something else", &outstanding(Waiting::Agent)).expect_err("still working");
+    let refusal = request(AGENT, "something else", &outstanding(Waiting::Agent), TOP)
+        .expect_err("still working");
 
     assert!(refusal.contains("`@reviewer` alone"), "{refusal}");
 }
@@ -98,11 +104,17 @@ fn a_new_task_while_one_is_working_is_refused_not_sent() {
 #[test]
 fn text_for_an_agent_waiting_on_input_answers_its_question() {
     assert_eq!(
-        request(AGENT, "yes, the main branch", &outstanding(Waiting::Input)),
+        request(
+            AGENT,
+            "yes, the main branch",
+            &outstanding(Waiting::Input),
+            TOP
+        ),
         Ok(send(
             "yes, the main branch",
             Some("task-1"),
-            Some("context-1")
+            Some("context-1"),
+            TOP
         ))
     );
 }
@@ -315,9 +327,10 @@ async fn a_removed_agent_is_refused_by_name_and_continues_when_it_comes_back() {
         request(
             AGENT,
             "and this one",
-            &agents.conversation("agent-1", AGENT, false)
+            &agents.conversation("agent-1", AGENT, false),
+            TOP
         ),
-        Ok(send("and this one", None, Some("context-1"))),
+        Ok(send("and this one", None, Some("context-1"), TOP)),
         "the same name, the same conversation"
     );
 }
@@ -337,7 +350,12 @@ async fn an_outstanding_task_follows_its_agent_to_a_new_address() {
     let reached = agents.reach(AGENT).await.expect("the new address answers");
     assert_eq!(reached.client.card_url().port(), Some(moved_to));
     assert_eq!(
-        request(AGENT, "", &agents.conversation("agent-1", AGENT, false)),
+        request(
+            AGENT,
+            "",
+            &agents.conversation("agent-1", AGENT, false),
+            TOP
+        ),
         Ok(A2aRequest::resume("task-1")),
         "`@reviewer` alone waits on the same task, now asked of the new address"
     );
@@ -464,4 +482,37 @@ fn an_endpoint_fingerprint_follows_the_url_and_header_names_but_not_values() {
         agent("https://b.example", "Bearer one").endpoint()
     );
     assert!(!here.endpoint().contains("one"));
+}
+
+#[test]
+fn every_message_says_which_hop_it_is_and_when_this_side_stops_waiting() {
+    let deadline = std::time::UNIX_EPOCH + Duration::from_millis(1_791_000_000_123);
+    let hop = Hop {
+        hop: 3,
+        deadline: Some(deadline),
+    };
+
+    let Ok(A2aRequest::Send(message)) = request(AGENT, "look", &Conversation::default(), hop)
+    else {
+        panic!("a task is sent");
+    };
+
+    assert_eq!(message.extensions, vec![HOPS_EXTENSION.to_string()]);
+    assert_eq!(
+        message.metadata.get(HOPS_EXTENSION),
+        Some(&serde_json::json!({"hop": 3, "deadline": "2026-10-03T04:00:00.123Z"}))
+    );
+}
+
+#[test]
+fn a_top_level_caller_sends_hop_one_and_no_deadline_it_does_not_have() {
+    let Ok(A2aRequest::Send(message)) = request(AGENT, "look", &Conversation::default(), TOP)
+    else {
+        panic!("a task is sent");
+    };
+
+    assert_eq!(
+        message.metadata.get(HOPS_EXTENSION),
+        Some(&serde_json::json!({"hop": 1}))
+    );
 }

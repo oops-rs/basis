@@ -21,15 +21,34 @@
 //!
 //! # What is served
 //!
-//! The JSON-RPC binding of protocol version 1.0, with SSE streaming, and the
-//! Agent Card at [`AGENT_CARD_PATH`]. Push notifications, the extended card,
-//! non-text parts and replies to a task awaiting input are each refused with
-//! the spec's own error, and the card claims none of them (ADR-0028 §5;
-//! proposal 0005 has what would change that).
+//! A2A v1.0 in full over two bindings, every method on each (ADR-0030):
+//! JSON-RPC at the endpoint's root and HTTP+JSON under [`HTTP_JSON_PATH`],
+//! both with SSE streaming, both listed on the Agent Card at
+//! [`AGENT_CARD_PATH`] — JSON-RPC first. gRPC is not served. Each binding
+//! only parses; one service answers both, so they cannot drift apart.
 //!
-//! A served agent never prompts: [`InboundApproval`] has no variant that
-//! would. It has no shell unless the operator grants one. And anything but
-//! a loopback address needs a [`BearerToken`].
+//! - **Principals.** Named bearer tokens ([`ServeConfig::with_principal`]);
+//!   every task belongs to the principal that created it, and every
+//!   task-scoped call sees only the caller's own — another's is "not found".
+//!   A loopback server with no token is one anonymous principal, and
+//!   anything but a loopback address needs a [`BearerToken`].
+//! - **Parts.** Text, data (handed to the model as JSON) and inline files of
+//!   a textual media type. A file by URL or binary bytes is refused: the
+//!   server never fetches what a caller names.
+//! - **Push notifications**, when the operator turns them on: configs stored
+//!   beside the task, every status change delivered at least once, across
+//!   restarts, only to webhooks that resolve to public addresses.
+//! - **The extended card**, when the operator gives one, to authenticated
+//!   callers.
+//! - **Asking the caller.** [`InboundApproval::AskCaller`] puts a
+//!   consequential call to whoever sent the task, as `INPUT_REQUIRED`
+//!   (`docs/a2a/approval-v1.md`). [`InboundApproval`] still has no variant
+//!   that asks a person at this server: there is none.
+//! - **Hops.** A message's hop and deadline (`docs/a2a/hops-v1.md`) are read,
+//!   past the hop cap refused, and the caller's deadline clamps the task's.
+//!
+//! The card declares each optional feature when, and only when, it is on. A
+//! served agent has no shell unless the operator grants one.
 //!
 //! ```no_run
 //! # async fn serve() -> Result<(), Box<dyn std::error::Error>> {
@@ -48,13 +67,20 @@ mod card;
 mod config;
 mod http;
 mod index;
+mod ops;
 mod project;
+mod push;
+mod rest;
 mod rpc;
 mod service;
 mod stream;
 
 pub use a2a;
 pub use card::AGENT_CARD_PATH;
-pub use config::{AgentIdentity, BearerToken, InboundApproval, RunDefaults, ServeConfig};
+pub use config::{
+    AgentIdentity, BearerToken, DEFAULT_PRINCIPAL, ExtendedCard, InboundApproval, Principal,
+    PrincipalError, RunDefaults, ServeConfig,
+};
 pub use http::{A2aServer, BindError, router};
-pub use service::{A2aService, OpenError};
+pub use rest::HTTP_JSON_PATH;
+pub use service::{A2aService, DEFAULT_HOP_CAP, OpenError};

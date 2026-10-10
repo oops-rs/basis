@@ -13,9 +13,14 @@ use mentra::a2a::{
     A2aStillWorking, A2aSubmitted, is_settled, remote_output, remote_reply, settle as settle_task,
     submit, types::TaskState,
 };
+use std::time::SystemTime;
+
+use chrono::{DateTime, SecondsFormat, Utc};
 use mentra::tool::{ParallelToolContext, ToolContext, ToolResult};
+use serde_json::{Value, json};
 
 use super::{describe::listed, no_remote_agents};
+use crate::a2a::HOPS_EXTENSION;
 use crate::a2a::remote::{
     Conversation, Outstanding, Reached, RemoteAgents, Route, Unreached, Waiting,
 };
@@ -108,13 +113,18 @@ pub(super) async fn delegate(
         .await
         .map_err(|why| unreached(agents, name, why))?;
     let caller = ctx.agent_id.clone();
-    let mut conversation = agents.conversation(&caller, name, remembered);
-    let request = request(name, body, &conversation)?;
-
     // The run's own bounds — cancellation, stop, deadline — taken before the
     // context is handed over for progress, which is the one thing the
-    // exchange needs from it while it waits.
+    // exchange needs from it while it waits. The deadline also travels: the
+    // remote agent is told when this side stops waiting.
     let options = ctx.child_run_options();
+    let hop = Hop {
+        hop: agents.hop().saturating_add(1),
+        deadline: options.deadline,
+    };
+    let mut conversation = agents.conversation(&caller, name, remembered);
+    let request = request(name, body, &conversation, hop)?;
+
     let ctx: ParallelToolContext = ctx.into();
     let progress = |text: String| ctx.emit_progress(text);
     let save = |next: Conversation| {
@@ -162,7 +172,12 @@ pub(super) async fn delegate(
 
 /// What this call sends, given where the conversation stands — or why it
 /// sends nothing.
-fn request(name: &str, body: &str, conversation: &Conversation) -> Result<A2aRequest, String> {
+fn request(
+    name: &str,
+    body: &str,
+    conversation: &Conversation,
+    hop: Hop,
+) -> Result<A2aRequest, String> {
     match (&conversation.outstanding, body.is_empty()) {
         (Some(outstanding), true) => Ok(A2aRequest::resume(&outstanding.task_id)),
         (None, true) => Err(format!(
@@ -182,14 +197,18 @@ fn request(name: &str, body: &str, conversation: &Conversation) -> Result<A2aReq
             body,
             Some(&outstanding.task_id),
             conversation.context_id.as_deref(),
+            hop,
         )),
-        (None, false) => Ok(send(body, None, conversation.context_id.as_deref())),
+        (None, false) => Ok(send(body, None, conversation.context_id.as_deref(), hop)),
     }
 }
 
-/// A message continuing `context_id`, answering `task_id` when it is set.
-fn send(body: &str, task_id: Option<&str>, context_id: Option<&str>) -> A2aRequest {
-    let mut message = A2aSend::new(body);
+/// A message continuing `context_id`, answering `task_id` when it is set,
+/// and saying which hop it is.
+fn send(body: &str, task_id: Option<&str>, context_id: Option<&str>, hop: Hop) -> A2aRequest {
+    let mut message = A2aSend::new(body)
+        .with_extension(HOPS_EXTENSION)
+        .with_metadata(HOPS_EXTENSION, hop.metadata());
     if let Some(task_id) = task_id {
         message = message.with_task_id(task_id);
     }
@@ -197,6 +216,31 @@ fn send(body: &str, task_id: Option<&str>, context_id: Option<&str>) -> A2aReque
         message = message.with_context_id(context_id);
     }
     message.into()
+}
+
+/// Where one outbound message stands in a chain of agents
+/// (`docs/a2a/hops-v1.md`): `hop` is this message's — the runtime's own
+/// plus one, so a top-level caller sends 1 — and `deadline` is when this
+/// side stops waiting, which the run's options already hold as the earlier
+/// of its own and any it inherited. A deadline therefore only shrinks across
+/// a hop, which is the extension's rule.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+struct Hop {
+    hop: u32,
+    deadline: Option<SystemTime>,
+}
+
+impl Hop {
+    /// The object the extension puts under its URI in a message's metadata.
+    fn metadata(self) -> Value {
+        let mut object = json!({ "hop": self.hop });
+        if let Some(deadline) = self.deadline {
+            object["deadline"] = Value::String(
+                DateTime::<Utc>::from(deadline).to_rfc3339_opts(SecondsFormat::Millis, true),
+            );
+        }
+        object
+    }
 }
 
 /// Where the conversation stands after this exchange, and what the model
