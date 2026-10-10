@@ -12,6 +12,13 @@
 //! [`reload_a2a`](crate::Workspace::reload_a2a) moves the baseline so the
 //! watch does not repeat it, and a file that failed to parse is not read again
 //! every interval — only once it changes again.
+//!
+//! **A change is read once it holds still.** An editor that saves by renaming
+//! the old file away and writing a new one (vim's `backupcopy`, Emacs) leaves
+//! a moment with no file at all, and a reload that landed in it would drop
+//! every agent the file named. So a poll that sees something new only notes
+//! it, and the reload waits for the next poll to see the same: a file must
+//! stay missing for a whole interval before its agents are let go.
 
 use std::{
     path::{Path, PathBuf},
@@ -79,6 +86,30 @@ fn stamp(path: &Path) -> Stamp {
     }
 }
 
+/// What the previous poll saw that the last read had not, waiting for this
+/// poll to confirm it.
+#[derive(Debug, Default)]
+struct Settling {
+    pending: Option<Vec<Stamp>>,
+}
+
+impl Settling {
+    /// Whether to read the sources now: they differ from what the last read
+    /// `seen`, and the previous poll saw them exactly as they are now.
+    fn observe(&mut self, now: Vec<Stamp>, seen: &[Stamp]) -> bool {
+        if now == seen {
+            self.pending = None;
+            return false;
+        }
+        if self.pending.as_ref() == Some(&now) {
+            self.pending = None;
+            return true;
+        }
+        self.pending = Some(now);
+        false
+    }
+}
+
 /// Starts polling `live`'s sources every `interval`.
 ///
 /// Holds the state weakly, so the watch never keeps a workspace's A2A state
@@ -87,10 +118,11 @@ pub(crate) fn start(live: Weak<LiveA2a>, paths: Vec<PathBuf>, interval: Duration
     let poll = tokio::spawn(async move {
         let mut ticks = tokio::time::interval(interval.max(MIN_INTERVAL));
         ticks.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Delay);
+        let mut settling = Settling::default();
         loop {
             ticks.tick().await;
             let Some(live) = live.upgrade() else { break };
-            if stamps(&paths) == live.seen() {
+            if !settling.observe(stamps(&paths), &live.seen()) {
                 continue;
             }
             // Reported, not fatal: a reload that fails changes nothing, and

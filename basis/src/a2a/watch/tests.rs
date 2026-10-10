@@ -22,3 +22,55 @@ fn a_stamp_tells_a_missing_file_from_a_present_one_and_an_edit_from_neither() {
     std::fs::remove_file(&path).unwrap();
     assert_eq!(stamps(&paths), missing, "and a file that goes");
 }
+
+fn present(len: u64) -> Vec<Stamp> {
+    vec![Stamp::Present {
+        len,
+        modified: None,
+    }]
+}
+
+#[test]
+fn a_change_is_read_once_two_polls_agree_on_it() {
+    let seen = present(10);
+    let mut settling = Settling::default();
+
+    assert!(!settling.observe(present(10), &seen), "nothing new");
+    assert!(!settling.observe(present(12), &seen), "new, noted");
+    assert!(
+        settling.observe(present(12), &seen),
+        "and still so: read it"
+    );
+}
+
+#[test]
+fn a_file_missing_for_one_poll_of_a_rename_and_write_save_is_never_read() {
+    let seen = present(10);
+    let mut settling = Settling::default();
+
+    assert!(
+        !settling.observe(vec![Stamp::Missing], &seen),
+        "renamed away"
+    );
+    assert!(
+        !settling.observe(present(14), &seen),
+        "written anew: not yet"
+    );
+    assert!(
+        settling.observe(present(14), &seen),
+        "the new file, once settled"
+    );
+}
+
+#[test]
+fn a_change_undone_before_the_next_poll_is_forgotten() {
+    let seen = present(10);
+    let mut settling = Settling::default();
+
+    assert!(!settling.observe(vec![Stamp::Missing], &seen));
+    assert!(!settling.observe(present(10), &seen), "back as it was");
+    assert!(
+        !settling.observe(vec![Stamp::Missing], &seen),
+        "a later disappearance starts the count again"
+    );
+}

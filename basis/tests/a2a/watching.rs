@@ -113,3 +113,33 @@ async fn dropping_the_watch_stops_it() {
     assert!(workspace.a2a_agents().is_empty());
     assert_eq!(server.fetches(), 0);
 }
+
+#[tokio::test]
+async fn a_save_that_renames_the_file_away_and_writes_a_new_one_never_drops_an_agent() {
+    // vim's `backupcopy=no`, Emacs: the file is gone for a moment before the
+    // new one lands. A poll in that moment must not reload with no agents.
+    let server = CardServer::start();
+    let dir = tempfile::tempdir().unwrap();
+    let file = dir.path().join(".basis/a2a.json");
+    write(&file, &a2a_file(&[("nous", &server.base)]));
+    let workspace = pinned(dir.path(), offline_runtime())
+        .open()
+        .await
+        .expect("opens");
+    let interval = Duration::from_millis(100);
+    let _watch = workspace.watch_a2a(interval);
+
+    for _ in 0..5 {
+        std::fs::rename(&file, dir.path().join(".basis/a2a.json~")).unwrap();
+        tokio::time::sleep(interval / 5).await;
+        assert!(!workspace.a2a_agents().is_empty(), "dropped mid-save");
+        write(&file, &a2a_file(&[("nous", &server.base)]));
+        tokio::time::sleep(interval / 2).await;
+        assert!(!workspace.a2a_agents().is_empty(), "dropped mid-save");
+    }
+    write(
+        &file,
+        &a2a_file(&[("nous", &server.base), ("scout", &server.base)]),
+    );
+    settles_on(&workspace, &["nous", "scout"]).await;
+}
