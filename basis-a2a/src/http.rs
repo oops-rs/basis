@@ -113,8 +113,7 @@ impl A2aServer {
         rest::interface_url(&self.endpoint)
     }
 
-    /// Serves until the process ends. Connections are bounded as
-    /// [`listener`](crate::listener) describes.
+    /// Serves until the process ends, with its connections bounded.
     pub async fn serve(self) -> io::Result<()> {
         axum::serve(self.listener, self.router).await
     }
@@ -140,12 +139,14 @@ impl A2aServer {
 /// interface is advertised, and served, under it at
 /// [`HTTP_JSON_PATH`](crate::HTTP_JSON_PATH).
 ///
-/// Every request passes the [`gate`](crate::gate) first — a concurrency
-/// limit, authentication, then a bounded body read. A host serving these
-/// routes on a listener of its own bounds its connections itself.
+/// Every request passes a gate first — a concurrency limit,
+/// authentication, then a bounded body read. A host serving these routes on
+/// a listener of its own bounds its connections itself.
 ///
 /// `Host` is checked as for a loopback bind when `endpoint` names a loopback
-/// address — see the gate's notes on web pages.
+/// address, so a web page whose own name was rebound to loopback is refused,
+/// and every request body must say it is JSON, which no cross-site request
+/// can without a preflight.
 pub fn router(service: A2aService, endpoint: &str) -> Router {
     let loopback = reqwest::Url::parse(endpoint)
         .ok()

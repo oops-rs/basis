@@ -221,9 +221,11 @@ pub(crate) struct ServeArgs {
     pub(crate) a2a_args: Box<A2aArgs>,
 }
 
-/// Knobs for `serve --a2a` (ADR-0028). Unlike ACP, the caller here is another
-/// agent: it names no workspace and answers no questions, so the workspace,
-/// the agent's card and its bounds are all the operator's to say.
+/// Knobs for `serve --a2a` (ADR-0028, ADR-0030). Unlike ACP, the caller here
+/// is another agent: it names no workspace, and answers a question only when
+/// the operator chooses to ask it one (`--approve prompt`), so the workspace,
+/// the agent's card, its bounds and who may call it are all the operator's
+/// to say.
 #[derive(Debug, Default, clap::Args)]
 pub(crate) struct A2aArgs {
     /// Workspace the served agent works in. Defaults to the current directory.
@@ -437,8 +439,8 @@ pub(crate) struct AcpArgs {
 
     /// When to ask before the agent changes anything. ACP defaults to asking
     /// the client, which is the point of a protocol with a permission request
-    /// in it. A2A defaults to never and refuses prompt: its caller is another
-    /// agent, with nobody behind it to answer.
+    /// in it. A2A defaults to never, and prompt asks the caller — the agent
+    /// that sent the task — since nobody at the server is there to answer.
     #[arg(long, value_name = "MODE", value_parser = approval_policy_parser())]
     pub(crate) approve: Option<ApprovalPolicy>,
 }

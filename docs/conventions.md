@@ -281,10 +281,32 @@ credential plaintext passage. A host that needs it builds the agent in code
 with mentra's `allowing_plaintext_credentials`. An `A2A-Version` header is
 refused too — the client speaks `1.0` and says so itself.
 
-Each card is fetched once, at open. An agent that cannot be reached warns and
-the open continues; it is still named in `run_started`'s `a2a_agents`, beside
+Each card is fetched at open. An agent that cannot be reached warns and the
+open continues; it is still named in `run_started`'s `a2a_agents`, beside
 `a2a_files`, and in `Workspace::a2a_agents`, by the name configured — an agent
-is not a tool on the shared registry, so nothing is suffixed. Reach is decided
+is not a tool on the shared registry, so nothing is suffixed — and `@<agent>`
+tries it again when asked, at most once every 30 seconds, so an agent that
+comes up later is reached without anyone reloading.
+
+The set is live ([ADR-0031](adr/0031-remote-agents-are-live.md)). Saving
+either file is picked up without a restart wherever basis runs for long: the
+ACP server, the A2A server and every task basis drives poll both paths every
+2 seconds — a file that did not exist at open included — and reload once a
+change has held still for a poll, so an editor that saves by writing a new file
+never catches the set empty. A reload applies the difference by name: an added
+agent connects, a removed one is refused by name, a changed URL or header set
+reconnects, and an unchanged agent has its card fetched again. A file that
+fails to read or validate changes nothing — the error is reported naming the
+file and field, and every agent stays as it was — so a half-typed save never
+drops an agent. A one-shot embedder watches nothing unless it asks
+(`Workspace::watch_a2a`, `Workspace::reload_a2a`). A delegation already
+waiting keeps the connection it started with.
+
+Every message basis sends to an agent carries the hops extension
+([hops-v1](a2a/hops-v1.md)): how many agent-to-agent hops it is from the caller
+that started the chain, and the earliest deadline anyone along it is waiting
+under, so two agents that call each other stop at a server's hop cap or the
+first deadline. Reach is decided
 per agent: only the sessions this open mints or resumes, and their delegated
 children, are told about these agents and can route to them, so a second open
 of the same directory that did not name an agent can neither see nor reach it.
@@ -343,6 +365,11 @@ under the store directory, mentra's file-backed layout
 found there is a basis ≤0.6 store this build refuses by name rather than
 reads, migrates, or shadows.
 
+`basis serve --a2a` keeps what A2A adds to a task — its A2A ids, the caller's
+message, the principal that sent it, and its push configs with whatever is not
+yet delivered — under `<data root>/workspaces/<key>/hosts/a2a`, never inside a
+task directory. Losing it loses the A2A view of past tasks, never a task.
+
 ## Environment
 
 | Variable | What it does |
@@ -353,6 +380,7 @@ reads, migrates, or shadows.
 | `BASIS_API_KEY` | The key for that endpoint. `OPENAI_API_KEY` is read after it |
 | `BASIS_TASK_ID` | Set by basis on every process a run spawns: which task this is. Read by a nested `basis` to route its own `spawn` |
 | `BASIS_PARENT_TASK_ID` | Set by basis on the same processes when the task has a parent |
+| `BASIS_HOP` | Set by basis on the same processes when the task's work arrived over A2A: how many agent-to-agent hops it is from its top-level caller ([hops-v1](a2a/hops-v1.md)). What an A2A client run from inside the task adds one to when it hands work on. Absent at hop 0 |
 
 Provider credentials are read by the names the ecosystem already uses, in this
 order when several are exported: `ANTHROPIC_API_KEY`, `OPENAI_API_KEY`,

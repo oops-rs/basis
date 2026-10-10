@@ -442,9 +442,12 @@ impl WorkspaceBuilder {
     /// where the first of those goes, outranking both files by name. See
     /// [`crate::a2a`] for the rules, which are `.mcp.json`'s.
     ///
-    /// Each agent's card is fetched once, by [`open`](Self::open), and the
-    /// agent is reachable — as `spawn "@<agent> <task>"`, ADR-0029 — from the
-    /// sessions this workspace mints or resumes, and from nowhere else.
+    /// Each agent's card is fetched by [`open`](Self::open), and the agent is
+    /// reachable — as `spawn "@<agent> <task>"`, ADR-0029 — from the sessions
+    /// this workspace mints or resumes, and from nowhere else. The set stays
+    /// live after that (ADR-0031): see
+    /// [`Workspace::reload_a2a`](crate::Workspace::reload_a2a) and
+    /// [`Workspace::watch_a2a`](crate::Workspace::watch_a2a).
     #[cfg(feature = "a2a")]
     pub fn with_a2a(self, a2a: A2aConfig) -> Self {
         Self { a2a, ..self }

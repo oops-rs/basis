@@ -97,8 +97,6 @@ impl Error {
         self.invalid_reference
     }
 
-    /// The next step this error names, when it names one unambiguously —
-    /// see [`Hint`].
     /// Whether `spawn` refused because the workspace is full — a condition
     /// a host serving other callers reports as such, not as its own fault,
     /// and that only archiving settled tasks clears.
@@ -106,6 +104,8 @@ impl Error {
         self.task_limit
     }
 
+    /// The next step this error names, when it names one unambiguously —
+    /// see [`Hint`].
     pub fn hint(&self) -> Option<&Hint> {
         self.hint.as_ref()
     }

@@ -1,9 +1,10 @@
 //! Handing a task to a remote agent, once the answer is in (ADR-0029).
 //!
-//! The exchange — submit with `returnImmediately`, poll to a settled state
-//! within the agent's wait bound, cancel when the run is cancelled — is
-//! mentra's ([`mentra::a2a::exchange`]), and so is the framing that marks the
-//! remote agent's words as its own. What is basis's is everything the model
+//! The exchange — submit with `returnImmediately`, wait for the task to
+//! settle within the agent's wait bound (following its stream when the card
+//! offers one, polling otherwise, never resending), cancel when the run is
+//! cancelled — is mentra's ([`mentra::a2a::exchange`]), and so is the
+//! framing that marks the remote agent's words as its own. What is basis's is everything the model
 //! would otherwise have had to carry: which conversation a task belongs to,
 //! and which task is still outstanding (ADR-0029 §5). So every guidance line
 //! here is written in `spawn`'s grammar, and none of them mentions an id.

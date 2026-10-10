@@ -5,14 +5,14 @@
 //! editor drives an agent and MCP is how an agent calls tools; A2A is how
 //! one agent hands work to another whose insides it cannot see. This crate
 //! is the half that *receives* work. The half that sends it — fetching a
-//! card, calling a remote agent as a tool — is mentra's `a2a` client,
-//! configured through basis's `.basis/a2a.json`.
+//! card, handing a remote agent a task as `spawn "@<agent> …"` (ADR-0029) —
+//! is mentra's `a2a` client, configured through basis's `.basis/a2a.json`.
 //!
 //! # An A2A task is a basis task
 //!
 //! There is no second lifecycle here. Every accepted message is one
 //! `basis-tasks` spawn in the served workspace, and what A2A reports is read
-//! straight off it — see [`project`](crate::project) for the table. So a
+//! straight off it — see the `project` module for the table. So a
 //! served task is as durable as any other: it survives this server
 //! restarting, `basis list` shows it, and `basis watch` replays it. A
 //! `contextId` is a conversation; a follow-up in one continues it with

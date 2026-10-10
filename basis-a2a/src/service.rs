@@ -389,8 +389,8 @@ impl A2aService {
     }
 
     /// `CancelTask`: asks the task to stop — cutting its running turn short —
-    /// and answers with where it stands once that lands, or once
-    /// [`CANCEL_GRACE`] has passed.
+    /// and answers with where it stands once that lands, or once a grace of
+    /// a few seconds has passed.
     pub async fn cancel_task(
         &self,
         caller: &Principal,

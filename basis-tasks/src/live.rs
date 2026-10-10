@@ -31,10 +31,10 @@ pub trait LiveSink: Send + Sync {
 /// The third is the waiter's own deadline, distinct from the task's: a
 /// bounded `wait` is a promise to *observe* for so long, never to own the
 /// task for that long (README, "Waiting is not owning"). The executor
-/// honors it at the turn boundary, beside the cancel marker — the
-/// granularity ADR-0019 fixes for everything that stops a task. A turn in
+/// honors it at the turn boundary, the granularity ADR-0019 fixed. A turn in
 /// flight when it passes runs to its end under the task's deadline, not the
-/// wait's; the next one does not start.
+/// wait's; the next one does not start. A cancel marker, unlike it, cuts the
+/// turn in flight short (ADR-0032).
 #[derive(Clone, Default)]
 pub(crate) struct DriveContext {
     pub(crate) live: Option<Arc<dyn LiveSink>>,

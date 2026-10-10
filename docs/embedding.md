@@ -21,7 +21,8 @@ discovery, no servers registered ([ADR-0012](adr/0012-one-contract-many-bindings
 A2A sits beside it as the default-on `a2a` feature: `.basis/a2a.json` discovery,
 `WorkspaceBuilder::with_a2a`, and each named remote agent a `spawn` target, `@<agent> <task>`,
 through mentra's A2A client ([ADR-0028](adr/0028-a2a-is-the-agent-to-agent-protocol.md),
-[ADR-0029](adr/0029-a-remote-agent-is-a-spawn-target.md)).
+[ADR-0029](adr/0029-a-remote-agent-is-a-spawn-target.md)), from a set the host can reload or watch
+while it runs ([Remote agents stay live](#remote-agents-stay-live)).
 Off, it drops that client and the `a2a-lf` wire types with it, because mentra gates them
 behind its own `a2a` feature.
 
@@ -896,6 +897,90 @@ wait-edge policy admitting a descendant or an independent root and refusing an a
 peer. `Approve::Prompt` needs a `PromptHost` supplied — a library has no terminal to ask at
 any more than `basis` itself does — and showing a task's progress live is a `LiveSink` a
 caller plugs in per call rather than something the crate decides for you.
+
+A task's cancel cuts its running turn short: the executor watches for the cancel marker while a
+turn runs and cancels the turn when it appears, so `Tasks::cancel` lands within a poll interval
+rather than at the end of the turn. A task whose process died mid-turn is continued by its next
+attach rather than re-driven or settled, and a tool call that was running is reported to the
+model as of unknown effect, never run again
+([ADR-0032](adr/0032-an-interrupted-turn-is-continued.md)).
+
+Three knobs exist for a host that drives tasks on someone else's behalf, as `basis-a2a` does:
+
+- `RunSpec::with_hop(hop)` records how many agent-to-agent hops away from a top-level caller the
+  work arrived. The task's runtime gets it (`RuntimeBuilder::with_a2a_hop`, so its own `@agent`
+  messages send `hop + 1`), its commands see it as `BASIS_HOP`, and its children inherit it.
+- `RunSpec::with_not_after_ms(ms)` caps the task's deadline at an instant, in milliseconds since
+  the epoch, whatever `with_deadline` adds up to. A caller's deadline arrives as an instant, and
+  turning it back into a duration at spawn would hand the task a little more time than the caller
+  has.
+- `Tasks::with_stop(stop)` takes a `basis_tasks::Stop`. Once `stop.stop()` is called, every task
+  this `Tasks` is driving is abandoned where it stands, with nothing recorded, and left resumable,
+  as a crash would leave it, and every wait under it returns timed out. It is how a server
+  shutting down avoids recording a turn nobody will hear.
+
+## Remote agents stay live
+
+A workspace's remote agents are not fixed at open
+([ADR-0031](adr/0031-remote-agents-are-live.md)). Every agent the workspace mints or resumes holds
+the same live set, so a change reaches routing at once and reaches what `spawn` tells the model at
+the next request. A delegation already waiting keeps the connection it started with.
+
+```rust
+let reload = workspace.reload_a2a().await?;      // Result<basis::A2aReload, basis::A2aError>
+if reload.changed_configuration() {
+    eprintln!("a2a: +{:?} -{:?} ~{:?}", reload.added, reload.removed, reload.changed);
+}
+
+// Poll both files; dropping the handle stops it.
+let _watch = workspace.watch_a2a(basis::DEFAULT_A2A_WATCH_INTERVAL)?;
+```
+
+`reload_a2a` re-reads the host's supplied agents, `.basis/a2a.json` and the global `a2a.json`
+under the rules the open used, and applies the difference by name. An added agent connects. A
+removed one is refused by name, and its conversation is kept in case the name comes back. A
+changed one is reconnected, and an unchanged one has its card fetched again. `A2aReload` reports
+it all in names only (`added`, `removed`, `changed`, `refreshed`, `unreachable`), because a URL
+is often a credential. A source that fails to read or validate returns the error and changes
+nothing, so a half-typed save never drops an agent. Call it when the host changes its own
+supplied list, since no file changes then.
+
+`watch_a2a(interval)` returns `Result<A2aWatch, A2aWatchError>`. It polls both paths, a file that
+did not exist at open included, and reloads once a change has held still for one poll. A reload
+that fails is reported on stderr and the watch carries on. The poll is a task on the current Tokio
+runtime; called from a thread outside one, it returns `A2aWatchError` rather than panicking. The
+watch holds the workspace weakly, so it never keeps one alive. `basis-host` starts one for every
+workspace its source opens, every `DEFAULT_A2A_WATCH_INTERVAL` (2 s), and
+`SessionTemplate::with_a2a_watch(Some(interval))` changes the interval or `None` turns it off.
+`basis-tasks` watches for as long as it drives a task. A bare `Workspace` watches nothing unless
+asked.
+
+An agent whose card could not be fetched is not dropped: it stays configured, is listed by
+`Workspace::a2a_agents()` (a `Vec<String>` of the current names), and `@<agent>` tries it again
+when asked, at most once per `A2A_RETRY_BACKOFF` (30 s).
+
+## Serving A2A from your own host
+
+`basis-a2a` is the server half: `A2aService` answers every A2A method over a workspace's
+`basis-tasks`, and `A2aServer` binds both bindings — JSON-RPC at the root, HTTP+JSON under
+`HTTP_JSON_PATH` — with the card at `AGENT_CARD_PATH`
+([ADR-0030](adr/0030-a2a-is-spoken-in-full.md)). `ServeConfig` holds what `basis serve --a2a`'s
+flags set: `with_token` or `with_principal` (repeatable), `with_approval(InboundApproval::AskCaller
+{ deadline })`, `with_push_notifications` and `with_private_webhooks`, `with_extended_card`,
+`with_hop_cap`, `with_trusted_anonymous_callers`, plus per-principal quotas
+(`with_live_task_quota`, `with_stream_cap`). `A2aService::open` refuses a combination that cannot
+be served safely, and `OpenError` names which: a principal set with a repeated name or token, an
+extended card with no token to serve it to, or push or asking on a tokenless server whose
+anonymous callers were not trusted explicitly.
+
+Every request method on `A2aService` (send, get, list, cancel, subscribe and the push configs)
+takes the caller first, as `caller: &Principal`, because every task-scoped answer depends on who
+asked. A host that serves `basis_a2a::router(service, endpoint)`
+on a listener of its own, rather than through `A2aServer`, gets the gate that authenticates the
+caller with it. It must also call `A2aService::shutdown().await` before its runtime goes away:
+drivers run on blocking threads that a runtime shutdown does not stop, and `shutdown` stops them
+without recording anything. `A2aServer::serve_until(signal)` does that itself once its listener
+drains.
 
 ## Compaction
 

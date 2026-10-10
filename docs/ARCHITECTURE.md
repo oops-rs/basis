@@ -1,6 +1,6 @@
 # basis — Architecture
 
-> rev 17 · 2026-10-09 · **basis** — the minimal set everything else is built from
+> rev 18 · 2026-10-10 · **basis** — the minimal set everything else is built from
 > The *how*. For the *why* — problem, idea, bets — see [`PROPOSAL.md`](PROPOSAL.md);
 > locked decisions live in [`adr/`](adr/); deferred ideas in [`proposals/`](proposals/);
 > research grounding in [`p0-groundwork.md`](p0-groundwork.md).
@@ -34,7 +34,11 @@
 > agent-to-agent protocol beside ACP (ADR-0028): a sixth crate, `basis-a2a`, serves any
 > workspace's agent to other agents over durable `basis-tasks`, and mentra's A2A client,
 > configured by `.basis/a2a.json`, makes each remote agent a `spawn` target — `@<agent>
-> <task>`, one delegation door for local and remote alike (ADR-0029). The closed ledger and
+> <task>`, one delegation door for local and remote alike (ADR-0029). It is now spoken in
+> full — every method over JSON-RPC and HTTP+JSON, push, the extended card, non-text parts,
+> principals, asking the caller and hops (ADR-0030) — a workspace's remote agents are a live set
+> a host reloads or watches (ADR-0031), and a turn a crash interrupted is continued while a cancel
+> cuts a running one short (ADR-0032). The closed ledger and
 > phases are in [`archive/REDESIGN.md`](archive/REDESIGN.md).
 > Reference bar: [pi](https://github.com/earendil-works/pi) (earendil-works) — minimal core, complete harness.
 > General-purpose: no domain assumptions. Periodic bug-checking is one use case, never a design input.
@@ -276,7 +280,7 @@ flowchart LR
     srv["server · wire session mapping · mode presentation"]
   end
   subgraph a2a["basis-a2a — the A2A server"]
-    a2asrv["JSON-RPC + SSE · agent card · task projection"]
+    a2asrv["JSON-RPC + HTTP+JSON · SSE · cards · push · task projection"]
   end
   subgraph tasks["basis-tasks — durable tasks"]
     durable["handles · inbox · attach lock · journal"]
@@ -344,14 +348,60 @@ flowchart LR
   accepted message is one detached `basis-tasks` spawn, a `contextId` is a conversation continued
   with `Continuation::Named`, the terminal record is the A2A state, and `events.jsonl` is the SSE
   stream. The serving process drives what it accepted and resumes the unsettled tasks on open, so
-  a restart costs a turn, never a task. What A2A adds — ids, the caller's message — is an index
-  under `Tasks::host_dir("a2a")`, never inside a task directory. Inbound runs never prompt
-  (`InboundApproval` has no such variant), have no shell unless granted, and a non-loopback bind
-  needs a bearer token. The other direction is mentra's client behind `spawn` (ADR-0029): each
-  agent in `.basis/a2a.json` is a target, `@<name> <task>`, routed per calling agent through the
-  agent ledger and declared `External`, so the approval gate sees every call; basis keeps each
-  conversation's ids beside the session's store, so a resumed task picks up remote work rather
-  than sending it twice.
+  a restart costs a turn, never a task; `A2aService::shutdown` stops its drivers and records
+  nothing, so a turn cut off by a shutdown is continued by the next open like one cut off by a
+  crash (ADR-0032). What A2A adds — ids, the caller's message, the principal that sent it, its
+  push configs — is an index under `Tasks::host_dir("a2a")`, never inside a task directory.
+- **A2A is served in full, over two bindings** (ADR-0030). JSON-RPC at the root and HTTP+JSON
+  under `/json` are two routers that only parse, over one `A2aService` that answers all eleven
+  methods, so they cannot drift apart; the card lists JSON-RPC first, and declares `streaming`,
+  `pushNotifications`, the extended card and the two extensions when, and only when, each is on.
+  gRPC stays deferred for its weight (proposal 0005 §6). Every request passes authentication
+  before a byte of its body is read. Parts are text, data — handed to the model as JSON — and
+  inline files of a textual media type; a file by URL is refused, because the server never
+  fetches what a caller names.
+- **Who may call, and what each sees** (ADR-0030 §8). The server holds named bearer tokens; each
+  task records the principal that created it, and every task-scoped method sees only the caller's
+  own, with "not yours" indistinguishable from "not found". A loopback server with no token is one
+  anonymous principal, which refuses web pages but trusts every local process, so push and asking
+  the caller need a token there unless the operator trusts anonymous callers explicitly; a
+  non-loopback bind needs a token. The extended card is served only to an authenticated principal.
+- **Inbound runs ask the caller or nobody** (ADR-0028 §4, ADR-0030 §7). `InboundApproval` is
+  `Never` (the default), `Always`, or `AskCaller`, and has no variant that asks a person at the
+  server, because there is none. `AskCaller` parks the turn and moves the task to
+  `INPUT_REQUIRED` with one question at a time, under the approval extension
+  ([`a2a/approval-v1.md`](a2a/approval-v1.md)): the caller answers by call id, a mismatched answer
+  is refused, the deadline answers `deny`, a cancel cancels, and a restart asks again under a fresh
+  id. Inbound runs have no shell unless granted.
+- **Push is durable** (ADR-0030 §4). A task's push configs live beside its index record; every
+  status change is delivered to each at least once, retried with backoff and re-sent after a
+  restart from the last undelivered state. A webhook must be `http` or `https` and resolve only
+  to public addresses — checked before anything is sent and again at each delivery, with the
+  connection pinned to the addresses checked — unless the operator allows private webhooks.
+- **Hops bound a chain of agents** (ADR-0030 §9). The hops extension
+  ([`a2a/hops-v1.md`](a2a/hops-v1.md)) carries a hop count and a deadline in each message's
+  metadata. The server refuses past its cap (8 by default) and clamps the task's deadline to the
+  caller's; the task's hop reaches its runtime through `RuntimeBuilder::with_a2a_hop` and its
+  commands as `BASIS_HOP`, and its own `@agent` messages send the next hop and the earlier
+  deadline. Absent metadata is hop 0, so agents that are not basis interoperate.
+- **The client is mentra's, behind `spawn`** (ADR-0029). Each agent in `.basis/a2a.json` is a
+  target, `@<name> <task>`, routed per calling agent through the agent ledger and declared
+  `External`, so the approval gate sees every call. mentra's client picks the first interface on
+  the card, in the card's order, whose binding it speaks, and settles a task by following its
+  stream when the card declares one and polling `GetTask` otherwise, never resending. basis keeps
+  each conversation's ids beside the session's store, so a resumed task picks up remote work
+  rather than sending it twice.
+- **The remote agents are a live set** (ADR-0031). An open's agents sit behind one lock as an
+  immutable roster swapped whole, and every agent minted or resumed from the open holds it, so a
+  change reaches routing at once and reaches what `spawn` teaches at the next model request —
+  basis asks mentra to re-capture tool descriptions after every change. `Workspace::reload_a2a`
+  re-reads the three sources and applies the difference by name; a source that fails to read
+  leaves the set exactly as it was. `Workspace::watch_a2a` polls the files and reloads once a
+  change holds still; `basis-host` turns it on for every workspace it serves and `basis-tasks` for
+  every task it drives, while a bare `Workspace` watches nothing unless asked. An unreachable agent
+  is retried when it is next asked for, at most once per `A2A_RETRY_BACKOFF`. A removed agent is
+  refused by name and its conversation kept, and a delegation in flight keeps the client it started
+  with.
 - **The host kit moves behavior; it does not generalize it** (ADR-0025). `ApprovalPolicy`
   and its session-scoped remembered answers are shared by ACP, tasks, and the CLI, and
   `PolicyGate` beside them is what a host with a *switchable* mode installs on a live session so
