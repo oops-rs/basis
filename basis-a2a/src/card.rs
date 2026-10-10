@@ -35,6 +35,7 @@ pub(crate) struct Features {
     /// At least one token is configured.
     pub(crate) authenticated: bool,
     pub(crate) extended_card: bool,
+    pub(crate) push_notifications: bool,
 }
 
 /// The public card, at the well-known path.
@@ -79,7 +80,7 @@ pub(crate) fn build(identity: &AgentIdentity, endpoint: &str, features: Features
         ],
         capabilities: AgentCapabilities {
             streaming: Some(true),
-            push_notifications: Some(false),
+            push_notifications: Some(features.push_notifications),
             extensions: None,
             extended_agent_card: Some(features.extended_card),
         },

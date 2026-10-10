@@ -18,22 +18,26 @@
 //! Every spawn is `detached`: a served task is an independent root, never a
 //! child of whatever task the serving process might itself be running as.
 
+mod drive;
 mod parts;
+mod push;
+mod send;
 
 pub(crate) use parts::INPUT_MODES;
-mod send;
+pub(crate) use push::Push;
 
 use std::{
     collections::HashMap,
-    sync::{Arc, Mutex, MutexGuard},
+    sync::{Arc, Mutex},
     time::Duration,
 };
 
 use a2a::{
     A2AError, CancelTaskRequest, GetTaskRequest, ListTasksRequest, ListTasksResponse,
     SendMessageRequest, SendMessageResponse, StreamResponse, SubscribeToTaskRequest, Task,
+    TaskStatusUpdateEvent,
 };
-use basis_tasks::{Tasks, WaitOutcome, now_ms};
+use basis_tasks::Tasks;
 use futures::stream::BoxStream;
 use tokio::sync::watch;
 
@@ -45,6 +49,7 @@ use crate::{
     },
     index::{Index, Record},
     project::{self, Standing, View, internal},
+    push::PushStore,
     stream,
 };
 
@@ -93,6 +98,8 @@ struct Inner {
     principals: Principals,
     public_url: Option<String>,
     extended_card: Option<ExtendedCard>,
+    /// Present when push notifications are on.
+    push: Option<Push>,
     /// One receiver per task this process is driving, flipped to `true` when
     /// its driver returns. Absent for a task nobody here is driving.
     drivers: Mutex<HashMap<String, watch::Receiver<bool>>>,
@@ -113,6 +120,8 @@ impl A2aService {
             public_url,
             data_dir,
             extended_card,
+            push_notifications,
+            private_webhooks,
         } = config;
         let principals = Principals::new(tokens)?;
         if extended_card.is_some() && !principals.any() {
@@ -122,7 +131,13 @@ impl A2aService {
             Some(data_dir) => Tasks::open_at(data_dir, workspace)?,
             None => Tasks::open(workspace)?,
         };
-        let index = Index::open(&tasks.host_dir(HOST)?)?;
+        let host_dir = tasks.host_dir(HOST)?;
+        let index = Index::open(&host_dir)?;
+        let push = if push_notifications {
+            Some(Push::new(PushStore::open(&host_dir)?, private_webhooks))
+        } else {
+            None
+        };
         let service = Self {
             inner: Arc::new(Inner {
                 tasks,
@@ -134,10 +149,12 @@ impl A2aService {
                 principals,
                 public_url,
                 extended_card,
+                push,
                 drivers: Mutex::new(HashMap::new()),
             }),
         };
         service.resume_unsettled();
+        service.resume_push();
         Ok(service)
     }
 
@@ -158,6 +175,7 @@ impl A2aService {
         Features {
             authenticated: self.inner.principals.any(),
             extended_card: self.inner.extended_card.is_some(),
+            push_notifications: self.inner.push.is_some(),
         }
     }
 
@@ -332,6 +350,22 @@ impl A2aService {
         stream::follow(self.clone(), record, None)
     }
 
+    /// Where `record`'s task stands now, as the status update that says so,
+    /// and the key two observations of it compare equal under exactly when
+    /// nothing a caller would be told about has changed.
+    pub(crate) fn status_now(
+        &self,
+        record: &Record,
+    ) -> Result<(String, TaskStatusUpdateEvent), A2AError> {
+        let standing = Standing::read(self.tasks(), record)?;
+        let update = project::status_update(record, &standing);
+        let key = serde_json::to_value(&update.status.state)
+            .ok()
+            .and_then(|state| state.as_str().map(str::to_owned))
+            .unwrap_or_default();
+        Ok((key, update))
+    }
+
     /// The task `id` names, when `caller` owns it; another principal's task
     /// is refused with the very error a missing one is.
     fn record(&self, caller: &Principal, id: &str) -> Result<Record, A2AError> {
@@ -339,70 +373,5 @@ impl A2aService {
             .index
             .owned(caller, id)
             .ok_or_else(|| A2AError::task_not_found(id))
-    }
-
-    fn drivers(&self) -> MutexGuard<'_, HashMap<String, watch::Receiver<bool>>> {
-        self.inner
-            .drivers
-            .lock()
-            .unwrap_or_else(|poisoned| poisoned.into_inner())
-    }
-
-    /// Returns once this process's driver for `id` has returned — at once
-    /// when there is none.
-    pub(crate) async fn settled(&self, id: &str) {
-        let receiver = self.drivers().get(id).cloned();
-        if let Some(mut receiver) = receiver {
-            let _ = receiver.wait_for(|done| *done).await;
-        }
-    }
-
-    /// Drives `record`'s task to its terminal on a task of its own.
-    fn drive(&self, record: &Record) {
-        let (done, receiver) = watch::channel(false);
-        self.drivers().insert(record.id.clone(), receiver);
-        let service = self.clone();
-        let id = record.id.clone();
-        let handle = record.handle();
-        tokio::spawn(async move {
-            // `Duration::MAX` is "until it settles": the task's own deadline
-            // bounds the run, and a wait is only ever an observation of it.
-            match service
-                .tasks()
-                .wait(&handle, None, Duration::MAX, None)
-                .await
-            {
-                Ok(WaitOutcome::Terminal(_)) => {
-                    if let Err(error) = service.inner.index.finish(&id, now_ms()) {
-                        eprintln!("basis-a2a: record task {id} settling: {error}");
-                    }
-                }
-                Ok(WaitOutcome::TimedOut { .. }) => {
-                    eprintln!("basis-a2a: task {id} stopped being driven before it settled");
-                }
-                Err(error) => eprintln!("basis-a2a: drive task {id}: {error}"),
-            }
-            service.drivers().remove(&id);
-            let _ = done.send(true);
-        });
-    }
-
-    fn resume_unsettled(&self) {
-        for record in self.inner.index.all() {
-            if record.finished_ms.is_some() {
-                continue;
-            }
-            match self.tasks().terminal(&record.handle()) {
-                // Settled while nobody here was watching: the time is when we
-                // noticed, the closest fact there is.
-                Ok(Some(_)) => {
-                    if let Err(error) = self.inner.index.finish(&record.id, now_ms()) {
-                        eprintln!("basis-a2a: record task {} settling: {error}", record.id);
-                    }
-                }
-                Ok(None) => self.drive(&record),
-                Err(error) => eprintln!("basis-a2a: resume task {}: {error}", record.id),
-            }
-        }
     }
 }

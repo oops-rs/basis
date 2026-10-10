@@ -138,6 +138,8 @@ pub struct ServeConfig {
     pub(crate) public_url: Option<String>,
     pub(crate) data_dir: Option<PathBuf>,
     pub(crate) extended_card: Option<ExtendedCard>,
+    pub(crate) push_notifications: bool,
+    pub(crate) private_webhooks: bool,
 }
 
 impl ServeConfig {
@@ -156,6 +158,8 @@ impl ServeConfig {
             public_url: None,
             data_dir: None,
             extended_card: None,
+            push_notifications: false,
+            private_webhooks: false,
         }
     }
 
@@ -221,6 +225,31 @@ impl ServeConfig {
     pub fn with_extended_card(self, extended: ExtendedCard) -> Self {
         Self {
             extended_card: Some(extended),
+            ..self
+        }
+    }
+
+    /// Serves push notifications (ADR-0030 §4): callers may register
+    /// webhooks, which this server then calls on every status change of
+    /// their task. Off by default, because it makes this server send
+    /// requests to URLs its callers choose; every webhook is checked against
+    /// loopback, private and link-local addresses unless
+    /// [`with_private_webhooks`](Self::with_private_webhooks) says otherwise.
+    #[must_use]
+    pub fn with_push_notifications(self) -> Self {
+        Self {
+            push_notifications: true,
+            ..self
+        }
+    }
+
+    /// Lets webhooks point at loopback, private and link-local addresses —
+    /// for a deployment whose callers live on the same private network. It
+    /// still never sends anywhere but `http` and `https`.
+    #[must_use]
+    pub fn with_private_webhooks(self) -> Self {
+        Self {
+            private_webhooks: true,
             ..self
         }
     }

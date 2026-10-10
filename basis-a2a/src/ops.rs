@@ -20,10 +20,6 @@ use crate::{card::Cards, config::Principal, service::A2aService};
 
 /// One request, parsed.
 #[derive(Debug)]
-#[expect(
-    dead_code,
-    reason = "push configs are refused until push notifications are served"
-)]
 pub(crate) enum Operation {
     SendMessage(SendMessageRequest),
     SendStreamingMessage(SendMessageRequest),
@@ -89,10 +85,16 @@ pub(crate) async fn perform(
         Operation::SubscribeToTask(request) => {
             Ok(Outcome::Stream(service.subscribe_to_task(caller, request)?))
         }
-        Operation::CreatePushConfig(_)
-        | Operation::GetPushConfig(_)
-        | Operation::ListPushConfigs(_)
-        | Operation::DeletePushConfig(_) => Err(A2AError::push_notification_not_supported()),
+        Operation::CreatePushConfig(config) => {
+            value(service.create_push_config(caller, config).await?)
+        }
+        Operation::GetPushConfig(request) => value(service.get_push_config(caller, request)?),
+        Operation::ListPushConfigs(request) => value(service.list_push_configs(caller, request)?),
+        // `google.protobuf.Empty`.
+        Operation::DeletePushConfig(request) => {
+            service.delete_push_config(caller, request)?;
+            Ok(Outcome::Value(Value::Object(Default::default())))
+        }
         Operation::GetExtendedAgentCard => value(cards.extended_for(caller)?),
     }
 }

@@ -50,6 +50,7 @@ mod http;
 mod index;
 mod ops;
 mod project;
+mod push;
 mod rest;
 mod rpc;
 mod service;

@@ -36,9 +36,6 @@ impl A2aService {
             history_length: None,
             return_immediately: None,
         });
-        if configuration.task_push_notification_config.is_some() {
-            return Err(A2AError::push_notification_not_supported());
-        }
         if let Some(modes) = &configuration.accepted_output_modes
             && !modes.is_empty()
             && !modes
@@ -50,6 +47,13 @@ impl A2aService {
         let history_length = crate::project::history_length(configuration.history_length)?;
         let rendered = parts::render(&message)?;
         let (context_id, continuation) = self.conversation(caller, &message)?;
+
+        // Checked before anything is spawned, so a refused webhook leaves no
+        // task behind it.
+        let webhook = configuration.task_push_notification_config;
+        if let Some(webhook) = &webhook {
+            self.check_webhook(webhook).await?;
+        }
 
         let spec = self.run_spec(rendered.prompt.clone(), continuation);
         let tasks = self.tasks().clone();
@@ -76,7 +80,14 @@ impl A2aService {
         )
         .with_parts((!rendered.only_text).then_some(message.parts));
         self.inner.index.insert(record.clone()).map_err(internal)?;
+        // Stored before the task is driven, so its first change of status is
+        // already one the webhook hears about. A store that fails still
+        // leaves the task driven: it was accepted, and `ListTasks` finds it.
+        let stored = webhook.map(|webhook| self.store_push_config(&record, webhook));
         self.drive(&record);
+        if let Some(Err(error)) = stored {
+            return Err(error);
+        }
         Ok(Accepted {
             record,
             history_length,
