@@ -27,7 +27,7 @@ use std::{
 use mentra::{ModelInfo, ModelSelector};
 
 #[cfg(feature = "a2a")]
-use crate::a2a::{self, A2aConfig, remote::RemoteAgents};
+use crate::a2a::{A2aConfig, live::LiveA2a};
 #[cfg(feature = "mcp")]
 use crate::mcp::{self, McpConfig, connections::McpConnections};
 use crate::{
@@ -914,7 +914,7 @@ impl WorkspaceBuilder {
         // refuses the open should refuse it before a child process exists to
         // be torn down again.
         #[cfg(feature = "a2a")]
-        let (a2a_files, a2a_agents) = discovered_a2a(&path, &self.a2a)?;
+        let a2a_discovered = crate::a2a::live::discovered(&path, &self.a2a)?;
         #[cfg(feature = "mcp")]
         let (mcp_connections, mcp_files, mcp_servers) = {
             let (files, servers) = discovered_mcp(&path, &self.mcp)?;
@@ -926,23 +926,19 @@ impl WorkspaceBuilder {
         };
         #[cfg(not(feature = "mcp"))]
         let (mcp_files, mcp_servers): (Vec<ContextFile>, Vec<String>) = (Vec::new(), Vec::new());
-        // Beside MCP and under the same rule: both lists reach the header in
-        // every build, so the stream's shape does not depend on the feature.
+        // Connected after MCP, as before; kept whole rather than as lists,
+        // because the set is live (ADR-0031) and a reload reads the same
+        // sources this open did.
         #[cfg(feature = "a2a")]
-        let (a2a_remote, a2a_agents) = if a2a_agents.is_empty() {
-            (None, Vec::new())
-        } else {
-            let remote = RemoteAgents::connect(
-                a2a_agents,
+        let a2a = Arc::new(
+            LiveA2a::connect(
+                path.clone(),
+                self.a2a,
+                a2a_discovered,
                 runtime.a2a_conversations_dir().map(Path::to_path_buf),
             )
-            .await;
-            let names = remote.names();
-
-            (Some(Arc::new(remote)), names)
-        };
-        #[cfg(not(feature = "a2a"))]
-        let (a2a_files, a2a_agents): (Vec<ContextFile>, Vec<String>) = (Vec::new(), Vec::new());
+            .await,
+        );
 
         Ok(Workspace {
             // Compaction is two statements from two owners, joined here: the
@@ -980,8 +976,6 @@ impl WorkspaceBuilder {
             templates,
             mcp_files,
             mcp_servers,
-            a2a_files,
-            a2a_agents,
             declared_tool_files: sourced(&declared_sources),
             declared_tools: declared_tool_names,
             declared_registration: declared_tools,
@@ -991,7 +985,7 @@ impl WorkspaceBuilder {
             #[cfg(feature = "mcp")]
             mcp_connections,
             #[cfg(feature = "a2a")]
-            a2a_remote,
+            a2a,
         })
     }
 }
@@ -1031,30 +1025,6 @@ fn discovered_mcp(
         .collect();
 
     Ok((files, mcp::configured(workspace, config)?))
-}
-
-/// Discovers the remote agents this workspace can reach, and which files said
-/// so.
-///
-/// Each file is read once: the sources are what the header names, and the
-/// same sources are layered under the host's own list into what connects.
-/// [`crate::a2a::remote`] owns connecting them.
-#[cfg(feature = "a2a")]
-fn discovered_a2a(
-    workspace: &Path,
-    config: &A2aConfig,
-) -> Result<(Vec<ContextFile>, Vec<a2a::A2aAgent>), RunError> {
-    let supplied = a2a::supplied(config)?;
-    let sources = a2a::discover(workspace, config)?;
-    let files = sources
-        .iter()
-        .map(|source| ContextFile {
-            path: source.path.clone(),
-            scope: source.scope.label(),
-        })
-        .collect();
-
-    Ok((files, a2a::layered(supplied, sources)))
 }
 
 /// Registers every skills directory that exists, most specific first, and

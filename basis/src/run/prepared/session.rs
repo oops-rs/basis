@@ -100,6 +100,8 @@ impl PreparedRun {
             agent_row,
             retry_policy,
             context_snapshot,
+            #[cfg(feature = "a2a")]
+            a2a,
         } = self;
 
         Self {
@@ -110,6 +112,8 @@ impl PreparedRun {
             agent_row,
             retry_policy,
             context_snapshot,
+            #[cfg(feature = "a2a")]
+            a2a,
         }
     }
 

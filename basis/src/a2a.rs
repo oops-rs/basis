@@ -49,6 +49,8 @@
 //! Nothing read here is ever repeated back: see [`A2aError`].
 
 mod file;
+pub(crate) mod live;
+mod reload;
 pub(crate) mod remote;
 
 use std::path::{Path, PathBuf};
@@ -59,6 +61,7 @@ use crate::context::ContextScope;
 
 pub use mentra::a2a::{A2aAgentConfig, A2aLimits};
 pub use mentra::mcp::SecretString;
+pub use reload::A2aReload;
 
 /// Where basis looks inside a workspace, relative to its root.
 pub const DEFAULT_WORKSPACE_A2A_FILE: &str = ".basis/a2a.json";
@@ -98,6 +101,29 @@ impl A2aAgent {
 
     pub fn into_config(self) -> A2aAgentConfig {
         self.0
+    }
+
+    /// Whether `other` reaches the same agent the same way: the same name,
+    /// URL, headers, plaintext override and limits. What a reload asks to
+    /// decide between fetching a card again and reconnecting (ADR-0031 §1).
+    ///
+    /// Compared field by field rather than through a derived `PartialEq`,
+    /// because mentra's configuration derives none — and so that a field
+    /// mentra adds later is a compile error here rather than a difference
+    /// quietly ignored.
+    pub(crate) fn connects_like(&self, other: &Self) -> bool {
+        let A2aAgentConfig {
+            name,
+            url,
+            headers,
+            allow_plaintext_credentials,
+            limits,
+        } = &self.0;
+        *name == other.0.name
+            && *url == other.0.url
+            && *headers == other.0.headers
+            && *allow_plaintext_credentials == other.0.allow_plaintext_credentials
+            && *limits == other.0.limits
     }
 }
 

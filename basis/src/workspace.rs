@@ -45,6 +45,8 @@
 //! run from it, and drop the workspace when the run ends. There is one
 //! resolution path, and this is it.
 
+#[cfg(feature = "a2a")]
+mod a2a;
 mod builder;
 mod lifecycle;
 mod profile;
@@ -66,7 +68,7 @@ pub(crate) use builder::load_templates;
 use lifecycle::MintPosture;
 
 #[cfg(feature = "a2a")]
-use crate::a2a::remote::RemoteAgents;
+use crate::a2a::live::LiveA2a;
 #[cfg(feature = "mcp")]
 use crate::mcp::connections::McpConnections;
 use crate::{
@@ -171,8 +173,6 @@ pub struct Workspace {
     templates: Vec<Template>,
     mcp_files: Vec<ContextFile>,
     mcp_servers: Vec<String>,
-    a2a_files: Vec<ContextFile>,
-    a2a_agents: Vec<String>,
     declared_tool_files: Vec<ContextFile>,
     declared_tools: Vec<String>,
     /// Keeps this workspace's declared tools claimed on the runtime's single
@@ -204,10 +204,12 @@ pub struct Workspace {
     #[cfg(feature = "mcp")]
     #[allow(dead_code, reason = "held for its Drop")]
     mcp_connections: McpConnections,
-    /// The remote agents this open connected, recorded on every agent it
-    /// mints or resumes (ADR-0029 §3). `None` when none were configured.
+    /// What this open knows about its remote agents — where it looked, and
+    /// the live set every agent it mints or resumes holds (ADR-0029 §3,
+    /// ADR-0031). Present even when nothing is configured, so an agent added
+    /// later reaches sessions already running.
     #[cfg(feature = "a2a")]
-    a2a_remote: Option<Arc<RemoteAgents>>,
+    a2a: Arc<LiveA2a>,
 }
 
 /// Hand-written because neither the runtime nor the registration is `Debug`
@@ -226,7 +228,7 @@ impl std::fmt::Debug for Workspace {
             .field("skills", &self.skills.len())
             .field("templates", &self.templates.len())
             .field("mcp_servers", &self.mcp_servers)
-            .field("a2a_agents", &self.a2a_agents)
+            .field("a2a_agents", &self.a2a_agents())
             .field("declared_tools", &self.declared_tools)
             .field("host_tools", &self.host_tools)
             .finish_non_exhaustive()
@@ -510,17 +512,17 @@ impl Workspace {
         &self.mcp_servers
     }
 
-    /// The remote A2A agents this workspace configured, by name — each one a
-    /// target the model reaches as `spawn "@<name> <task>"` (ADR-0029).
-    /// Verbatim: a remote agent is not a tool on the shared registry, so
-    /// nothing is claimed and no name is suffixed.
-    ///
-    /// Every configured agent is listed, reachable at open or not, so a host
-    /// can see what the workspace asked for. Names only, for
-    /// [`mcp_servers`](Self::mcp_servers)'s reason: nothing here echoes a URL
-    /// or a credential.
-    pub fn a2a_agents(&self) -> &[String] {
-        &self.a2a_agents
+    /// The remote A2A agents this workspace configures: none, in a build
+    /// without the `a2a` feature. Kept so the method — like the header field
+    /// it feeds — does not vanish with a cargo feature.
+    #[cfg(not(feature = "a2a"))]
+    pub fn a2a_agents(&self) -> Vec<String> {
+        Vec::new()
+    }
+
+    #[cfg(not(feature = "a2a"))]
+    fn a2a_files(&self) -> Vec<ContextFile> {
+        Vec::new()
     }
 
     /// The tools this workspace's manifests declared, by name, after layering
@@ -670,26 +672,7 @@ impl Workspace {
             mcp_servers: self.mcp_servers.clone(),
             host_tools: self.host_tools.clone(),
             #[cfg(feature = "a2a")]
-            remote: self.a2a_remote.clone(),
-        }
-    }
-
-    /// Gives a freshly minted or resumed session the copy of `spawn` that
-    /// knows this open's remote agents (ADR-0029 §4) — or nothing, when none
-    /// answered at open, so its model keeps the `spawn` every agent sees.
-    ///
-    /// Registered on the session's agent alone, which is the isolation: a
-    /// sibling open of this directory shares this audience but not this agent,
-    /// so it is neither told about these agents nor routed to them.
-    #[cfg(feature = "a2a")]
-    fn teach_remote_agents(&self, session: &mut Session) {
-        if let Some(copy) = self
-            .a2a_remote
-            .as_deref()
-            .and_then(|remote| self.runtime.spawn_tool().for_remote_agents(remote))
-            .map(crate::tools::SpawnTool::remembering)
-        {
-            session.register_tool(copy);
+            remote: Some(Arc::clone(self.a2a.remote())),
         }
     }
 
@@ -719,7 +702,7 @@ impl Workspace {
             mcp_servers: self.mcp_servers.clone(),
             host_tools: self.host_tools.clone(),
             #[cfg(feature = "a2a")]
-            remote: self.a2a_remote.clone(),
+            remote: Some(Arc::clone(self.a2a.remote())),
         }
     }
 
@@ -737,7 +720,7 @@ impl Workspace {
     ) -> PreparedRun {
         let bounds = spec.turn_options();
 
-        PreparedRun::new(
+        let run = PreparedRun::new(
             session,
             RunContext {
                 workspace: self.root.clone(),
@@ -751,8 +734,8 @@ impl Workspace {
                 templates: self.templates.clone(),
                 mcp_files: self.mcp_files.clone(),
                 mcp_servers: self.mcp_servers.clone(),
-                a2a_files: self.a2a_files.clone(),
-                a2a_agents: self.a2a_agents.clone(),
+                a2a_files: self.a2a_files(),
+                a2a_agents: self.a2a_agents(),
             },
         )
         .with_bounds(bounds)
@@ -762,7 +745,10 @@ impl Workspace {
         // takes it per run, so the mint is where a runtime-scoped knob becomes
         // a per-run option.
         .with_retry_policy(self.runtime.retry_policy())
-        .with_context_snapshot(context_snapshot)
+        .with_context_snapshot(context_snapshot);
+        #[cfg(feature = "a2a")]
+        let run = run.with_live_a2a(Arc::clone(&self.a2a));
+        run
     }
 }
 

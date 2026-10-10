@@ -38,10 +38,12 @@ pub struct RunContext {
     /// The servers those files produced, after layering. Names only: the
     /// header must not echo a command or a credential.
     pub mcp_servers: Vec<String>,
-    /// A2A configuration files in effect, most specific first.
+    /// A2A configuration files in effect at mint, most specific first. The
+    /// set is live (ADR-0031): the header a turn opens with reads it again.
     pub a2a_files: Vec<ContextFile>,
-    /// The remote agents those files and the host named, after layering, by
-    /// the names that took effect. Names only, for `mcp_servers`'s reason.
+    /// The remote agents those files and the host named at mint, after
+    /// layering, by the names that took effect. Names only, for
+    /// `mcp_servers`'s reason; live in the header, as `a2a_files` is.
     pub a2a_agents: Vec<String>,
 }
 

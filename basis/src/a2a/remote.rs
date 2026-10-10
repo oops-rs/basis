@@ -45,6 +45,7 @@
 //! per conversation), not this module's.
 
 mod conversation;
+mod reload;
 
 use std::{
     path::PathBuf,
@@ -134,6 +135,14 @@ impl RemoteAgents {
             roster: RwLock::new(Arc::new(roster)),
             conversations: conversation::Book::new(remembered_in),
         }
+    }
+
+    /// Makes `roster` the set every reader sees from now on.
+    fn swap(&self, roster: Roster) {
+        *self
+            .roster
+            .write()
+            .unwrap_or_else(|poisoned| poisoned.into_inner()) = Arc::new(roster);
     }
 
     /// The set as it stands now. Cheap — one `Arc` clone — and consistent: a

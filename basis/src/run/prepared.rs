@@ -118,6 +118,11 @@ pub struct PreparedRun {
     /// deliberately: the two answer different questions and a shared name
     /// would blur them at every call site.
     context_snapshot: ContextSnapshot,
+    /// The minting workspace's remote agents, live (ADR-0031), so the header
+    /// each turn opens with names the set as it stands then rather than as it
+    /// stood at mint. `None` off the workspace path.
+    #[cfg(feature = "a2a")]
+    a2a: Option<Arc<crate::a2a::live::LiveA2a>>,
 }
 
 /// Hand-written because mentra's `Session` is not `Debug`, and because the
@@ -148,7 +153,40 @@ impl PreparedRun {
             agent_row: None,
             retry_policy: RetryPolicy::default(),
             context_snapshot: ContextSnapshot::default(),
+            #[cfg(feature = "a2a")]
+            a2a: None,
         }
+    }
+
+    /// Lets this run's header follow the minting workspace's live A2A set.
+    #[cfg(feature = "a2a")]
+    pub(crate) fn with_live_a2a(self, a2a: Arc<crate::a2a::live::LiveA2a>) -> Self {
+        Self {
+            a2a: Some(a2a),
+            ..self
+        }
+    }
+
+    /// The header line, with the A2A half read now: [`context`](Self::context)
+    /// describes the run as minted, but a long-lived session's later turns
+    /// should not announce a set of remote agents a reload already replaced.
+    fn header_now(&self, session_id: &str) -> Event {
+        #[allow(unused_mut, reason = "mutated only with the `a2a` feature")]
+        let mut header = header_for(session_id, &self.run);
+        #[cfg(feature = "a2a")]
+        if let (
+            Some(live),
+            Event::RunStarted {
+                a2a_files,
+                a2a_agents,
+                ..
+            },
+        ) = (&self.a2a, &mut header)
+        {
+            *a2a_files = live.files();
+            *a2a_agents = live.names();
+        }
+        header
     }
 
     /// Hands this run the ledger row its session was recorded under, to hold
@@ -259,7 +297,7 @@ impl PreparedRun {
 
     /// The header line this run will open with, before anything is sent.
     pub fn header(&self) -> Event {
-        header_for(&self.session.id().to_string(), &self.run)
+        self.header_now(&self.session.id().to_string())
     }
 
     /// Sends the configured prompt, streaming into `sink` and putting every
@@ -440,7 +478,7 @@ impl PreparedRun {
         let receiver = self.session.subscribe();
 
         let mut sink = sink;
-        sink.emit(header_for(&session_id, &self.run))?;
+        sink.emit(self.header_now(&session_id))?;
 
         let (done, done_rx) = oneshot::channel();
         let forwarder = tokio::spawn(async move {
