@@ -49,6 +49,7 @@ mod reload;
 mod retry;
 
 use std::{
+    collections::BTreeSet,
     path::PathBuf,
     sync::{Arc, Mutex, RwLock},
     time::{Duration, Instant},
@@ -107,10 +108,16 @@ impl RemoteAgent {
     }
 }
 
-/// One consistent view of the set: who is configured, in configuration order.
+/// One consistent view of the set: who is configured, in configuration order,
+/// and who was configured once and is not any more.
 #[derive(Default)]
 pub(crate) struct Roster {
     agents: Vec<Arc<RemoteAgent>>,
+    /// Names a reload took away, kept so `@<name>` is refused as *no longer
+    /// configured* rather than as a name nobody ever heard of (ADR-0031 §5).
+    /// A name configured again leaves this set; its conversations were never
+    /// touched, so they continue.
+    removed: BTreeSet<String>,
 }
 
 impl Roster {
@@ -155,7 +162,13 @@ impl RemoteAgents {
             })
             .collect();
 
-        Self::with_roster(Roster { agents: connected }, remembered_in)
+        Self::with_roster(
+            Roster {
+                agents: connected,
+                removed: BTreeSet::new(),
+            },
+            remembered_in,
+        )
     }
 
     fn with_roster(roster: Roster, remembered_in: Option<PathBuf>) -> Self {
@@ -310,6 +323,7 @@ impl RemoteAgents {
                         ))
                     })
                     .collect(),
+                removed: BTreeSet::new(),
             },
             None,
         )

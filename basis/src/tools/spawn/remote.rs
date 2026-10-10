@@ -9,8 +9,9 @@
 //! here is written in `spawn`'s grammar, and none of them mentions an id.
 
 use mentra::a2a::{
-    A2aExchange, A2aExchangeError, A2aRequest, A2aStillWorking, A2aSubmitted, is_settled,
-    remote_output, remote_reply, settle as settle_task, submit, types::TaskState,
+    A2aError as ClientError, A2aExchange, A2aExchangeError, A2aRequest, A2aRpcError,
+    A2aStillWorking, A2aSubmitted, is_settled, remote_output, remote_reply, settle as settle_task,
+    submit, types::TaskState,
 };
 use mentra::tool::{ParallelToolContext, ToolContext, ToolResult};
 
@@ -28,8 +29,18 @@ pub(super) fn authorize(agents: &RemoteAgents, name: &str) -> Result<(), String>
     match agents.route(name) {
         Route::Connected | Route::Retry => Ok(()),
         Route::Backoff(wait) => Err(backing_off(name, wait)),
+        Route::Removed => Err(removed(name)),
         Route::Unknown => Err(unknown(agents, name)),
     }
+}
+
+/// The refusal for an agent a reload took away: by name, so the model stops
+/// asking for it rather than guessing at a spelling (ADR-0031 §5).
+fn removed(name: &str) -> String {
+    format!(
+        "the remote agent `{name}` is no longer configured for this workspace, so there is \
+         nothing to hand `@{name}` to; write the task with no `@` to hand it to a subagent here"
+    )
 }
 
 /// The refusal for a name the calling agent's workspace does not configure.
@@ -69,6 +80,7 @@ fn unreached(agents: &RemoteAgents, name: &str, why: Unreached) -> String {
              in {}s",
             seconds(retry_in)
         ),
+        Unreached::Removed => removed(name),
         Unreached::Unknown => unknown(agents, name),
     }
 }
@@ -289,6 +301,20 @@ fn settle(
                 "Remote agent `{name}` answered in a way spawn does not understand."
             )),
         ),
+        // The task basis kept for it is one the agent does not know — most
+        // often because a reload moved the agent to a new endpoint while the
+        // task was outstanding (ADR-0031 §5). Waiting on it again could only
+        // fail again, so the record ends here, and the conversation with it:
+        // its context is the old endpoint's too.
+        Err(error) if before.outstanding.is_some() && task_not_found(&error) => (
+            Conversation::default(),
+            Err(format!(
+                "Remote agent `{name}` no longer knows the task it was working on — it may have \
+                 moved to a new address — so that task is forgotten and the conversation with \
+                 it starts over. Hand it the task again with `@{name} <task>` if it still needs \
+                 doing."
+            )),
+        ),
         Err(A2aExchangeError::Send(error)) => (
             before,
             Err(format!(
@@ -330,6 +356,23 @@ fn settle(
                 "Remote agent `{name}` could not be reached: {error}"
             )),
         ),
+    }
+}
+
+/// Whether the agent answered that it does not know the task asked about.
+fn task_not_found(error: &A2aExchangeError) -> bool {
+    let not_found = |error: &ClientError| {
+        matches!(
+            error,
+            ClientError::Rpc {
+                error: A2aRpcError::TaskNotFound,
+                ..
+            }
+        )
+    };
+    match error {
+        A2aExchangeError::Send(error) | A2aExchangeError::Poll { error, .. } => not_found(error),
+        _ => false,
     }
 }
 

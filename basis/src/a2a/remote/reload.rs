@@ -8,7 +8,7 @@
 //! failed to read or validate never reaches this point and the set it would
 //! have replaced stands untouched.
 
-use std::sync::Arc;
+use std::{collections::BTreeSet, sync::Arc};
 
 use super::{RemoteAgent, RemoteAgents, Roster, connect_each, warned};
 use crate::a2a::{A2aAgent, A2aReload};
@@ -52,6 +52,13 @@ impl RemoteAgents {
                 .collect(),
             ..A2aReload::default()
         };
+        let removed: BTreeSet<String> = before
+            .removed
+            .iter()
+            .chain(&report.removed)
+            .filter(|name| !agents.iter().any(|agent| agent.name() == name.as_str()))
+            .cloned()
+            .collect();
 
         let mut connected = Vec::with_capacity(agents.len());
         for ((agent, client), fate) in connect_each(agents).await.into_iter().zip(fates) {
@@ -74,7 +81,10 @@ impl RemoteAgents {
             connected.push(Arc::new(RemoteAgent::new(agent, client)));
         }
 
-        self.swap(Roster { agents: connected });
+        self.swap(Roster {
+            agents: connected,
+            removed,
+        });
         self.changed();
         report
     }

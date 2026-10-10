@@ -29,7 +29,9 @@ pub(crate) enum Route {
     /// Configured and unreachable, and tried too recently to try again for
     /// this long.
     Backoff(Duration),
-    /// Not configured.
+    /// Configured once, and taken away by a reload (ADR-0031 §5).
+    Removed,
+    /// Not configured, and never was.
     Unknown,
 }
 
@@ -44,7 +46,9 @@ pub(crate) enum Unreached {
         error: ClientError,
         retry_in: Duration,
     },
-    /// Not configured.
+    /// Configured once, and taken away by a reload.
+    Removed,
+    /// Not configured, and never was.
     Unknown,
 }
 
@@ -79,7 +83,7 @@ impl RemoteAgents {
     pub(crate) fn route(&self, name: &str) -> Route {
         let roster = self.snapshot();
         let Some(agent) = roster.get(name) else {
-            return Route::Unknown;
+            return roster.absent(name);
         };
         if agent.client.is_some() {
             return Route::Connected;
@@ -101,7 +105,10 @@ impl RemoteAgents {
     pub(crate) async fn reach(&self, name: &str) -> Result<Arc<A2aClient>, Unreached> {
         let roster = self.snapshot();
         let Some(agent) = roster.get(name) else {
-            return Err(Unreached::Unknown);
+            return Err(match roster.absent(name) {
+                Route::Removed => Unreached::Removed,
+                _ => Unreached::Unknown,
+            });
         };
         if let Some(client) = &agent.client {
             return Ok(Arc::clone(client));
@@ -139,8 +146,22 @@ impl RemoteAgents {
             agent.agent.clone(),
             Some(Arc::clone(client)),
         ));
-        *roster = Arc::new(Roster { agents });
+        *roster = Arc::new(Roster {
+            agents,
+            removed: roster.removed.clone(),
+        });
         true
+    }
+}
+
+impl Roster {
+    /// Why a name the set does not hold is not there.
+    fn absent(&self, name: &str) -> Route {
+        if self.removed.contains(name) {
+            Route::Removed
+        } else {
+            Route::Unknown
+        }
     }
 }
 
