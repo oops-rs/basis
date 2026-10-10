@@ -5,10 +5,17 @@ All six crates — `basis`, `basis-host`, `basis-tasks`, `basis-acp`,
 live in `docs/adr/`; this file says what changed for someone upgrading.
 Releases before 0.15.0 are described by their tags and ADRs only.
 
+## 0.15.1 — 2026-10-10
+
+- The minimum supported Rust is now **1.95** (was 1.88), the release that
+  stabilizes the `if let` match guards `spawn` and the declared-tool manifest
+  use; CI's MSRV job and current stable's lints are aligned with it (#2). No
+  API changes. A crate on edition 2024 (resolver 3) that declares an older
+  `rust-version` keeps resolving 0.15.0.
+
 ## 0.15.0 — 2026-10-10
 
-Built on mentra 0.29.0. The published crates declare `rust-version = "1.88"`;
-main raises it to 1.95 for the next release (#2).
+Built on mentra 0.29.0, with `rust-version = "1.88"`.
 
 ### A2A in full ([ADR-0030](docs/adr/0030-a2a-is-spoken-in-full.md))
 
