@@ -134,16 +134,18 @@ async fn a_turn_cut_off_while_asking_is_continued_and_asks_again() {
     assert_eq!(tool_failed(&events, "files"), Some(false));
     assert!(workspace.path().join("made.txt").exists());
     assert!(!resumed.has_interrupted_turn());
+    let closed_as_unknown = |block: &ContentBlock| {
+        matches!(
+            block,
+            ContentBlock::ToolResult { tool_use_id, is_error: true, .. } if tool_use_id == "call-1"
+        )
+    };
     assert!(
         resumed
             .history()
             .iter()
-            .any(|message| {
-                message.content.iter().any(|block| matches!(
-            block,
-            ContentBlock::ToolResult { tool_use_id, is_error: true, .. } if tool_use_id == "call-1"
-        ))
-            }),
+            .flat_map(|message| &message.content)
+            .any(closed_as_unknown),
         "the cut-off call was closed as unknown, not run"
     );
 }
