@@ -292,15 +292,29 @@ the same server behind a websocket for a browser client, binding loopback and se
 an `--allow-origin` is named — a websocket handshake is exempt from the same-origin policy.
 
 `basis serve --a2a <ADDR>` serves the workspace's agent to *other agents* over
-[A2A](https://a2a-protocol.org/v1.0.0/specification) — the JSON-RPC binding with SSE streaming, and
-an Agent Card at `/.well-known/agent-card.json`
-([ADR-0028](docs/adr/0028-a2a-is-the-agent-to-agent-protocol.md)). An A2A task *is* a durable
-basis task, so it survives the server restarting and `basis list` shows it; a `contextId` is a
-conversation, continued by the next message that names it. The other direction needs no command:
-name a remote agent in `.basis/a2a.json` and the model hands it work through `spawn`, the same
-tool it delegates with locally — `@<name> <task>` ([ADR-0029](docs/adr/0029-a-remote-agent-is-a-spawn-target.md)) —
-put to the approver like any external call. ACP is how a person drives an agent, MCP is how an agent
-calls tools, A2A is how one agent hands work to another.
+[A2A](https://a2a-protocol.org/v1.0.0/specification) v1.0 in full — every method, on both the
+JSON-RPC binding at the root and the HTTP+JSON one under `/json`, each with SSE streaming, and an
+Agent Card at `/.well-known/agent-card.json` that lists both
+([ADR-0028](docs/adr/0028-a2a-is-the-agent-to-agent-protocol.md),
+[ADR-0030](docs/adr/0030-a2a-is-spoken-in-full.md)). gRPC is the one binding not served, for its
+weight. An A2A task *is* a durable basis task, so it survives the server restarting and
+`basis list` shows it; a `contextId` is a conversation, continued by the next message that names
+it. A caller whose stream drops subscribes again rather than resending, and one that cannot hold a
+connection at all registers a webhook and is called back on every status change (`--push`). A
+message may carry data and inline text files as well as text; a file by URL is refused, because the
+server never fetches what a caller names. `--extended-card FILE` tells authenticated callers more
+than the public card does. The other direction needs no command: name a remote agent in
+`.basis/a2a.json` and the model hands it work through `spawn`, the same tool it delegates with
+locally — `@<name> <task>` ([ADR-0029](docs/adr/0029-a-remote-agent-is-a-spawn-target.md)) — put
+to the approver like any external call. basis follows the remote task's stream when its card
+offers one and polls otherwise, and neither ever sends the task twice. The set of remote agents is
+live ([ADR-0031](docs/adr/0031-remote-agents-are-live.md)): the ACP server, the A2A server and
+every task basis drives watch `a2a.json` and pick up an added agent, a rotated credential or a
+moved URL without a restart, and an agent that was down is tried again when next asked for, at most
+every 30 seconds. Every `@agent` message says how many hops it is from the caller that started the
+chain and when that caller stops waiting ([hops-v1](docs/a2a/hops-v1.md)), so two agents that call
+each other stop at the server's `--hop-cap` (8 by default) or the first deadline. ACP is how a
+person drives an agent, MCP is how an agent calls tools, A2A is how one agent hands work to another.
 
 The CLI is one small grammar ([ADR-0015](docs/adr/0015-cli-grammar.md)). A positional argument that
 names no subcommand is a prompt; bare `basis` prints usage rather than starting a server:
@@ -354,12 +368,15 @@ Inside another task (`BASIS_TASK_ID` set) it prints the handle of a
 *resumable* agent instead, because a parent turn that blocks on its child is how a wait-for cycle
 starts — `--await` is the parent's explicit opt-in, and `--resumable` is the shell's opt-out.
 `basis wait <ID>` attaches to a resumable agent and produces the result, and
-backgrounding is the OS's job — `basis wait <ID> &`, `nohup`, tmux, `systemd-run`, CI. Cancellation
-is honored at turn boundaries (a hung tool call is ended by the deadline), and a crash mid-turn
-loses the in-flight round: re-driving it may repeat tool side effects, because a checkpoint
-restores state, never effects. Four rules are the load-bearing part — the durable-task contract
-every handle obeys across processes (in process, concurrency is the host's tokio; see
-"Structured concurrency" above):
+backgrounding is the OS's job — `basis wait <ID> &`, `nohup`, tmux, `systemd-run`, CI. A cancel
+cuts the running turn short within a poll interval (100 ms), not at the end of the turn; a tool
+that ignores its own cancellation is still ended by the deadline. A crash mid-turn leaves an
+*interrupted* turn that the next attach continues. A tool call that was running when the process
+died is closed as of unknown effect and never run again, and the model is told to check before
+repeating it, because a checkpoint restores state, never effects
+([ADR-0032](docs/adr/0032-an-interrupted-turn-is-continued.md)). Four rules are the load-bearing
+part — the durable-task contract every handle obeys across processes (in process, concurrency is
+the host's tokio; see "Structured concurrency" above):
 
 - **Ownership is a tree.** An attached child inherits its parent's cancellation and the narrower
   deadline. A successful parent keeps attached children in scope until they settle; a failed or
@@ -455,10 +472,20 @@ directory and never records a credential — an agent's executor is whichever pr
 it, holding that shell's environment, so there is nothing on disk to leak and no daemon holding a
 key on your behalf; the bridge's `Origin` allowlist starts empty. An A2A server is reached by
 other agents rather than by you, so its defaults are the narrow ones: no shell unless `--shell`,
-`never` unless `--approve always` (`prompt` is refused — there is nobody to ask), and any address
-but loopback refused unless `--token-env` names a bearer token. It does not terminate TLS; put a
-proxy in front and advertise it with `--public-url`. The boundary, where you want
-one, is the OS's — [docs/containerization.md](docs/containerization.md) has the read-only-root
+and `never` unless `--approve` says otherwise. `--approve prompt` asks the *caller*, since nobody
+at the server is there to answer: a consequential call parks the task as `INPUT_REQUIRED` with a
+question the caller answers `approve <call id>` or `deny <call id>`
+([approval-v1](docs/a2a/approval-v1.md)), and one left unanswered for `--ask-deadline` (10 minutes
+by default) is denied. Any address but loopback is refused unless a bearer token is named:
+`--token-env VAR` for one caller, or `--principal NAME=VAR`, repeatable, for several, each of whom
+sees only the tasks it created and cannot tell another's from one that does not exist. A loopback
+server with no token refuses web pages, so a site open in your browser cannot reach it, but it
+still trusts every local process; `--push` and `--approve prompt` therefore need a token, unless
+`--trust-anonymous-callers` says that trust is meant. A webhook is sent only `http` or `https`,
+and only to an address that resolves public, checked again at every delivery, unless
+`--allow-private-webhooks` lets callers on the server's own network be called back. It does not
+terminate TLS; put a proxy in front and advertise it with `--public-url`. The boundary, where you
+want one, is the OS's — [docs/containerization.md](docs/containerization.md) has the read-only-root
 pattern, what it protects, and what it does not. A command routed to a registered target
 (`!@mac …`) is no different: it runs with whatever authority the executor the *host* wrote
 holds, basis never calls a target "the host", and [docs/targets.md](docs/targets.md) says so
@@ -491,12 +518,13 @@ the shared approval policy, served-session source, workspace pool, and turn/canc
 that a third frontend otherwise had to recover from ACP, plus typed supplied hook/tool lists for
 programmatic hosts. Named honestly, still open:
 the packages convention and provider OAuth; surfacing `team_*`, which stays hidden until a concrete
-use case asks for it; and **nobody has driven this from Zed or JetBrains yet** — it is verified against the
-protocol and its official client library, not against the ecosystem. The six workspace crates
-share one version; `basis-a2a` joins the published ones only when the user performs the next
-release, and A2A is likewise verified against the official SDK's wire types and its own tests, not
-yet against a third-party agent. CI runs fmt, clippy at
-`-D warnings`, and the full suite on Linux, macOS and Windows, plus MSRV (1.88, edition 2024).
+use case asks for it; A2A's gRPC binding, deferred for its weight until a caller needs it
+([proposal 0005](docs/proposals/0005-a2a-beyond-the-first-cut.md)); and **nobody has driven this
+from Zed or JetBrains yet** — it is verified against the protocol and its official client library,
+not against the ecosystem. The six workspace crates share one version, and A2A is likewise verified
+against the official SDK's wire types and its own tests, not yet against a third-party agent. CI
+runs fmt, clippy at `-D warnings`, and the full suite on Linux, macOS and Windows, plus MSRV
+(1.88, edition 2024).
 
 Every addition faces one check: does it make embedding cheaper for a Rust host, is it a convention
 other agents already speak, or is it a seam? If none of the three, it is the host's code, the
@@ -507,7 +535,8 @@ for `--effort`, custom endpoints, and the hooks `shell`→`spawn` migration) ·
 [conventions.md](docs/conventions.md) (every file and variable basis reads, in precedence order) ·
 [embedding.md](docs/embedding.md) (the SDK in detail) · [targets.md](docs/targets.md) (running a
 command somewhere else) · [REDESIGN.md](docs/archive/REDESIGN.md) (closed ledger) ·
-[adr/](docs/adr/) (26 locked decisions) · [proposals/](docs/proposals/) (deferred ideas).
+[adr/](docs/adr/) (32 locked decisions) · [a2a/](docs/a2a/) (basis's two A2A extensions) ·
+[proposals/](docs/proposals/) (deferred ideas).
 
 ## License
 
