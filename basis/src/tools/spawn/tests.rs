@@ -8,6 +8,7 @@
 //! `tests/spawn.rs`.
 
 use super::*;
+use parse::INPUT_FIELD;
 
 use std::path::PathBuf;
 

@@ -60,21 +60,23 @@ impl Workspace {
         self.a2a.reload().await
     }
 
-    /// Gives a freshly minted or resumed session the copy of `spawn` that
-    /// knows this open's remote agents (ADR-0029 §4) — or nothing, when none
-    /// answered at open, so its model keeps the `spawn` every agent sees.
+    /// Gives a freshly minted or resumed session the copy of `spawn` bound to
+    /// this open's live set of remote agents (ADR-0029 §4, ADR-0031 §3).
+    ///
+    /// Always, even when the set is empty: the copy's description is read
+    /// from the set whenever mentra captures it, so it is the plain `spawn`
+    /// until an agent is configured, and an agent added by a reload is taught
+    /// to this session from its next model request on.
     ///
     /// Registered on the session's agent alone, which is the isolation: a
     /// sibling open of this directory shares this audience but not this agent,
     /// so it is neither told about these agents nor routed to them.
     pub(super) fn teach_remote_agents(&self, session: &mut Session) {
-        if let Some(copy) = self
+        let copy = self
             .runtime
             .spawn_tool()
             .for_remote_agents(self.a2a.remote())
-            .map(crate::tools::SpawnTool::remembering)
-        {
-            session.register_tool(copy);
-        }
+            .remembering();
+        session.register_tool(copy);
     }
 }

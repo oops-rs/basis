@@ -158,12 +158,8 @@ pub(super) async fn delegate(
     // tool its parent was given (ADR-0029 §4). Its own conversation with each,
     // because a child is a conversation of its own.
     #[cfg(feature = "a2a")]
-    if let Some(copy) = inherited
-        .as_ref()
-        .and_then(|row| row.remote.as_deref())
-        .and_then(|remote| tool.for_remote_agents(remote))
-    {
-        child.register_tool(copy);
+    if let Some(remote) = inherited.as_ref().and_then(|row| row.remote.as_ref()) {
+        child.register_tool(tool.for_remote_agents(remote));
     }
 
     // Held for the child's whole run, like the depth entry below, and read by

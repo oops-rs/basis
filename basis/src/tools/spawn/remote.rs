@@ -14,7 +14,7 @@ use mentra::a2a::{
 };
 use mentra::tool::{ParallelToolContext, ToolContext, ToolResult};
 
-use super::{listed, no_remote_agents};
+use super::{describe::listed, no_remote_agents};
 use crate::a2a::remote::{Conversation, Outstanding, RemoteAgents, Route, Unreached, Waiting};
 
 /// Whether `@<name>` can go anywhere, asked in the preview — before the

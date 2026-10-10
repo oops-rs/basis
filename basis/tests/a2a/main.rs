@@ -13,6 +13,7 @@
 
 mod live;
 mod support;
+mod teaching;
 
 use std::{path::PathBuf, sync::Arc};
 
