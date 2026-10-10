@@ -48,7 +48,9 @@ mod card;
 mod config;
 mod http;
 mod index;
+mod ops;
 mod project;
+mod rest;
 mod rpc;
 mod service;
 mod stream;
@@ -60,4 +62,5 @@ pub use config::{
     RunDefaults, ServeConfig,
 };
 pub use http::{A2aServer, BindError, router};
+pub use rest::HTTP_JSON_PATH;
 pub use service::{A2aService, OpenError};

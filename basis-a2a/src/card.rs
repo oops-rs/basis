@@ -10,10 +10,10 @@ use std::collections::HashMap;
 
 use a2a::{
     AgentCapabilities, AgentCard, AgentInterface, AgentSkill, HttpAuthSecurityScheme,
-    SecurityScheme, TRANSPORT_PROTOCOL_JSONRPC,
+    SecurityScheme, TRANSPORT_PROTOCOL_HTTP_JSON, TRANSPORT_PROTOCOL_JSONRPC,
 };
 
-use crate::config::AgentIdentity;
+use crate::{config::AgentIdentity, rest};
 
 /// The well-known path the spec puts the card at.
 pub const AGENT_CARD_PATH: &str = "/.well-known/agent-card.json";
@@ -56,7 +56,12 @@ pub(crate) fn build(identity: &AgentIdentity, endpoint: &str, authenticated: boo
         name: identity.name.clone(),
         description: identity.description.clone(),
         version: identity.version.clone(),
-        supported_interfaces: vec![AgentInterface::new(endpoint, TRANSPORT_PROTOCOL_JSONRPC)],
+        // JSON-RPC first: a client takes the first interface it speaks
+        // (ADR-0030 §1), and JSON-RPC is the binding basis has served longest.
+        supported_interfaces: vec![
+            AgentInterface::new(endpoint, TRANSPORT_PROTOCOL_JSONRPC),
+            AgentInterface::new(rest::interface_url(endpoint), TRANSPORT_PROTOCOL_HTTP_JSON),
+        ],
         capabilities: AgentCapabilities {
             streaming: Some(true),
             push_notifications: Some(false),
@@ -80,7 +85,7 @@ mod tests {
     use super::*;
 
     #[test]
-    fn the_card_advertises_json_rpc_at_the_endpoint_and_only_what_is_served() {
+    fn the_card_advertises_json_rpc_then_http_json_and_only_what_is_served() {
         let identity = AgentIdentity::new("helper", "Answers questions.");
         let card = build(&identity, "http://127.0.0.1:1/", false);
         assert_eq!(card.supported_interfaces[0].url, "http://127.0.0.1:1/");
@@ -89,6 +94,12 @@ mod tests {
             TRANSPORT_PROTOCOL_JSONRPC
         );
         assert_eq!(card.supported_interfaces[0].protocol_version, "1.0");
+        assert_eq!(card.supported_interfaces[1].url, "http://127.0.0.1:1/json");
+        assert_eq!(
+            card.supported_interfaces[1].protocol_binding,
+            TRANSPORT_PROTOCOL_HTTP_JSON
+        );
+        assert_eq!(card.supported_interfaces[1].protocol_version, "1.0");
         assert_eq!(card.capabilities.streaming, Some(true));
         assert_eq!(card.capabilities.push_notifications, Some(false));
         assert_eq!(card.capabilities.extended_agent_card, Some(false));

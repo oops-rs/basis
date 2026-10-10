@@ -5,16 +5,15 @@
 //! server sends them; only authentication is refused at the HTTP layer,
 //! before anything here runs.
 
-use a2a::{A2AError, JsonRpcId, JsonRpcRequest, JsonRpcResponse, StreamResponse, methods};
+use a2a::{A2AError, JsonRpcId, JsonRpcRequest, JsonRpcResponse, StreamResponse};
 use futures::stream::BoxStream;
-use serde::de::DeserializeOwned;
 use serde_json::Value;
 
-use crate::{config::Principal, service::A2aService};
-
-/// The protocol major version served (ADR-0028 §5). Any minor is accepted,
-/// since nothing here branches on it.
-const MAJOR_VERSION: u32 = 1;
+use crate::{
+    config::Principal,
+    ops::{self, Operation, Outcome},
+    service::A2aService,
+};
 
 /// What one request produced.
 pub(crate) enum Reply {
@@ -61,103 +60,16 @@ pub(crate) async fn dispatch(
     if request.jsonrpc != "2.0" {
         return Reply::error(id, A2AError::invalid_request("jsonrpc must be \"2.0\""));
     }
-    if let Err(error) = check_version(version) {
+    if let Err(error) = ops::check_version(version) {
         return Reply::error(id, error);
     }
-    match route(service, caller, request.method.as_str(), request.params).await {
-        Ok(Routed::Value(result)) => Reply::Json(JsonRpcResponse::success(id, result)),
-        Ok(Routed::Stream(stream)) => Reply::Stream(id, stream),
+    let operation = match Operation::from_rpc(request.method.as_str(), request.params) {
+        Ok(operation) => operation,
+        Err(error) => return Reply::error(id, error),
+    };
+    match ops::perform(service, caller, operation).await {
+        Ok(Outcome::Value(result)) => Reply::Json(JsonRpcResponse::success(id, result)),
+        Ok(Outcome::Stream(stream)) => Reply::Stream(id, stream),
         Err(error) => Reply::error(id, error),
-    }
-}
-
-enum Routed {
-    Value(Value),
-    Stream(BoxStream<'static, StreamResponse>),
-}
-
-async fn route(
-    service: &A2aService,
-    caller: &Principal,
-    method: &str,
-    params: Option<Value>,
-) -> Result<Routed, A2AError> {
-    match method {
-        methods::SEND_MESSAGE => value(service.send_message(caller, parse(params)?).await?),
-        methods::SEND_STREAMING_MESSAGE => Ok(Routed::Stream(
-            service
-                .send_streaming_message(caller, parse(params)?)
-                .await?,
-        )),
-        methods::GET_TASK => value(service.get_task(caller, parse(params)?)?),
-        methods::LIST_TASKS => value(service.list_tasks(caller, parse_or_default(params)?)?),
-        methods::CANCEL_TASK => value(service.cancel_task(caller, parse(params)?).await?),
-        methods::SUBSCRIBE_TO_TASK => Ok(Routed::Stream(
-            service.subscribe_to_task(caller, parse(params)?)?,
-        )),
-        methods::CREATE_PUSH_CONFIG
-        | methods::GET_PUSH_CONFIG
-        | methods::LIST_PUSH_CONFIGS
-        | methods::DELETE_PUSH_CONFIG => Err(A2AError::push_notification_not_supported()),
-        // The card does not declare an extended card, and the spec answers
-        // that with `UnsupportedOperationError`, not "not configured".
-        methods::GET_EXTENDED_AGENT_CARD => Err(A2AError::unsupported_operation(
-            "this agent has no extended card",
-        )),
-        other => Err(A2AError::method_not_found(other)),
-    }
-}
-
-fn value(result: impl serde::Serialize) -> Result<Routed, A2AError> {
-    serde_json::to_value(result)
-        .map(Routed::Value)
-        .map_err(|error| A2AError::internal(format!("encode the result: {error}")))
-}
-
-fn parse<T: DeserializeOwned>(params: Option<Value>) -> Result<T, A2AError> {
-    let params = params.ok_or_else(|| A2AError::invalid_params("params are required"))?;
-    serde_json::from_value(params).map_err(|error| A2AError::invalid_params(format!("{error}")))
-}
-
-/// For the one method whose every parameter is optional.
-fn parse_or_default<T: DeserializeOwned>(params: Option<Value>) -> Result<T, A2AError> {
-    parse(Some(
-        params.unwrap_or_else(|| Value::Object(Default::default())),
-    ))
-}
-
-/// An absent version is 0.3 (spec §3.6), which is refused like any other
-/// version this server does not serve — exactly as the reference server
-/// refuses it.
-fn check_version(version: Option<&str>) -> Result<(), A2AError> {
-    let requested = version
-        .map(str::trim)
-        .filter(|v| !v.is_empty())
-        .unwrap_or("0.3");
-    let major = requested
-        .split('.')
-        .next()
-        .and_then(|major| major.parse().ok());
-    if major == Some(MAJOR_VERSION) {
-        Ok(())
-    } else {
-        Err(A2AError::version_not_supported(requested))
-    }
-}
-
-#[cfg(test)]
-mod tests {
-    use super::*;
-    use a2a::error_code;
-
-    #[test]
-    fn version_one_of_any_minor_is_served_and_nothing_else() {
-        assert!(check_version(Some("1.0")).is_ok());
-        assert!(check_version(Some(" 1.2 ")).is_ok());
-        assert!(check_version(Some("1")).is_ok());
-        for refused in [None, Some(""), Some("0.3"), Some("2.0"), Some("one")] {
-            let error = check_version(refused).unwrap_err();
-            assert_eq!(error.code, error_code::VERSION_NOT_SUPPORTED, "{refused:?}");
-        }
     }
 }

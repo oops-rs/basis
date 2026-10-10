@@ -1,5 +1,7 @@
-//! The HTTP surface: the public card, and one authenticated JSON-RPC
-//! endpoint that answers either a JSON body or an SSE stream.
+//! The HTTP surface: the public card, and the two bindings over one
+//! service — JSON-RPC at the endpoint's root, HTTP+JSON under
+//! [`HTTP_JSON_PATH`](crate::HTTP_JSON_PATH) — each answering a JSON body or
+//! an SSE stream, behind the same authentication and the same version check.
 //!
 //! TLS is not terminated here (ADR-0028 §6). A deployment that leaves the
 //! machine puts a proxy in front and advertises its `https://` URL with
@@ -9,7 +11,7 @@ use std::{
     collections::HashMap, convert::Infallible, future::Future, io, net::SocketAddr, sync::Arc,
 };
 
-use a2a::{AgentCard, JsonRpcResponse, SVC_PARAM_VERSION};
+use a2a::{AgentCard, JsonRpcResponse, SVC_PARAM_VERSION, StreamResponse};
 use axum::{
     Json, Router,
     body::Bytes,
@@ -19,14 +21,16 @@ use axum::{
         IntoResponse, Response,
         sse::{Event, KeepAlive, Sse},
     },
-    routing::{get, post},
+    routing::{any, get, post},
 };
-use futures::StreamExt;
+use futures::{StreamExt, stream::BoxStream};
+use serde_json::Value;
 use tokio::net::TcpListener;
 
 use crate::{
     card::{self, AGENT_CARD_PATH},
     config::Principal,
+    rest::{self, HTTP_JSON_PATH},
     rpc::{self, Reply},
     service::A2aService,
 };
@@ -49,8 +53,8 @@ pub enum BindError {
 }
 
 #[derive(Clone)]
-struct AppState {
-    service: A2aService,
+pub(crate) struct AppState {
+    pub(crate) service: A2aService,
     card: Arc<AgentCard>,
 }
 
@@ -97,6 +101,12 @@ impl A2aServer {
         &self.endpoint
     }
 
+    /// The HTTP+JSON interface URL the card advertises, beside the JSON-RPC
+    /// endpoint.
+    pub fn http_json_url(&self) -> String {
+        rest::interface_url(&self.endpoint)
+    }
+
     /// Serves until the process ends.
     pub async fn serve(self) -> io::Result<()> {
         axum::serve(self.listener, self.router).await
@@ -115,7 +125,9 @@ impl A2aServer {
 }
 
 /// The routes, for a host that serves them on a listener of its own.
-/// `endpoint` is the JSON-RPC URL the card advertises.
+/// `endpoint` is the JSON-RPC URL the card advertises; the HTTP+JSON
+/// interface is advertised, and served, under it at
+/// [`HTTP_JSON_PATH`](crate::HTTP_JSON_PATH).
 pub fn router(service: A2aService, endpoint: &str) -> Router {
     let card = Arc::new(card::build(
         service.identity(),
@@ -125,6 +137,7 @@ pub fn router(service: A2aService, endpoint: &str) -> Router {
     Router::new()
         .route(AGENT_CARD_PATH, get(agent_card))
         .route("/", post(json_rpc))
+        .route(&format!("{HTTP_JSON_PATH}/{{*path}}"), any(rest::handle))
         .layer(DefaultBodyLimit::max(MAX_BODY))
         .with_state(AppState { service, card })
 }
@@ -142,37 +155,50 @@ async fn json_rpc(
     let Some(caller) = authenticate(&state.service, &headers) else {
         return unauthorized();
     };
-    let version = headers
+    let version = version(&headers, Some(&query));
+    match rpc::dispatch(&state.service, &caller, version.as_deref(), &body).await {
+        Reply::Json(response) => Json(response).into_response(),
+        Reply::Stream(id, updates) => sse(updates, move |update| {
+            let result = serde_json::to_value(update).unwrap_or_default();
+            serde_json::to_value(JsonRpcResponse::success(id.clone(), result)).unwrap_or_default()
+        }),
+    }
+}
+
+/// The caller's `A2A-Version`: its header, or — for the JSON-RPC binding,
+/// which has always taken it there too — a query parameter.
+pub(crate) fn version(
+    headers: &HeaderMap,
+    query: Option<&HashMap<String, String>>,
+) -> Option<String> {
+    headers
         .get(SVC_PARAM_VERSION)
         .and_then(|value| value.to_str().ok())
         .map(str::to_owned)
         .or_else(|| {
-            query
+            query?
                 .iter()
                 .find(|(key, _)| key.eq_ignore_ascii_case(SVC_PARAM_VERSION))
                 .map(|(_, value)| value.clone())
-        });
-    match rpc::dispatch(&state.service, &caller, version.as_deref(), &body).await {
-        Reply::Json(response) => Json(response).into_response(),
-        Reply::Stream(id, updates) => {
-            let events = updates.map(move |update| {
-                let result = serde_json::to_value(update).unwrap_or_default();
-                let response = JsonRpcResponse::success(id.clone(), result);
-                Ok::<_, Infallible>(
-                    Event::default().data(serde_json::to_string(&response).unwrap_or_default()),
-                )
-            });
-            Sse::new(events)
-                .keep_alive(KeepAlive::default())
-                .into_response()
-        }
-    }
+        })
+}
+
+/// An SSE response carrying each update as `frame` dresses it.
+pub(crate) fn sse(
+    updates: BoxStream<'static, StreamResponse>,
+    frame: impl Fn(StreamResponse) -> Value + Send + 'static,
+) -> Response {
+    let events = updates
+        .map(move |update| Ok::<_, Infallible>(Event::default().data(frame(update).to_string())));
+    Sse::new(events)
+        .keep_alive(KeepAlive::default())
+        .into_response()
 }
 
 /// Who sent `headers`, if anyone this server accepts. Checked before any
 /// body is parsed, so an unauthenticated caller learns nothing of what the
 /// server would have said.
-fn authenticate(service: &A2aService, headers: &HeaderMap) -> Option<Principal> {
+pub(crate) fn authenticate(service: &A2aService, headers: &HeaderMap) -> Option<Principal> {
     let presented = headers
         .get(header::AUTHORIZATION)
         .and_then(|value| value.to_str().ok())
@@ -180,7 +206,7 @@ fn authenticate(service: &A2aService, headers: &HeaderMap) -> Option<Principal> 
     service.principals().authenticate(presented)
 }
 
-fn unauthorized() -> Response {
+pub(crate) fn unauthorized() -> Response {
     (
         StatusCode::UNAUTHORIZED,
         [(header::WWW_AUTHENTICATE, "Bearer")],

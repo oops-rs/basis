@@ -241,7 +241,8 @@ impl ServeConfig {
 
     /// The URL callers reach the JSON-RPC endpoint at, as advertised on the
     /// card — what a reverse proxy terminating TLS in front of this server
-    /// exposes. Defaults to `http://<bound address>/`.
+    /// exposes. Defaults to `http://<bound address>/`. The HTTP+JSON interface
+    /// is advertised under it, at [`HTTP_JSON_PATH`](crate::HTTP_JSON_PATH).
     #[must_use]
     pub fn with_public_url(self, public_url: impl Into<String>) -> Self {
         Self {
