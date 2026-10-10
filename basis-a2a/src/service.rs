@@ -15,6 +15,14 @@
 //! index says it accepted and that has not settled, so a restart costs a
 //! task its in-flight turn, never the task.
 //!
+//! A driver never outlives the service's shutdown. [`A2aService::shutdown`]
+//! flips the `Stop` every driver drives under: each abandons its turn where
+//! it stands, as a crash would, and records nothing — no terminal state, and
+//! no answer to a question it had open, which is resolved as interrupted.
+//! The next start drives the task again from what its conversation
+//! committed. Dropping the last handle on the service does the same, for a
+//! host that never said it was going.
+//!
 //! Every spawn is `detached`: a served task is an independent root, never a
 //! child of whatever task the serving process might itself be running as.
 
@@ -42,7 +50,7 @@ use a2a::{
     SendMessageRequest, SendMessageResponse, StreamResponse, SubscribeToTaskRequest, Task,
     TaskStatusUpdateEvent,
 };
-use basis_tasks::Tasks;
+use basis_tasks::{Stop, Tasks};
 use futures::stream::BoxStream;
 
 use crate::{
@@ -110,6 +118,25 @@ struct Inner {
     /// Every task this process is driving. Absent for a task nobody here is
     /// driving.
     drivers: Mutex<HashMap<String, Driver>>,
+    /// What every driver drives under; flipped once, at shutdown.
+    stop: Stop,
+}
+
+impl Drop for Inner {
+    /// The last handle on the service is gone without a
+    /// [`shutdown`](A2aService::shutdown) — its runtime is being torn down
+    /// under it. The drivers' blocking threads outlive their tokio tasks, so
+    /// they are told here, or they would go on to record turns nobody hears.
+    fn drop(&mut self) {
+        self.stop.stop();
+        let drivers = self
+            .drivers
+            .get_mut()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
+        for driver in drivers.values() {
+            driver.questions.interrupt();
+        }
+    }
 }
 
 impl A2aService {
@@ -145,6 +172,8 @@ impl A2aService {
             InboundApproval::AskCaller { .. } => tasks.with_prompt_host(Arc::new(NobodyHost)),
             InboundApproval::Never | InboundApproval::Always => tasks,
         };
+        let stop = Stop::new();
+        let tasks = tasks.with_stop(stop.clone());
         let host_dir = tasks.host_dir(HOST)?;
         let index = Index::open(&host_dir)?;
         let push = if push_notifications {
@@ -166,6 +195,7 @@ impl A2aService {
                 push,
                 hop_cap,
                 drivers: Mutex::new(HashMap::new()),
+                stop,
             }),
         };
         service.resume_unsettled();

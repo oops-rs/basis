@@ -687,15 +687,17 @@ async fn run_model(
         // The host going away abandons the turn where it stands, exactly as
         // a crash would: what it committed stays in the conversation for the
         // next attach to continue (or roll back and re-drive), and nothing
-        // about it is recorded here. A turn that ends as the host stops is
-        // taken as it ended.
+        // about it is recorded here. The stop is looked at first: a host
+        // whose runtime is being torn down must not poll the turn again, and
+        // a turn that finished in the same instant is read back off its
+        // conversation by the next attach all the same.
         let report = tokio::select! {
             biased;
-            report = bounded => report,
             () = ctx.stopping() => {
                 cancellation.cancel();
                 return yielded(paths, meta);
             }
+            report = bounded => report,
         };
         let Some(report) = report else {
             cancellation.cancel();

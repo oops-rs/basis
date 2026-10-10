@@ -62,10 +62,43 @@ impl A2aService {
         }
     }
 
+    /// Stops driving every task, and returns once no driver is left.
+    ///
+    /// Each turn in flight is abandoned where it stands, as a crash would
+    /// leave it, and nothing is recorded about it: no terminal state, and a
+    /// question the turn had open to its caller is resolved as interrupted,
+    /// so a later answer to it is refused. Every task stays resumable, and
+    /// the next [`open`](A2aService::open) drives it again — a turn that was
+    /// asking asks again, under a fresh call id. Nothing new is driven once
+    /// this is called. Idempotent.
+    ///
+    /// [`A2aServer::serve_until`](crate::A2aServer::serve_until) calls this
+    /// once its listener has drained. A host serving [`router`](crate::router)
+    /// on a listener of its own calls it before its runtime goes away: a
+    /// driver works on a blocking thread, which the runtime's shutdown does
+    /// not stop.
+    pub async fn shutdown(&self) {
+        self.inner.stop.stop();
+        let drivers: Vec<Driver> = self.drivers().values().cloned().collect();
+        for driver in &drivers {
+            driver.questions.interrupt();
+        }
+        for mut driver in drivers {
+            let _ = driver.done.wait_for(|done| *done).await;
+        }
+    }
+
+    fn stopping(&self) -> bool {
+        self.inner.stop.is_stopping()
+    }
+
     /// Drives `record`'s task to its terminal on a task of its own.
     pub(super) fn drive(&self, record: &Record) {
         let (done, receiver) = watch::channel(false);
         let questions = Arc::new(Questions::new());
+        if self.stopping() {
+            questions.interrupt();
+        }
         self.drivers().insert(
             record.id.clone(),
             Driver {
@@ -96,6 +129,8 @@ impl A2aService {
                         eprintln!("basis-a2a: record task {id} settling: {error}");
                     }
                 }
+                // Shutting down: left for the next start, on purpose.
+                Ok(WaitOutcome::TimedOut { .. }) if service.stopping() => {}
                 Ok(WaitOutcome::TimedOut { .. }) => {
                     eprintln!("basis-a2a: task {id} stopped being driven before it settled");
                 }

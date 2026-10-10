@@ -67,14 +67,22 @@ for input, unless the caller asked to return immediately.
 ## Endings
 
 - **Deadline.** The agent waits a bounded time for an answer. When it passes,
-  the call is denied, and the task continues without it.
+  the call is denied, and the task continues without it. An answer that
+  arrives as the deadline closes the question is either taken, or refused
+  with `InvalidParams`: the agent MUST NOT acknowledge an answer it did not
+  act on.
 - **Cancel.** `CancelTask` on a task with an open question denies that
   question and every later one, and the task ends `TASK_STATE_CANCELED`.
-- **Restart.** An agent that restarts while a question is open MUST NOT honor
-  an answer to it, and MUST NOT make the call on the strength of one. It
-  drives the task again: a re-run turn asks again under a new call id, and an
-  answer naming the old one is refused as a mismatch, or as an answer to a
-  task with no question open.
+- **Restart.** A restart re-drives the turn, which asks again under a fresh
+  call id. An agent that stops while a question is open — it crashes, or it
+  shuts down — MUST NOT honor an answer to that question, and MUST NOT make
+  the call on the strength of one; a shutdown records no outcome for the
+  task, which stays where it was until the agent starts again. On that start
+  the turn is continued from what it had done: the call that was waiting is
+  not made, its result tells the model the process stopped while it was
+  pending, the model is asked to go on, and when it tries the call again the
+  task returns to `TASK_STATE_INPUT_REQUIRED` with a new question. An answer naming the old call id is refused as a mismatch, or as
+  an answer to a task with no question open.
 
 ## Streams
 
