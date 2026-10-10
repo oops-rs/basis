@@ -25,6 +25,7 @@ use std::{
     sync::{Mutex, MutexGuard},
 };
 
+use a2a::Part;
 use basis_tasks::TaskHandle;
 use serde::{Deserialize, Serialize};
 use tempfile::NamedTempFile;
@@ -32,7 +33,7 @@ use tempfile::NamedTempFile;
 use crate::config::{DEFAULT_PRINCIPAL, Principal};
 
 /// One task this server accepted.
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub(crate) struct Record {
     /// The A2A task id: the handle's task part.
     pub(crate) id: String,
@@ -46,8 +47,13 @@ pub(crate) struct Record {
     pub(crate) context_id: String,
     /// The caller's `messageId` for the message that started the task.
     pub(crate) message_id: String,
-    /// The text the task was started with, exactly as the caller sent it.
+    /// The prompt the task was started with: the caller's text exactly as
+    /// sent, or its parts rendered into one (see `service::parts`).
     pub(crate) text: String,
+    /// The caller's parts, kept only when some were more than text — the
+    /// history then shows what was sent, not what the model was handed.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub(crate) parts: Option<Vec<Part>>,
     pub(crate) created_ms: u64,
     /// When this server saw the task settle. Absent while it runs.
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -70,9 +76,14 @@ impl Record {
             context_id,
             message_id,
             text,
+            parts: None,
             created_ms,
             finished_ms: None,
         }
+    }
+
+    pub(crate) fn with_parts(self, parts: Option<Vec<Part>>) -> Self {
+        Self { parts, ..self }
     }
 
     pub(crate) fn handle(&self) -> TaskHandle {

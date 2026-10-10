@@ -23,7 +23,10 @@ use crate::data_dir::{AgentPaths, write_private_atomic};
 
 pub(crate) const MAX_MESSAGES: usize = 16;
 pub(crate) const MAX_MESSAGE: usize = 256 * 1024;
-pub(crate) const MAX_PROMPT: usize = 256 * 1024;
+/// The largest prompt `spawn` accepts, in bytes. Public so a host that
+/// assembles a prompt from parts of its own can refuse an oversized one as
+/// the caller's mistake, before `spawn` refuses it as a failure.
+pub const MAX_PROMPT: usize = 256 * 1024;
 pub(crate) const MAX_EVENT_BYTES: usize = 32 * 1024;
 pub(crate) const MAX_RESULT_BYTES: usize = 1024 * 1024;
 /// How many tasks one workspace may hold at once. `spawn` refuses past it

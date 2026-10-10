@@ -65,8 +65,8 @@ pub use handle::TaskHandle;
 pub use live::LiveSink;
 pub use spec::{Continuation, DEFAULT_DEADLINE, RunSpec};
 pub use state::{
-    InboxRecord, MAX_TASKS, MessageRecord, MessageReply, MessageState, Terminal, TerminalRecord,
-    now_ms,
+    InboxRecord, MAX_PROMPT, MAX_TASKS, MessageRecord, MessageReply, MessageState, Terminal,
+    TerminalRecord, now_ms,
 };
 pub use tasks::{TaskSummary, probe_state};
 pub use watch::{EventCursor, WatchRecord};

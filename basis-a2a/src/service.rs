@@ -18,6 +18,9 @@
 //! Every spawn is `detached`: a served task is an independent root, never a
 //! child of whatever task the serving process might itself be running as.
 
+mod parts;
+
+pub(crate) use parts::INPUT_MODES;
 mod send;
 
 use std::{

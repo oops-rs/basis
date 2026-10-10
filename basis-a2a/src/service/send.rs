@@ -1,10 +1,10 @@
 //! Accepting a message: validating it, deciding which conversation it
 //! continues, and spawning the task that answers it.
 
-use a2a::{A2AError, Message, PartContent, Role, SendMessageRequest};
+use a2a::{A2AError, Message, SendMessageRequest};
 use basis_tasks::{Continuation, Hint, RunSpec, now_ms};
 
-use super::A2aService;
+use super::{A2aService, parts};
 use crate::{card::TEXT, config::Principal, index::Record, project::internal};
 
 /// The output modes a caller may accept for this server to be able to answer.
@@ -48,10 +48,10 @@ impl A2aService {
             return Err(A2AError::content_type_not_supported());
         }
         let history_length = crate::project::history_length(configuration.history_length)?;
-        let text = text_of(&message)?;
+        let rendered = parts::render(&message)?;
         let (context_id, continuation) = self.conversation(caller, &message)?;
 
-        let spec = self.run_spec(text.clone(), continuation);
+        let spec = self.run_spec(rendered.prompt.clone(), continuation);
         let tasks = self.tasks().clone();
         let handle = tokio::task::spawn_blocking(move || tasks.spawn(spec))
             .await
@@ -71,9 +71,10 @@ impl A2aService {
             caller,
             context_id,
             message.message_id,
-            text,
+            rendered.prompt,
             now_ms(),
-        );
+        )
+        .with_parts((!rendered.only_text).then_some(message.parts));
         self.inner.index.insert(record.clone()).map_err(internal)?;
         self.drive(&record);
         Ok(Accepted {
@@ -161,71 +162,5 @@ impl A2aService {
             spec = spec.with_system_prompt(system_prompt.clone());
         }
         spec
-    }
-}
-
-/// The prompt a message carries: its text parts, joined. Anything that is
-/// not text is refused rather than dropped — a caller who sent a file and
-/// got an answer that ignored it has no way to know.
-fn text_of(message: &Message) -> Result<String, A2AError> {
-    if message.role != Role::User {
-        return Err(A2AError::invalid_params(
-            "a message to an agent has role ROLE_USER",
-        ));
-    }
-    if message.message_id.trim().is_empty() {
-        return Err(A2AError::invalid_params("messageId is required"));
-    }
-    let mut texts = Vec::with_capacity(message.parts.len());
-    for part in &message.parts {
-        match &part.content {
-            PartContent::Text(text) => texts.push(text.as_str()),
-            _ => return Err(A2AError::content_type_not_supported()),
-        }
-    }
-    let text = texts.join("\n\n");
-    if text.trim().is_empty() {
-        return Err(A2AError::invalid_params("the message has no text"));
-    }
-    Ok(text)
-}
-
-#[cfg(test)]
-mod tests {
-    use super::*;
-    use a2a::{Part, error_code};
-
-    fn message(parts: Vec<Part>) -> Message {
-        Message::new(Role::User, parts)
-    }
-
-    #[test]
-    fn text_parts_are_joined_into_one_prompt() {
-        let text = text_of(&message(vec![Part::text("one"), Part::text("two")])).unwrap();
-        assert_eq!(text, "one\n\ntwo");
-    }
-
-    #[test]
-    fn a_non_text_part_is_refused_not_dropped() {
-        let error = text_of(&message(vec![
-            Part::text("see attached"),
-            Part::url("https://example.com/a.png"),
-        ]))
-        .unwrap_err();
-        assert_eq!(error.code, error_code::CONTENT_TYPE_NOT_SUPPORTED);
-    }
-
-    #[test]
-    fn an_agent_role_or_an_empty_message_is_invalid() {
-        let agent = Message::new(Role::Agent, vec![Part::text("hi")]);
-        assert_eq!(
-            text_of(&agent).unwrap_err().code,
-            error_code::INVALID_PARAMS
-        );
-        let blank = message(vec![Part::text("  ")]);
-        assert_eq!(
-            text_of(&blank).unwrap_err().code,
-            error_code::INVALID_PARAMS
-        );
     }
 }

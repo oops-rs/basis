@@ -13,12 +13,12 @@ use a2a::{
     SecurityScheme, TRANSPORT_PROTOCOL_HTTP_JSON, TRANSPORT_PROTOCOL_JSONRPC,
 };
 
-use crate::{config::AgentIdentity, rest};
+use crate::{config::AgentIdentity, rest, service::INPUT_MODES};
 
 /// The well-known path the spec puts the card at.
 pub const AGENT_CARD_PATH: &str = "/.well-known/agent-card.json";
 
-/// The only media type served tasks take and give.
+/// The only media type served tasks give: an answer is text.
 pub(crate) const TEXT: &str = "text/plain";
 
 /// The scheme name the card's security requirement refers to.
@@ -68,7 +68,7 @@ pub(crate) fn build(identity: &AgentIdentity, endpoint: &str, authenticated: boo
             extensions: None,
             extended_agent_card: Some(false),
         },
-        default_input_modes: vec![TEXT.to_string()],
+        default_input_modes: INPUT_MODES.iter().map(|mode| mode.to_string()).collect(),
         default_output_modes: vec![TEXT.to_string()],
         skills,
         provider: None,

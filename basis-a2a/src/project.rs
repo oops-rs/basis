@@ -178,7 +178,10 @@ fn history(record: &Record, history_length: Option<usize>) -> Option<Vec<Message
         context_id: Some(record.context_id.clone()),
         task_id: Some(record.id.clone()),
         role: Role::User,
-        parts: vec![Part::text(record.text.clone())],
+        parts: record
+            .parts
+            .clone()
+            .unwrap_or_else(|| vec![Part::text(record.text.clone())]),
         metadata: None,
         extensions: None,
         reference_task_ids: None,
