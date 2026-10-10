@@ -8,7 +8,7 @@
 //! it is reported, so it follows the set rather than the open.
 //!
 //! Every read is stamped first — each source path's existence, length and
-//! modification time ([`watch`](super::watch)) — so a watch can tell whether
+//! modification time ([`super::watch`]) — so a watch can tell whether
 //! anything changed since the last read without reading anything itself.
 
 use std::{

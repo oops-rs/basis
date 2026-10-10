@@ -25,6 +25,18 @@
 //! it to the end, so a swap never interrupts an exchange already in flight
 //! (ADR-0031 §6) — it changes what the *next* `@<agent>` reaches.
 //!
+//! A name a reload took away is remembered as *removed*, so `@<agent>` is
+//! refused as no longer configured rather than as a name nobody knows. Its
+//! conversations are not touched (ADR-0031 §5): they are keyed by name, not by
+//! connection, so re-adding the name continues them, and an outstanding task
+//! whose agent moved to a new URL is waited on at the new one.
+//!
+//! After every change — a reload, or an unreachable agent reached on a retry
+//! ([`retry`]) — the set calls the hook it was built with, which asks mentra to
+//! capture every registered tool's description again; the `spawn` copies that
+//! hold this set compute theirs from it, so the next model request is told the
+//! set as it is.
+//!
 //! # The conversation is basis's
 //!
 //! ADR-0029 §5: within one session, successive delegations to one remote agent

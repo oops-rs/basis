@@ -60,7 +60,8 @@
 //!   `.basis/tools.json` works in a build that has never heard of MCP.
 //! - **`a2a`** (default) — `.basis/a2a.json` discovery and the A2A binding
 //!   (ADR-0028): each named remote agent reachable from `spawn` as
-//!   `@<agent> <task>` (ADR-0029), through mentra's A2A client. Built without
+//!   `@<agent> <task>` (ADR-0029), through mentra's A2A client, from a set a
+//!   host can reload or watch while it runs (ADR-0031). Built without
 //!   it, the crate names no agents, and mentra's client and the `a2a-lf` wire
 //!   types drop out of the tree with it, because mentra gates them too.
 
