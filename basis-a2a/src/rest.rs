@@ -38,7 +38,7 @@ use a2a::{
     StreamResponse, SubscribeToTaskRequest,
 };
 use axum::{
-    Json,
+    Extension, Json,
     body::Bytes,
     extract::{Path, Query, State},
     http::{HeaderMap, Method, StatusCode, header},
@@ -48,6 +48,7 @@ use futures::stream::BoxStream;
 use serde_json::{Map, Value};
 
 use crate::{
+    config::Principal,
     http::{self, AppState},
     ops::{self, Operation, Outcome, parse, parse_or_default, refuse_tenant},
 };
@@ -69,15 +70,13 @@ pub(crate) fn interface_url(json_rpc_endpoint: &str) -> String {
 /// Answers every request under [`HTTP_JSON_PATH`].
 pub(crate) async fn handle(
     State(state): State<AppState>,
+    Extension(caller): Extension<Principal>,
     method: Method,
     Path(path): Path<String>,
     Query(query): Query<Vec<(String, String)>>,
     headers: HeaderMap,
     body: Bytes,
 ) -> Response {
-    let Some(caller) = http::authenticate(&state.service, &headers) else {
-        return http::unauthorized();
-    };
     if let Err(error) = ops::check_version(http::version(&headers, None).as_deref()) {
         return error::response(error);
     }

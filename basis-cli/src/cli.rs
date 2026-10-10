@@ -273,6 +273,11 @@ pub(crate) struct A2aArgs {
     #[arg(long, value_name = "N", requires = "a2a")]
     pub(crate) hop_cap: Option<u32>,
 
+    /// Allow --push or --approve prompt with no token. Every local process is
+    /// then trusted to register webhooks and answer questions.
+    #[arg(long, requires = "a2a")]
+    pub(crate) trust_anonymous_callers: bool,
+
     /// The URL callers reach this server at, as the card advertises it — the
     /// https:// address of the proxy in front, when there is one.
     #[arg(long, value_name = "URL", requires = "a2a")]
@@ -331,6 +336,7 @@ impl ServeArgs {
             allow_private_webhooks,
             extended_card,
             hop_cap,
+            trust_anonymous_callers,
             public_url,
             shell,
             deadline,
@@ -347,6 +353,7 @@ impl ServeArgs {
             || *allow_private_webhooks
             || extended_card.is_some()
             || hop_cap.is_some()
+            || *trust_anonymous_callers
             || public_url.is_some()
             || *shell
             || deadline.is_some()
@@ -1036,6 +1043,7 @@ mod tests {
             ["--principal", "a=T"],
             ["--hop-cap", "3"],
             ["--push", "--no-shell"],
+            ["--trust-anonymous-callers", "--no-shell"],
         ] {
             let mut argv = vec!["basis", "serve", "--acp"];
             argv.extend(flag);

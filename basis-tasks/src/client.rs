@@ -297,7 +297,7 @@ impl Tasks {
             .map_err(|error| Error::new(format!("scan workspace agents: {error}")))?
             .count();
         if existing >= state::MAX_TASKS {
-            return Err(Error::new(format!(
+            return Err(Error::task_limit(format!(
                 "workspace has {} tasks (the limit); archive old agent directories under {}",
                 state::MAX_TASKS,
                 agents.display()

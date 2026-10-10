@@ -231,6 +231,8 @@ fn restart_config(data: &std::path::Path, workspace: &std::path::Path, model: &s
         .with_approval(InboundApproval::AskCaller {
             deadline: Duration::from_secs(60),
         })
+        // Called in-process as the anonymous principal; nothing listens.
+        .with_trusted_anonymous_callers()
 }
 
 /// The first life of [`a_restart_never_honors_the_dead_questions_answer`]:

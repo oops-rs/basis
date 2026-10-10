@@ -16,7 +16,11 @@ use futures::stream::BoxStream;
 use serde::de::DeserializeOwned;
 use serde_json::Value;
 
-use crate::{card::Cards, config::Principal, service::A2aService};
+use crate::{
+    card::{self, Cards},
+    config::Principal,
+    service::A2aService,
+};
 
 /// One request, parsed.
 #[derive(Debug)]
@@ -95,7 +99,9 @@ pub(crate) async fn perform(
             service.delete_push_config(caller, request)?;
             Ok(Outcome::Value(Value::Object(Default::default())))
         }
-        Operation::GetExtendedAgentCard => value(cards.extended_for(caller)?),
+        Operation::GetExtendedAgentCard => {
+            Ok(Outcome::Value(card::to_wire(cards.extended_for(caller)?)))
+        }
     }
 }
 

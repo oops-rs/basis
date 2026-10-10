@@ -138,6 +138,9 @@ fn a2a_config(acp: AcpArgs, args: A2aArgs) -> Result<ServeConfig, String> {
     if let Some(hop_cap) = args.hop_cap {
         config = config.with_hop_cap(hop_cap);
     }
+    if args.trust_anonymous_callers {
+        config = config.with_trusted_anonymous_callers();
+    }
     if let Some(public_url) = args.public_url {
         config = config.with_public_url(public_url);
     }

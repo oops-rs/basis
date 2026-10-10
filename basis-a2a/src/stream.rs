@@ -26,7 +26,7 @@ use tokio::sync::mpsc;
 use crate::{
     index::Record,
     project::{self, Standing, View, internal},
-    service::A2aService,
+    service::{A2aService, StreamSlot},
 };
 
 /// How many updates may wait unread before the producer waits for the
@@ -38,10 +38,13 @@ const BUFFER: usize = 64;
 /// its terminal state — or at a question to its caller, the interrupted
 /// state the spec closes a stream at too (§11.7). The caller answers, then
 /// subscribes again.
+/// `slot` is the stream's place under its caller's cap, held for as long as
+/// the stream is.
 pub(crate) fn follow(
     service: A2aService,
     record: Record,
     history_length: Option<usize>,
+    slot: StreamSlot,
 ) -> Result<BoxStream<'static, StreamResponse>, A2AError> {
     let mut cursor = service.tasks().watch(&record.handle()).map_err(internal)?;
     // Everything journaled so far is what the snapshot below already says.
@@ -58,8 +61,11 @@ pub(crate) fn follow(
         let working = matches!(standing, Standing::Working);
         tokio::spawn(produce(service, record, cursor, working, sender));
     }
-    let rest = stream::unfold(receiver, |mut receiver| async move {
-        receiver.recv().await.map(|update| (update, receiver))
+    let rest = stream::unfold((receiver, slot), |(mut receiver, slot)| async move {
+        receiver
+            .recv()
+            .await
+            .map(|update| (update, (receiver, slot)))
     });
     Ok(stream::once(async move { snapshot }).chain(rest).boxed())
 }
