@@ -11,6 +11,9 @@
 > Deferred work: [`proposals/0005-a2a-beyond-the-first-cut.md`](../proposals/0005-a2a-beyond-the-first-cut.md).
 > Amended by [`0029-a-remote-agent-is-a-spawn-target.md`](0029-a-remote-agent-is-a-spawn-target.md):
 > basis reaches a remote agent through `spawn "@agent …"`, not an `a2a__{agent}` tool (§1).
+> Amended by [`0030-a2a-is-spoken-in-full.md`](0030-a2a-is-spoken-in-full.md):
+> every method over JSON-RPC and HTTP+JSON, push, the extended card, non-text
+> parts, asking the caller, principals and hops (§1, §4, §5, §6).
 
 ## Context
 

@@ -1,6 +1,8 @@
 # 0005 — A2A beyond the first cut
 
-> Status: Deferred
+> Status: Mostly closed · 2026-10-10 — §1–§5 and the HTTP+JSON half of §6 are
+> decided by [ADR-0030](../adr/0030-a2a-is-spoken-in-full.md). Only gRPC (and
+> any later binding) remains deferred, under §6's trigger.
 > Created: 2026-10-09, with [ADR-0028](../adr/0028-a2a-is-the-agent-to-agent-protocol.md),
 > which ships the narrow first cut this proposal extends.
 
