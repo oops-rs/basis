@@ -26,7 +26,7 @@
 use a2a::{
     A2AError, Artifact, Message, Part, Role, Task, TaskState, TaskStatus, TaskStatusUpdateEvent,
 };
-use basis_tasks::{Tasks, Terminal, TerminalRecord};
+use basis_tasks::{TaskHandle, Tasks, Terminal, TerminalRecord};
 use chrono::{DateTime, Utc};
 
 use crate::{
@@ -79,11 +79,11 @@ pub(crate) enum Standing {
 
 impl Standing {
     pub(crate) fn read(tasks: &Tasks, record: &Record) -> Result<Self, A2AError> {
-        let handle = record.handle();
-        if let Some(terminal) = tasks.terminal(&handle).map_err(internal)? {
+        let handle = handle_of(record)?;
+        if let Some(terminal) = tasks.terminal(handle).map_err(internal)? {
             return Ok(Self::Settled(terminal));
         }
-        Ok(if tasks.is_attached(&handle).map_err(internal)? {
+        Ok(if tasks.is_attached(handle).map_err(internal)? {
             Self::Working
         } else {
             Self::Submitted
@@ -274,6 +274,15 @@ pub(crate) fn timestamp(ms: u64) -> Option<DateTime<Utc>> {
     DateTime::from_timestamp_millis(i64::try_from(ms).ok()?)
 }
 
+/// The `basis-tasks` handle `record` names. A record of a hosted task is
+/// one a `basis-tasks` server never wrote — its state directory is some
+/// host's — and is this server's fault to report, not the caller's.
+pub(crate) fn handle_of(record: &Record) -> Result<&TaskHandle, A2AError> {
+    record
+        .handle()
+        .ok_or_else(|| internal(format!("task {} is not a basis-tasks task", record.id)))
+}
+
 /// A failure of this server's own, not the caller's: logged in full where
 /// the operator can read it, reported to the caller without paths or
 /// anything else of the host's.
@@ -285,7 +294,6 @@ pub(crate) fn internal(error: impl std::fmt::Display) -> A2AError {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use basis_tasks::TaskHandle;
     use serde_json::json;
 
     fn record() -> Record {

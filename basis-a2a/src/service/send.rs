@@ -9,7 +9,12 @@ use super::{
     ask::{self, Unanswered},
     hops, parts,
 };
-use crate::{card::TEXT, config::Principal, index::Record, project::internal};
+use crate::{
+    card::TEXT,
+    config::Principal,
+    index::Record,
+    project::{handle_of, internal},
+};
 
 /// The output modes a caller may accept for this server to be able to answer.
 const TEXT_MODES: [&str; 4] = [TEXT, "text/*", "*/*", "text"];
@@ -87,7 +92,11 @@ impl A2aService {
             .index
             .unsettled_owned(caller)
             .iter()
-            .filter(|record| !matches!(self.tasks().terminal(&record.handle()), Ok(Some(_))))
+            .filter(|record| {
+                !record
+                    .handle()
+                    .is_some_and(|handle| matches!(self.tasks().terminal(handle), Ok(Some(_))))
+            })
             .count();
         if live >= self.inner.live_task_quota {
             return Err(A2AError::unsupported_operation(format!(
@@ -244,7 +253,8 @@ impl A2aService {
                             "contextId {context_id} is not one this server issued"
                         ))
                     })?;
-                Ok((context_id.to_string(), Continuation::Named(latest.handle())))
+                let handle = handle_of(&latest)?.clone();
+                Ok((context_id.to_string(), Continuation::Named(handle)))
             }
         }
     }

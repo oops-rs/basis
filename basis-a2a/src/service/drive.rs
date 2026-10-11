@@ -94,6 +94,13 @@ impl A2aService {
 
     /// Drives `record`'s task to its terminal on a task of its own.
     pub(super) fn drive(&self, record: &Record) {
+        let Some(handle) = record.handle().cloned() else {
+            eprintln!(
+                "basis-a2a: task {} is not a basis-tasks task; not driving it",
+                record.id
+            );
+            return;
+        };
         let (done, receiver) = watch::channel(false);
         let questions = Arc::new(Questions::new());
         if self.stopping() {
@@ -119,7 +126,6 @@ impl A2aService {
         };
         let service = self.clone();
         let id = record.id.clone();
-        let handle = record.handle();
         tokio::spawn(async move {
             // `Duration::MAX` is "until it settles": the task's own deadline
             // bounds the run, and a wait is only ever an observation of it.
@@ -146,7 +152,14 @@ impl A2aService {
             if record.finished_ms.is_some() {
                 continue;
             }
-            match self.tasks().terminal(&record.handle()) {
+            let Some(handle) = record.handle() else {
+                eprintln!(
+                    "basis-a2a: task {} is not a basis-tasks task; not resuming it",
+                    record.id
+                );
+                continue;
+            };
+            match self.tasks().terminal(handle) {
                 // Settled while nobody here was watching: the time is when we
                 // noticed, the closest fact there is.
                 Ok(Some(_)) => {

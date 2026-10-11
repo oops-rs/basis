@@ -46,7 +46,10 @@ pub(crate) fn follow(
     history_length: Option<usize>,
     slot: StreamSlot,
 ) -> Result<BoxStream<'static, StreamResponse>, A2AError> {
-    let mut cursor = service.tasks().watch(&record.handle()).map_err(internal)?;
+    let mut cursor = service
+        .tasks()
+        .watch(project::handle_of(&record)?)
+        .map_err(internal)?;
     // Everything journaled so far is what the snapshot below already says.
     cursor.poll().map_err(internal)?;
     let standing = service.standing(&record)?;

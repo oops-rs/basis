@@ -401,7 +401,7 @@ impl A2aService {
             return Err(A2AError::task_not_cancelable(&request.id));
         }
         let tasks = self.tasks().clone();
-        let handle = record.handle();
+        let handle = project::handle_of(&record)?.clone();
         tokio::task::spawn_blocking(move || tasks.cancel(&handle, None))
             .await
             .map_err(internal)?

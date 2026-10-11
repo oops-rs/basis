@@ -32,17 +32,31 @@ use tempfile::NamedTempFile;
 
 use crate::config::{DEFAULT_PRINCIPAL, Principal};
 
+/// Who runs a task, and the id it knows the task by.
+///
+/// One server serves one backend, so every record it writes carries the
+/// same kind of key; a record of the other kind is one this server never
+/// wrote, and is refused where it is used rather than guessed at.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) enum Key {
+    /// A `basis-tasks` task, by its full handle, `<workspace key>/<id>`.
+    Tasks(TaskHandle),
+    /// A task a host runs, by the host's own id for it (ADR-0033 §4). A
+    /// caller never sees it.
+    Hosted(String),
+}
+
 /// One task this server accepted.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[serde(try_from = "Stored", into = "Stored")]
 pub(crate) struct Record {
-    /// The A2A task id: the handle's task part.
+    /// The A2A task id: the handle's task part, or one this server minted
+    /// for a hosted task.
     pub(crate) id: String,
-    /// The full basis handle, `<workspace key>/<id>`.
-    pub(crate) handle: String,
+    pub(crate) key: Key,
     /// The name of the principal whose message created the task, recorded
     /// here rather than inferred later (proposal 0005 §4). A record written
     /// before principals existed belongs to the one caller there was.
-    #[serde(default = "default_principal")]
     pub(crate) principal: String,
     pub(crate) context_id: String,
     /// The caller's `messageId` for the message that started the task.
@@ -52,22 +66,93 @@ pub(crate) struct Record {
     pub(crate) text: String,
     /// The caller's parts, kept only when some were more than text — the
     /// history then shows what was sent, not what the model was handed.
-    #[serde(default, skip_serializing_if = "Option::is_none")]
     pub(crate) parts: Option<Vec<Part>>,
     pub(crate) created_ms: u64,
     /// The hop the message that started the task arrived at (ADR-0030 §9).
-    #[serde(default, skip_serializing_if = "is_zero")]
     pub(crate) hop: u32,
     /// When the task gives up: its own deadline, clamped to its caller's.
     /// Absent on records written before hops existed.
-    #[serde(default, skip_serializing_if = "Option::is_none")]
     pub(crate) deadline_ms: Option<u64>,
     /// When this server saw the task settle. Absent while it runs.
-    #[serde(default, skip_serializing_if = "Option::is_none")]
     pub(crate) finished_ms: Option<u64>,
 }
 
+/// A record as it is written: [`Key`] spread over two optional fields, so a
+/// file written before hosted tasks existed — `handle` and no `host_id` —
+/// still loads as the `basis-tasks` record it is.
+#[derive(Serialize, Deserialize)]
+struct Stored {
+    id: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    handle: Option<TaskHandle>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    host_id: Option<String>,
+    #[serde(default = "default_principal")]
+    principal: String,
+    context_id: String,
+    message_id: String,
+    text: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    parts: Option<Vec<Part>>,
+    created_ms: u64,
+    #[serde(default, skip_serializing_if = "is_zero")]
+    hop: u32,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    deadline_ms: Option<u64>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    finished_ms: Option<u64>,
+}
+
+impl TryFrom<Stored> for Record {
+    type Error = String;
+
+    fn try_from(stored: Stored) -> Result<Self, Self::Error> {
+        let key = match (stored.handle, stored.host_id) {
+            (Some(handle), None) => Key::Tasks(handle),
+            (None, Some(host_id)) => Key::Hosted(host_id),
+            _ => return Err("a task record names exactly one of `handle` and `host_id`".into()),
+        };
+        Ok(Self {
+            id: stored.id,
+            key,
+            principal: stored.principal,
+            context_id: stored.context_id,
+            message_id: stored.message_id,
+            text: stored.text,
+            parts: stored.parts,
+            created_ms: stored.created_ms,
+            hop: stored.hop,
+            deadline_ms: stored.deadline_ms,
+            finished_ms: stored.finished_ms,
+        })
+    }
+}
+
+impl From<Record> for Stored {
+    fn from(record: Record) -> Self {
+        let (handle, host_id) = match record.key {
+            Key::Tasks(handle) => (Some(handle), None),
+            Key::Hosted(host_id) => (None, Some(host_id)),
+        };
+        Self {
+            id: record.id,
+            handle,
+            host_id,
+            principal: record.principal,
+            context_id: record.context_id,
+            message_id: record.message_id,
+            text: record.text,
+            parts: record.parts,
+            created_ms: record.created_ms,
+            hop: record.hop,
+            deadline_ms: record.deadline_ms,
+            finished_ms: record.finished_ms,
+        }
+    }
+}
+
 impl Record {
+    /// A `basis-tasks` task's record: its A2A id is the handle's task part.
     pub(crate) fn new(
         handle: &TaskHandle,
         principal: &Principal,
@@ -76,9 +161,30 @@ impl Record {
         text: String,
         created_ms: u64,
     ) -> Self {
+        Self::keyed(
+            task_id_of(handle).to_string(),
+            Key::Tasks(handle.clone()),
+            principal,
+            context_id,
+            message_id,
+            text,
+            created_ms,
+        )
+    }
+
+    /// A record under the A2A id `id`, for the task `key` names.
+    pub(crate) fn keyed(
+        id: String,
+        key: Key,
+        principal: &Principal,
+        context_id: String,
+        message_id: String,
+        text: String,
+        created_ms: u64,
+    ) -> Self {
         Self {
-            id: task_id_of(handle).to_string(),
-            handle: handle.as_str().to_string(),
+            id,
+            key,
             principal: principal.name().to_string(),
             context_id,
             message_id,
@@ -103,8 +209,13 @@ impl Record {
         }
     }
 
-    pub(crate) fn handle(&self) -> TaskHandle {
-        TaskHandle::parse(self.handle.clone()).expect("a record is only built from a parsed handle")
+    /// The `basis-tasks` handle, when a `basis-tasks` task is what this
+    /// record names.
+    pub(crate) fn handle(&self) -> Option<&TaskHandle> {
+        match &self.key {
+            Key::Tasks(handle) => Some(handle),
+            Key::Hosted(_) => None,
+        }
     }
 
     /// The moment the task's status last changed, as far as this server
@@ -289,7 +400,7 @@ mod tests {
         let reopened = Index::open(dir.path()).unwrap();
         let loaded = reopened.get(&id).expect("persisted");
         assert_eq!(loaded.finished_ms, Some(5));
-        assert_eq!(loaded.handle(), handle(&id));
+        assert_eq!(loaded.handle(), Some(&handle(&id)));
     }
 
     #[test]
@@ -347,6 +458,44 @@ mod tests {
         .unwrap();
         let index = Index::open(dir.path()).unwrap();
         assert!(index.owned(&Principal::anonymous(), &id).is_some());
+    }
+
+    #[test]
+    fn a_hosted_record_survives_reopening_under_its_hosts_id() {
+        let dir = tempfile::tempdir().unwrap();
+        let index = Index::open(dir.path()).unwrap();
+        let id = "f".repeat(32);
+        let hosted = Record::keyed(
+            id.clone(),
+            Key::Hosted("run-7".into()),
+            &Principal::anonymous(),
+            "ctx".into(),
+            "m".into(),
+            "hi".into(),
+            1,
+        );
+        index.insert(hosted).unwrap();
+        let loaded = Index::open(dir.path()).unwrap().get(&id).unwrap();
+        assert_eq!(loaded.key, Key::Hosted("run-7".into()));
+        assert!(loaded.handle().is_none());
+    }
+
+    #[test]
+    fn a_record_naming_both_keys_or_neither_is_refused() {
+        let id = "0".repeat(32);
+        for key in [
+            serde_json::json!({"handle": format!("{KEY}/{id}"), "host_id": "x"}),
+            serde_json::json!({}),
+        ] {
+            let mut raw = serde_json::json!({
+                "id": id, "context_id": "ctx", "message_id": "m", "text": "hi",
+                "created_ms": 1,
+            });
+            raw.as_object_mut()
+                .unwrap()
+                .extend(key.as_object().unwrap().clone());
+            assert!(serde_json::from_value::<Record>(raw).is_err());
+        }
     }
 
     #[test]
