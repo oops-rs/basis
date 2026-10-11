@@ -66,9 +66,10 @@ shared.**
    the push store and every other file the server keeps live under
    `state_dir`; nothing is written to a workspace. The settings that
    configure a `basis-tasks` run — `with_shell`, `with_run_defaults`,
-   `InboundApproval::AskCaller` — are refused at `open` with a hosted
-   backend, by name, rather than ignored: they would mean nothing, and a
-   setting that silently does nothing is a typo nobody hears about.
+   `with_data_dir`, and any approval but the default `Never` — are refused
+   at `open` with a hosted backend, by name, rather than ignored: they would
+   mean nothing, and a setting that silently does nothing is a typo nobody
+   hears about.
 
 3. **A completed task's parts are the host's.** A `basis-tasks` task
    completes with one text artifact, as before. A hosted task completes with

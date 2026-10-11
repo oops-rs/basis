@@ -549,6 +549,9 @@ fn refuse_for_hosted(
         "with_run_defaults"
     } else if matches!(approval, InboundApproval::AskCaller { .. }) {
         "InboundApproval::AskCaller"
+    } else if matches!(approval, InboundApproval::Always) {
+        // A host's tasks have no basis-tasks approver for this to open.
+        "InboundApproval::Always"
     } else if data_dir {
         "with_data_dir"
     } else {

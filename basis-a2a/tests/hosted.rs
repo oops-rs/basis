@@ -509,7 +509,7 @@ type Configure = fn(ServeConfig) -> ServeConfig;
 async fn settings_that_configure_a_basis_tasks_run_are_refused_by_name() {
     let host = FakeHost::held();
     let state = tempfile::tempdir().unwrap();
-    let refusals: [(&str, Configure); 4] = [
+    let refusals: [(&str, Configure); 5] = [
         ("with_shell", ServeConfig::with_shell),
         ("with_run_defaults", |config| {
             config.with_run_defaults(RunDefaults::default().with_model("m"))
@@ -520,6 +520,9 @@ async fn settings_that_configure_a_basis_tasks_run_are_refused_by_name() {
                     deadline: Duration::from_secs(60),
                 })
                 .with_token(BearerToken::new(TOKEN).unwrap())
+        }),
+        ("InboundApproval::Always", |config| {
+            config.with_approval(InboundApproval::Always)
         }),
         ("with_data_dir", |config| {
             config.with_data_dir("/tmp/nowhere")
@@ -539,7 +542,7 @@ async fn settings_that_configure_a_basis_tasks_run_are_refused_by_name() {
     A2aService::open(
         hosted(&state, &host)
             .with_run_defaults(RunDefaults::default())
-            .with_approval(InboundApproval::Always)
+            .with_approval(InboundApproval::Never)
             .with_live_task_quota(3),
     )
     .expect("opens");
