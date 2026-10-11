@@ -5,6 +5,22 @@ All six crates — `basis`, `basis-host`, `basis-tasks`, `basis-acp`,
 live in `docs/adr/`; this file says what changed for someone upgrading.
 Releases before 0.15.0 are described by their tags and ADRs only.
 
+## Unreleased
+
+### A host may run the tasks it serves ([ADR-0033](docs/adr/0033-a-host-may-run-the-tasks-it-serves.md))
+
+- `basis-a2a` can serve a host's own tasks instead of `basis-tasks` spawns:
+  implement `TaskHost` (`start`, `standing`, `cancel`, `settled`,
+  `progress`) and open the server with `ServeConfig::hosted(identity,
+  state_dir, host)`. Principals, quotas, stream caps, hops and deadlines,
+  push, both bindings and the extended card behave as for a workspace.
+- A hosted task completes with the parts its host returns; its A2A id is
+  minted by the server, and a restarted server awaits unsettled hosted tasks
+  again rather than re-sending them.
+- `with_shell`, `with_run_defaults`, `with_data_dir` and any approval but
+  `Never` are refused by name at `open` on a hosted server.
+- The `basis-tasks`-backed path, including `basis serve --a2a`, is unchanged.
+
 ## 0.15.1 — 2026-10-10
 
 - The minimum supported Rust is now **1.95** (was 1.88), the release that
