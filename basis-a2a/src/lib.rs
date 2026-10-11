@@ -1,5 +1,6 @@
-//! The A2A server over basis: any basis agent, reachable by any
-//! [A2A](https://a2a-protocol.org/v1.0.0/specification) client.
+//! The A2A server over basis: any basis agent — or any host's own tasks —
+//! reachable by any [A2A](https://a2a-protocol.org/v1.0.0/specification)
+//! client.
 //!
 //! ADR-0028 made A2A basis's agent-to-agent protocol. ACP is how a person's
 //! editor drives an agent and MCP is how an agent calls tools; A2A is how
@@ -8,16 +9,41 @@
 //! card, handing a remote agent a task as `spawn "@<agent> …"` (ADR-0029) —
 //! is mentra's `a2a` client, configured through basis's `.basis/a2a.json`.
 //!
-//! # An A2A task is a basis task
+//! # Who runs a task
 //!
-//! There is no second lifecycle here. Every accepted message is one
-//! `basis-tasks` spawn in the served workspace, and what A2A reports is read
-//! straight off it — see the `project` module for the table. So a
-//! served task is as durable as any other: it survives this server
-//! restarting, `basis list` shows it, and `basis watch` replays it. A
+//! By default, `basis-tasks`, and there is no second lifecycle here. Every
+//! accepted message is one `basis-tasks` spawn in the served workspace, and
+//! what A2A reports is read straight off it — see the `project` module for
+//! the table. So a served task is as durable as any other: it survives this
+//! server restarting, `basis list` shows it, and `basis watch` replays it. A
 //! `contextId` is a conversation; a follow-up in one continues it with
 //! `Continuation::Named`, and `basis-tasks`' own one-executor-per-conversation
 //! rule is what refuses a second message while the first is still running.
+//!
+//! A host that already runs tasks of its own serves those instead
+//! (ADR-0033): it implements [`TaskHost`] — start, standing, cancel, settled,
+//! progress — and opens the service with [`ServeConfig::hosted`]. Everything
+//! else on this page is the same for its tasks. The server mints each A2A id
+//! and keeps the host's beside it; a follow-up hands the host the id of the
+//! latest task in its context as [`HostedStart::continues`]; a completed
+//! task's parts, text or data, are its one `result` artifact; and a restart
+//! awaits every unsettled task again through [`TaskHost::settled`], never
+//! [`TaskHost::start`]. Asking the caller is a `basis-tasks` mechanism, so a
+//! hosted config refuses it, as it refuses the shell and the run defaults.
+//!
+//! ```no_run
+//! # async fn serve(host: std::sync::Arc<dyn basis_a2a::TaskHost>) -> Result<(), Box<dyn std::error::Error>> {
+//! use basis_a2a::{A2aServer, A2aService, AgentIdentity, BearerToken, ServeConfig};
+//!
+//! // `host` is the embedder's own `impl TaskHost`.
+//! let identity = AgentIdentity::new("librarian", "Answers from its own catalog.");
+//! let token = BearerToken::new(std::env::var("A2A_TOKEN")?).ok_or("A2A_TOKEN is empty")?;
+//! let config = ServeConfig::hosted(identity, "/var/lib/librarian/a2a", host).with_token(token);
+//! let server = A2aServer::bind("0.0.0.0:8080".parse()?, A2aService::open(config)?).await?;
+//! server.serve().await?;
+//! # Ok(())
+//! # }
+//! ```
 //!
 //! # What is served
 //!

@@ -337,8 +337,8 @@ flowchart LR
   code; **`basis-host`** is the adapter-neutral approval, session, and served-workspace kit
   over it (ADR-0025); **`basis-tasks`** is the durable task layer, reachable from Rust without
   the binary (ADR-0022); **`basis-acp`** is the ACP adapter over the SDK and host kit, opt-in by
-  dependency; **`basis-a2a`** is the A2A server over `basis-tasks`, and the only crate that links
-  an HTTP server (ADR-0028); **`basis-cli`** publishes the `basis` binary over all five libraries,
+  dependency; **`basis-a2a`** is the A2A server over `basis-tasks` — or over a host's own tasks
+  (ADR-0033) — and the only crate that links an HTTP server (ADR-0028); **`basis-cli`** publishes the `basis` binary over all five libraries,
   and the explicit `basis serve --acp` command is what an editor spawns. MCP and the A2A client
   are default-on `mcp` and `a2a` features of `basis`, so an embedder can compile a core that has
   never heard of either (ADR-0012, ADR-0028). The websocket bridge stays in the binary, marked extractable: it
@@ -352,6 +352,16 @@ flowchart LR
   nothing, so a turn cut off by a shutdown is continued by the next open like one cut off by a
   crash (ADR-0032). What A2A adds — ids, the caller's message, the principal that sent it, its
   push configs — is an index under `Tasks::host_dir("a2a")`, never inside a task directory.
+- **A host may run the tasks it serves** (ADR-0033). That a task is a `basis-tasks` spawn is the
+  default, not the construction: a host with a run machine of its own implements `TaskHost` —
+  `start`, `standing`, `cancel`, `settled`, `progress` — and opens `ServeConfig::hosted` over a
+  state directory that holds the index and push configs. Everything above that seam is shared:
+  both bindings, the card, principals, the quota, stream caps, hops, push and the extended card.
+  The server mints the A2A id and keeps the host's beside it; a follow-up passes the latest task's
+  host id as `continues`; a completion's parts, text or data, are the one `result` artifact; and a
+  restart awaits each unsettled hosted task again through `settled`, never `start`. The settings
+  that configure a `basis-tasks` run (shell, run defaults, data dir, asking the caller) are refused
+  at `open` rather than ignored, so `INPUT_REQUIRED` stays a `basis-tasks` feature.
 - **A2A is served in full, over two bindings** (ADR-0030). JSON-RPC at the root and HTTP+JSON
   under `/json` are two routers that only parse, over one `A2aService` that answers all eleven
   methods, so they cannot drift apart; the card lists JSON-RPC first, and declares `streaming`,

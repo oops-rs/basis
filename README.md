@@ -299,7 +299,8 @@ Agent Card at `/.well-known/agent-card.json` that lists both
 [ADR-0030](docs/adr/0030-a2a-is-spoken-in-full.md)). gRPC is the one binding not served, for its
 weight. An A2A task *is* a durable basis task, so it survives the server restarting and
 `basis list` shows it; a `contextId` is a conversation, continued by the next message that names
-it. A caller whose stream drops subscribes again rather than resending, and one that cannot hold a
+it. A host with tasks of its own can serve them instead, behind the same server, by implementing
+`basis_a2a::TaskHost` ([ADR-0033](docs/adr/0033-a-host-may-run-the-tasks-it-serves.md)). A caller whose stream drops subscribes again rather than resending, and one that cannot hold a
 connection at all registers a webhook and is called back on every status change (`--push`). A
 message may carry data and inline text files as well as text; a file by URL is refused, because the
 server never fetches what a caller names. `--extended-card FILE` tells authenticated callers more
@@ -536,7 +537,7 @@ for `--effort`, custom endpoints, and the hooks `shell`→`spawn` migration) ·
 [conventions.md](docs/conventions.md) (every file and variable basis reads, in precedence order) ·
 [embedding.md](docs/embedding.md) (the SDK in detail) · [targets.md](docs/targets.md) (running a
 command somewhere else) · [REDESIGN.md](docs/archive/REDESIGN.md) (closed ledger) ·
-[adr/](docs/adr/) (32 locked decisions) · [a2a/](docs/a2a/) (basis's two A2A extensions) ·
+[adr/](docs/adr/) (33 locked decisions) · [a2a/](docs/a2a/) (basis's two A2A extensions) ·
 [proposals/](docs/proposals/) (deferred ideas).
 
 ## License

@@ -15,8 +15,9 @@ categories = ["development-tools"]
 # The event vocabulary a served task's journal is written in, read to turn a
 # run's progress into A2A status updates.
 basis.workspace = true
-# An A2A task *is* a basis-tasks task (ADR-0028 §3): this crate projects that
-# lifecycle onto the wire and owns no second one.
+# An A2A task is a basis-tasks task by default (ADR-0028 §3, ADR-0033): this
+# crate projects that lifecycle onto the wire and owns no second one. A host
+# that runs its own tasks serves them through `TaskHost` instead.
 basis-tasks.workspace = true
 
 a2a-lf.workspace = true
