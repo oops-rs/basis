@@ -213,13 +213,16 @@ mod tests {
     #[test]
     fn a_completed_task_ends_with_its_artifact_then_its_state() {
         let raw = json!({"state": "succeeded", "result": "done"});
-        let standing = Standing::Settled(TerminalRecord {
-            terminal: serde_json::from_value(raw.clone()).ok(),
-            raw,
-            stopped_by: None,
-            usage: None,
-            result_truncated: false,
-        });
+        let standing = Standing::Settled(
+            TerminalRecord {
+                terminal: serde_json::from_value(raw.clone()).ok(),
+                raw,
+                stopped_by: None,
+                usage: None,
+                result_truncated: false,
+            }
+            .into(),
+        );
         let updates = settle(&record(), &standing);
         assert!(matches!(updates[0], StreamResponse::ArtifactUpdate(_)));
         let StreamResponse::StatusUpdate(last) = &updates[1] else {

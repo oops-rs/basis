@@ -1,13 +1,19 @@
-//! A basis task, seen as an A2A `Task`.
+//! A task, seen as an A2A `Task`.
 //!
-//! The mapping is ADR-0028 §3's table and nothing more. basis-tasks publishes
+//! Whoever runs a task, where it stands is a [`Standing`], and a settled one
+//! an [`Outcome`]; everything a caller is shown is projected from those, so
+//! both backends are reported alike. A completed task's answer is the parts
+//! of its one `result` artifact.
+//!
+//! For a `basis-tasks` task the mapping is ADR-0028 §3's table and nothing
+//! more. basis-tasks publishes
 //! two facts about a task, and the A2A state is read straight off them:
 //! whether `terminal.json` exists (and what it says), and whether anyone
 //! holds the attach lock.
 //!
 //! | basis-tasks | A2A |
 //! | --- | --- |
-//! | `Succeeded { result }` | `COMPLETED`, the result as one text artifact |
+//! | `Succeeded { result }` | `COMPLETED`, the result as one text part |
 //! | `Failed { error }` | `FAILED`, the error as the status message |
 //! | `Cancelled` | `CANCELED` |
 //! | a terminal state this build does not know | `FAILED`, saying so |
@@ -67,21 +73,58 @@ pub(crate) fn history_length(requested: Option<i32>) -> Result<Option<usize>, A2
     }
 }
 
-/// Where a task stands, read off basis-tasks without attaching.
+/// Where a task stands, whoever runs it.
 #[derive(Debug, Clone)]
 pub(crate) enum Standing {
     Submitted,
     Working,
     /// Parked on a question to the caller (ADR-0030 §7).
     Asking(Asked),
-    Settled(TerminalRecord),
+    Settled(Outcome),
+}
+
+/// How a settled task ended, in the terms A2A reports it in.
+#[derive(Debug, Clone, PartialEq)]
+pub(crate) enum Outcome {
+    /// The answer, as the parts of the one `result` artifact. `truncated`
+    /// when the task layer cut it to its bound.
+    Completed {
+        parts: Vec<Part>,
+        truncated: bool,
+    },
+    Failed {
+        error: String,
+    },
+    Canceled,
+    /// A terminal state this build does not know: never vouched for as
+    /// success.
+    Unknown,
+}
+
+impl From<TerminalRecord> for Outcome {
+    /// A `basis-tasks` terminal: its result is one text part.
+    fn from(terminal: TerminalRecord) -> Self {
+        match terminal.terminal {
+            Some(Terminal::Succeeded { result }) => Self::Completed {
+                parts: vec![Part::text(result)],
+                truncated: terminal.result_truncated,
+            },
+            Some(Terminal::Failed { error }) => Self::Failed { error },
+            Some(Terminal::Cancelled) => Self::Canceled,
+            // `Terminal` is non-exhaustive; a state a newer basis adds is
+            // not one this build can vouch for as success.
+            _ => Self::Unknown,
+        }
+    }
 }
 
 impl Standing {
+    /// Where a `basis-tasks` task stands, read off its directory without
+    /// attaching.
     pub(crate) fn read(tasks: &Tasks, record: &Record) -> Result<Self, A2AError> {
         let handle = handle_of(record)?;
         if let Some(terminal) = tasks.terminal(handle).map_err(internal)? {
-            return Ok(Self::Settled(terminal));
+            return Ok(Self::Settled(terminal.into()));
         }
         Ok(if tasks.is_attached(handle).map_err(internal)? {
             Self::Working
@@ -115,14 +158,9 @@ impl Standing {
             Self::Submitted => TaskState::Submitted,
             Self::Working => TaskState::Working,
             Self::Asking(_) => TaskState::InputRequired,
-            Self::Settled(record) => match &record.terminal {
-                Some(Terminal::Succeeded { .. }) => TaskState::Completed,
-                Some(Terminal::Cancelled) => TaskState::Canceled,
-                Some(Terminal::Failed { .. }) | None => TaskState::Failed,
-                // `Terminal` is non-exhaustive; a state a newer basis adds is
-                // not one this build can vouch for as success.
-                Some(_) => TaskState::Failed,
-            },
+            Self::Settled(Outcome::Completed { .. }) => TaskState::Completed,
+            Self::Settled(Outcome::Canceled) => TaskState::Canceled,
+            Self::Settled(Outcome::Failed { .. } | Outcome::Unknown) => TaskState::Failed,
         }
     }
 }
@@ -174,14 +212,11 @@ pub(crate) fn status_update(record: &Record, standing: &Standing) -> TaskStatusU
 
 fn status(record: &Record, standing: &Standing) -> TaskStatus {
     let message = match standing {
-        Standing::Settled(terminal) => match &terminal.terminal {
-            Some(Terminal::Failed { error }) => Some(agent_message(record, error.clone())),
-            None => Some(agent_message(
-                record,
-                "the task ended in a state this server does not recognize".to_string(),
-            )),
-            _ => None,
-        },
+        Standing::Settled(Outcome::Failed { error }) => Some(agent_message(record, error.clone())),
+        Standing::Settled(Outcome::Unknown) => Some(agent_message(
+            record,
+            "the task ended in a state this server does not recognize".to_string(),
+        )),
         Standing::Asking(asked) => Some(question(record, asked)),
         _ => None,
     };
@@ -215,21 +250,20 @@ fn question(record: &Record, asked: &Asked) -> Message {
     }
 }
 
-/// The completed task's answer, as the artifact a caller reads it from.
+/// The completed task's answer, as the artifact a caller reads it from. An
+/// answer of no parts has no artifact: the wire wants at least one.
 pub(crate) fn result_artifact(standing: &Standing) -> Option<Artifact> {
-    let Standing::Settled(terminal) = standing else {
+    let Standing::Settled(Outcome::Completed { parts, truncated }) = standing else {
         return None;
     };
-    let Some(Terminal::Succeeded { result }) = &terminal.terminal else {
+    if parts.is_empty() {
         return None;
-    };
+    }
     Some(Artifact {
         artifact_id: RESULT_ARTIFACT.to_string(),
         name: Some(RESULT_ARTIFACT.to_string()),
-        description: terminal
-            .result_truncated
-            .then(|| "truncated by the task layer's result bound".to_string()),
-        parts: vec![Part::text(result.clone())],
+        description: truncated.then(|| "truncated by the task layer's result bound".to_string()),
+        parts: parts.clone(),
         metadata: None,
         extensions: None,
     })
@@ -309,13 +343,16 @@ mod tests {
     }
 
     fn settled(raw: serde_json::Value) -> Standing {
-        Standing::Settled(TerminalRecord {
-            terminal: serde_json::from_value(raw.clone()).ok(),
-            raw,
-            stopped_by: None,
-            usage: None,
-            result_truncated: false,
-        })
+        Standing::Settled(
+            TerminalRecord {
+                terminal: serde_json::from_value(raw.clone()).ok(),
+                raw,
+                stopped_by: None,
+                usage: None,
+                result_truncated: false,
+            }
+            .into(),
+        )
     }
 
     #[test]
@@ -341,6 +378,30 @@ mod tests {
     fn an_unknown_terminal_state_is_a_failure_not_a_success() {
         let standing = settled(json!({"state": "from_the_future"}));
         assert_eq!(standing.state(), TaskState::Failed);
+    }
+
+    #[test]
+    fn a_completion_of_several_parts_is_one_artifact_of_them_all() {
+        let parts = vec![Part::text("see data"), Part::data(json!({"answer": 42}))];
+        let standing = Standing::Settled(Outcome::Completed {
+            parts: parts.clone(),
+            truncated: false,
+        });
+        let task = task(&record(), &standing, View::full(None));
+        assert_eq!(task.status.state, TaskState::Completed);
+        let artifacts = task.artifacts.unwrap();
+        assert_eq!(artifacts.len(), 1);
+        assert_eq!(artifacts[0].parts, parts);
+    }
+
+    #[test]
+    fn a_completion_of_no_parts_has_no_artifact() {
+        let standing = Standing::Settled(Outcome::Completed {
+            parts: Vec::new(),
+            truncated: false,
+        });
+        assert!(result_artifact(&standing).is_none());
+        assert_eq!(standing.state(), TaskState::Completed);
     }
 
     #[test]
