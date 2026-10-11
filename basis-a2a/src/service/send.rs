@@ -1,19 +1,24 @@
 //! Accepting a message: validating it, deciding which conversation it
-//! continues, and spawning the task that answers it.
+//! continues, and starting the task that answers it — a `basis-tasks` spawn
+//! ([`spawn`]) or a host's own ([`hosted`]).
+
+mod hosted;
+mod spawn;
 
 use a2a::{A2AError, Message, SendMessageRequest};
-use basis_tasks::{Continuation, DEFAULT_DEADLINE, Hint, MAX_TASKS, RunSpec, now_ms};
+use basis_tasks::now_ms;
 
 use super::{
-    A2aService,
+    A2aService, Backend,
     ask::{self, Unanswered},
-    hops, parts,
+    hops, host_id_of, parts,
 };
 use crate::{
     card::TEXT,
     config::Principal,
-    index::Record,
-    project::{handle_of, internal},
+    host::HostedStart,
+    index::{Key, Record},
+    project::internal,
 };
 
 /// The output modes a caller may accept for this server to be able to answer.
@@ -26,8 +31,16 @@ pub(crate) struct Accepted {
     pub(crate) return_immediately: bool,
 }
 
+/// A task a backend has started: the A2A id it is served under, the key
+/// the backend knows it by, and the instant it gives up at.
+struct Started {
+    id: String,
+    key: Key,
+    deadline_ms: u64,
+}
+
 impl A2aService {
-    /// Validates `request`, spawns the task that answers it, records it, and
+    /// Validates `request`, starts the task that answers it, records it, and
     /// starts driving it.
     pub(super) async fn accept(
         &self,
@@ -73,7 +86,7 @@ impl A2aService {
         let rendered = parts::render(&message)?;
         let inbound = hops::inbound(&message)?;
         hops::check_cap(inbound, self.inner.hop_cap)?;
-        let (context_id, continuation) = self.conversation(caller, &message)?;
+        let (context_id, latest) = self.conversation(caller, &message)?;
 
         // Checked before anything is spawned, so a refused webhook leaves no
         // task behind it.
@@ -85,19 +98,7 @@ impl A2aService {
         // Held from the quota check to the record's insertion, so two sends
         // at once cannot both take the last place.
         let _admission = self.inner.admission.lock().await;
-        // Read off `basis-tasks` too: a task whose terminal is written has
-        // settled, whether or not its driver has recorded so yet.
-        let live = self
-            .inner
-            .index
-            .unsettled_owned(caller)
-            .iter()
-            .filter(|record| {
-                !record
-                    .handle()
-                    .is_some_and(|handle| matches!(self.tasks().terminal(handle), Ok(Some(_))))
-            })
-            .count();
+        let live = self.live_tasks(caller).await;
         if live >= self.inner.live_task_quota {
             return Err(A2AError::unsupported_operation(format!(
                 "principal {} has {live} tasks still running, the most this agent runs at once \
@@ -105,58 +106,38 @@ impl A2aService {
                 caller.name()
             )));
         }
-        // Clamped here, at spawn, because `basis-tasks` counts a task's
-        // deadline from the moment it is minted.
         let accepted_ms = now_ms();
-        let deadline = hops::effective_deadline(
-            self.inner.run.deadline.unwrap_or(DEFAULT_DEADLINE),
-            inbound,
-            accepted_ms,
-        )?;
-        let mut spec = self
-            .run_spec(rendered.prompt.clone(), continuation)
-            .with_deadline(deadline)
-            .with_hop(inbound.hop);
-        // The caller's instant as well as the duration it implies, so the
-        // task is never given the few milliseconds spawning takes on top.
-        if let Some(caller_ms) = inbound.deadline_ms {
-            spec = spec.with_not_after_ms(caller_ms);
-        }
-        let tasks = self.tasks().clone();
-        let handle = tokio::task::spawn_blocking(move || tasks.spawn(spec))
-            .await
-            .map_err(internal)?
-            .map_err(|error| match error.hint() {
-                // `basis-tasks` keeps one executor per conversation; a second
-                // message into a context whose last task is still running is
-                // the caller's to wait out, not a fault of ours.
-                Some(Hint::Wait(_)) => A2AError::unsupported_operation(
-                    "a task in this context is still working; wait for it to settle, then send again",
-                ),
-                // The operator's to clear, and said so to them in full; the
-                // caller is told what happened and not where on disk.
-                _ if error.is_task_limit() => {
-                    eprintln!("basis-a2a: {error}");
-                    A2AError::unsupported_operation(format!(
-                        "this agent holds the most tasks its workspace can ({MAX_TASKS}); its \
-                         operator must archive settled ones before it takes more"
-                    ))
-                }
-                _ => internal(error),
-            })?;
-
-        // The instant the task actually runs under, read back rather than
-        // recomputed: `basis-tasks` anchored the relative deadline when it
-        // minted the task, a moment after `accepted_ms`, and what this task
-        // tells anyone it delegates to must never be later than that.
-        let deadline_ms = match self.tasks().deadline_at_ms(&handle) {
-            Ok(Some(deadline_ms)) => deadline_ms,
-            _ => {
-                accepted_ms.saturating_add(u64::try_from(deadline.as_millis()).unwrap_or(u64::MAX))
+        let started = match self.backend() {
+            Backend::Tasks(backend) => {
+                spawn::spawn(
+                    backend,
+                    &rendered.prompt,
+                    latest.as_ref(),
+                    inbound,
+                    accepted_ms,
+                )
+                .await?
+            }
+            Backend::Hosted(host) => {
+                let continues = latest
+                    .as_ref()
+                    .map(|latest| host_id_of(latest).map(str::to_string))
+                    .transpose()?;
+                let start = HostedStart {
+                    principal: caller.name().to_string(),
+                    context_id: context_id.clone(),
+                    continues,
+                    prompt: rendered.prompt.clone(),
+                    parts: message.parts.clone(),
+                    hop: inbound.hop,
+                    deadline_ms: hosted::deadline_ms(inbound, accepted_ms)?,
+                };
+                hosted::start(host.as_ref(), start).await?
             }
         };
-        let record = Record::new(
-            &handle,
+        let record = Record::keyed(
+            started.id,
+            started.key,
             caller,
             context_id,
             message.message_id,
@@ -164,7 +145,7 @@ impl A2aService {
             accepted_ms,
         )
         .with_parts((!rendered.only_text).then_some(message.parts))
-        .with_hops(inbound.hop, deadline_ms);
+        .with_hops(inbound.hop, started.deadline_ms);
         self.inner.index.insert(record.clone()).map_err(internal)?;
         // Stored before the task is driven, so its first change of status is
         // already one the webhook hears about. A store that fails still
@@ -236,14 +217,15 @@ impl A2aService {
     }
 
     /// Which conversation `message` belongs to: the one its `contextId`
-    /// names, or a new one.
+    /// names — with the latest task in it, which a follow-up continues — or
+    /// a new one.
     fn conversation(
         &self,
         caller: &Principal,
         message: &Message,
-    ) -> Result<(String, Continuation), A2AError> {
+    ) -> Result<(String, Option<Record>), A2AError> {
         match &message.context_id {
-            None => Ok((a2a::new_context_id(), Continuation::New)),
+            None => Ok((a2a::new_context_id(), None)),
             Some(context_id) => {
                 // Another principal's context is as unknown as one never
                 // issued: naming it continues nothing and reveals nothing.
@@ -256,45 +238,41 @@ impl A2aService {
                             "contextId {context_id} is not one this server issued"
                         ))
                     })?;
-                let handle = handle_of(&latest)?.clone();
-                Ok((context_id.to_string(), Continuation::Named(handle)))
+                Ok((context_id.to_string(), Some(latest)))
             }
         }
     }
 
-    fn run_spec(&self, prompt: String, continuation: Continuation) -> RunSpec {
-        let run = &self.inner.run;
-        let mut spec = RunSpec::new(prompt)
-            .with_approve(self.inner.approval.into())
-            .detached()
-            .continuing(continuation);
-        if !self.inner.shell {
-            spec = spec.without_shell();
+    /// How many of `caller`'s tasks have not settled — read off the backend
+    /// too: a task its backend says has settled has, whether or not its
+    /// driver has recorded so yet. A task whose standing cannot be read
+    /// counts as live.
+    async fn live_tasks(&self, caller: &Principal) -> usize {
+        let unsettled = self.inner.index.unsettled_owned(caller);
+        match self.backend() {
+            Backend::Tasks(backend) => unsettled
+                .iter()
+                .filter(|record| {
+                    !record
+                        .handle()
+                        .is_some_and(|handle| matches!(backend.tasks.terminal(handle), Ok(Some(_))))
+                })
+                .count(),
+            Backend::Hosted(host) => {
+                let mut live = 0;
+                for record in &unsettled {
+                    let settled = match record.host_id() {
+                        Some(id) => {
+                            matches!(host.standing(id).await, Ok(standing) if standing.is_terminal())
+                        }
+                        None => false,
+                    };
+                    if !settled {
+                        live += 1;
+                    }
+                }
+                live
+            }
         }
-        if let Some(provider) = &run.provider {
-            spec = spec.with_provider(provider.clone());
-        }
-        if let Some(base_url) = &run.base_url {
-            spec = spec.with_base_url(base_url.clone());
-        }
-        if let Some(model) = &run.model {
-            spec = spec.with_model(model.clone());
-        }
-        if let Some(effort) = run.effort {
-            spec = spec.with_effort(effort);
-        }
-        if let Some(deadline) = run.deadline {
-            spec = spec.with_deadline(deadline);
-        }
-        if let Some(tool_budget) = run.tool_budget {
-            spec = spec.with_tool_budget(tool_budget);
-        }
-        if let Some(token_budget) = run.token_budget {
-            spec = spec.with_token_budget(token_budget);
-        }
-        if let Some(system_prompt) = &run.system_prompt {
-            spec = spec.with_system_prompt(system_prompt.clone());
-        }
-        spec
     }
 }

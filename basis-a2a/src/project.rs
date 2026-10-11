@@ -36,6 +36,7 @@ use basis_tasks::{TaskHandle, Tasks, Terminal, TerminalRecord};
 use chrono::{DateTime, Utc};
 
 use crate::{
+    host::HostedStanding,
     index::Record,
     service::{APPROVAL_EXTENSION, Asked, HOPS_EXTENSION},
 };
@@ -114,6 +115,23 @@ impl From<TerminalRecord> for Outcome {
             // `Terminal` is non-exhaustive; a state a newer basis adds is
             // not one this build can vouch for as success.
             _ => Self::Unknown,
+        }
+    }
+}
+
+impl From<HostedStanding> for Standing {
+    /// What a host says of its task: a completion's parts are the answer,
+    /// exactly as given.
+    fn from(standing: HostedStanding) -> Self {
+        match standing {
+            HostedStanding::Submitted => Self::Submitted,
+            HostedStanding::Working => Self::Working,
+            HostedStanding::Completed { parts } => Self::Settled(Outcome::Completed {
+                parts,
+                truncated: false,
+            }),
+            HostedStanding::Failed { error } => Self::Settled(Outcome::Failed { error }),
+            HostedStanding::Canceled => Self::Settled(Outcome::Canceled),
         }
     }
 }

@@ -1,21 +1,24 @@
-//! Which A2A ids this server handed out, for which basis tasks.
+//! Which A2A ids this server handed out, for which tasks.
 //!
 //! A basis task directory knows nothing about A2A, and should not: it is
 //! exactly what `basis-tasks` writes, readable by `basis list` and `basis
 //! watch` with no adapter in sight. What A2A adds — a `contextId` grouping
 //! follow-ups, the caller's own `messageId`, the full text it sent — lives
 //! here, one small file per task under the host directory
-//! `basis_tasks::Tasks::host_dir` gives this crate.
+//! `basis_tasks::Tasks::host_dir` gives this crate, or under the state
+//! directory of a server whose tasks a host runs (ADR-0033 §2).
 //!
-//! The A2A task id is the handle's own task part (32 hex digits); the
-//! workspace key in front of it is the same for every task one server
-//! serves, so it adds nothing a caller needs. A caller's id is only ever
-//! looked up in memory, never joined onto a path, so nothing a caller sends
-//! can name a file.
+//! For a `basis-tasks` task the A2A task id is the handle's own task part
+//! (32 hex digits); the workspace key in front of it is the same for every
+//! task one server serves, so it adds nothing a caller needs. For a hosted
+//! task the server mints an id of the same shape and keeps the host's own
+//! beside it, so a caller never sees a host's id and a host never parses an
+//! A2A one. A caller's id is only ever looked up in memory, never joined
+//! onto a path, so nothing a caller sends can name a file.
 //!
 //! Losing this directory loses the A2A view of past tasks, never a task:
-//! every one of them is still a basis task, still listed and still
-//! resumable by the CLI.
+//! every `basis-tasks` one is still a basis task, still listed and still
+//! resumable by the CLI, and a hosted one is still its host's.
 
 use std::{
     collections::HashMap,
@@ -153,6 +156,7 @@ impl From<Record> for Stored {
 
 impl Record {
     /// A `basis-tasks` task's record: its A2A id is the handle's task part.
+    #[cfg(test)]
     pub(crate) fn new(
         handle: &TaskHandle,
         principal: &Principal,
@@ -215,6 +219,14 @@ impl Record {
         match &self.key {
             Key::Tasks(handle) => Some(handle),
             Key::Hosted(_) => None,
+        }
+    }
+
+    /// The host's id for the task, when a host runs it.
+    pub(crate) fn host_id(&self) -> Option<&str> {
+        match &self.key {
+            Key::Hosted(host_id) => Some(host_id),
+            Key::Tasks(_) => None,
         }
     }
 
@@ -476,7 +488,7 @@ mod tests {
         );
         index.insert(hosted).unwrap();
         let loaded = Index::open(dir.path()).unwrap().get(&id).unwrap();
-        assert_eq!(loaded.key, Key::Hosted("run-7".into()));
+        assert_eq!(loaded.host_id(), Some("run-7"));
         assert!(loaded.handle().is_none());
     }
 

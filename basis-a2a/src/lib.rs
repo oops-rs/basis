@@ -66,6 +66,7 @@
 mod card;
 mod config;
 mod gate;
+mod host;
 mod http;
 mod index;
 mod listener;
@@ -83,6 +84,7 @@ pub use config::{
     AgentIdentity, BearerToken, DEFAULT_LIVE_TASK_QUOTA, DEFAULT_PRINCIPAL, ExtendedCard,
     InboundApproval, Principal, PrincipalError, RunDefaults, ServeConfig,
 };
+pub use host::{HostError, HostedProgress, HostedStanding, HostedStart, TaskHost};
 pub use http::{A2aServer, BindError, router};
 pub use rest::HTTP_JSON_PATH;
 pub use service::{A2aService, DEFAULT_HOP_CAP, DEFAULT_STREAM_CAP, OpenError};

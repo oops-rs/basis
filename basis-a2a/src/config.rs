@@ -1,5 +1,6 @@
-//! What one served agent is: the workspace it runs in, what its card says
-//! about it, how its runs are bounded, and who may call it.
+//! What one served agent is: the workspace it runs in — or the host that
+//! runs its tasks — what its card says about it, how its runs are bounded,
+//! and who may call it.
 //!
 //! Everything here is decided once, before the first request, and none of it
 //! changes while serving. [`InboundApproval`] has no `Prompt` variant
@@ -10,10 +11,12 @@
 mod auth;
 mod identity;
 
-use std::{path::PathBuf, time::Duration};
+use std::{fmt, path::PathBuf, sync::Arc, time::Duration};
 
 use basis::{Effort, SystemPrompt};
 use basis_tasks::Approve;
+
+use crate::host::TaskHost;
 
 pub(crate) use auth::Principals;
 pub use auth::{BearerToken, DEFAULT_PRINCIPAL, Principal, PrincipalError};
@@ -131,6 +134,53 @@ impl RunDefaults {
             ..self
         }
     }
+
+    /// Whether nothing is set: the defaults `basis-tasks` gives a task
+    /// itself.
+    pub(crate) fn is_unset(&self) -> bool {
+        let Self {
+            provider,
+            base_url,
+            model,
+            effort,
+            deadline,
+            tool_budget,
+            token_budget,
+            system_prompt,
+        } = self;
+        provider.is_none()
+            && base_url.is_none()
+            && model.is_none()
+            && effort.is_none()
+            && deadline.is_none()
+            && tool_budget.is_none()
+            && token_budget.is_none()
+            && system_prompt.is_none()
+    }
+}
+
+/// Who runs the tasks a server serves.
+#[derive(Clone)]
+pub(crate) enum Source {
+    /// `basis-tasks`, in this workspace.
+    Workspace(PathBuf),
+    /// A host, with the server's own files under `state_dir` (ADR-0033 §2).
+    Hosted {
+        state_dir: PathBuf,
+        host: Arc<dyn TaskHost>,
+    },
+}
+
+impl fmt::Debug for Source {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            Self::Workspace(workspace) => f.debug_tuple("Workspace").field(workspace).finish(),
+            Self::Hosted { state_dir, .. } => f
+                .debug_struct("Hosted")
+                .field("state_dir", state_dir)
+                .finish_non_exhaustive(),
+        }
+    }
 }
 
 /// How many unsettled tasks one principal may have at once when the
@@ -142,7 +192,7 @@ pub const DEFAULT_LIVE_TASK_QUOTA: usize = 32;
 /// One served agent.
 #[derive(Debug, Clone)]
 pub struct ServeConfig {
-    pub(crate) workspace: PathBuf,
+    pub(crate) source: Source,
     pub(crate) identity: AgentIdentity,
     pub(crate) approval: InboundApproval,
     pub(crate) shell: bool,
@@ -165,8 +215,37 @@ impl ServeConfig {
     /// discover them. No shell, no consequential calls, no token — each is
     /// something the operator turns on.
     pub fn new(workspace: impl Into<PathBuf>, identity: AgentIdentity) -> Self {
+        Self::with_source(Source::Workspace(workspace.into()), identity)
+    }
+
+    /// Serves the tasks `host` runs (ADR-0033). The server's index, its push
+    /// configs and every other file it keeps live under `state_dir`, which
+    /// is created if missing; nothing is written to a workspace.
+    ///
+    /// Every option but the ones that configure a `basis-tasks` run applies
+    /// unchanged. Those — [`with_shell`](Self::with_shell),
+    /// [`with_run_defaults`](Self::with_run_defaults),
+    /// [`with_data_dir`](Self::with_data_dir) and
+    /// [`InboundApproval::AskCaller`] — would mean nothing here, and
+    /// [`A2aService::open`](crate::A2aService::open) refuses each by name
+    /// rather than ignore it.
+    pub fn hosted(
+        identity: AgentIdentity,
+        state_dir: impl Into<PathBuf>,
+        host: Arc<dyn TaskHost>,
+    ) -> Self {
+        Self::with_source(
+            Source::Hosted {
+                state_dir: state_dir.into(),
+                host,
+            },
+            identity,
+        )
+    }
+
+    fn with_source(source: Source, identity: AgentIdentity) -> Self {
         Self {
-            workspace: workspace.into(),
+            source,
             identity,
             approval: InboundApproval::default(),
             shell: false,

@@ -1,4 +1,5 @@
-//! The A2A operations, over one workspace's `basis-tasks`.
+//! The A2A operations, over one workspace's `basis-tasks` or a host's own
+//! tasks.
 //!
 //! [`A2aService`] is transport-free: every operation takes the spec's request
 //! type and returns the spec's response type or an [`A2AError`]. The
@@ -7,7 +8,14 @@
 //!
 //! # Who drives a task
 //!
-//! This process does. `basis-tasks` lets any process attach and drive a task
+//! This process does. For a hosted task, driving is only waiting: the host
+//! runs it, and its driver awaits [`TaskHost::settled`] and records the
+//! settling — on acceptance, and again on every [`A2aService::open`] until
+//! it has. The rest of this section is about `basis-tasks`.
+//!
+//! [`TaskHost::settled`]: crate::TaskHost::settled
+//!
+//! For a `basis-tasks` task, `basis-tasks` lets any process attach and drive a task
 //! (ADR-0019), and nothing else is going to: an A2A caller cannot attach to a
 //! directory on this machine. So every task this service accepts gets a
 //! driver — one tokio task holding a `Tasks::wait` that attaches and runs it
@@ -23,10 +31,11 @@
 //! committed. Dropping the last handle on the service does the same, for a
 //! host that never said it was going.
 //!
-//! Every spawn is `detached`: a served task is an independent root, never a
+//! Every `basis-tasks` spawn is `detached`: a served task is an independent root, never a
 //! child of whatever task the serving process might itself be running as.
 
 mod ask;
+mod backend;
 mod drive;
 mod hops;
 mod parts;
@@ -35,6 +44,7 @@ mod send;
 mod streams;
 
 pub(crate) use ask::{APPROVAL_EXTENSION, Asked};
+pub(crate) use backend::{Backend, TasksBackend, from_host, host_id_of, still_working};
 pub use hops::DEFAULT_HOP_CAP;
 pub(crate) use hops::HOPS_EXTENSION;
 pub(crate) use parts::INPUT_MODES;
@@ -45,6 +55,8 @@ use streams::Streams;
 
 use std::{
     collections::HashMap,
+    fs, io,
+    path::Path,
     sync::{Arc, Mutex},
     time::Duration,
 };
@@ -61,7 +73,7 @@ use crate::{
     card::Features,
     config::{
         AgentIdentity, ExtendedCard, InboundApproval, Principal, PrincipalError, Principals,
-        RunDefaults, ServeConfig,
+        ServeConfig, Source,
     },
     index::{Index, Record},
     project::{self, Standing, View, internal},
@@ -92,6 +104,18 @@ pub enum OpenError {
     Tasks(#[from] basis_tasks::Error),
     #[error("read the A2A task index: {0}")]
     Index(#[from] std::io::Error),
+    /// The state directory of a server whose tasks a host runs could not be
+    /// made.
+    #[error("create the server's state directory: {0}")]
+    StateDir(std::io::Error),
+    /// A setting that configures a `basis-tasks` run, on a server whose
+    /// tasks a host runs (ADR-0033 §2): it would do nothing, so it is
+    /// refused rather than ignored.
+    #[error(
+        "{0} configures a basis-tasks run, and this server's tasks are run by its host; \
+         remove it"
+    )]
+    NotForHostedTasks(&'static str),
     #[error("configure the server's principals: {0}")]
     Principals(#[from] PrincipalError),
     /// The spec requires the extended card to be served only to
@@ -115,11 +139,8 @@ pub struct A2aService {
 }
 
 struct Inner {
-    tasks: Tasks,
+    backend: Backend,
     index: Index,
-    approval: InboundApproval,
-    shell: bool,
-    run: RunDefaults,
     identity: AgentIdentity,
     principals: Principals,
     public_url: Option<String>,
@@ -156,12 +177,13 @@ impl Drop for Inner {
 }
 
 impl A2aService {
-    /// Opens the workspace's tasks and this server's index, and resumes
-    /// driving every task it accepted that has not settled. Must be called
-    /// inside a tokio runtime.
+    /// Opens the workspace's tasks — or, for a hosted config, its state
+    /// directory — and this server's index, and resumes driving every task
+    /// it accepted that has not settled. Must be called inside a tokio
+    /// runtime.
     pub fn open(config: ServeConfig) -> Result<Self, OpenError> {
         let ServeConfig {
-            workspace,
+            source,
             identity,
             approval,
             shell,
@@ -177,6 +199,9 @@ impl A2aService {
             live_task_quota,
             stream_cap,
         } = config;
+        if let Source::Hosted { .. } = source {
+            refuse_for_hosted(shell, run.is_unset(), approval, data_dir.is_some())?;
+        }
         let principals = Principals::new(tokens)?;
         if extended_card.is_some() && !principals.any() {
             return Err(OpenError::ExtendedCardWithoutToken);
@@ -189,32 +214,47 @@ impl A2aService {
                 return Err(OpenError::NeedsToken("asking the caller"));
             }
         }
-        let tasks = match data_dir {
-            Some(data_dir) => Tasks::open_at(data_dir, workspace)?,
-            None => Tasks::open(workspace)?,
-        };
-        // `basis-tasks` spawns a task that will ask only from a `Tasks` that
-        // can; each is then driven through a host of its own (`drive`).
-        let tasks = match approval {
-            InboundApproval::AskCaller { .. } => tasks.with_prompt_host(Arc::new(NobodyHost)),
-            InboundApproval::Never | InboundApproval::Always => tasks,
-        };
         let stop = Stop::new();
-        let tasks = tasks.with_stop(stop.clone());
-        let host_dir = tasks.host_dir(HOST)?;
-        let index = Index::open(&host_dir)?;
+        let (backend, state_dir) = match source {
+            Source::Workspace(workspace) => {
+                let tasks = match data_dir {
+                    Some(data_dir) => Tasks::open_at(data_dir, workspace)?,
+                    None => Tasks::open(workspace)?,
+                };
+                // `basis-tasks` spawns a task that will ask only from a
+                // `Tasks` that can; each is then driven through a host of
+                // its own (`drive`).
+                let tasks = match approval {
+                    InboundApproval::AskCaller { .. } => {
+                        tasks.with_prompt_host(Arc::new(NobodyHost))
+                    }
+                    InboundApproval::Never | InboundApproval::Always => tasks,
+                };
+                let tasks = tasks.with_stop(stop.clone());
+                let host_dir = tasks.host_dir(HOST)?;
+                let backend = TasksBackend {
+                    tasks,
+                    approval,
+                    shell,
+                    run,
+                };
+                (Backend::Tasks(Box::new(backend)), host_dir)
+            }
+            Source::Hosted { state_dir, host } => {
+                create_private_dir(&state_dir).map_err(OpenError::StateDir)?;
+                (Backend::Hosted(host), state_dir)
+            }
+        };
+        let index = Index::open(&state_dir)?;
         let push = if push_notifications {
-            Some(Push::new(PushStore::open(&host_dir)?, private_webhooks))
+            Some(Push::new(PushStore::open(&state_dir)?, private_webhooks))
         } else {
             None
         };
         let service = Self {
             inner: Arc::new(Inner {
-                tasks,
+                backend,
                 index,
-                approval,
-                shell,
-                run,
                 identity,
                 principals,
                 public_url,
@@ -251,7 +291,7 @@ impl A2aService {
             authenticated: self.inner.principals.any(),
             extended_card: self.inner.extended_card.is_some(),
             push_notifications: self.inner.push.is_some(),
-            ask_caller: matches!(self.inner.approval, InboundApproval::AskCaller { .. }),
+            ask_caller: self.inner.backend.asks_caller(),
         }
     }
 
@@ -259,8 +299,8 @@ impl A2aService {
         self.inner.public_url.as_deref()
     }
 
-    pub(crate) fn tasks(&self) -> &Tasks {
-        &self.inner.tasks
+    pub(crate) fn backend(&self) -> &Backend {
+        &self.inner.backend
     }
 
     /// `SendMessage`: starts a task, and — unless the caller asked to be
@@ -404,16 +444,22 @@ impl A2aService {
         if self.standing(&record).await?.is_terminal() {
             return Err(A2AError::task_not_cancelable(&request.id));
         }
-        let tasks = self.tasks().clone();
-        let handle = project::handle_of(&record)?.clone();
-        tokio::task::spawn_blocking(move || tasks.cancel(&handle, None))
-            .await
-            .map_err(internal)?
-            .map_err(internal)?;
-        // A turn parked on a question would never reach the boundary the
-        // cancel lands at: the question is denied, and so is every later one.
-        if let Some(questions) = self.questions(&record.id) {
-            questions.cancel();
+        match self.backend() {
+            Backend::Tasks(backend) => {
+                let tasks = backend.tasks.clone();
+                let handle = project::handle_of(&record)?.clone();
+                tokio::task::spawn_blocking(move || tasks.cancel(&handle, None))
+                    .await
+                    .map_err(internal)?
+                    .map_err(internal)?;
+                // A turn parked on a question would never reach the boundary
+                // the cancel lands at: the question is denied, and so is
+                // every later one.
+                if let Some(questions) = self.questions(&record.id) {
+                    questions.cancel();
+                }
+            }
+            Backend::Hosted(host) => host.cancel(host_id_of(&record)?).await.map_err(from_host)?,
         }
         let _ = tokio::time::timeout(CANCEL_GRACE, self.settled(&record.id)).await;
         let standing = self.standing(&record).await?;
@@ -461,12 +507,22 @@ impl A2aService {
     }
 
     /// Where `record`'s task stands: what `basis-tasks` says, with the
-    /// question this process holds open for it, if any.
+    /// question this process holds open for it, if any — or what its host
+    /// says.
     pub(crate) async fn standing(&self, record: &Record) -> Result<Standing, A2AError> {
-        let asked = self
-            .questions(&record.id)
-            .and_then(|questions| questions.asked());
-        Ok(Standing::read(self.tasks(), record)?.asking(asked))
+        match self.backend() {
+            Backend::Tasks(backend) => {
+                let asked = self
+                    .questions(&record.id)
+                    .and_then(|questions| questions.asked());
+                Ok(Standing::read(&backend.tasks, record)?.asking(asked))
+            }
+            Backend::Hosted(host) => Ok(host
+                .standing(host_id_of(record)?)
+                .await
+                .map_err(from_host)?
+                .into()),
+        }
     }
 
     /// The task `id` names, when `caller` owns it; another principal's task
@@ -477,4 +533,38 @@ impl A2aService {
             .owned(caller, id)
             .ok_or_else(|| A2AError::task_not_found(id))
     }
+}
+
+/// Refuses, by name, each setting that configures a `basis-tasks` run on a
+/// server whose tasks a host runs (ADR-0033 §2).
+fn refuse_for_hosted(
+    shell: bool,
+    run_unset: bool,
+    approval: InboundApproval,
+    data_dir: bool,
+) -> Result<(), OpenError> {
+    let refused = if shell {
+        "with_shell"
+    } else if !run_unset {
+        "with_run_defaults"
+    } else if matches!(approval, InboundApproval::AskCaller { .. }) {
+        "InboundApproval::AskCaller"
+    } else if data_dir {
+        "with_data_dir"
+    } else {
+        return Ok(());
+    };
+    Err(OpenError::NotForHostedTasks(refused))
+}
+
+/// Creates `dir` and any parent it lacks, each readable by its owner alone
+/// where the platform says so: it holds push configs' credentials, as a
+/// `basis-tasks` host directory does. A directory that already exists is
+/// the operator's, and left as it is.
+fn create_private_dir(dir: &Path) -> io::Result<()> {
+    let mut builder = fs::DirBuilder::new();
+    builder.recursive(true);
+    #[cfg(unix)]
+    std::os::unix::fs::DirBuilderExt::mode(&mut builder, 0o700);
+    builder.create(dir)
 }

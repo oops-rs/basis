@@ -1,6 +1,8 @@
 //! A task's progress, as an A2A event stream.
 //!
-//! The source is the task's own `events.jsonl`, through
+//! For a hosted task the source is its host's progress notes, each a
+//! `WORKING` update with the note as its message (see `hosted`). For a
+//! `basis-tasks` task it is the task's own `events.jsonl`, through
 //! `basis_tasks::EventCursor` — the journal every executor writes whoever
 //! drives the task, so a stream reads the same whether this process is
 //! driving or a CLI `basis wait` attached first. What is already in the
@@ -17,6 +19,10 @@
 //! note), and each tool starting (`WORKING`, naming the tool). Deltas,
 //! reasoning, usage and the rest stay in the journal for `basis watch`.
 
+mod hosted;
+
+use std::sync::Arc;
+
 use a2a::{A2AError, StreamResponse, TaskArtifactUpdateEvent, TaskState, TaskStatusUpdateEvent};
 use basis::Event;
 use basis_tasks::{EventCursor, POLL};
@@ -24,15 +30,28 @@ use futures::stream::{self, BoxStream, StreamExt};
 use tokio::sync::mpsc;
 
 use crate::{
+    host::{HostedProgress, TaskHost},
     index::Record,
     project::{self, Standing, View, internal},
-    service::{A2aService, StreamSlot},
+    service::{A2aService, Backend, StreamSlot, host_id_of},
 };
 
 /// How many updates may wait unread before the producer waits for the
 /// subscriber. A subscriber that stops reading holds back only its own
 /// stream.
 const BUFFER: usize = 64;
+
+/// Where a stream's progress comes from.
+enum Source {
+    /// A `basis-tasks` task's journal.
+    Journal(EventCursor),
+    /// A host's progress notes on its task.
+    Host {
+        host: Arc<dyn TaskHost>,
+        host_id: String,
+        progress: BoxStream<'static, HostedProgress>,
+    },
+}
 
 /// Streams `record`'s task: its current state, then its progress, ending at
 /// its terminal state — or at a question to its caller, the interrupted
@@ -46,12 +65,29 @@ pub(crate) async fn follow(
     history_length: Option<usize>,
     slot: StreamSlot,
 ) -> Result<BoxStream<'static, StreamResponse>, A2AError> {
-    let mut cursor = service
-        .tasks()
-        .watch(project::handle_of(&record)?)
-        .map_err(internal)?;
-    // Everything journaled so far is what the snapshot below already says.
-    cursor.poll().map_err(internal)?;
+    // Opened before the snapshot is read, so nothing that happens between
+    // the two is missed.
+    let source = match service.backend() {
+        Backend::Tasks(backend) => {
+            let mut cursor = backend
+                .tasks
+                .watch(project::handle_of(&record)?)
+                .map_err(internal)?;
+            // Everything journaled so far is what the snapshot below already
+            // says.
+            cursor.poll().map_err(internal)?;
+            Source::Journal(cursor)
+        }
+        Backend::Hosted(host) => {
+            let host_id = host_id_of(&record)?.to_string();
+            let progress = host.progress(&host_id);
+            Source::Host {
+                host: Arc::clone(host),
+                host_id,
+                progress,
+            }
+        }
+    };
     let standing = service.standing(&record).await?;
     let snapshot = StreamResponse::Task(project::task(
         &record,
@@ -62,7 +98,24 @@ pub(crate) async fn follow(
     let (sender, receiver) = mpsc::channel(BUFFER);
     if !standing.is_interrupted_or_terminal() {
         let working = matches!(standing, Standing::Working);
-        tokio::spawn(produce(service, record, cursor, working, sender));
+        match source {
+            Source::Journal(cursor) => {
+                tokio::spawn(produce(service, record, cursor, working, sender));
+            }
+            Source::Host {
+                host,
+                host_id,
+                progress,
+            } => {
+                let followed = hosted::Followed {
+                    service,
+                    record,
+                    host,
+                    host_id,
+                };
+                tokio::spawn(hosted::produce(followed, progress, working, sender));
+            }
+        }
     }
     let rest = stream::unfold((receiver, slot), |(mut receiver, slot)| async move {
         receiver
@@ -144,7 +197,13 @@ fn progress(record: &Record, event: &Event) -> Option<StreamResponse> {
         Event::ToolStarted { tool_name, .. } => Some(format!("Using `{tool_name}`.")),
         _ => return None,
     };
-    Some(StreamResponse::StatusUpdate(TaskStatusUpdateEvent {
+    Some(working(record, note))
+}
+
+/// A `WORKING` status update, with `note` as the agent's message when there
+/// is one.
+fn working(record: &Record, note: Option<String>) -> StreamResponse {
+    StreamResponse::StatusUpdate(TaskStatusUpdateEvent {
         task_id: record.id.clone(),
         context_id: record.context_id.clone(),
         status: a2a::TaskStatus {
@@ -153,7 +212,7 @@ fn progress(record: &Record, event: &Event) -> Option<StreamResponse> {
             timestamp: project::timestamp(basis_tasks::now_ms()),
         },
         metadata: None,
-    }))
+    })
 }
 
 /// The last updates of a settled task: its result, when it has one, then its
