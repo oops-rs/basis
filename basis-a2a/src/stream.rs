@@ -40,7 +40,7 @@ const BUFFER: usize = 64;
 /// subscribes again.
 /// `slot` is the stream's place under its caller's cap, held for as long as
 /// the stream is.
-pub(crate) fn follow(
+pub(crate) async fn follow(
     service: A2aService,
     record: Record,
     history_length: Option<usize>,
@@ -52,7 +52,7 @@ pub(crate) fn follow(
         .map_err(internal)?;
     // Everything journaled so far is what the snapshot below already says.
     cursor.poll().map_err(internal)?;
-    let standing = service.standing(&record)?;
+    let standing = service.standing(&record).await?;
     let snapshot = StreamResponse::Task(project::task(
         &record,
         &standing,
@@ -104,7 +104,7 @@ async fn produce(
                 return;
             }
         }
-        let standing = match service.standing(&record) {
+        let standing = match service.standing(&record).await {
             Ok(standing) => standing,
             Err(_) => return,
         };

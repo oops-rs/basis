@@ -368,6 +368,7 @@ fn a_restarted_server_resumes_driving_the_tasks_it_accepted() {
                     &Principal::anonymous(),
                     serde_json::from_value(json!({"id": id})).unwrap(),
                 )
+                .await
                 .unwrap();
             if task.status.state == basis_a2a::a2a::TaskState::Completed {
                 let text = task.artifacts.unwrap()[0].parts[0]

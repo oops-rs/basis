@@ -274,7 +274,7 @@ impl A2aService {
         if !accepted.return_immediately {
             self.settled_or_asking(&accepted.record.id).await;
         }
-        let standing = self.standing(&accepted.record)?;
+        let standing = self.standing(&accepted.record).await?;
         Ok(SendMessageResponse::Task(project::task(
             &accepted.record,
             &standing,
@@ -292,14 +292,18 @@ impl A2aService {
         // Taken first, so a caller at its cap starts no task it cannot watch.
         let slot = self.inner.streams.take(caller)?;
         let accepted = self.accept(caller, request).await?;
-        stream::follow(self.clone(), accepted.record, accepted.history_length, slot)
+        stream::follow(self.clone(), accepted.record, accepted.history_length, slot).await
     }
 
     /// `GetTask`.
-    pub fn get_task(&self, caller: &Principal, request: GetTaskRequest) -> Result<Task, A2AError> {
+    pub async fn get_task(
+        &self,
+        caller: &Principal,
+        request: GetTaskRequest,
+    ) -> Result<Task, A2AError> {
         let history_length = project::history_length(request.history_length)?;
         let record = self.record(caller, &request.id)?;
-        let standing = self.standing(&record)?;
+        let standing = self.standing(&record).await?;
         Ok(project::task(
             &record,
             &standing,
@@ -308,7 +312,7 @@ impl A2aService {
     }
 
     /// `ListTasks`: the caller's tasks, most recently changed first.
-    pub fn list_tasks(
+    pub async fn list_tasks(
         &self,
         caller: &Principal,
         request: ListTasksRequest,
@@ -351,7 +355,7 @@ impl A2aService {
             {
                 continue;
             }
-            let standing = self.standing(&record)?;
+            let standing = self.standing(&record).await?;
             if request
                 .status
                 .as_ref()
@@ -397,7 +401,7 @@ impl A2aService {
         request: CancelTaskRequest,
     ) -> Result<Task, A2AError> {
         let record = self.record(caller, &request.id)?;
-        if self.standing(&record)?.is_terminal() {
+        if self.standing(&record).await?.is_terminal() {
             return Err(A2AError::task_not_cancelable(&request.id));
         }
         let tasks = self.tasks().clone();
@@ -412,36 +416,36 @@ impl A2aService {
             questions.cancel();
         }
         let _ = tokio::time::timeout(CANCEL_GRACE, self.settled(&record.id)).await;
-        let standing = self.standing(&record)?;
+        let standing = self.standing(&record).await?;
         Ok(project::task(&record, &standing, View::full(None)))
     }
 
     /// `SubscribeToTask`: the task now, then its progress to its terminal
     /// state. A settled task has nothing left to stream.
-    pub fn subscribe_to_task(
+    pub async fn subscribe_to_task(
         &self,
         caller: &Principal,
         request: SubscribeToTaskRequest,
     ) -> Result<BoxStream<'static, StreamResponse>, A2AError> {
         let record = self.record(caller, &request.id)?;
-        if self.standing(&record)?.is_terminal() {
+        if self.standing(&record).await?.is_terminal() {
             return Err(A2AError::unsupported_operation(format!(
                 "task {} has settled; GetTask returns its result",
                 record.id
             )));
         }
         let slot = self.inner.streams.take(caller)?;
-        stream::follow(self.clone(), record, None, slot)
+        stream::follow(self.clone(), record, None, slot).await
     }
 
     /// Where `record`'s task stands now, as the status update that says so,
     /// and the key two observations of it compare equal under exactly when
     /// nothing a caller would be told about has changed.
-    pub(crate) fn status_now(
+    pub(crate) async fn status_now(
         &self,
         record: &Record,
     ) -> Result<(String, TaskStatusUpdateEvent), A2AError> {
-        let standing = self.standing(record)?;
+        let standing = self.standing(record).await?;
         let update = project::status_update(record, &standing);
         let state = serde_json::to_value(&update.status.state)
             .ok()
@@ -458,7 +462,7 @@ impl A2aService {
 
     /// Where `record`'s task stands: what `basis-tasks` says, with the
     /// question this process holds open for it, if any.
-    pub(crate) fn standing(&self, record: &Record) -> Result<Standing, A2AError> {
+    pub(crate) async fn standing(&self, record: &Record) -> Result<Standing, A2AError> {
         let asked = self
             .questions(&record.id)
             .and_then(|questions| questions.asked());

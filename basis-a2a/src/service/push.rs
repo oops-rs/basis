@@ -142,12 +142,12 @@ impl A2aService {
         self.push()?;
         let record = self.record(caller, &config.task_id)?;
         self.check_webhook(&config).await?;
-        self.store_push_config(&record, config)
+        self.store_push_config(&record, config).await
     }
 
     /// Stores `config` for `record`'s task, already checked, and watches the
     /// task for changes.
-    pub(super) fn store_push_config(
+    pub(super) async fn store_push_config(
         &self,
         record: &Record,
         config: TaskPushNotificationConfig,
@@ -164,7 +164,7 @@ impl A2aService {
             tenant: None,
             ..config
         };
-        let (status, _) = self.status_now(record)?;
+        let (status, _) = self.status_now(record).await?;
         let stored = push
             .store
             .upsert(&record.id, config, Some(status))
@@ -262,7 +262,7 @@ impl A2aService {
         let record = record.clone();
         tokio::spawn(async move {
             loop {
-                let settled = service.observe(&record);
+                let settled = service.observe(&record).await;
                 if settled {
                     break;
                 }
@@ -276,11 +276,11 @@ impl A2aService {
 
     /// Records `record`'s current status if it changed; `true` once the task
     /// has settled and there is nothing left to watch.
-    fn observe(&self, record: &Record) -> bool {
+    async fn observe(&self, record: &Record) -> bool {
         let Some(push) = &self.inner.push else {
             return true;
         };
-        let (status, mut update) = match self.status_now(record) {
+        let (status, mut update) = match self.status_now(record).await {
             Ok(now) => now,
             Err(_) => return true,
         };

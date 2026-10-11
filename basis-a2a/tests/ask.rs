@@ -359,6 +359,7 @@ async fn asked_again(service: &A2aService, caller: &Principal, task_id: &str) ->
                 caller,
                 serde_json::from_value(json!({"id": task_id})).unwrap(),
             )
+            .await
             .unwrap();
         let task = serde_json::to_value(task).unwrap();
         let state = task["status"]["state"].as_str().unwrap().to_string();
@@ -423,6 +424,7 @@ async fn a_shutdown_while_asking_records_nothing_and_the_next_start_asks_again()
                 &caller,
                 serde_json::from_value(json!({"id": task_id})).unwrap(),
             )
+            .await
             .unwrap(),
     )
     .unwrap();

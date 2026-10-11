@@ -83,12 +83,12 @@ pub(crate) async fn perform(
         Operation::SendStreamingMessage(request) => Ok(Outcome::Stream(
             service.send_streaming_message(caller, request).await?,
         )),
-        Operation::GetTask(request) => value(service.get_task(caller, request)?),
-        Operation::ListTasks(request) => value(service.list_tasks(caller, request)?),
+        Operation::GetTask(request) => value(service.get_task(caller, request).await?),
+        Operation::ListTasks(request) => value(service.list_tasks(caller, request).await?),
         Operation::CancelTask(request) => value(service.cancel_task(caller, request).await?),
-        Operation::SubscribeToTask(request) => {
-            Ok(Outcome::Stream(service.subscribe_to_task(caller, request)?))
-        }
+        Operation::SubscribeToTask(request) => Ok(Outcome::Stream(
+            service.subscribe_to_task(caller, request).await?,
+        )),
         Operation::CreatePushConfig(config) => {
             value(service.create_push_config(caller, config).await?)
         }

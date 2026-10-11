@@ -169,7 +169,10 @@ impl A2aService {
         // Stored before the task is driven, so its first change of status is
         // already one the webhook hears about. A store that fails still
         // leaves the task driven: it was accepted, and `ListTasks` finds it.
-        let stored = webhook.map(|webhook| self.store_push_config(&record, webhook));
+        let stored = match webhook {
+            Some(webhook) => Some(self.store_push_config(&record, webhook).await),
+            None => None,
+        };
         self.drive(&record);
         if let Some(Err(error)) = stored {
             return Err(error);
