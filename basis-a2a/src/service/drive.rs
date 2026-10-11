@@ -204,6 +204,8 @@ async fn drive_task(service: A2aService, tasks: Tasks, handle: TaskHandle, id: S
 /// stops the waiting and records nothing; the next start waits again.
 async fn await_hosted(service: A2aService, host: Arc<dyn TaskHost>, host_id: String, id: String) {
     tokio::select! {
+        // A task that has settled is recorded so, even as the server stops.
+        biased;
         settled = host.settled(&host_id) => match settled {
             Ok(()) => service.record_settled(&id),
             Err(error) => eprintln!("basis-a2a: await hosted task {id}: {error}"),

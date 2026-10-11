@@ -71,6 +71,24 @@ impl Served {
         Self::serve(model, config, data, workspace, None).await
     }
 
+    /// A served agent opened from `config` exactly as given — a hosted one,
+    /// say, whose state lives in `data` — called with `token`.
+    pub async fn start_config(
+        config: ServeConfig,
+        data: tempfile::TempDir,
+        token: Option<String>,
+    ) -> Self {
+        let workspace = tempfile::tempdir().unwrap();
+        Self::serve(
+            ScriptedEndpoint::start(false),
+            config,
+            data,
+            workspace,
+            token,
+        )
+        .await
+    }
+
     async fn serve(
         model: ScriptedEndpoint,
         config: ServeConfig,
