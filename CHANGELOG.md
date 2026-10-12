@@ -21,6 +21,29 @@ Releases before 0.15.0 are described by their tags and ADRs only.
   `Never` are refused by name at `open` on a hosted server.
 - The `basis-tasks`-backed path, including `basis serve --a2a`, is unchanged.
 
+## 0.16.0 — 2026-10-12
+
+### A host may run the tasks it serves ([ADR-0033](docs/adr/0033-a-host-may-run-the-tasks-it-serves.md))
+
+- `basis-a2a` serves either a workspace's `basis-tasks` (unchanged, the
+  default) or a host's own tasks. A host implements `TaskHost` (`start`,
+  `standing`, `cancel`, `settled`, `progress`) and opens
+  `ServeConfig::hosted(identity, state_dir, host)`. Every A2A feature above
+  the seam — both bindings, the card and extended card, principals, quotas,
+  stream caps, hops, push — works the same for both.
+- A hosted task completes with the parts its host returns (text, data or
+  both) as its one `result` artifact. Its A2A id is minted by the server.
+- A hosted config refuses `with_shell`, `with_run_defaults`,
+  `with_data_dir` and any approval but `Never` at `open`
+  (`OpenError::NotForHostedTasks`), rather than ignoring them.
+
+### Breaking
+
+- `A2aService::get_task`, `list_tasks` and `subscribe_to_task` are now
+  `async`: a hosted backend answers where a task stands asynchronously.
+- `OpenError` gains `NotForHostedTasks` and `StateDir` (it is not
+  `#[non_exhaustive]`).
+
 ## 0.15.1 — 2026-10-10
 
 - The minimum supported Rust is now **1.95** (was 1.88), the release that
