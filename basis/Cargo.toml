@@ -70,6 +70,6 @@ tokio.workspace = true
 [dev-dependencies]
 futures.workspace = true
 mentra = { workspace = true, features = ["test-utils"] }
-tokio = { workspace = true, features = ["time"] }
+tokio = { workspace = true, features = ["time", "test-util"] }
 tokio-tungstenite.workspace = true
 tempfile.workspace = true

@@ -97,3 +97,13 @@ fn a_change_undone_before_the_next_poll_is_forgotten() {
         "a later disappearance starts the count again"
     );
 }
+
+#[test]
+fn a_file_that_stays_missing_for_two_polls_is_read_as_a_deletion() {
+    let seen = present(10);
+    let mut settling = Settling::default();
+
+    assert!(!settling.observe(vec![Stamp::Missing], &seen));
+    assert!(settling.observe(vec![Stamp::Missing], &seen));
+    assert!(!settling.observe(vec![Stamp::Missing], &[Stamp::Missing]));
+}

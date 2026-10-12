@@ -127,20 +127,24 @@ async fn a_save_that_renames_the_file_away_and_writes_a_new_one_never_drops_an_a
         .await
         .expect("opens");
     let interval = Duration::from_millis(100);
+    // Opening fetches an agent card over real IO. Pause only afterwards so
+    // a slow scheduler cannot stretch the missing-file window past a poll.
+    tokio::time::pause();
+    std::fs::rename(&file, dir.path().join(".basis/a2a.json~")).unwrap();
     let _watch = workspace.watch_a2a(interval).expect("in a runtime");
 
-    for _ in 0..5 {
-        std::fs::rename(&file, dir.path().join(".basis/a2a.json~")).unwrap();
-        tokio::time::sleep(interval / 5).await;
-        assert!(!workspace.a2a_agents().is_empty(), "dropped mid-save");
-        write(&file, &a2a_file(&[("nous", &server.base)]));
-        tokio::time::sleep(interval / 2).await;
-        assert!(!workspace.a2a_agents().is_empty(), "dropped mid-save");
-    }
+    // The watch's immediate first tick sees the missing file; the next tick
+    // cannot run before we finish the save. Repeating short real-time saves
+    // could put successive polls in different missing windows, with no poll
+    // ever observing the file in between.
+    tokio::time::sleep(interval / 5).await;
+    assert_eq!(workspace.a2a_agents(), ["nous"], "dropped mid-save");
     write(
         &file,
         &a2a_file(&[("nous", &server.base), ("scout", &server.base)]),
     );
+    // Card refreshes use real IO, so restore the clock before the reload.
+    tokio::time::resume();
     settles_on(&workspace, &["nous", "scout"]).await;
 }
 
