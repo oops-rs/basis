@@ -149,6 +149,8 @@ struct Inner {
     push: Option<Push>,
     hop_cap: u32,
     live_task_quota: usize,
+    /// How long a task may run, before its caller's deadline clamps it.
+    task_deadline: Duration,
     streams: Arc<Streams>,
     /// Serializes the live-task quota check with the insertion it admits.
     admission: tokio::sync::Mutex<()>,
@@ -198,6 +200,7 @@ impl A2aService {
             trust_anonymous,
             live_task_quota,
             stream_cap,
+            task_deadline,
         } = config;
         if let Source::Hosted { .. } = source {
             refuse_for_hosted(shell, run.is_unset(), approval, data_dir.is_some())?;
@@ -262,6 +265,7 @@ impl A2aService {
                 push,
                 hop_cap,
                 live_task_quota,
+                task_deadline: task_deadline.unwrap_or(basis_tasks::DEFAULT_DEADLINE),
                 streams: Streams::new(stream_cap),
                 admission: tokio::sync::Mutex::new(()),
                 drivers: Mutex::new(HashMap::new()),

@@ -3,7 +3,7 @@
 use std::time::Duration;
 
 use a2a::A2AError;
-use basis_tasks::{Continuation, DEFAULT_DEADLINE, Hint, MAX_TASKS, RunSpec};
+use basis_tasks::{Continuation, Hint, MAX_TASKS, RunSpec};
 
 use super::Started;
 use crate::{
@@ -20,6 +20,7 @@ pub(super) async fn spawn(
     latest: Option<&Record>,
     inbound: Inbound,
     accepted_ms: u64,
+    task_deadline: Duration,
 ) -> Result<Started, A2AError> {
     let continuation = match latest {
         Some(latest) => Continuation::Named(handle_of(latest)?.clone()),
@@ -28,7 +29,7 @@ pub(super) async fn spawn(
     // Clamped here, at spawn, because `basis-tasks` counts a task's deadline
     // from the moment it is minted.
     let deadline = effective_deadline(
-        backend.run.deadline.unwrap_or(DEFAULT_DEADLINE),
+        backend.run.deadline.unwrap_or(task_deadline),
         inbound,
         accepted_ms,
     )?;

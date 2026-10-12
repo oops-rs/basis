@@ -95,6 +95,52 @@ async fn a_blocking_send_answers_with_the_hosts_parts_as_the_result() {
 }
 
 #[tokio::test]
+async fn a_hosted_task_runs_under_the_servers_task_deadline_unless_its_caller_is_sooner() {
+    let now_ms = || u64::try_from(Utc::now().timestamp_millis()).unwrap();
+    let hour_ms = 3_600_000;
+
+    // Unset: basis-tasks' 30-minute default.
+    let host = FakeHost::answering(answer());
+    let served = serve(&host, |config| config).await;
+    let before = now_ms();
+    served.result("SendMessage", send("q", None, false)).await;
+    let granted = host.calls().starts[0].deadline_ms - before;
+    assert!(
+        (hour_ms / 2 - 5_000..=hour_ms / 2 + 5_000).contains(&granted),
+        "{granted}"
+    );
+
+    // Configured: the server's own, longer deadline.
+    let host = FakeHost::answering(answer());
+    let served = serve(&host, |config| {
+        config.with_task_deadline(Duration::from_secs(2 * 3600))
+    })
+    .await;
+    let before = now_ms();
+    served.result("SendMessage", send("q", None, false)).await;
+    let granted = host.calls().starts[0].deadline_ms - before;
+    assert!(
+        (2 * hour_ms - 5_000..=2 * hour_ms + 5_000).contains(&granted),
+        "{granted}"
+    );
+
+    // A caller's sooner deadline still wins.
+    let host = FakeHost::answering(answer());
+    let served = serve(&host, |config| {
+        config.with_task_deadline(Duration::from_secs(2 * 3600))
+    })
+    .await;
+    let deadline = Utc::now() + Span::seconds(90);
+    let mut message = user_message("q", None);
+    message["metadata"] = json!({HOPS: {"hop": 1, "deadline": deadline.to_rfc3339()}});
+    served
+        .result("SendMessage", json!({"message": message}))
+        .await;
+    let deadline_ms = u64::try_from(deadline.timestamp_millis()).unwrap();
+    assert!(host.calls().starts[0].deadline_ms <= deadline_ms);
+}
+
+#[tokio::test]
 async fn returning_immediately_hands_back_a_task_that_settles_later() {
     let host = FakeHost::held();
     let served = serve(&host, |config| config).await;

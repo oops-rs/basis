@@ -115,6 +115,7 @@ impl A2aService {
                     latest.as_ref(),
                     inbound,
                     accepted_ms,
+                    self.inner.task_deadline,
                 )
                 .await?
             }
@@ -130,7 +131,11 @@ impl A2aService {
                     prompt: rendered.prompt.clone(),
                     parts: message.parts.clone(),
                     hop: inbound.hop,
-                    deadline_ms: hosted::deadline_ms(inbound, accepted_ms)?,
+                    deadline_ms: hosted::deadline_ms(
+                        self.inner.task_deadline,
+                        inbound,
+                        accepted_ms,
+                    )?,
                 };
                 hosted::start(host.as_ref(), start).await?
             }

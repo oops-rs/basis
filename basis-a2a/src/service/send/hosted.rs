@@ -2,7 +2,7 @@
 //! this server mints.
 
 use a2a::A2AError;
-use basis_tasks::DEFAULT_DEADLINE;
+use std::time::Duration;
 
 use super::{Started, spawn::after};
 use crate::{
@@ -11,10 +11,14 @@ use crate::{
     service::{from_host, hops::Inbound, hops::effective_deadline},
 };
 
-/// The instant a hosted task must have settled by: the same default a
-/// `basis-tasks` task is given, clamped to its caller's.
-pub(super) fn deadline_ms(inbound: Inbound, accepted_ms: u64) -> Result<u64, A2AError> {
-    let deadline = effective_deadline(DEFAULT_DEADLINE, inbound, accepted_ms)?;
+/// The instant a hosted task must have settled by: the server's task
+/// deadline, clamped to its caller's.
+pub(super) fn deadline_ms(
+    task_deadline: Duration,
+    inbound: Inbound,
+    accepted_ms: u64,
+) -> Result<u64, A2AError> {
+    let deadline = effective_deadline(task_deadline, inbound, accepted_ms)?;
     Ok(after(accepted_ms, deadline))
 }
 

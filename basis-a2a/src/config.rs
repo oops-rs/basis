@@ -207,6 +207,7 @@ pub struct ServeConfig {
     pub(crate) trust_anonymous: bool,
     pub(crate) live_task_quota: usize,
     pub(crate) stream_cap: usize,
+    pub(crate) task_deadline: Option<Duration>,
 }
 
 impl ServeConfig {
@@ -260,6 +261,7 @@ impl ServeConfig {
             trust_anonymous: false,
             live_task_quota: DEFAULT_LIVE_TASK_QUOTA,
             stream_cap: crate::DEFAULT_STREAM_CAP,
+            task_deadline: None,
         }
     }
 
@@ -374,6 +376,20 @@ impl ServeConfig {
     pub fn with_trusted_anonymous_callers(self) -> Self {
         Self {
             trust_anonymous: true,
+            ..self
+        }
+    }
+
+    /// How long a served task may run before it is given up, unless its
+    /// caller's deadline comes sooner — a caller can only ever shorten it
+    /// (`docs/a2a/hops-v1.md`). Without one, a task gets `basis-tasks`'
+    /// default (30 minutes). For a `basis-tasks` task,
+    /// [`RunDefaults::with_deadline`] still takes precedence; for a hosted
+    /// one (ADR-0033) this is the only way to grant a longer run.
+    #[must_use]
+    pub fn with_task_deadline(self, deadline: Duration) -> Self {
+        Self {
+            task_deadline: Some(deadline),
             ..self
         }
     }

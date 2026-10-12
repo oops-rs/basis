@@ -82,6 +82,11 @@ shared.**
    host's id beside it in the index. A caller never sees a host id, and a
    host never parses an A2A one.
 
+   Amended 2026-10-12: a hosted task's deadline is the server's
+   `with_task_deadline` (default `basis-tasks`' 30 minutes), clamped to its
+   caller's. Without it a host that answers slowly had no way to grant a run
+   longer than the default, since `with_run_defaults` is refused for it.
+
 5. **Restart is the host's to survive.** On `open`, every hosted task the
    index holds that has not settled is awaited again through `settled`. A
    host whose task did not survive its own restart reports it `Failed` with
