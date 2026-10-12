@@ -11,7 +11,8 @@
 //!
 //! The seam is the handful of points at which the server touches the task
 //! layer: it starts a task, asks where one stands, cancels one, waits for
-//! one to settle, and follows its progress. Ids cross it in one direction
+//! one to settle, follows its progress, and — for a host that asks its
+//! caller (ADR-0034) — hands it the caller's reply. Ids cross it in one direction
 //! only: the host names its task with an id of its own, the server keeps
 //! that id beside the A2A id it mints, and a caller never sees the host's.
 
@@ -65,6 +66,14 @@ pub enum HostedStanding {
     },
     /// Settled because it was canceled.
     Canceled,
+    /// Paused on a question to its caller (ADR-0034): the task is
+    /// `INPUT_REQUIRED`, and these parts are its status message, from the
+    /// agent. It has not settled; the caller's reply reaches the host
+    /// through [`TaskHost::reply`], after which the task is working again
+    /// under the same A2A id.
+    InputRequired {
+        parts: Vec<Part>,
+    },
 }
 
 impl HostedStanding {
@@ -90,6 +99,23 @@ impl HostedProgress {
     pub fn new(note: impl Into<String>) -> Self {
         Self { note: note.into() }
     }
+}
+
+/// A caller's reply to a task paused on [`HostedStanding::InputRequired`]
+/// (ADR-0034).
+#[derive(Debug, Clone, PartialEq)]
+#[non_exhaustive]
+pub struct HostedReply {
+    /// The reply's A2A `messageId`, as the caller sent it.
+    pub message_id: String,
+    /// The reply rendered as one text, exactly as [`HostedStart::prompt`]
+    /// is: text parts as written, data as labelled JSON, inline textual
+    /// files fenced under their names, each separated by a blank line. For
+    /// a reply of only text parts, that is those texts joined by blank
+    /// lines.
+    pub text: String,
+    /// The reply's parts, exactly as sent.
+    pub parts: Vec<Part>,
 }
 
 /// Why a host refused or failed a request — and so whose fault it is.
@@ -134,11 +160,29 @@ pub trait TaskHost: Send + Sync + 'static {
     fn cancel(&self, id: &str) -> BoxFuture<'_, Result<(), HostError>>;
 
     /// Resolves once the task `id` has settled — at once, when it already
-    /// has. The server's driver for the task awaits it.
+    /// has. The server's driver for the task awaits it. A task paused on
+    /// [`HostedStanding::InputRequired`] has not settled.
     fn settled(&self, id: &str) -> BoxFuture<'_, Result<(), HostError>>;
 
     /// The task's progress notes from now on, ending when it settles. A
     /// host with nothing to say returns an empty stream; a stream that ends
     /// early only means fewer notes, never a settled task.
     fn progress(&self, id: &str) -> BoxStream<'static, HostedProgress>;
+
+    /// Hands the task `id`, paused on [`HostedStanding::InputRequired`], its
+    /// caller's reply (ADR-0034). The server calls it only for a task whose
+    /// standing it has just read as `InputRequired`, from the principal
+    /// that owns the task.
+    ///
+    /// On `Ok` the task must no longer stand `InputRequired` for the
+    /// question answered — `Working` again, or settled — because a blocking
+    /// `SendMessage` answers as soon as the task is settled or asking. A
+    /// [`HostError::Refused`] leaves the task asking and is told to the
+    /// caller as invalid params.
+    ///
+    /// The default refuses every reply, for a host that never asks.
+    fn reply(&self, id: &str, reply: HostedReply) -> BoxFuture<'_, Result<(), HostError>> {
+        let _ = (id, reply);
+        Box::pin(async { Err(HostError::Refused("this agent takes no replies".into())) })
+    }
 }

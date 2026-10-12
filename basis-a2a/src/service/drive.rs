@@ -8,7 +8,7 @@ use std::{
     time::Duration,
 };
 
-use basis_tasks::{TaskHandle, Tasks, WaitOutcome, now_ms};
+use basis_tasks::{POLL, TaskHandle, Tasks, WaitOutcome, now_ms};
 use futures::FutureExt;
 use tokio::sync::watch;
 
@@ -16,7 +16,7 @@ use super::{
     A2aService, Backend,
     ask::{CallerHost, Questions},
 };
-use crate::{config::InboundApproval, host::TaskHost, index::Record};
+use crate::{config::InboundApproval, host::TaskHost, index::Record, project::Standing};
 
 /// This process's hold on one task it drives.
 #[derive(Clone)]
@@ -53,14 +53,37 @@ impl A2aService {
 
     /// Returns once `id` has settled or is waiting on its caller — where a
     /// blocking `SendMessage` answers (spec §3.1.1).
-    pub(crate) async fn settled_or_asking(&self, id: &str) {
-        let Some(mut driver) = self.drivers().get(id).cloned() else {
+    pub(crate) async fn settled_or_asking(&self, record: &Record) {
+        let Some(mut driver) = self.drivers().get(&record.id).cloned() else {
             return;
         };
-        let mut asked = driver.questions.watch();
-        tokio::select! {
-            _ = driver.done.wait_for(|done| *done) => {}
-            _ = asked.wait_for(Option::is_some) => {}
+        match self.backend() {
+            Backend::Tasks(_) => {
+                let mut asked = driver.questions.watch();
+                tokio::select! {
+                    _ = driver.done.wait_for(|done| *done) => {}
+                    _ = asked.wait_for(Option::is_some) => {}
+                }
+            }
+            // A host's question is read off its standing (ADR-0034), at the
+            // cadence a stream reads it.
+            Backend::Hosted(_) => {
+                tokio::select! {
+                    _ = driver.done.wait_for(|done| *done) => {}
+                    () = self.host_asks(record) => {}
+                }
+            }
+        }
+    }
+
+    /// Returns once `record`'s hosted task stands `INPUT_REQUIRED` — or its
+    /// standing cannot be read, which nothing waiting on it can wait out.
+    async fn host_asks(&self, record: &Record) {
+        loop {
+            match self.standing(record).await {
+                Ok(Standing::HostAsking(_)) | Err(_) => return,
+                Ok(_) => tokio::time::sleep(POLL).await,
+            }
         }
     }
 

@@ -11,7 +11,8 @@
 //! This process does. For a hosted task, driving is only waiting: the host
 //! runs it, and its driver awaits [`TaskHost::settled`] and records the
 //! settling — on acceptance, and again on every [`A2aService::open`] until
-//! it has. The rest of this section is about `basis-tasks`.
+//! it has. A hosted task paused on a question to its caller (ADR-0034) has
+//! not settled, so its driver goes on waiting through the question. The rest of this section is about `basis-tasks`.
 //!
 //! [`TaskHost::settled`]: crate::TaskHost::settled
 //!
@@ -316,7 +317,7 @@ impl A2aService {
     ) -> Result<SendMessageResponse, A2AError> {
         let accepted = self.accept(caller, request).await?;
         if !accepted.return_immediately {
-            self.settled_or_asking(&accepted.record.id).await;
+            self.settled_or_asking(&accepted.record).await;
         }
         let standing = self.standing(&accepted.record).await?;
         Ok(SendMessageResponse::Task(project::task(
@@ -505,6 +506,8 @@ impl A2aService {
         // `INPUT_REQUIRED`.
         let key = match &standing {
             Standing::Asking(asked) => format!("{state}:{}", asked.call_id),
+            // A host's question has no id; what it asks stands in for one.
+            Standing::HostAsking(parts) => format!("{state}:{:016x}", fingerprint(parts)),
             _ => state,
         };
         Ok((key, update))
@@ -537,6 +540,20 @@ impl A2aService {
             .owned(caller, id)
             .ok_or_else(|| A2AError::task_not_found(id))
     }
+}
+
+/// A digest of a host's question, so two different questions in a row are
+/// two changes. Stable within one build, which is as long as a push store's
+/// last-seen status needs it to be compared against: a rebuilt server that
+/// sees a different digest for the same question sends it once more, which
+/// at-least-once delivery allows.
+fn fingerprint(parts: &[a2a::Part]) -> u64 {
+    use std::hash::{Hash, Hasher};
+    let mut hasher = std::collections::hash_map::DefaultHasher::new();
+    serde_json::to_string(parts)
+        .unwrap_or_default()
+        .hash(&mut hasher);
+    hasher.finish()
 }
 
 /// Refuses, by name, each setting that configures a `basis-tasks` run on a

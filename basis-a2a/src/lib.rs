@@ -28,8 +28,14 @@
 //! latest task in its context as [`HostedStart::continues`]; a completed
 //! task's parts, text or data, are its one `result` artifact; and a restart
 //! awaits every unsettled task again through [`TaskHost::settled`], never
-//! [`TaskHost::start`]. Asking the caller is a `basis-tasks` mechanism, so a
-//! hosted config refuses it, as it refuses the shell and the run defaults.
+//! [`TaskHost::start`]. A host may also ask its caller (ADR-0034): a task
+//! that stands [`HostedStanding::InputRequired`] is `INPUT_REQUIRED` with
+//! the host's parts as its question — a blocking send answers there and a
+//! stream closes there — and the caller's reply, a message carrying the
+//! task's `taskId`, reaches the host through [`TaskHost::reply`] and resumes
+//! the same task. The approval extension below is a `basis-tasks` mechanism,
+//! so a hosted config refuses [`InboundApproval::AskCaller`], as it refuses
+//! the shell and the run defaults.
 //!
 //! ```no_run
 //! # async fn serve(host: std::sync::Arc<dyn basis_a2a::TaskHost>) -> Result<(), Box<dyn std::error::Error>> {
@@ -110,7 +116,7 @@ pub use config::{
     AgentIdentity, BearerToken, DEFAULT_LIVE_TASK_QUOTA, DEFAULT_PRINCIPAL, ExtendedCard,
     InboundApproval, Principal, PrincipalError, RunDefaults, ServeConfig,
 };
-pub use host::{HostError, HostedProgress, HostedStanding, HostedStart, TaskHost};
+pub use host::{HostError, HostedProgress, HostedReply, HostedStanding, HostedStart, TaskHost};
 pub use http::{A2aServer, BindError, router};
 pub use rest::HTTP_JSON_PATH;
 pub use service::{A2aService, DEFAULT_HOP_CAP, DEFAULT_STREAM_CAP, OpenError};

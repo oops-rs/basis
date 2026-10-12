@@ -593,3 +593,303 @@ async fn settings_that_configure_a_basis_tasks_run_are_refused_by_name() {
     )
     .expect("opens");
 }
+
+fn question() -> Vec<Part> {
+    vec![
+        Part::text("Which branch?"),
+        Part::data(json!({"choices": ["main", "dev"]})),
+    ]
+}
+
+/// A reply to the task `id`, in `context`.
+fn reply(id: &str, context: &str, text: &str) -> Value {
+    let mut message = user_message(text, Some(context));
+    message["taskId"] = json!(id);
+    json!({"message": message})
+}
+
+/// Starts a task with a blocking send that the host pauses on
+/// [`question`], and returns the task as that send answered it.
+async fn asked(served: &Served, host: &Arc<FakeHost>) -> Value {
+    let driver = Arc::clone(host);
+    let n = host.calls().starts.len();
+    let asking = tokio::spawn(async move {
+        let id = driver.started(n).await;
+        tokio::time::sleep(Duration::from_millis(50)).await;
+        driver.ask(&id, question());
+    });
+    let task = served
+        .result("SendMessage", send("deploy it", None, false))
+        .await["task"]
+        .clone();
+    asking.await.unwrap();
+    task
+}
+
+#[tokio::test]
+async fn a_hosts_question_is_input_required_and_a_reply_resumes_the_same_task() {
+    let host = FakeHost::held();
+    let served = serve(&host, |config| config).await;
+    let task = asked(&served, &host).await;
+    assert_eq!(
+        task["status"]["state"], "TASK_STATE_INPUT_REQUIRED",
+        "{task}"
+    );
+    let message = &task["status"]["message"];
+    assert_eq!(message["role"], "ROLE_AGENT", "{task}");
+    assert_eq!(message["parts"][0]["text"], "Which branch?", "{task}");
+    assert_eq!(message["parts"][1]["data"]["choices"][1], "dev", "{task}");
+    let id = task["id"].as_str().unwrap();
+    let context = task["contextId"].as_str().unwrap();
+
+    // Listed, and counted, as what it is.
+    let listed = served
+        .result("ListTasks", json!({"status": "TASK_STATE_INPUT_REQUIRED"}))
+        .await;
+    assert_eq!(listed["totalSize"], 1, "{listed}");
+
+    // The reply reaches the host, and the blocking send answers once the
+    // same task settles.
+    let driver = Arc::clone(&host);
+    let finishing = tokio::spawn(async move {
+        driver.replied("run-0", 1).await;
+        driver.complete("run-0", answer());
+    });
+    let done = served
+        .result("SendMessage", reply(id, context, "main"))
+        .await["task"]
+        .clone();
+    finishing.await.unwrap();
+    assert_eq!(done["id"], id, "{done}");
+    assert_eq!(done["status"]["state"], "TASK_STATE_COMPLETED", "{done}");
+    let (replied, given) = host.calls().replies[0].clone();
+    assert_eq!(replied, "run-0");
+    assert_eq!(given.message_id, "m-main");
+    assert_eq!(given.text, "main");
+    assert_eq!(given.parts, vec![Part::text("main")]);
+    assert_eq!(host.calls().starts.len(), 1, "a reply starts nothing");
+}
+
+#[tokio::test]
+async fn a_stream_closes_on_the_question_and_a_subscription_follows_the_resumed_task() {
+    let host = FakeHost::held();
+    let served = serve(&host, |config| config).await;
+    let driver = Arc::clone(&host);
+    let events = stream_while(
+        &served,
+        "SendStreamingMessage",
+        json!({"message": user_message("stream me", None)}),
+        async move {
+            let id = driver.started(0).await;
+            driver.followed(&id, 1).await;
+            driver.note(&id, "looking");
+            tokio::time::sleep(Duration::from_millis(50)).await;
+            driver.ask(&id, question());
+        },
+    )
+    .await;
+    assert_eq!(notes(&events)[0], "looking", "{events:?}");
+    assert_eq!(
+        *final_state(&events),
+        "TASK_STATE_INPUT_REQUIRED",
+        "{events:?}"
+    );
+    let last = &events.last().unwrap()["result"]["statusUpdate"];
+    assert_eq!(
+        last["status"]["message"]["parts"][0]["text"],
+        "Which branch?"
+    );
+    let id = last["taskId"].as_str().unwrap().to_string();
+    let context = last["contextId"].as_str().unwrap().to_string();
+
+    // Subscribing while it asks has nothing to follow but the question.
+    let paused = stream_while(&served, "SubscribeToTask", json!({"id": id}), async {}).await;
+    assert_eq!(paused.len(), 1, "{paused:?}");
+    assert_eq!(
+        paused[0]["result"]["task"]["status"]["state"],
+        "TASK_STATE_INPUT_REQUIRED"
+    );
+
+    let resumed = served
+        .result(
+            "SendMessage",
+            json!({
+                "message": reply(&id, &context, "dev")["message"],
+                "configuration": {"returnImmediately": true},
+            }),
+        )
+        .await;
+    assert_eq!(resumed["task"]["status"]["state"], "TASK_STATE_WORKING");
+    let driver = Arc::clone(&host);
+    let events = stream_while(&served, "SubscribeToTask", json!({"id": id}), async move {
+        driver.followed("run-0", 3).await;
+        driver.note("run-0", "deploying dev");
+        tokio::time::sleep(Duration::from_millis(50)).await;
+        driver.complete("run-0", answer());
+    })
+    .await;
+    assert_eq!(notes(&events), ["deploying dev"], "{events:?}");
+    assert_eq!(*final_state(&events), "TASK_STATE_COMPLETED", "{events:?}");
+}
+
+#[tokio::test]
+async fn a_reply_is_refused_unless_its_task_is_asking_and_its_callers() {
+    let host = FakeHost::held();
+    let state = tempfile::tempdir().unwrap();
+    let config = hosted(&state, &host)
+        .with_principal(
+            Principal::new("alice").unwrap(),
+            BearerToken::new("alice-token").unwrap(),
+        )
+        .with_principal(
+            Principal::new("bob").unwrap(),
+            BearerToken::new("bob-token").unwrap(),
+        );
+    let served = Served::start_config(config, state, None).await;
+    let alice = served.as_token("alice-token");
+    let bob = served.as_token("bob-token");
+    let task = alice.result("SendMessage", send("work", None, true)).await["task"].clone();
+    let id = task["id"].as_str().unwrap();
+    let context = task["contextId"].as_str().unwrap();
+
+    // Not asking: the reply belongs in a new message on the context.
+    let refused = alice.call("SendMessage", reply(id, context, "early")).await;
+    assert_eq!(refused["error"]["code"], error_code::UNSUPPORTED_OPERATION);
+    assert!(
+        refused["error"]["message"]
+            .as_str()
+            .unwrap()
+            .contains("not waiting for input"),
+        "{refused}"
+    );
+
+    host.ask(&host.started(0).await, question());
+    alice.wait_for(id, "TASK_STATE_INPUT_REQUIRED").await;
+    assert_eq!(
+        bob.error_code("SendMessage", reply(id, context, "mine now"))
+            .await,
+        error_code::TASK_NOT_FOUND
+    );
+    assert_eq!(
+        alice
+            .error_code("SendMessage", reply(id, "another-context", "main"))
+            .await,
+        error_code::INVALID_PARAMS
+    );
+    // The host's own refusal is the caller's to fix, and the task still asks.
+    let refused = alice.call("SendMessage", reply(id, context, REFUSED)).await;
+    assert_eq!(refused["error"]["code"], error_code::INVALID_PARAMS);
+    assert_eq!(refused["error"]["message"], "not an answer to that");
+    assert!(host.calls().replies.is_empty());
+    alice.wait_for(id, "TASK_STATE_INPUT_REQUIRED").await;
+}
+
+#[tokio::test]
+async fn a_host_that_takes_no_replies_refuses_them_by_default() {
+    let host = FakeHost::held();
+    let state = tempfile::tempdir().unwrap();
+    let config = ServeConfig::hosted(
+        identity(),
+        state.path(),
+        Arc::new(fake_host::NoReplies(Arc::clone(&host))),
+    );
+    let served = Served::start_config(config, state, None).await;
+    let task = asked(&served, &host).await;
+    let id = task["id"].as_str().unwrap();
+    let refused = served
+        .call(
+            "SendMessage",
+            reply(id, task["contextId"].as_str().unwrap(), "main"),
+        )
+        .await;
+    assert_eq!(refused["error"]["code"], error_code::INVALID_PARAMS);
+    assert_eq!(refused["error"]["message"], "this agent takes no replies");
+}
+
+#[tokio::test]
+async fn a_task_asking_its_caller_is_live_and_cancelable() {
+    let host = FakeHost::held();
+    let served = serve(&host, |config| config.with_live_task_quota(1)).await;
+    let task = asked(&served, &host).await;
+    assert_eq!(
+        served
+            .error_code("SendMessage", send("another", None, true))
+            .await,
+        error_code::UNSUPPORTED_OPERATION,
+        "a paused task still holds its place"
+    );
+    let canceled = served.result("CancelTask", json!({"id": task["id"]})).await;
+    assert_eq!(
+        canceled["status"]["state"], "TASK_STATE_CANCELED",
+        "{canceled}"
+    );
+    assert_eq!(host.calls().cancels, ["run-0"]);
+}
+
+#[tokio::test]
+async fn a_webhook_hears_a_hosted_task_ask_and_resume() {
+    let host = FakeHost::held();
+    let served = serve(&host, |config| {
+        config.with_push_notifications().with_private_webhooks()
+    })
+    .await;
+    let (url, bodies) = webhook();
+    let task = served
+        .result(
+            "SendMessage",
+            json!({
+                "message": user_message("call me back", None),
+                "configuration": {
+                    "returnImmediately": true,
+                    "taskPushNotificationConfig": {"url": url},
+                },
+            }),
+        )
+        .await["task"]
+        .clone();
+    let id = task["id"].as_str().unwrap();
+    let states = || -> Vec<String> {
+        bodies
+            .lock()
+            .unwrap()
+            .iter()
+            .filter_map(|body| body["statusUpdate"]["status"]["state"].as_str())
+            .map(str::to_string)
+            .collect()
+    };
+    let heard = |state: &'static str, times: usize| {
+        let states = &states;
+        async move {
+            let deadline = std::time::Instant::now() + Duration::from_secs(20);
+            while states().iter().filter(|heard| *heard == state).count() < times {
+                assert!(
+                    std::time::Instant::now() < deadline,
+                    "never heard {state}: {:?}",
+                    states()
+                );
+                tokio::time::sleep(Duration::from_millis(50)).await;
+            }
+        }
+    };
+    host.ask(&host.started(0).await, question());
+    heard("TASK_STATE_INPUT_REQUIRED", 1).await;
+    let working_before = states()
+        .iter()
+        .filter(|state| *state == "TASK_STATE_WORKING")
+        .count();
+
+    // The host asks again at once: the resumption is still heard, and so is
+    // the second question.
+    served
+        .result(
+            "SendMessage",
+            json!({
+                "message": reply(id, task["contextId"].as_str().unwrap(), "main")["message"],
+                "configuration": {"returnImmediately": true},
+            }),
+        )
+        .await;
+    host.ask("run-0", vec![Part::text("And which region?")]);
+    heard("TASK_STATE_WORKING", working_before + 1).await;
+    heard("TASK_STATE_INPUT_REQUIRED", 2).await;
+}

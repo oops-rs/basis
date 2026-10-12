@@ -21,6 +21,10 @@
 //! | no terminal, attached | `WORKING` |
 //! | no terminal, not attached | `SUBMITTED` |
 //!
+//! A hosted task's [`HostedStanding`] maps one to one, its
+//! `InputRequired { parts }` to `INPUT_REQUIRED` with those parts as the
+//! agent's status message (ADR-0034).
+//!
 //! The question is the one fact here that is not on disk: it lives in the
 //! driving process (see `service::ask`), which overlays it with
 //! [`Standing::asking`].
@@ -81,6 +85,9 @@ pub(crate) enum Standing {
     Working,
     /// Parked on a question to the caller (ADR-0030 §7).
     Asking(Asked),
+    /// A hosted task paused on a question of its host's to the caller
+    /// (ADR-0034): these parts are the question.
+    HostAsking(Vec<Part>),
     Settled(Outcome),
 }
 
@@ -132,6 +139,7 @@ impl From<HostedStanding> for Standing {
             }),
             HostedStanding::Failed { error } => Self::Settled(Outcome::Failed { error }),
             HostedStanding::Canceled => Self::Settled(Outcome::Canceled),
+            HostedStanding::InputRequired { parts } => Self::HostAsking(parts),
         }
     }
 }
@@ -168,14 +176,17 @@ impl Standing {
     /// Terminal, or waiting on the caller: where a blocking send answers and
     /// a stream closes (spec §3.1.1, §11.7).
     pub(crate) fn is_interrupted_or_terminal(&self) -> bool {
-        matches!(self, Self::Settled(_) | Self::Asking(_))
+        matches!(
+            self,
+            Self::Settled(_) | Self::Asking(_) | Self::HostAsking(_)
+        )
     }
 
     pub(crate) fn state(&self) -> TaskState {
         match self {
             Self::Submitted => TaskState::Submitted,
             Self::Working => TaskState::Working,
-            Self::Asking(_) => TaskState::InputRequired,
+            Self::Asking(_) | Self::HostAsking(_) => TaskState::InputRequired,
             Self::Settled(Outcome::Completed { .. }) => TaskState::Completed,
             Self::Settled(Outcome::Canceled) => TaskState::Canceled,
             Self::Settled(Outcome::Failed { .. } | Outcome::Unknown) => TaskState::Failed,
@@ -236,6 +247,9 @@ fn status(record: &Record, standing: &Standing) -> TaskStatus {
             "the task ended in a state this server does not recognize".to_string(),
         )),
         Standing::Asking(asked) => Some(question(record, asked)),
+        Standing::HostAsking(parts) => {
+            (!parts.is_empty()).then(|| agent_message_parts(record, parts.clone()))
+        }
         _ => None,
     };
     TaskStatus {

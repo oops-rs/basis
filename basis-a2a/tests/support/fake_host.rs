@@ -4,7 +4,10 @@
 //! starts.
 //!
 //! Like the real thing it keeps one executor per conversation: a start that
-//! continues a task still running is refused as busy.
+//! continues a task still running is refused as busy. A task the test
+//! [`ask`](FakeHost::ask)s on is `InputRequired` until a reply resumes it;
+//! a reply containing [`REFUSED`] is refused and leaves it asking.
+//! [`NoReplies`] wraps one with `TaskHost::reply` left at its default.
 //!
 //! Included by path from each test file, so not every helper is used by
 //! every one of them.
@@ -16,7 +19,9 @@ use std::{
     time::{Duration, Instant},
 };
 
-use basis_a2a::{HostError, HostedProgress, HostedStanding, HostedStart, TaskHost, a2a::Part};
+use basis_a2a::{
+    HostError, HostedProgress, HostedReply, HostedStanding, HostedStart, TaskHost, a2a::Part,
+};
 use futures::{
     FutureExt, StreamExt,
     future::BoxFuture,
@@ -34,6 +39,8 @@ pub struct Calls {
     pub cancels: Vec<String>,
     pub settled: Vec<String>,
     pub progress: Vec<String>,
+    /// Each reply handed to a task, with the task's host id.
+    pub replies: Vec<(String, HostedReply)>,
 }
 
 struct Run {
@@ -157,6 +164,29 @@ impl FakeHost {
             .notes = None;
     }
 
+    /// Pauses `id` on a question to its caller.
+    pub fn ask(&self, id: &str, parts: Vec<Part>) {
+        self.set(id, HostedStanding::InputRequired { parts });
+    }
+
+    /// Waits until `id` has been replied to `count` times over.
+    pub async fn replied(&self, id: &str, count: usize) {
+        let deadline = Instant::now() + Duration::from_secs(10);
+        loop {
+            let replies = self
+                .calls()
+                .replies
+                .iter()
+                .filter(|(replied, _)| replied == id)
+                .count();
+            if replies >= count {
+                return;
+            }
+            assert!(Instant::now() < deadline, "{id} was never replied to");
+            tokio::time::sleep(Duration::from_millis(10)).await;
+        }
+    }
+
     pub fn complete(&self, id: &str, parts: Vec<Part>) {
         self.set(id, HostedStanding::Completed { parts });
     }
@@ -239,6 +269,26 @@ impl TaskHost for FakeHost {
         .boxed()
     }
 
+    fn reply(&self, id: &str, reply: HostedReply) -> BoxFuture<'_, Result<(), HostError>> {
+        let id = id.to_string();
+        async move {
+            if reply.text.contains(REFUSED) {
+                return Err(HostError::Refused("not an answer to that".into()));
+            }
+            let asking = matches!(
+                *self.watch(&id)?.borrow(),
+                HostedStanding::InputRequired { .. }
+            );
+            if !asking {
+                return Err(HostError::Refused(format!("{id} asked nothing")));
+            }
+            self.state().calls.replies.push((id.clone(), reply));
+            self.set(&id, HostedStanding::Working);
+            Ok(())
+        }
+        .boxed()
+    }
+
     fn progress(&self, id: &str) -> BoxStream<'static, HostedProgress> {
         let mut state = self.state();
         state.calls.progress.push(id.to_string());
@@ -255,5 +305,30 @@ impl TaskHost for FakeHost {
             }
         })
         .boxed()
+    }
+}
+
+/// A [`FakeHost`] that leaves [`TaskHost::reply`] at its default.
+pub struct NoReplies(pub Arc<FakeHost>);
+
+impl TaskHost for NoReplies {
+    fn start(&self, start: HostedStart) -> BoxFuture<'_, Result<String, HostError>> {
+        self.0.start(start)
+    }
+
+    fn standing(&self, id: &str) -> BoxFuture<'_, Result<HostedStanding, HostError>> {
+        self.0.standing(id)
+    }
+
+    fn cancel(&self, id: &str) -> BoxFuture<'_, Result<(), HostError>> {
+        self.0.cancel(id)
+    }
+
+    fn settled(&self, id: &str) -> BoxFuture<'_, Result<(), HostError>> {
+        self.0.settled(id)
+    }
+
+    fn progress(&self, id: &str) -> BoxStream<'static, HostedProgress> {
+        self.0.progress(id)
     }
 }

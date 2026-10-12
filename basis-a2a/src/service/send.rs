@@ -11,18 +11,26 @@ use basis_tasks::now_ms;
 use super::{
     A2aService, Backend,
     ask::{self, Unanswered},
-    hops, host_id_of, parts,
+    from_host, hops, host_id_of, parts,
 };
 use crate::{
     card::TEXT,
     config::Principal,
-    host::HostedStart,
+    host::{HostedReply, HostedStart, TaskHost},
     index::{Key, Record},
-    project::internal,
+    project::{Standing, internal},
 };
 
 /// The output modes a caller may accept for this server to be able to answer.
 const TEXT_MODES: [&str; 4] = [TEXT, "text/*", "*/*", "text"];
+
+/// What a reply to a task that is not asking is told.
+fn not_waiting(task_id: &str) -> A2AError {
+    A2AError::unsupported_operation(format!(
+        "task {task_id} is not waiting for input; send a message with its contextId and no \
+         taskId to continue the conversation"
+    ))
+}
 
 /// What [`A2aService::accept`] settled on.
 pub(crate) struct Accepted {
@@ -68,15 +76,21 @@ impl A2aService {
         }
         let history_length = crate::project::history_length(configuration.history_length)?;
         let return_immediately = configuration.return_immediately.unwrap_or(false);
-        if let Some(task_id) = &message.task_id {
+        if let Some(task_id) = message.task_id.clone() {
             // A message naming a task is a reply to it: here, only ever the
-            // answer to a question it has open (ADR-0030 §7).
+            // answer to a question it has open (ADR-0030 §7, ADR-0034).
             if configuration.task_push_notification_config.is_some() {
                 return Err(A2AError::invalid_params(
                     "an answer to a question carries no push config; create one on the task",
                 ));
             }
-            let record = self.answer(caller, task_id, &message)?;
+            let record = match self.backend() {
+                Backend::Tasks(_) => self.answer(caller, &task_id, &message)?,
+                Backend::Hosted(host) => {
+                    let host = std::sync::Arc::clone(host);
+                    self.reply(host.as_ref(), caller, &task_id, message).await?
+                }
+            };
             return Ok(Accepted {
                 record,
                 history_length,
@@ -180,27 +194,8 @@ impl A2aService {
         task_id: &str,
         message: &Message,
     ) -> Result<Record, A2AError> {
-        if message.role != a2a::Role::User || message.message_id.trim().is_empty() {
-            return Err(A2AError::invalid_params(
-                "a message to an agent has role ROLE_USER and a messageId",
-            ));
-        }
-        let record = self.record(caller, task_id)?;
-        if message
-            .context_id
-            .as_ref()
-            .is_some_and(|context| *context != record.context_id)
-        {
-            return Err(A2AError::invalid_params(
-                "contextId does not match the task's context",
-            ));
-        }
-        let not_waiting = || {
-            A2AError::unsupported_operation(format!(
-                "task {task_id} is not waiting for input; send a message with its contextId and \
-                 no taskId to continue the conversation"
-            ))
-        };
+        let record = self.replied_to(caller, task_id, message)?;
+        let not_waiting = || not_waiting(task_id);
         let questions = self
             .questions(&record.id)
             .filter(|questions| questions.asked().is_some())
@@ -218,6 +213,61 @@ impl A2aService {
                      was not taken; the task carries on without it"
                 )),
             })?;
+        Ok(record)
+    }
+
+    /// Hands a hosted task paused on a question its caller's reply
+    /// (ADR-0034). A task that is not asking is refused as it always was;
+    /// a reply the host refuses leaves it asking.
+    async fn reply(
+        &self,
+        host: &dyn TaskHost,
+        caller: &Principal,
+        task_id: &str,
+        message: Message,
+    ) -> Result<Record, A2AError> {
+        let record = self.replied_to(caller, task_id, &message)?;
+        if !matches!(self.standing(&record).await?, Standing::HostAsking(_)) {
+            return Err(not_waiting(task_id));
+        }
+        let rendered = parts::render(&message)?;
+        let reply = HostedReply {
+            message_id: message.message_id,
+            text: rendered.prompt,
+            parts: message.parts,
+        };
+        host.reply(host_id_of(&record)?, reply)
+            .await
+            .map_err(from_host)?;
+        // Heard at once, so a webhook hears the task resume even when its
+        // host asks again before the next poll would have seen it working.
+        self.observe_now(&record).await;
+        Ok(record)
+    }
+
+    /// The task a reply names, once the reply is shaped as one and `caller`
+    /// owns the task — another principal's is not found.
+    fn replied_to(
+        &self,
+        caller: &Principal,
+        task_id: &str,
+        message: &Message,
+    ) -> Result<Record, A2AError> {
+        if message.role != a2a::Role::User || message.message_id.trim().is_empty() {
+            return Err(A2AError::invalid_params(
+                "a message to an agent has role ROLE_USER and a messageId",
+            ));
+        }
+        let record = self.record(caller, task_id)?;
+        if message
+            .context_id
+            .as_ref()
+            .is_some_and(|context| *context != record.context_id)
+        {
+            return Err(A2AError::invalid_params(
+                "contextId does not match the task's context",
+            ));
+        }
         Ok(record)
     }
 

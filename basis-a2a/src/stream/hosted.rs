@@ -5,7 +5,9 @@
 //! settled — with its result artifact and terminal state, as a
 //! `basis-tasks` task's does — whether or not the host's progress stream
 //! ended first. A task that starts working with nothing to say is still
-//! announced as `WORKING`, read off its standing at the journal's cadence.
+//! announced as `WORKING`, read off its standing at the journal's cadence;
+//! a task that pauses on a question to its caller (ADR-0034) is read off it
+//! the same way, and the stream closes on its `INPUT_REQUIRED` update.
 
 use std::sync::Arc;
 
@@ -67,8 +69,8 @@ pub(super) async fn produce(
                 }
                 break;
             }
-            _ = tick.tick(), if !announced_working => {
-                if let Ok(standing @ Standing::Working) = service.standing(&record).await {
+            _ = tick.tick() => match service.standing(&record).await {
+                Ok(standing @ Standing::Working) if !announced_working => {
                     announced_working = true;
                     let update =
                         StreamResponse::StatusUpdate(project::status_update(&record, &standing));
@@ -76,7 +78,17 @@ pub(super) async fn produce(
                         return;
                     }
                 }
-            }
+                // Asking its caller (ADR-0034): the stream closes on the
+                // question, as a `basis-tasks` task's does; the caller
+                // replies, then subscribes again.
+                Ok(standing @ Standing::HostAsking(_)) => {
+                    let update =
+                        StreamResponse::StatusUpdate(project::status_update(&record, &standing));
+                    let _ = sender.send(update).await;
+                    return;
+                }
+                _ => {}
+            },
         }
     }
     // Settled — or the host could not say, and where it stands now is the

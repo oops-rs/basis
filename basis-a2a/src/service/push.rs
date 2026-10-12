@@ -274,6 +274,20 @@ impl A2aService {
         });
     }
 
+    /// Records `record`'s current status now, if push notifications are on
+    /// and anything is watching it — without waiting for its monitor's
+    /// next look.
+    pub(super) async fn observe_now(&self, record: &Record) {
+        let watched = self
+            .inner
+            .push
+            .as_ref()
+            .is_some_and(|push| push.monitored().contains(&record.id));
+        if watched {
+            self.observe(record).await;
+        }
+    }
+
     /// Records `record`'s current status if it changed; `true` once the task
     /// has settled and there is nothing left to watch.
     async fn observe(&self, record: &Record) -> bool {
