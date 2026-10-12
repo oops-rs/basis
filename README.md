@@ -300,7 +300,9 @@ Agent Card at `/.well-known/agent-card.json` that lists both
 weight. An A2A task *is* a durable basis task, so it survives the server restarting and
 `basis list` shows it; a `contextId` is a conversation, continued by the next message that names
 it. A host with tasks of its own can serve them instead, behind the same server, by implementing
-`basis_a2a::TaskHost` ([ADR-0033](docs/adr/0033-a-host-may-run-the-tasks-it-serves.md)). A caller whose stream drops subscribes again rather than resending, and one that cannot hold a
+`basis_a2a::TaskHost` ([ADR-0033](docs/adr/0033-a-host-may-run-the-tasks-it-serves.md)), and
+pause one on a question to its caller as `INPUT_REQUIRED`, resuming the same task when the caller
+replies on its `taskId` ([ADR-0034](docs/adr/0034-a-hosted-task-may-ask-its-caller.md)). A caller whose stream drops subscribes again rather than resending, and one that cannot hold a
 connection at all registers a webhook and is called back on every status change (`--push`). A
 message may carry data and inline text files as well as text; a file by URL is refused, because the
 server never fetches what a caller names. `--extended-card FILE` tells authenticated callers more
@@ -308,7 +310,10 @@ than the public card does. The other direction needs no command: name a remote a
 `.basis/a2a.json` and the model hands it work through `spawn`, the same tool it delegates with
 locally — `@<name> <task>` ([ADR-0029](docs/adr/0029-a-remote-agent-is-a-spawn-target.md)) — put
 to the approver like any external call. basis follows the remote task's stream when its card
-offers one and polls otherwise, and neither ever sends the task twice. The set of remote agents is
+offers one and polls otherwise, and neither ever sends the task twice. A host that mints a fresh
+agent per chat message binds each run to the chat with `PreparedRun::with_remote_conversations`,
+so an `@<name>` question asked in one message is answered by `@<name> <answer>` in the next
+([ADR-0035](docs/adr/0035-a-host-may-key-remote-conversations.md)). The set of remote agents is
 live ([ADR-0031](docs/adr/0031-remote-agents-are-live.md)): the ACP server, the A2A server and
 every task basis drives watch `a2a.json` and pick up an added agent, a rotated credential or a
 moved URL without a restart, and an agent that was down is tried again when next asked for, at most
@@ -537,7 +542,7 @@ for `--effort`, custom endpoints, and the hooks `shell`→`spawn` migration) ·
 [conventions.md](docs/conventions.md) (every file and variable basis reads, in precedence order) ·
 [embedding.md](docs/embedding.md) (the SDK in detail) · [targets.md](docs/targets.md) (running a
 command somewhere else) · [REDESIGN.md](docs/archive/REDESIGN.md) (closed ledger) ·
-[adr/](docs/adr/) (33 locked decisions) · [a2a/](docs/a2a/) (basis's two A2A extensions) ·
+[adr/](docs/adr/) (35 locked decisions) · [a2a/](docs/a2a/) (basis's two A2A extensions) ·
 [proposals/](docs/proposals/) (deferred ideas).
 
 ## License

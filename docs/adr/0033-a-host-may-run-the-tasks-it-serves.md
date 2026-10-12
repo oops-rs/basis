@@ -4,6 +4,8 @@
 > Amends [`0028-a2a-is-the-agent-to-agent-protocol.md`](0028-a2a-is-the-agent-to-agent-protocol.md)
 > §3 — an A2A task is a `basis-tasks` task *by default*, no longer by
 > construction.
+> Amended by [`0034-a-hosted-task-may-ask-its-caller.md`](0034-a-hosted-task-may-ask-its-caller.md):
+> a hosted task may ask its caller (§1, Consequences).
 > Preserves [`0030-a2a-is-spoken-in-full.md`](0030-a2a-is-spoken-in-full.md)
 > in full: every method, both bindings, principals, hops, push and the
 > extended card mean the same thing whoever runs the task.
@@ -105,6 +107,10 @@ shared.**
   including `basis serve --a2a`.
 - `INPUT_REQUIRED` is a `basis-tasks` feature. A host that wants to ask its
   caller needs a sixth method; none is added until a host needs one.
+  Amended 2026-10-12 by
+  [`0034-a-hosted-task-may-ask-its-caller.md`](0034-a-hosted-task-may-ask-its-caller.md):
+  Nous needed one, so `TaskHost::reply` and `HostedStanding::InputRequired`
+  were added, the method defaulted so no existing host changes.
 - `basis-a2a` still links `basis-tasks`, because the default backend is it.
   Feature-gating that weight out for hosted-only embedders is deferred until
   one asks.

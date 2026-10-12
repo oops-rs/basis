@@ -12,6 +12,8 @@
 > ([mentra#61](https://github.com/oops-rs/mentra/issues/61)).
 > Amended by [`0031-remote-agents-are-live.md`](0031-remote-agents-are-live.md):
 > the set an open connected is live — reloaded, watched and retried (§3, §4).
+> Extended by [`0035-a-host-may-key-remote-conversations.md`](0035-a-host-may-key-remote-conversations.md):
+> a host may key a run's remote conversations instead of the calling agent (§5).
 
 ## Context
 

@@ -7,19 +7,30 @@ Releases before 0.15.0 are described by their tags and ADRs only.
 
 ## Unreleased
 
-### A host may run the tasks it serves ([ADR-0033](docs/adr/0033-a-host-may-run-the-tasks-it-serves.md))
+No breaking changes.
 
-- `basis-a2a` can serve a host's own tasks instead of `basis-tasks` spawns:
-  implement `TaskHost` (`start`, `standing`, `cancel`, `settled`,
-  `progress`) and open the server with `ServeConfig::hosted(identity,
-  state_dir, host)`. Principals, quotas, stream caps, hops and deadlines,
-  push, both bindings and the extended card behave as for a workspace.
-- A hosted task completes with the parts its host returns; its A2A id is
-  minted by the server, and a restarted server awaits unsettled hosted tasks
-  again rather than re-sending them.
-- `with_shell`, `with_run_defaults`, `with_data_dir` and any approval but
-  `Never` are refused by name at `open` on a hosted server.
-- The `basis-tasks`-backed path, including `basis serve --a2a`, is unchanged.
+### A hosted task may ask its caller ([ADR-0034](docs/adr/0034-a-hosted-task-may-ask-its-caller.md))
+
+- A `TaskHost` pauses a task on a question by reporting
+  `HostedStanding::InputRequired { parts }`: the task is
+  `TASK_STATE_INPUT_REQUIRED` with those parts as the agent's status message.
+  A blocking send answers there, a stream closes there, push hears it, and the
+  task still counts as live and can be canceled.
+- The caller's reply — a message carrying the task's `taskId` — reaches the
+  host through the new `TaskHost::reply(id, HostedReply)`, and the same task
+  resumes. The method has a default that refuses ("this agent takes no
+  replies"), so existing hosts compile and behave unchanged.
+
+### A host may key a run's remote conversations ([ADR-0035](docs/adr/0035-a-host-may-key-remote-conversations.md))
+
+- `PreparedRun::with_remote_conversations(key)` keeps what `spawn "@agent …"`
+  remembers — the remote context and any outstanding task — under a host's
+  key instead of the calling agent's id, so a host that mints a fresh agent per
+  chat message can answer a remote agent's question in the next message.
+  Records live in `a2a_conversations/keys/`, are replaced atomically, and are
+  last writer wins across processes.
+- `Workspace::remote_conversation(key, agent)` reports whether a key's
+  conversation with an agent is `Open`, `Working` or `InputRequired`.
 
 ## 0.16.1 — 2026-10-12
 
