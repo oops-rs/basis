@@ -23,7 +23,7 @@ use serde_json::{Value, json};
 use super::{describe::listed, no_remote_agents};
 use crate::a2a::HOPS_EXTENSION;
 use crate::a2a::remote::{
-    Conversation, Outstanding, Reached, RemoteAgents, Route, Unreached, Waiting,
+    Conversation, Outstanding, Reached, Remembered, RemoteAgents, Route, Unreached, Waiting,
 };
 
 /// Whether `@<name>` can go anywhere, asked in the preview — before the
@@ -96,15 +96,16 @@ fn unreached(agents: &RemoteAgents, name: &str, why: Unreached) -> String {
 /// Hands `body` to the remote agent `name`, or — with an empty body — waits
 /// again on its outstanding task, and reports what came back.
 ///
-/// `remembered` says whether the calling agent's record is kept on disk: true
-/// for an agent a workspace minted or resumed, false for a delegated child
-/// (`crate::a2a::remote` has the rule).
+/// `remembered` says where the calling agent's record is kept: on disk by
+/// agent for one a workspace minted or resumed, under a host's key for one
+/// bound to it, in memory for a delegated child (`crate::a2a::remote` has the
+/// rule).
 pub(super) async fn delegate(
     ctx: ToolContext<'_>,
     agents: &RemoteAgents,
     name: &str,
     body: &str,
-    remembered: bool,
+    remembered: &Remembered,
 ) -> ToolResult {
     // Held to the end of this call: a reload that swaps the set meanwhile
     // changes what the *next* `@<agent>` reaches, never this exchange

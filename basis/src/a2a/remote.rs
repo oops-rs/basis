@@ -55,6 +55,10 @@
 //! stays in memory; so does every record on a runtime whose history is kept
 //! nowhere. One writer per file is the attach lock's guarantee (one executor
 //! per conversation), not this module's.
+//!
+//! A host may instead bind a run's conversations to a key of its own
+//! (ADR-0035), shared by every run bound to it; `conversation` has the
+//! rules.
 
 mod conversation;
 mod reload;
@@ -71,7 +75,7 @@ use mentra::a2a::{A2aClient, A2aError as ClientError};
 
 use super::A2aAgent;
 
-pub(crate) use conversation::{Conversation, Outstanding, Waiting, forget};
+pub(crate) use conversation::{Conversation, Outstanding, Remembered, Waiting, forget};
 pub(crate) use retry::{Reached, Route, Unreached};
 
 /// How long an unreachable agent is left alone after a connect attempt
@@ -251,27 +255,34 @@ impl RemoteAgents {
         self.snapshot().names()
     }
 
-    /// Where `caller`'s conversation with `remote` stands — read from disk
-    /// the first time, when `caller` is `remembered`.
+    /// Where `caller`'s conversation with `remote` stands, kept as
+    /// `remembered` says.
     pub(crate) fn conversation(
         &self,
         caller: &str,
         remote: &str,
-        remembered: bool,
+        remembered: &Remembered,
     ) -> Conversation {
         self.conversations.get(caller, remote, remembered)
     }
 
+    /// Where the conversation with `remote` under a host's `key` stands, or
+    /// `None` when there is none (ADR-0035).
+    pub(crate) fn keyed_conversation(&self, key: &str, remote: &str) -> Option<Conversation> {
+        self.conversations.keyed(key, remote)
+    }
+
     /// Records where `caller`'s conversation with `remote` stands now, and —
-    /// when `caller` is `remembered` — writes it through, so a restart finds
-    /// it. A failed write is returned for the caller to report; the record in
-    /// memory stands either way, because the exchange it describes happened.
+    /// when it is remembered on disk — writes it through, so a restart finds
+    /// it. A failed write is returned for the caller to report; a record kept
+    /// by agent stands in memory either way, because the exchange it
+    /// describes happened.
     pub(crate) fn record(
         &self,
         caller: &str,
         remote: &str,
         conversation: Conversation,
-        remembered: bool,
+        remembered: &Remembered,
     ) -> std::io::Result<()> {
         self.conversations
             .record(caller, remote, conversation, remembered)

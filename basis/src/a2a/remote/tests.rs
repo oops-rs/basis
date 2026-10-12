@@ -24,16 +24,19 @@ fn a_remembered_agent_finds_its_outstanding_task_after_a_restart() {
     let dir = tempfile::tempdir().unwrap();
     let before = RemoteAgents::unreachable_in(&["reviewer"], dir.path());
     before
-        .record("agent-1", "reviewer", working(), true)
+        .record("agent-1", "reviewer", working(), &Remembered::ByAgent)
         .expect("written through");
     drop(before);
 
     // A new process: nothing in memory, the same directory on disk.
     let after = RemoteAgents::unreachable_in(&["reviewer"], dir.path());
 
-    assert_eq!(after.conversation("agent-1", "reviewer", true), working());
     assert_eq!(
-        after.conversation("agent-2", "reviewer", true),
+        after.conversation("agent-1", "reviewer", &Remembered::ByAgent),
+        working()
+    );
+    assert_eq!(
+        after.conversation("agent-2", "reviewer", &Remembered::ByAgent),
         Conversation::default(),
         "another session's record is its own"
     );
@@ -45,10 +48,13 @@ fn a_child_keeps_its_conversation_in_memory_only() {
     let agents = RemoteAgents::unreachable_in(&["reviewer"], dir.path());
 
     agents
-        .record("child-1", "reviewer", working(), false)
+        .record("child-1", "reviewer", working(), &Remembered::Not)
         .expect("nothing to write");
 
-    assert_eq!(agents.conversation("child-1", "reviewer", false), working());
+    assert_eq!(
+        agents.conversation("child-1", "reviewer", &Remembered::Not),
+        working()
+    );
     assert!(
         std::fs::read_dir(dir.path()).is_err()
             || std::fs::read_dir(dir.path()).unwrap().next().is_none(),
@@ -61,10 +67,13 @@ fn a_runtime_that_keeps_no_history_keeps_no_record() {
     let agents = RemoteAgents::unreachable(&["reviewer"]);
 
     agents
-        .record("agent-1", "reviewer", working(), true)
+        .record("agent-1", "reviewer", working(), &Remembered::ByAgent)
         .expect("nothing to write");
 
-    assert_eq!(agents.conversation("agent-1", "reviewer", true), working());
+    assert_eq!(
+        agents.conversation("agent-1", "reviewer", &Remembered::ByAgent),
+        working()
+    );
 }
 
 #[test]
@@ -72,7 +81,7 @@ fn forgetting_a_conversation_removes_its_record() {
     let dir = tempfile::tempdir().unwrap();
     let agents = RemoteAgents::unreachable_in(&["reviewer"], dir.path());
     agents
-        .record("agent-1", "reviewer", working(), true)
+        .record("agent-1", "reviewer", working(), &Remembered::ByAgent)
         .expect("written through");
 
     forget(dir.path(), "agent-1").expect("removed");
@@ -80,7 +89,7 @@ fn forgetting_a_conversation_removes_its_record() {
 
     let after = RemoteAgents::unreachable_in(&["reviewer"], dir.path());
     assert_eq!(
-        after.conversation("agent-1", "reviewer", true),
+        after.conversation("agent-1", "reviewer", &Remembered::ByAgent),
         Conversation::default()
     );
 }
@@ -91,14 +100,154 @@ fn an_id_that_is_not_a_file_name_is_never_made_into_a_path() {
     let agents = RemoteAgents::unreachable_in(&["reviewer"], dir.path());
 
     agents
-        .record("../escape", "reviewer", working(), true)
+        .record("../escape", "reviewer", working(), &Remembered::ByAgent)
         .expect("kept in memory");
 
     assert!(!dir.path().join("../escape.json").exists());
     assert_eq!(
-        agents.conversation("../escape", "reviewer", true),
+        agents.conversation("../escape", "reviewer", &Remembered::ByAgent),
         working()
     );
+}
+
+fn by_key(key: &str) -> Remembered {
+    Remembered::ByKey(key.to_string())
+}
+
+#[test]
+fn runs_bound_to_one_key_share_its_record_across_opens_and_agents() {
+    let dir = tempfile::tempdir().unwrap();
+    let first = RemoteAgents::unreachable_in(&["nous"], dir.path());
+    first
+        .record("agent-1", "nous", working(), &by_key("chat-7"))
+        .expect("written through");
+
+    // Another open on the same store, another minted agent: the same record,
+    // read afresh rather than from anything cached.
+    let second = RemoteAgents::unreachable_in(&["nous"], dir.path());
+    assert_eq!(
+        second.conversation("agent-2", "nous", &by_key("chat-7")),
+        working()
+    );
+    assert_eq!(second.keyed_conversation("chat-7", "nous"), Some(working()));
+    assert_eq!(
+        second.conversation("agent-2", "nous", &Remembered::ByAgent),
+        Conversation::default(),
+        "the agent's own record is apart from the key's"
+    );
+
+    // A change through one open is what the other reads next.
+    second
+        .record(
+            "agent-2",
+            "nous",
+            Conversation::default(),
+            &by_key("chat-7"),
+        )
+        .expect("written through");
+    assert_eq!(
+        first.conversation("agent-1", "nous", &by_key("chat-7")),
+        Conversation::default()
+    );
+    assert!(dir.path().join("keys/chat-7.json").is_file());
+}
+
+#[test]
+fn different_keys_are_isolated_and_one_record_keeps_every_agent() {
+    let dir = tempfile::tempdir().unwrap();
+    let agents = RemoteAgents::unreachable_in(&["nous", "reviewer"], dir.path());
+    agents
+        .record("agent-1", "nous", working(), &by_key("chat-1"))
+        .unwrap();
+    agents
+        .record("agent-1", "reviewer", working(), &by_key("chat-1"))
+        .unwrap();
+
+    assert_eq!(agents.keyed_conversation("chat-2", "nous"), None);
+    assert_eq!(
+        agents.conversation("agent-1", "nous", &by_key("chat-2")),
+        Conversation::default()
+    );
+    assert_eq!(
+        agents.keyed_conversation("chat-1", "reviewer"),
+        Some(working())
+    );
+    assert_eq!(agents.keyed_conversation("chat-1", "nous"), Some(working()));
+}
+
+#[test]
+fn a_runtime_that_keeps_no_history_shares_a_key_in_memory() {
+    let agents = RemoteAgents::unreachable(&["nous"]);
+    agents
+        .record("agent-1", "nous", working(), &by_key("chat-1"))
+        .unwrap();
+    assert_eq!(
+        agents.conversation("agent-2", "nous", &by_key("chat-1")),
+        working()
+    );
+}
+
+#[test]
+fn a_key_is_never_made_into_a_path_outside_its_directory() {
+    let dir = tempfile::tempdir().unwrap();
+    let store = dir.path().join("store");
+    let agents = RemoteAgents::unreachable_in(&["nous"], &store);
+    for key in [
+        "../../escape",
+        "/etc/passwd",
+        "..",
+        "",
+        "a/b",
+        "Chat",
+        "chat",
+    ] {
+        agents
+            .record("agent-1", "nous", working(), &by_key(key))
+            .unwrap_or_else(|error| panic!("{key:?}: {error}"));
+        assert_eq!(
+            agents.keyed_conversation(key, "nous"),
+            Some(working()),
+            "{key:?}"
+        );
+    }
+    let written: Vec<String> = std::fs::read_dir(store.join("keys"))
+        .unwrap()
+        .map(|entry| entry.unwrap().file_name().into_string().unwrap())
+        .collect();
+    assert_eq!(written.len(), 7, "each key its own file: {written:?}");
+    assert!(
+        written
+            .iter()
+            .all(|name| name.ends_with(".json") && !name.contains('/') && !name.starts_with('.')),
+        "{written:?}"
+    );
+    assert_eq!(
+        std::fs::read_dir(dir.path()).unwrap().count(),
+        1,
+        "nothing beside the store"
+    );
+}
+
+#[test]
+fn a_plain_key_is_its_own_file_name_and_any_other_is_made_one() {
+    assert_eq!(conversation::file_name_of("chat-7_a"), "chat-7_a");
+    let made = conversation::file_name_of("../x");
+    assert!(made.starts_with("___x~"), "{made}");
+    assert_ne!(
+        conversation::file_name_of("Chat"),
+        conversation::file_name_of("chat"),
+        "a case-insensitive file system cannot confuse them"
+    );
+    assert_ne!(
+        conversation::file_name_of("a/b"),
+        conversation::file_name_of("a_b")
+    );
+    assert_eq!(
+        conversation::file_name_of("a/b"),
+        conversation::file_name_of("a/b"),
+        "stable"
+    );
+    assert!(conversation::file_name_of(&"x".repeat(500)).len() <= 64 + 17);
 }
 
 /// An agent at a port nothing listens on, so connecting fails fast and the
@@ -137,13 +286,16 @@ async fn a_reload_reports_the_difference_by_name() {
 async fn a_reload_keeps_every_conversation_whatever_it_did_to_the_agent() {
     let agents = RemoteAgents::connect(vec![down("reviewer", 1)], None).await;
     agents
-        .record("agent-1", "reviewer", working(), false)
+        .record("agent-1", "reviewer", working(), &Remembered::Not)
         .expect("in memory");
 
     agents.reload(Vec::new()).await;
     agents.reload(vec![down("reviewer", 2)]).await;
 
-    assert_eq!(agents.conversation("agent-1", "reviewer", false), working());
+    assert_eq!(
+        agents.conversation("agent-1", "reviewer", &Remembered::Not),
+        working()
+    );
 }
 
 #[test]

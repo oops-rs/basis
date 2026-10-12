@@ -123,6 +123,12 @@ pub struct PreparedRun {
     /// stood at mint. `None` off the workspace path.
     #[cfg(feature = "a2a")]
     a2a: Option<Arc<crate::a2a::live::LiveA2a>>,
+    /// The copy of `spawn` the minting workspace registered on this session
+    /// for its remote agents, kept so
+    /// [`with_remote_conversations`](Self::with_remote_conversations) can
+    /// register it again bound to a key. `None` off the workspace path.
+    #[cfg(feature = "a2a")]
+    remote_spawn: Option<crate::tools::SpawnTool>,
 }
 
 /// Hand-written because mentra's `Session` is not `Debug`, and because the
@@ -155,6 +161,51 @@ impl PreparedRun {
             context_snapshot: ContextSnapshot::default(),
             #[cfg(feature = "a2a")]
             a2a: None,
+            #[cfg(feature = "a2a")]
+            remote_spawn: None,
+        }
+    }
+
+    /// Keeps this run's conversations with remote agents under the host's
+    /// `key` rather than under this run's own agent (ADR-0035).
+    ///
+    /// By default, what `spawn "@<agent> …"` remembers — the A2A context it
+    /// continues and a task still outstanding, such as one waiting for an
+    /// answer — belongs to the calling agent, so a host that mints a fresh
+    /// agent per message of one chat loses it between messages: the answer
+    /// to a remote agent's question arrives in a new agent, and starts a new
+    /// remote task. Bound to one key, every run shares one record: the next
+    /// run's `@<agent> <answer>` answers the question the last one was asked,
+    /// and `@<agent> <task>` continues the same remote context. Runs on
+    /// different keys never see each other's.
+    ///
+    /// The record lives beside this runtime's other A2A records, in a file
+    /// named for the key (any string; one that is not a plain file name is
+    /// made into one, so a key never names a path elsewhere), and is read
+    /// afresh on every call. A runtime whose history is kept nowhere keeps it
+    /// in memory, shared by the runs of one workspace open. Two runs on one
+    /// key at once are last writer wins; see ADR-0035.
+    /// [`Workspace::remote_conversation`](crate::Workspace::remote_conversation)
+    /// reads where a key's conversation with an agent stands.
+    ///
+    /// A no-op for a run no workspace minted, which has no remote agents.
+    /// Delegated children keep their own conversations in memory, as before.
+    #[cfg(feature = "a2a")]
+    #[must_use]
+    pub fn with_remote_conversations(mut self, key: impl Into<String>) -> Self {
+        if let Some(copy) = &self.remote_spawn {
+            self.session
+                .register_tool(copy.clone().remembering_under(key.into()));
+        }
+        self
+    }
+
+    /// Remembers the copy of `spawn` the workspace registered for this run.
+    #[cfg(feature = "a2a")]
+    pub(crate) fn with_remote_spawn(self, copy: crate::tools::SpawnTool) -> Self {
+        Self {
+            remote_spawn: Some(copy),
+            ..self
         }
     }
 

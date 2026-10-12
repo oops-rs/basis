@@ -58,6 +58,8 @@ use std::sync::Arc;
 
 use mentra::{ModelInfo, Session, agent::AgentConfig, provider::ReasoningOptions};
 
+#[cfg(feature = "a2a")]
+pub use a2a::RemoteConversationState;
 pub use builder::WorkspaceBuilder;
 pub use profile::RunProfile;
 pub use roster::ToolRoster;
@@ -296,14 +298,17 @@ impl Workspace {
             .agents()
             .record_for_workspace(session.agent_id(), tools);
         #[cfg(feature = "a2a")]
-        self.teach_remote_agents(&mut session);
+        let remote_spawn = self.teach_remote_agents(&mut session);
         if !spec.profile.decides_reasoning() {
             apply_effort(&mut session, spec.effort.or(self.effort))?;
         }
 
-        Ok(self
+        let run = self
             .minted(session, spec, model_id, context_snapshot)
-            .with_agent_row(row))
+            .with_agent_row(row);
+        #[cfg(feature = "a2a")]
+        let run = run.with_remote_spawn(remote_spawn);
+        Ok(run)
     }
 
     /// Picks up a conversation a previous process left behind.
@@ -391,7 +396,7 @@ impl Workspace {
             .agents()
             .record_for_workspace(agent_id, self.resumed_tools(&session));
         #[cfg(feature = "a2a")]
-        self.teach_remote_agents(&mut session);
+        let remote_spawn = self.teach_remote_agents(&mut session);
         let model = if let Some(model) = spec.profile.resolved_model() {
             session.set_model(model.clone())?;
             model.id.clone()
@@ -412,9 +417,12 @@ impl Workspace {
         // the resume loaded, which is exactly the one this run will send.
         let context_snapshot = session.config().system.clone();
 
-        Ok(self
+        let run = self
             .minted(session, spec, model, context_snapshot)
-            .with_agent_row(row))
+            .with_agent_row(row);
+        #[cfg(feature = "a2a")]
+        let run = run.with_remote_spawn(remote_spawn);
+        Ok(run)
     }
 
     /// A cheap stand-in for everything in this workspace a run could see.

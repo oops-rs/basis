@@ -102,6 +102,8 @@ impl PreparedRun {
             context_snapshot,
             #[cfg(feature = "a2a")]
             a2a,
+            #[cfg(feature = "a2a")]
+            remote_spawn,
         } = self;
 
         Self {
@@ -114,6 +116,8 @@ impl PreparedRun {
             context_snapshot,
             #[cfg(feature = "a2a")]
             a2a,
+            #[cfg(feature = "a2a")]
+            remote_spawn,
         }
     }
 

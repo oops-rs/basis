@@ -5,11 +5,35 @@
 //! connection: a record outlives a reload that reconnects the agent, and one
 //! that removes it (ADR-0031 §5), so re-adding the same name continues the
 //! conversation it had.
+//!
+//! # Or by a host's key
+//!
+//! ADR-0035: a host that mints a fresh agent per message of one chat binds
+//! its runs to a key of its own
+//! ([`PreparedRun::with_remote_conversations`](crate::PreparedRun::with_remote_conversations)),
+//! and every run bound to one key shares one record, whoever its calling
+//! agent is. A keyed record is read from its file on every call rather than
+//! cached, because the runs sharing it are not one session and need not be
+//! one process; it is written as every record is — whole, beside the file,
+//! then renamed over it — so a reader sees the old record or the new one,
+//! never half. Two runs on one key writing at once are last writer wins: a
+//! write reads the file, changes the one remote agent's entry it is about,
+//! and replaces the file, so a concurrent change to *another* agent's entry
+//! made between that read and that rename is lost. Within one workspace open
+//! the read-change-write is serialized, so only writers in different opens
+//! or processes can race. Runs on one key are a host's one conversation, one
+//! message at a time, so the host decides whether they overlap.
+//!
+//! A runtime whose history is kept nowhere keeps keyed records in memory, per
+//! workspace open, as it does every other.
 
 use std::{
     collections::{BTreeMap, HashMap},
     path::{Path, PathBuf},
-    sync::Mutex,
+    sync::{
+        Mutex,
+        atomic::{AtomicU64, Ordering},
+    },
 };
 
 use serde::{Deserialize, Serialize};
@@ -51,10 +75,31 @@ pub(crate) enum Waiting {
     Input,
 }
 
+/// Where a calling agent's conversations are kept.
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub(crate) enum Remembered {
+    /// In memory, under the calling agent's id: a delegated child, which is
+    /// never resumed.
+    #[default]
+    Not,
+    /// On disk, under the calling agent's id: an agent a workspace minted or
+    /// resumed.
+    ByAgent,
+    /// Under a host's key, whoever the calling agent is (ADR-0035).
+    ByKey(String),
+}
+
+/// The subdirectory keyed records live in, apart from agent ids' so a key
+/// and an id that happen to be one string never share a file.
+const KEYS_DIR: &str = "keys";
+
 /// Every calling agent's conversations, loaded from disk the first time a
-/// remembered agent is asked about.
+/// remembered agent is asked about — and every keyed one's, read from disk
+/// every time.
 pub(super) struct Book {
     by_caller: Mutex<HashMap<String, Conversations>>,
+    /// Keyed records, when there is no directory to keep them in.
+    by_key: Mutex<HashMap<String, Conversations>>,
     /// Where remembered agents' records live, or `None` when history is kept
     /// nowhere.
     remembered_in: Option<PathBuf>,
@@ -70,13 +115,20 @@ impl Book {
     pub(super) fn new(remembered_in: Option<PathBuf>) -> Self {
         Self {
             by_caller: Mutex::new(HashMap::new()),
+            by_key: Mutex::new(HashMap::new()),
             remembered_in,
         }
     }
 
     /// Where `caller`'s conversation with `remote` stands — read from disk
-    /// the first time, when `caller` is `remembered`.
-    pub(super) fn get(&self, caller: &str, remote: &str, remembered: bool) -> Conversation {
+    /// the first time, when `caller` is remembered by agent, and every time
+    /// when it is remembered by key.
+    pub(super) fn get(&self, caller: &str, remote: &str, remembered: &Remembered) -> Conversation {
+        let remembered = match remembered {
+            Remembered::ByKey(key) => return self.keyed(key, remote).unwrap_or_default(),
+            Remembered::ByAgent => true,
+            Remembered::Not => false,
+        };
         let mut by_caller = self
             .by_caller
             .lock()
@@ -102,8 +154,13 @@ impl Book {
         caller: &str,
         remote: &str,
         conversation: Conversation,
-        remembered: bool,
+        remembered: &Remembered,
     ) -> std::io::Result<()> {
+        let remembered = match remembered {
+            Remembered::ByKey(key) => return self.record_keyed(key, remote, conversation),
+            Remembered::ByAgent => true,
+            Remembered::Not => false,
+        };
         let mut by_caller = self
             .by_caller
             .lock()
@@ -113,6 +170,50 @@ impl Book {
         match self.file(caller, remembered) {
             Some(file) => store(&file, own),
             None => Ok(()),
+        }
+    }
+
+    /// Where the conversation with `remote` under `key` stands, or `None`
+    /// when there is none.
+    pub(super) fn keyed(&self, key: &str, remote: &str) -> Option<Conversation> {
+        match &self.remembered_in {
+            Some(dir) => load(&keyed_file(dir, key)).agents.remove(remote),
+            None => self
+                .by_key
+                .lock()
+                .expect("A2A conversation map poisoned")
+                .get(key)?
+                .agents
+                .get(remote)
+                .cloned(),
+        }
+    }
+
+    /// Records the conversation with `remote` under `key`: read, changed and
+    /// replaced under this book's lock, so two runs of one open cannot lose
+    /// each other's change. See the module docs for two opens.
+    fn record_keyed(
+        &self,
+        key: &str,
+        remote: &str,
+        conversation: Conversation,
+    ) -> std::io::Result<()> {
+        let mut by_key = self.by_key.lock().expect("A2A conversation map poisoned");
+        match &self.remembered_in {
+            Some(dir) => {
+                let file = keyed_file(dir, key);
+                let mut own = load(&file);
+                own.agents.insert(remote.to_string(), conversation);
+                store(&file, &own)
+            }
+            None => {
+                by_key
+                    .entry(key.to_string())
+                    .or_default()
+                    .agents
+                    .insert(remote.to_string(), conversation);
+                Ok(())
+            }
         }
     }
 
@@ -133,6 +234,40 @@ fn is_file_safe(id: &str) -> bool {
         && id
             .chars()
             .all(|c| c.is_ascii_alphanumeric() || c == '-' || c == '_')
+}
+
+/// The file a keyed record lives in under `dir`.
+fn keyed_file(dir: &Path, key: &str) -> PathBuf {
+    dir.join(KEYS_DIR)
+        .join(format!("{}.json", file_name_of(key)))
+}
+
+/// A host's key as a file name: the key itself when it is already a plain
+/// one — lowercase letters, digits, `-` and `_`, at most 64 of them — and
+/// otherwise its plain characters (lowercased, everything else `_`, at most
+/// 64) followed by a digest of the whole key, so no key names a path outside
+/// the directory, two keys a case-insensitive file system would confuse stay
+/// apart, and distinct keys keep distinct files.
+pub(crate) fn file_name_of(key: &str) -> String {
+    let plain = |c: char| c.is_ascii_lowercase() || c.is_ascii_digit() || c == '-' || c == '_';
+    if !key.is_empty() && key.len() <= 64 && key.chars().all(plain) {
+        return key.to_string();
+    }
+    let readable: String = key
+        .chars()
+        .map(|c| c.to_ascii_lowercase())
+        .map(|c| if plain(c) { c } else { '_' })
+        .take(64)
+        .collect();
+    format!("{readable}~{:016x}", fnv1a(key.as_bytes()))
+}
+
+/// FNV-1a, 64-bit: stable across builds and platforms, which a file name a
+/// later process must find again needs, and std's hasher does not promise.
+fn fnv1a(bytes: &[u8]) -> u64 {
+    bytes.iter().fold(0xcbf2_9ce4_8422_2325, |hash, byte| {
+        (hash ^ u64::from(*byte)).wrapping_mul(0x0100_0000_01b3)
+    })
 }
 
 /// A record on disk, or nothing. A file that cannot be read is said once and
@@ -164,9 +299,18 @@ fn store(file: &Path, conversations: &Conversations) -> std::io::Result<()> {
     let dir = file.parent().expect("a record file has a directory");
     std::fs::create_dir_all(dir)?;
     let bytes = serde_json::to_vec_pretty(conversations).map_err(std::io::Error::other)?;
-    let staged = file.with_extension("json.tmp");
+    // Named for this write alone, so two writers of one record — two runs
+    // on one key — never interleave into one staged file.
+    static WRITES: AtomicU64 = AtomicU64::new(0);
+    let staged = file.with_extension(format!(
+        "json.{}.{}.tmp",
+        std::process::id(),
+        WRITES.fetch_add(1, Ordering::Relaxed)
+    ));
     std::fs::write(&staged, bytes)?;
-    std::fs::rename(&staged, file)
+    std::fs::rename(&staged, file).inspect_err(|_| {
+        let _ = std::fs::remove_file(&staged);
+    })
 }
 
 /// Removes `agent_id`'s record from `dir`, when it has one — what

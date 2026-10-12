@@ -11,9 +11,13 @@ use mentra::Session;
 
 use super::Workspace;
 use crate::{
-    a2a::{A2aError, A2aReload, A2aWatch, A2aWatchError},
+    a2a::{A2aError, A2aReload, A2aWatch, A2aWatchError, remote::Waiting},
     event::ContextFile,
+    tools::SpawnTool,
 };
+
+#[cfg(doc)]
+use crate::PreparedRun;
 
 impl Workspace {
     /// The remote A2A agents this workspace configures now, by name — each
@@ -98,12 +102,54 @@ impl Workspace {
     /// Registered on the session's agent alone, which is the isolation: a
     /// sibling open of this directory shares this audience but not this agent,
     /// so it is neither told about these agents nor routed to them.
-    pub(super) fn teach_remote_agents(&self, session: &mut Session) {
+    ///
+    /// Returns the copy, for [`PreparedRun::with_remote_conversations`] to
+    /// register again bound to a host's key.
+    pub(super) fn teach_remote_agents(&self, session: &mut Session) -> SpawnTool {
         let copy = self
             .runtime
             .spawn_tool()
             .for_remote_agents(self.a2a.remote())
             .remembering();
-        session.register_tool(copy);
+        session.register_tool(copy.clone());
+        copy
     }
+
+    /// Where the conversation with the remote agent `agent` stands for runs
+    /// bound to the host's `key`
+    /// ([`PreparedRun::with_remote_conversations`]), or `None` when no run
+    /// bound to it has handed `agent` anything — or when what it handed has
+    /// been forgotten.
+    ///
+    /// What a host reads to tell its model, before a run, that `@<agent>` is
+    /// waiting for an answer
+    /// ([`RemoteConversationState::InputRequired`]). Read from the record
+    /// each time, so it is what the last run on `key` left, in this open or
+    /// another on the same store.
+    pub fn remote_conversation(&self, key: &str, agent: &str) -> Option<RemoteConversationState> {
+        let conversation = self.a2a.remote().keyed_conversation(key, agent)?;
+        Some(match conversation.outstanding {
+            None => RemoteConversationState::Open,
+            Some(outstanding) => match outstanding.waiting_for {
+                Waiting::Agent => RemoteConversationState::Working,
+                Waiting::Input => RemoteConversationState::InputRequired,
+            },
+        })
+    }
+}
+
+/// Where a remote agent's conversation stands for runs bound to one host key
+/// — what [`Workspace::remote_conversation`] reports (ADR-0035).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[non_exhaustive]
+pub enum RemoteConversationState {
+    /// A conversation is open and nothing is outstanding: the next
+    /// `@<agent> <task>` continues its context.
+    Open,
+    /// The agent is still working on the last task it was handed: `@<agent>`
+    /// alone waits for it again.
+    Working,
+    /// The agent asked a question: `@<agent> <answer>` answers it, on the
+    /// same remote task.
+    InputRequired,
 }

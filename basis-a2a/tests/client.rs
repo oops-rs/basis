@@ -25,10 +25,16 @@ use std::{
 
 use basis::{
     A2aAgentConfig, A2aConfig, AllowAll, CollectingSink, ContextConfig, Event, MemoryConfig,
-    ModelSelector, Runtime, Workspace,
+    ModelSelector, RemoteConversationState, Runtime, Workspace,
 };
-use basis_a2a::{A2aServer, A2aService, AgentIdentity, BearerToken, RunDefaults, ServeConfig};
+use basis_a2a::{
+    A2aServer, A2aService, AgentIdentity, BearerToken, RunDefaults, ServeConfig, a2a::Part,
+};
 use serde_json::{Value, json};
+
+#[path = "support/fake_host.rs"]
+mod fake_host;
+use fake_host::FakeHost;
 
 const TOKEN: &str = "test-token";
 /// The environment variable the calling workspace's `a2a.json` reads the
@@ -277,6 +283,167 @@ async fn a_sibling_open_of_the_same_directory_cannot_reach_the_agent() {
         1,
         "only the owner's task reached the served agent"
     );
+}
+
+/// ADR-0034 and ADR-0035 together: a host that mints a fresh agent per chat
+/// message binds each run's remote conversations to the chat's key, so the
+/// answer to a hosted agent's question — typed in the next message, read by a
+/// new agent — answers that question on the same remote task, while another
+/// chat's key starts a conversation of its own.
+#[tokio::test]
+async fn runs_bound_to_one_key_answer_the_question_the_last_one_was_asked() {
+    isolate_environment();
+
+    // The served agent: a host that runs its own tasks and asks.
+    let host = FakeHost::held();
+    let served_state = tempfile::tempdir().unwrap();
+    let service = A2aService::open(ServeConfig::hosted(
+        AgentIdentity::new("nous", "Answers, and asks when it must."),
+        served_state.path(),
+        Arc::clone(&host) as _,
+    ))
+    .expect("opens");
+    let server = A2aServer::bind("127.0.0.1:0".parse().unwrap(), service)
+        .await
+        .expect("binds loopback");
+    let base = format!("http://{}", server.local_addr());
+    tokio::spawn(server.serve());
+
+    // One scripted model for three runs, each asking `@nous` once.
+    let ask = |input: &str| Reply::ToolCall {
+        name: "spawn".to_string(),
+        arguments: json!({ "input": input }).to_string(),
+    };
+    let done = Reply::Text("done".to_string());
+    let caller_model = ScriptedEndpoint::start(vec![
+        ask("@nous deploy it"),
+        done.clone(),
+        ask("@nous main"),
+        done.clone(),
+        ask("@nous main"),
+        done,
+    ]);
+    // History kept on disk, so the keyed record is a file two opens share.
+    let store = tempfile::tempdir().unwrap();
+    let runtime = Arc::new(
+        Runtime::builder()
+            .with_base_url(&caller_model.base_url)
+            .with_api_key("test-key")
+            .with_store_dir(store.path())
+            .build()
+            .expect("builds"),
+    );
+    let caller = tempfile::tempdir().unwrap();
+    let open = || {
+        Workspace::builder(caller.path())
+            .with_runtime(Arc::clone(&runtime))
+            .with_model(ModelSelector::Id("test-model".to_string()))
+            .with_context(ContextConfig::none())
+            .with_memory(MemoryConfig::disabled())
+            .with_a2a(
+                A2aConfig {
+                    global_dir: None,
+                    ..A2aConfig::default()
+                }
+                .with_supplied(vec![A2aAgentConfig::new("nous", &base).into()]),
+            )
+            .open()
+    };
+    let spawned = |events: &[Event]| {
+        events
+            .iter()
+            .find_map(|event| match event {
+                Event::ToolCompleted {
+                    tool_name,
+                    is_error,
+                    summary,
+                    ..
+                } if tool_name == "spawn" => Some((*is_error, summary.clone())),
+                _ => None,
+            })
+            .expect("spawn ran")
+    };
+
+    // Message one, in chat 1: the host asks.
+    let first = open().await.expect("opens");
+    let asking = Arc::clone(&host);
+    let asker = tokio::spawn(async move {
+        let id = asking.started(0).await;
+        tokio::time::sleep(Duration::from_millis(100)).await;
+        asking.ask(&id, vec![Part::text("Which branch?")]);
+    });
+    let report = run(&first, "chat-1").await;
+    asker.await.unwrap();
+    let (failed, summary) = spawned(report.sink.events());
+    assert!(!failed, "{summary}");
+    assert_eq!(
+        first.remote_conversation("chat-1", "nous"),
+        Some(RemoteConversationState::InputRequired)
+    );
+    assert_eq!(first.remote_conversation("chat-2", "nous"), None);
+    drop(report);
+    drop(first);
+
+    // Message two, in chat 1: a new open, a new agent, the same key — the
+    // answer reaches the question.
+    let second = open().await.expect("opens again");
+    assert_eq!(
+        second.remote_conversation("chat-1", "nous"),
+        Some(RemoteConversationState::InputRequired),
+        "a host can tell its model before the run"
+    );
+    let finishing = Arc::clone(&host);
+    let finisher = tokio::spawn(async move {
+        finishing.replied("run-0", 1).await;
+        finishing.complete("run-0", vec![Part::text("deployed main")]);
+    });
+    let report = run(&second, "chat-1").await;
+    finisher.await.unwrap();
+    let (failed, summary) = spawned(report.sink.events());
+    assert!(!failed, "{summary}");
+    let calls = host.calls();
+    assert_eq!(calls.starts.len(), 1, "the answer started nothing new");
+    assert_eq!(calls.replies.len(), 1);
+    assert_eq!(calls.replies[0].0, "run-0");
+    assert_eq!(calls.replies[0].1.text, "main");
+    assert_eq!(
+        second.remote_conversation("chat-1", "nous"),
+        Some(RemoteConversationState::Open)
+    );
+    assert!(
+        caller_model.requests()[3].contains("deployed main"),
+        "the second run's model read the answer"
+    );
+
+    // Message three, in chat 2: a conversation of its own.
+    let finishing = Arc::clone(&host);
+    let finisher = tokio::spawn(async move {
+        let id = finishing.started(1).await;
+        finishing.complete(&id, vec![Part::text("which deploy?")]);
+    });
+    let report = run(&second, "chat-2").await;
+    finisher.await.unwrap();
+    assert!(!spawned(report.sink.events()).0);
+    let calls = host.calls();
+    assert_eq!(
+        calls.starts.len(),
+        2,
+        "another key's `@nous main` is a new task"
+    );
+    assert!(calls.starts[1].continues.is_none(), "in a new context");
+    assert_ne!(calls.starts[1].context_id, calls.starts[0].context_id);
+    assert_eq!(calls.replies.len(), 1);
+}
+
+/// One chat message: a freshly minted agent, bound to `key`.
+async fn run(workspace: &Workspace, key: &str) -> basis::RunReport<CollectingSink> {
+    workspace
+        .prepare("chat")
+        .expect("mints")
+        .with_remote_conversations(key)
+        .execute_with_approver(CollectingSink::default(), AllowAll)
+        .await
+        .expect("the run completes")
 }
 
 /// The provider's credential and the token the file names are read from the

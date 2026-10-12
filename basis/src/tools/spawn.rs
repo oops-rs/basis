@@ -148,12 +148,13 @@ pub struct SpawnTool {
     /// call may use.
     #[cfg(feature = "a2a")]
     remote: Option<Arc<crate::a2a::remote::RemoteAgents>>,
-    /// Whether the agent this copy belongs to keeps its remote conversations
-    /// on disk (ADR-0029 §5): set on the copy a workspace registers for an
-    /// agent it minted or resumed, never on a delegated child's, which is not
+    /// Where the agent this copy belongs to keeps its remote conversations
+    /// (ADR-0029 §5): on disk by agent for the copy a workspace registers for
+    /// an agent it minted or resumed, under a host's key for one bound to it
+    /// (ADR-0035), and in memory for a delegated child's, which is not
     /// resumed and so has nothing to pick back up.
     #[cfg(feature = "a2a")]
-    remembers: bool,
+    remembers: crate::a2a::remote::Remembered,
 }
 
 /// The per-call facts both authorization preview and execution must decide.
@@ -239,7 +240,7 @@ impl SpawnTool {
             #[cfg(feature = "a2a")]
             remote: None,
             #[cfg(feature = "a2a")]
-            remembers: false,
+            remembers: crate::a2a::remote::Remembered::Not,
         }
     }
 
@@ -301,7 +302,7 @@ impl SpawnTool {
     pub(crate) fn for_remote_agents(&self, remote: &Arc<crate::a2a::remote::RemoteAgents>) -> Self {
         Self {
             remote: Some(Arc::clone(remote)),
-            remembers: false,
+            remembers: crate::a2a::remote::Remembered::Not,
             ..self.clone()
         }
     }
@@ -338,7 +339,18 @@ impl SpawnTool {
     #[must_use]
     pub(crate) fn remembering(self) -> Self {
         Self {
-            remembers: true,
+            remembers: crate::a2a::remote::Remembered::ByAgent,
+            ..self
+        }
+    }
+
+    /// The same copy, keeping its remote conversations under a host's `key`
+    /// rather than its agent's id (ADR-0035).
+    #[cfg(feature = "a2a")]
+    #[must_use]
+    pub(crate) fn remembering_under(self, key: String) -> Self {
+        Self {
+            remembers: crate::a2a::remote::Remembered::ByKey(key),
             ..self
         }
     }
@@ -541,7 +553,7 @@ impl ToolExecutor for SpawnTool {
             SpawnDecision::Command => execute::command(&ctx, spawn.body(), spawn.target()).await,
             #[cfg(feature = "a2a")]
             SpawnDecision::Remote { agents, name } => {
-                remote::delegate(ctx, &agents, &name, spawn.body(), self.remembers).await
+                remote::delegate(ctx, &agents, &name, spawn.body(), &self.remembers).await
             }
             SpawnDecision::Agent { depth, spec, .. } => {
                 execute::delegate(self, &mut ctx, spawn.body(), depth, *spec).await

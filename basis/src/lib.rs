@@ -200,4 +200,6 @@ pub use tools::declared::{
     DEFAULT_GLOBAL_TOOLS_FILE, DEFAULT_WORKSPACE_TOOLS_FILE, DeclaredToolError,
     TOOLS_SCHEMA_VERSION, ToolsConfig, ToolsSource,
 };
+#[cfg(feature = "a2a")]
+pub use workspace::RemoteConversationState;
 pub use workspace::{RunProfile, RunSpec, ToolRoster, Workspace, WorkspaceBuilder};

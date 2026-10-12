@@ -312,7 +312,7 @@ async fn a_removed_agent_is_refused_by_name_and_continues_when_it_comes_back() {
         outstanding: None,
     };
     agents
-        .record("agent-1", AGENT, settled.clone(), false)
+        .record("agent-1", AGENT, settled.clone(), &Remembered::Not)
         .expect("in memory");
 
     agents.reload(Vec::new()).await;
@@ -327,7 +327,7 @@ async fn a_removed_agent_is_refused_by_name_and_continues_when_it_comes_back() {
         request(
             AGENT,
             "and this one",
-            &agents.conversation("agent-1", AGENT, false),
+            &agents.conversation("agent-1", AGENT, &Remembered::Not),
             TOP
         ),
         Ok(send("and this one", None, Some("context-1"), TOP)),
@@ -339,7 +339,12 @@ async fn a_removed_agent_is_refused_by_name_and_continues_when_it_comes_back() {
 async fn an_outstanding_task_follows_its_agent_to_a_new_address() {
     let agents = RemoteAgents::unreachable(&["reviewer"]);
     agents
-        .record("agent-1", AGENT, outstanding(Waiting::Agent), false)
+        .record(
+            "agent-1",
+            AGENT,
+            outstanding(Waiting::Agent),
+            &Remembered::Not,
+        )
         .expect("in memory");
     let moved_to = free_port();
     serve_card(moved_to);
@@ -353,7 +358,7 @@ async fn an_outstanding_task_follows_its_agent_to_a_new_address() {
         request(
             AGENT,
             "",
-            &agents.conversation("agent-1", AGENT, false),
+            &agents.conversation("agent-1", AGENT, &Remembered::Not),
             TOP
         ),
         Ok(A2aRequest::resume("task-1")),
