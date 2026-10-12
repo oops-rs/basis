@@ -21,6 +21,13 @@ Releases before 0.15.0 are described by their tags and ADRs only.
   `Never` are refused by name at `open` on a hosted server.
 - The `basis-tasks`-backed path, including `basis serve --a2a`, is unchanged.
 
+## 0.16.1 — 2026-10-12
+
+- `ServeConfig::with_task_deadline` sets how long a served task may run,
+  for a hosted server as well as a `basis-tasks` one. A caller's deadline
+  still clamps it. Before this a hosted task could never run past
+  `basis-tasks`' 30-minute default. No breaking changes.
+
 ## 0.16.0 — 2026-10-12
 
 ### A host may run the tasks it serves ([ADR-0033](docs/adr/0033-a-host-may-run-the-tasks-it-serves.md))
