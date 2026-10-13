@@ -5,6 +5,32 @@ All six crates — `basis`, `basis-host`, `basis-tasks`, `basis-acp`,
 live in `docs/adr/`; this file says what changed for someone upgrading.
 Releases before 0.15.0 are described by their tags and ADRs only.
 
+## 0.17.0 — 2026-10-13
+
+### A server may authenticate its own way ([ADR-0036](docs/adr/0036-a-server-may-authenticate-its-own-way.md))
+
+- `basis-a2a` decides who a request is from with an `Authenticator`: given
+  the request's head (`RequestHead` — method, URI, headers, never the body),
+  it returns a `Principal` or a `Refusal` (`401` with its `WWW-Authenticate`
+  challenge, or `403`), asynchronously, before any body is read. Give one
+  with `ServeConfig::with_authenticator`; a server behind a gateway that signs
+  a token per request accepts exactly those.
+- The authenticator declares the card's `Security` — its schemes, and which
+  a caller must present — so a JWT checker can advertise HTTP bearer with
+  `bearerFormat: "JWT"`. One that declares none is held to a tokenless
+  server's rules: loopback only, no extended card, push and asking only with
+  trusted anonymous callers.
+- Named tokens and the tokenless anonymous caller are the default
+  authenticator: with none given, every server, card and `401` is unchanged,
+  including `basis serve --a2a`.
+- `Principal::new` accepts `:` (for names like `anon:dev_…`).
+
+### Breaking
+
+- `OpenError` gains `TokensWithAuthenticator`: a config with both tokens and
+  an authenticator is refused at `open`, since the authenticator replaces the
+  tokens. A `match` on `OpenError` needs an arm for it.
+
 ## 0.16.2 — 2026-10-12
 
 No breaking changes.
