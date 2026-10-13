@@ -484,7 +484,9 @@ question the caller answers `approve <call id>` or `deny <call id>`
 ([approval-v1](docs/a2a/approval-v1.md)), and one left unanswered for `--ask-deadline` (10 minutes
 by default) is denied. Any address but loopback is refused unless a bearer token is named:
 `--token-env VAR` for one caller, or `--principal NAME=VAR`, repeatable, for several, each of whom
-sees only the tasks it created and cannot tell another's from one that does not exist. A loopback
+sees only the tasks it created and cannot tell another's from one that does not exist. (A program
+embedding `basis-a2a` may replace the tokens with an `Authenticator` of its own — a gateway's
+signed tokens, say — per [ADR-0036](docs/adr/0036-a-server-may-authenticate-its-own-way.md).) A loopback
 server with no token refuses web pages, so a site open in your browser cannot reach it, but it
 still trusts every local process; `--push` and `--approve prompt` therefore need a token, unless
 `--trust-anonymous-callers` says that trust is meant. A webhook is sent only `http` or `https`,

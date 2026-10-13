@@ -370,12 +370,15 @@ flowchart LR
   before a byte of its body is read. Parts are text, data — handed to the model as JSON — and
   inline files of a textual media type; a file by URL is refused, because the server never
   fetches what a caller names.
-- **Who may call, and what each sees** (ADR-0030 §8). The server holds named bearer tokens; each
-  task records the principal that created it, and every task-scoped method sees only the caller's
-  own, with "not yours" indistinguishable from "not found". A loopback server with no token is one
-  anonymous principal, which refuses web pages but trusts every local process, so push and asking
-  the caller need a token there unless the operator trusts anonymous callers explicitly; a
-  non-loopback bind needs a token. The extended card is served only to an authenticated principal.
+- **Who may call, and what each sees** (ADR-0030 §8, ADR-0036). An `Authenticator` turns each
+  request's head into a principal before its body is read, and declares the card's security
+  schemes; by default it is the server's named bearer tokens, and a server behind a gateway gives
+  its own. Each task records the principal that created it, and every task-scoped method sees only
+  the caller's own, with "not yours" indistinguishable from "not found". A loopback server that
+  authenticates nobody is one anonymous principal, which refuses web pages but trusts every local
+  process, so push and asking the caller need a token there unless the operator trusts anonymous
+  callers explicitly; a non-loopback bind needs a server that authenticates. The extended card is
+  served only to an authenticated principal.
 - **Inbound runs ask the caller or nobody** (ADR-0028 §4, ADR-0030 §7). `InboundApproval` is
   `Never` (the default), `Always`, or `AskCaller`, and has no variant that asks a person at the
   server, because there is none. `AskCaller` parks the turn and moves the task to

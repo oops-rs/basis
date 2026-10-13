@@ -8,6 +8,8 @@
 > and the HTTP+JSON half of §6; gRPC stays deferred there.
 > Applies [`0005-mentra-coevolution-discipline.md`](0005-mentra-coevolution-discipline.md):
 > the client half is mentra's.
+> Amended by [`0036-a-server-may-authenticate-its-own-way.md`](0036-a-server-may-authenticate-its-own-way.md):
+> named bearer tokens are the default authenticator, and a server may give its own (§8).
 
 ## Context
 
