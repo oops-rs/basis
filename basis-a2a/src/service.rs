@@ -71,10 +71,11 @@ use basis_tasks::{Stop, Tasks};
 use futures::stream::BoxStream;
 
 use crate::{
+    authenticator::{Authenticator, Security},
     card::Features,
     config::{
-        AgentIdentity, ExtendedCard, InboundApproval, Principal, PrincipalError, Principals,
-        ServeConfig, Source,
+        AgentIdentity, Custom, ExtendedCard, InboundApproval, Principal, PrincipalError,
+        Principals, ServeConfig, Source,
     },
     index::{Index, Record},
     project::{self, Standing, View, internal},
@@ -119,8 +120,13 @@ pub enum OpenError {
     NotForHostedTasks(&'static str),
     #[error("configure the server's principals: {0}")]
     Principals(#[from] PrincipalError),
+    /// Tokens and an authenticator of the operator's own: the authenticator
+    /// replaces the tokens (ADR-0036), so they would be silently ignored.
+    #[error("this server has both tokens and an authenticator, which replaces them; configure one")]
+    TokensWithAuthenticator,
     /// The spec requires the extended card to be served only to
-    /// authenticated callers, and a server with no token has none.
+    /// authenticated callers, and a server that authenticates nobody has
+    /// none.
     #[error("an extended card needs a token to serve it to; configure one")]
     ExtendedCardWithoutToken,
     /// Push notifications or asking the caller, on a server where every
@@ -143,7 +149,9 @@ struct Inner {
     backend: Backend,
     index: Index,
     identity: AgentIdentity,
-    principals: Principals,
+    authenticator: Arc<dyn Authenticator>,
+    /// What `authenticator` declared when the service opened.
+    security: Option<Security>,
     public_url: Option<String>,
     extended_card: Option<ExtendedCard>,
     /// Present when push notifications are on.
@@ -192,6 +200,7 @@ impl A2aService {
             shell,
             run,
             tokens,
+            authenticator,
             public_url,
             data_dir,
             extended_card,
@@ -206,11 +215,16 @@ impl A2aService {
         if let Source::Hosted { .. } = source {
             refuse_for_hosted(shell, run.is_unset(), approval, data_dir.is_some())?;
         }
-        let principals = Principals::new(tokens)?;
-        if extended_card.is_some() && !principals.any() {
+        let authenticator: Arc<dyn Authenticator> = match authenticator {
+            Some(_) if !tokens.is_empty() => return Err(OpenError::TokensWithAuthenticator),
+            Some(Custom(authenticator)) => authenticator,
+            None => Arc::new(Principals::new(tokens)?),
+        };
+        let security = authenticator.security();
+        if extended_card.is_some() && security.is_none() {
             return Err(OpenError::ExtendedCardWithoutToken);
         }
-        if !principals.any() && !trust_anonymous {
+        if security.is_none() && !trust_anonymous {
             if push_notifications {
                 return Err(OpenError::NeedsToken("push notifications"));
             }
@@ -260,7 +274,8 @@ impl A2aService {
                 backend,
                 index,
                 identity,
-                principals,
+                authenticator,
+                security,
                 public_url,
                 extended_card,
                 push,
@@ -282,8 +297,14 @@ impl A2aService {
         &self.inner.identity
     }
 
-    pub(crate) fn principals(&self) -> &Principals {
-        &self.inner.principals
+    pub(crate) fn authenticator(&self) -> &dyn Authenticator {
+        self.inner.authenticator.as_ref()
+    }
+
+    /// What the card declares a caller must present; `None` when this
+    /// service authenticates nobody.
+    pub(crate) fn security(&self) -> Option<&Security> {
+        self.inner.security.as_ref()
     }
 
     pub(crate) fn extended_card(&self) -> Option<&ExtendedCard> {
@@ -293,7 +314,7 @@ impl A2aService {
     /// What the card may claim: exactly what this service serves.
     pub(crate) fn features(&self) -> Features {
         Features {
-            authenticated: self.inner.principals.any(),
+            security: self.inner.security.clone(),
             extended_card: self.inner.extended_card.is_some(),
             push_notifications: self.inner.push.is_some(),
             ask_caller: self.inner.backend.asks_caller(),

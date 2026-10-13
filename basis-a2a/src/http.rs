@@ -16,7 +16,7 @@ use axum::{
     Extension, Json, Router,
     body::Bytes,
     extract::{DefaultBodyLimit, Query, State},
-    http::{HeaderMap, StatusCode, header},
+    http::HeaderMap,
     middleware,
     response::{
         IntoResponse, Response,
@@ -45,10 +45,11 @@ pub(crate) const MAX_BODY: usize = 512 * 1024;
 /// Why a server could not be bound.
 #[derive(Debug, thiserror::Error)]
 pub enum BindError {
-    /// ADR-0028 §6: an address other machines can reach needs a token.
+    /// ADR-0028 §6: an address other machines can reach needs a token, or
+    /// an authenticator that declares a security scheme.
     #[error(
-        "{0} is reachable from other machines, and this server has no token; configure one, or \
-         bind a loopback address"
+        "{0} is reachable from other machines, and this server authenticates nobody; configure \
+         a token, or bind a loopback address"
     )]
     Unauthenticated(SocketAddr),
     #[error("bind {0}: {1}")]
@@ -73,9 +74,9 @@ pub struct A2aServer {
 
 impl A2aServer {
     /// Binds `address` for `service`. A non-loopback address is refused when
-    /// the service has no token, before anything listens.
+    /// the service authenticates nobody, before anything listens.
     pub async fn bind(address: SocketAddr, service: A2aService) -> Result<Self, BindError> {
-        if !address.ip().is_loopback() && !service.principals().any() {
+        if !address.ip().is_loopback() && service.security().is_none() {
             return Err(BindError::Unauthenticated(address));
         }
         let listener = TcpListener::bind(address)
@@ -240,42 +241,4 @@ pub(crate) fn sse(
     Sse::new(events)
         .keep_alive(KeepAlive::default())
         .into_response()
-}
-
-/// Who sent `headers`, if anyone this server accepts. Checked by the
-/// [`gate`](crate::gate) before any body is read.
-pub(crate) fn authenticate(service: &A2aService, headers: &HeaderMap) -> Option<Principal> {
-    let presented = headers
-        .get(header::AUTHORIZATION)
-        .and_then(|value| value.to_str().ok())
-        .and_then(bearer);
-    service.principals().authenticate(presented)
-}
-
-pub(crate) fn unauthorized() -> Response {
-    (
-        StatusCode::UNAUTHORIZED,
-        [(header::WWW_AUTHENTICATE, "Bearer")],
-    )
-        .into_response()
-}
-
-/// The token in an `Authorization: Bearer <token>` value; the scheme is
-/// case-insensitive, as RFC 7235 has it.
-fn bearer(value: &str) -> Option<&str> {
-    let (scheme, token) = value.trim().split_once(' ')?;
-    scheme.eq_ignore_ascii_case("bearer").then(|| token.trim())
-}
-
-#[cfg(test)]
-mod tests {
-    use super::*;
-
-    #[test]
-    fn a_bearer_value_yields_its_token_whatever_the_schemes_case() {
-        assert_eq!(bearer("Bearer abc"), Some("abc"));
-        assert_eq!(bearer("bearer  abc "), Some("abc"));
-        assert_eq!(bearer("Basic abc"), None);
-        assert_eq!(bearer("Bearer"), None);
-    }
 }

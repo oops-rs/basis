@@ -63,7 +63,12 @@
 //!   every task belongs to the principal that created it, and every
 //!   task-scoped call sees only the caller's own — another's is "not found".
 //!   A loopback server with no token is one anonymous principal, and
-//!   anything but a loopback address needs a [`BearerToken`].
+//!   anything but a loopback address needs a [`BearerToken`]. A server
+//!   behind a gateway that signs a token per request plugs in an
+//!   [`Authenticator`] of its own instead
+//!   ([`ServeConfig::with_authenticator`]): it turns a request's head into a
+//!   [`Principal`] before the body is read, and declares the card's
+//!   security schemes.
 //! - **Parts.** Text, data (handed to the model as JSON) and inline files of
 //!   a textual media type. A file by URL or binary bytes is refused: the
 //!   server never fetches what a caller names.
@@ -95,6 +100,7 @@
 //! # }
 //! ```
 
+mod authenticator;
 mod card;
 mod config;
 mod gate;
@@ -111,6 +117,7 @@ mod service;
 mod stream;
 
 pub use a2a;
+pub use authenticator::{Authenticator, Refusal, RequestHead, Security};
 pub use card::AGENT_CARD_PATH;
 pub use config::{
     AgentIdentity, BearerToken, DEFAULT_LIVE_TASK_QUOTA, DEFAULT_PRINCIPAL, ExtendedCard,

@@ -7,8 +7,9 @@
 //!
 //! 1. **A concurrency limit.** At most [`MAX_IN_FLIGHT`] requests are handled
 //!    at once; one past it is answered `503` at once rather than queued.
-//! 2. **Authentication**, before a byte of the body is read. The public card
-//!    is the one path that needs none.
+//! 2. **Authentication**, before a byte of the body is read, by the
+//!    service's [`Authenticator`] — named tokens unless the operator gave
+//!    another. The public card is the one path that needs none.
 //! 3. **A bounded body read**: at most the body limit, within
 //!    [`BODY_TIMEOUT`], and only as JSON. The handler is then given the body
 //!    already read.
@@ -31,21 +32,23 @@
 //!   page sends its own name.
 //!
 //! [`Principal`]: crate::Principal
+//! [`Authenticator`]: crate::Authenticator
 
 use std::{sync::Arc, time::Duration};
 
 use axum::{
     body::{Body, to_bytes},
     extract::{Request, State},
-    http::{StatusCode, header},
+    http::{HeaderValue, StatusCode, header},
     middleware::Next,
     response::{IntoResponse, Response},
 };
 use tokio::sync::Semaphore;
 
 use crate::{
+    authenticator::{Authenticator, Refusal},
     card::AGENT_CARD_PATH,
-    http::{self, AppState, MAX_BODY},
+    http::{AppState, MAX_BODY},
 };
 
 /// The most requests handled at once. A blocking `SendMessage` holds its
@@ -159,11 +162,14 @@ pub(crate) async fn gate(State(state): State<AppState>, request: Request, next: 
     if request.uri().path() == AGENT_CARD_PATH {
         return next.run(request).await;
     }
-    let Some(caller) = http::authenticate(&state.service, request.headers()) else {
-        return http::unauthorized();
+    let (mut parts, body) = request.into_parts();
+    let authenticator = state.service.authenticator();
+    let caller = match authenticator.authenticate(&parts).await {
+        Ok(caller) => caller,
+        Err(refusal) => return refuse(authenticator, refusal),
     };
-    let declared = request
-        .headers()
+    let declared = parts
+        .headers
         .get(header::CONTENT_LENGTH)
         .and_then(|length| length.to_str().ok())
         .and_then(|length| length.parse::<usize>().ok());
@@ -171,15 +177,14 @@ pub(crate) async fn gate(State(state): State<AppState>, request: Request, next: 
         return too_large();
     }
     let json = is_json(
-        request
-            .headers()
+        parts
+            .headers
             .get(header::CONTENT_TYPE)
             .and_then(|value| value.to_str().ok()),
     );
     if declared.is_some_and(|length| length > 0) && !json {
         return not_json();
     }
-    let (mut parts, body) = request.into_parts();
     let body = match tokio::time::timeout(BODY_TIMEOUT, to_bytes(body, MAX_BODY)).await {
         Ok(Ok(body)) => body,
         // `to_bytes` fails past the limit as well as on a broken read; a
@@ -197,6 +202,23 @@ pub(crate) async fn gate(State(state): State<AppState>, request: Request, next: 
     }
     parts.extensions.insert(caller);
     next.run(Request::from_parts(parts, Body::from(body))).await
+}
+
+/// A refused caller is told only which: `401` with the authenticator's
+/// challenge, or `403`. Neither carries a body.
+fn refuse(authenticator: &dyn Authenticator, refusal: Refusal) -> Response {
+    match refusal {
+        Refusal::Unauthenticated => {
+            let challenge = HeaderValue::from_str(authenticator.challenge())
+                .unwrap_or_else(|_| HeaderValue::from_static("Bearer"));
+            (
+                StatusCode::UNAUTHORIZED,
+                [(header::WWW_AUTHENTICATE, challenge)],
+            )
+                .into_response()
+        }
+        Refusal::Forbidden => StatusCode::FORBIDDEN.into_response(),
+    }
 }
 
 fn not_json() -> Response {

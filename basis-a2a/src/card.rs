@@ -6,17 +6,15 @@
 //! and nothing else, so a capability claimed and not served is a bug a
 //! caller only finds by failing.
 
-use std::collections::HashMap;
-
 use serde_json::{Map, Value, json};
 
 use a2a::{
     A2AError, AgentCapabilities, AgentCard, AgentExtension, AgentInterface, AgentSkill,
-    HttpAuthSecurityScheme, SecurityScheme, TRANSPORT_PROTOCOL_HTTP_JSON,
-    TRANSPORT_PROTOCOL_JSONRPC,
+    TRANSPORT_PROTOCOL_HTTP_JSON, TRANSPORT_PROTOCOL_JSONRPC,
 };
 
 use crate::{
+    authenticator::Security,
     config::{AgentIdentity, ExtendedCard, Principal},
     rest,
     service::{A2aService, APPROVAL_EXTENSION, HOPS_EXTENSION, INPUT_MODES},
@@ -28,15 +26,13 @@ pub const AGENT_CARD_PATH: &str = "/.well-known/agent-card.json";
 /// The only media type served tasks give: an answer is text.
 pub(crate) const TEXT: &str = "text/plain";
 
-/// The scheme name the card's security requirement refers to.
-const BEARER: &str = "bearer";
-
 /// Which optional features a service serves — each is claimed on the card
 /// when, and only when, it is on (ADR-0030 §10).
-#[derive(Debug, Clone, Copy, Default)]
+#[derive(Debug, Clone, Default)]
 pub(crate) struct Features {
-    /// At least one token is configured.
-    pub(crate) authenticated: bool,
+    /// What the authenticator declares a caller must present; `None` when
+    /// it authenticates nobody.
+    pub(crate) security: Option<Security>,
     pub(crate) extended_card: bool,
     pub(crate) push_notifications: bool,
     /// Consequential calls are put to the caller (the approval extension).
@@ -45,7 +41,6 @@ pub(crate) struct Features {
 
 /// The public card, at the well-known path.
 pub(crate) fn build(identity: &AgentIdentity, endpoint: &str, features: Features) -> AgentCard {
-    let authenticated = features.authenticated;
     let skills = if identity.skills.is_empty() {
         vec![AgentSkill {
             id: "general".to_string(),
@@ -60,18 +55,12 @@ pub(crate) fn build(identity: &AgentIdentity, endpoint: &str, features: Features
     } else {
         identity.skills.clone()
     };
-    let (security_schemes, security_requirements) = if authenticated {
-        let scheme = SecurityScheme::HttpAuth(HttpAuthSecurityScheme {
-            scheme: "Bearer".to_string(),
-            description: Some("The token the operator configured for this server.".to_string()),
-            bearer_format: None,
-        });
-        (
-            Some(HashMap::from([(BEARER.to_string(), scheme)])),
-            Some(vec![HashMap::from([(BEARER.to_string(), Vec::new())])]),
-        )
-    } else {
-        (None, None)
+    let (security_schemes, security_requirements) = match &features.security {
+        Some(security) => (
+            Some(security.schemes().clone()),
+            Some(security.requirements().to_vec()),
+        ),
+        None => (None, None),
     };
     AgentCard {
         name: identity.name.clone(),
@@ -86,7 +75,7 @@ pub(crate) fn build(identity: &AgentIdentity, endpoint: &str, features: Features
         capabilities: AgentCapabilities {
             streaming: Some(true),
             push_notifications: Some(features.push_notifications),
-            extensions: extensions(features),
+            extensions: extensions(&features),
             extended_agent_card: Some(features.extended_card),
         },
         default_input_modes: INPUT_MODES.iter().map(|mode| mode.to_string()).collect(),
@@ -102,7 +91,7 @@ pub(crate) fn build(identity: &AgentIdentity, endpoint: &str, features: Features
 }
 
 /// The extensions this server speaks, each declared only when on.
-fn extensions(features: Features) -> Option<Vec<AgentExtension>> {
+fn extensions(features: &Features) -> Option<Vec<AgentExtension>> {
     // Always served: every message is read for it, and a server that reads it
     // is one a caller can tell how deep its chain already is.
     let mut extensions = vec![AgentExtension {
@@ -224,7 +213,23 @@ pub(crate) fn extend(public: &AgentCard, extended: &ExtendedCard) -> AgentCard {
 
 #[cfg(test)]
 mod tests {
+    use std::collections::HashMap;
+
+    use a2a::{HttpAuthSecurityScheme, SecurityScheme};
+
     use super::*;
+    use crate::{authenticator::Authenticator, config::Principals};
+
+    const BEARER: &str = "bearer";
+
+    /// What a server with one token declares.
+    fn token_security() -> Option<Security> {
+        let principal = Principal::new("default").unwrap();
+        let token = crate::BearerToken::new("s3cret").unwrap();
+        Principals::new(vec![(principal, token)])
+            .unwrap()
+            .security()
+    }
 
     #[test]
     fn the_card_advertises_json_rpc_then_http_json_and_only_what_is_served() {
@@ -266,7 +271,7 @@ mod tests {
         };
         let identity = AgentIdentity::new("helper", "Answers questions.").with_skill(skill);
         let features = Features {
-            authenticated: true,
+            security: token_security(),
             ..Features::default()
         };
         let wire = to_wire(&build(&identity, "http://127.0.0.1:1/", features));
@@ -290,11 +295,34 @@ mod tests {
     fn a_token_puts_the_bearer_scheme_on_the_card() {
         let identity = AgentIdentity::new("helper", "Answers questions.");
         let features = Features {
-            authenticated: true,
+            security: token_security(),
             ..Features::default()
         };
         let card = build(&identity, "http://127.0.0.1:1/", features);
         assert!(card.security_schemes.unwrap().contains_key(BEARER));
         assert!(card.security_requirements.unwrap()[0].contains_key(BEARER));
+    }
+
+    #[test]
+    fn the_card_declares_whatever_scheme_the_authenticator_does() {
+        let jwt = SecurityScheme::HttpAuth(HttpAuthSecurityScheme {
+            scheme: "Bearer".into(),
+            description: None,
+            bearer_format: Some("JWT".into()),
+        });
+        let identity = AgentIdentity::new("helper", "Answers questions.");
+        let features = Features {
+            security: Some(Security::required("gateway", jwt)),
+            ..Features::default()
+        };
+        let wire = to_wire(&build(&identity, "http://127.0.0.1:1/", features));
+        assert_eq!(
+            wire["securitySchemes"]["gateway"]["httpAuthSecurityScheme"]["bearerFormat"],
+            "JWT"
+        );
+        assert_eq!(
+            wire["securityRequirements"],
+            json!([{"schemes": {"gateway": {"list": []}}}])
+        );
     }
 }

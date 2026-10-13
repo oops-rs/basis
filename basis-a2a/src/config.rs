@@ -16,7 +16,7 @@ use std::{fmt, path::PathBuf, sync::Arc, time::Duration};
 use basis::{Effort, SystemPrompt};
 use basis_tasks::Approve;
 
-use crate::host::TaskHost;
+use crate::{authenticator::Authenticator, host::TaskHost};
 
 pub(crate) use auth::Principals;
 pub use auth::{BearerToken, DEFAULT_PRINCIPAL, Principal, PrincipalError};
@@ -183,6 +183,17 @@ impl fmt::Debug for Source {
     }
 }
 
+/// An operator's own authenticator, held where `Debug` can print the config
+/// around it.
+#[derive(Clone)]
+pub(crate) struct Custom(pub(crate) Arc<dyn Authenticator>);
+
+impl fmt::Debug for Custom {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.write_str("Authenticator(..)")
+    }
+}
+
 /// How many unsettled tasks one principal may have at once when the
 /// operator names no other number. The workspace holds at most
 /// `basis_tasks::MAX_TASKS` (1024), settled ones included; a quota per
@@ -198,6 +209,7 @@ pub struct ServeConfig {
     pub(crate) shell: bool,
     pub(crate) run: RunDefaults,
     pub(crate) tokens: Vec<(Principal, BearerToken)>,
+    pub(crate) authenticator: Option<Custom>,
     pub(crate) public_url: Option<String>,
     pub(crate) data_dir: Option<PathBuf>,
     pub(crate) extended_card: Option<ExtendedCard>,
@@ -252,6 +264,7 @@ impl ServeConfig {
             shell: false,
             run: RunDefaults::default(),
             tokens: Vec::new(),
+            authenticator: None,
             public_url: None,
             data_dir: None,
             extended_card: None,
@@ -307,6 +320,23 @@ impl ServeConfig {
         Self { tokens, ..self }
     }
 
+    /// Decides who every request is from with `authenticator` instead of
+    /// this server's named tokens (ADR-0036), and declares on the card the
+    /// security it says a caller must present. Every principal it returns
+    /// owns its tasks apart from every other, as a token's does.
+    ///
+    /// It replaces the tokens rather than joining them:
+    /// [`A2aService::open`](crate::A2aService::open) refuses a config with
+    /// both. An authenticator whose [`security`](Authenticator::security) is
+    /// `None` is held to what a tokenless server is.
+    #[must_use]
+    pub fn with_authenticator(self, authenticator: Arc<dyn Authenticator>) -> Self {
+        Self {
+            authenticator: Some(Custom(authenticator)),
+            ..self
+        }
+    }
+
     /// The URL callers reach the JSON-RPC endpoint at, as advertised on the
     /// card — what a reverse proxy terminating TLS in front of this server
     /// exposes. Defaults to `http://<bound address>/`. The HTTP+JSON interface
@@ -320,7 +350,8 @@ impl ServeConfig {
     }
 
     /// Serves `extended` to authenticated callers and declares it on the
-    /// public card (ADR-0030 §5). Needs at least one token:
+    /// public card (ADR-0030 §5). Needs at least one token, or an
+    /// authenticator that declares a scheme:
     /// [`A2aService::open`](crate::A2aService::open) refuses an extended card
     /// on a server nobody authenticates to, since nobody could be served it.
     #[must_use]

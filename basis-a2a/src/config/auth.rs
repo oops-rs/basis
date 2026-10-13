@@ -4,8 +4,16 @@
 //! given is the [`Principal`] every task it creates is recorded under. One
 //! token that sees every task is a single-tenant server; several names make
 //! one served agent shareable by parties that cannot see each other's work.
+//! [`Principals`] is the [`Authenticator`] a server uses unless the operator
+//! gives it another (ADR-0036).
 
 use std::fmt;
+
+use a2a::{HttpAuthSecurityScheme, SecurityScheme};
+use axum::http::header;
+use futures::future::BoxFuture;
+
+use crate::authenticator::{Authenticator, Refusal, RequestHead, Security};
 
 /// The principal every task belongs to when the server has exactly one
 /// caller: the single [`ServeConfig::with_token`](crate::ServeConfig::with_token)
@@ -58,8 +66,9 @@ impl fmt::Debug for BearerToken {
     }
 }
 
-/// Who a request came from: the name of the token it carried, or the
-/// anonymous caller of a loopback server with no token.
+/// Who a request came from: the name its authenticator gave it — the name
+/// of the token it carried, by default — or the anonymous caller of a
+/// loopback server with no token.
 ///
 /// Tasks are owned by name. Whether the caller proved it with a token is
 /// kept beside the name because one operation — the extended card — is for
@@ -73,15 +82,16 @@ pub struct Principal {
 impl Principal {
     /// A principal a host has authenticated by means of its own, for calling
     /// [`A2aService`](crate::A2aService) directly. `None` for a name that is
-    /// not 1–64 ASCII letters, digits, `-`, `_` or `.` — names are written
-    /// into the task index and printed in logs, so they are kept plain.
+    /// not 1–64 ASCII letters, digits, `-`, `_`, `.` or `:` — names are
+    /// written into the task index and printed in logs, so they are kept
+    /// plain. No name is ever part of a path.
     pub fn new(name: impl Into<String>) -> Option<Self> {
         let name = name.into();
         let plain = !name.is_empty()
             && name.len() <= 64
-            && name
-                .bytes()
-                .all(|byte| byte.is_ascii_alphanumeric() || matches!(byte, b'-' | b'_' | b'.'));
+            && name.bytes().all(|byte| {
+                byte.is_ascii_alphanumeric() || matches!(byte, b'-' | b'_' | b'.' | b':')
+            });
         plain.then_some(Self {
             name,
             authenticated: true,
@@ -124,7 +134,11 @@ pub enum PrincipalError {
     SharedToken(String, String),
 }
 
-/// Every token a server accepts, each under its principal's name.
+/// The scheme name the card's security requirement refers to.
+pub(crate) const BEARER: &str = "bearer";
+
+/// Every token a server accepts, each under its principal's name: the
+/// default [`Authenticator`].
 #[derive(Debug, Clone, Default)]
 pub(crate) struct Principals {
     tokens: Vec<(Principal, BearerToken)>,
@@ -148,8 +162,7 @@ impl Principals {
         Ok(Self { tokens })
     }
 
-    /// Whether any token is configured — what a non-loopback bind requires
-    /// and what the card's security scheme declares.
+    /// Whether any token is configured.
     pub(crate) fn any(&self) -> bool {
         !self.tokens.is_empty()
     }
@@ -172,6 +185,43 @@ impl Principals {
         }
         found
     }
+}
+
+impl Authenticator for Principals {
+    fn authenticate<'a>(
+        &'a self,
+        head: &'a RequestHead,
+    ) -> BoxFuture<'a, Result<Principal, Refusal>> {
+        let presented = head
+            .headers
+            .get(header::AUTHORIZATION)
+            .and_then(|value| value.to_str().ok())
+            .and_then(bearer);
+        let caller = Principals::authenticate(self, presented).ok_or(Refusal::Unauthenticated);
+        Box::pin(async move { caller })
+    }
+
+    fn security(&self) -> Option<Security> {
+        self.any().then(|| {
+            Security::required(
+                BEARER,
+                SecurityScheme::HttpAuth(HttpAuthSecurityScheme {
+                    scheme: "Bearer".to_string(),
+                    description: Some(
+                        "The token the operator configured for this server.".to_string(),
+                    ),
+                    bearer_format: None,
+                }),
+            )
+        })
+    }
+}
+
+/// The token in an `Authorization: Bearer <token>` value; the scheme is
+/// case-insensitive, as RFC 7235 has it.
+fn bearer(value: &str) -> Option<&str> {
+    let (scheme, token) = value.trim().split_once(' ')?;
+    scheme.eq_ignore_ascii_case("bearer").then(|| token.trim())
 }
 
 #[cfg(test)]
@@ -212,9 +262,18 @@ mod tests {
     #[test]
     fn a_principal_name_is_plain() {
         assert!(Principal::new("team-a_1.x").is_some());
+        assert!(Principal::new("anon:dev_01J9").is_some());
         for bad in ["", "a b", "a/b", "ü", &"x".repeat(65)] {
             assert!(Principal::new(bad).is_none(), "{bad:?}");
         }
+    }
+
+    #[test]
+    fn a_bearer_value_yields_its_token_whatever_the_schemes_case() {
+        assert_eq!(bearer("Bearer abc"), Some("abc"));
+        assert_eq!(bearer("bearer  abc "), Some("abc"));
+        assert_eq!(bearer("Basic abc"), None);
+        assert_eq!(bearer("Bearer"), None);
     }
 
     #[test]
