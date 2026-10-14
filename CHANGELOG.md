@@ -5,6 +5,24 @@ All six crates — `basis`, `basis-host`, `basis-tasks`, `basis-acp`,
 live in `docs/adr/`; this file says what changed for someone upgrading.
 Releases before 0.15.0 are described by their tags and ADRs only.
 
+## 0.18.1 — 2026-10-14
+
+No breaking changes.
+
+### A delegation carries parameters ([ADR-0040](docs/adr/0040-a-delegation-carries-parameters.md))
+
+- `spawn` takes an optional `metadata` object beside `input`: parameters for
+  the remote agent a task is handed to, as `{"project": "lama"}` when the
+  agent's card asks for some. Over A2A they are the request's `metadata`
+  (`params.metadata`), beside the message; the message's own metadata stays
+  the hops extension's. Offered in the schema only when there are remote
+  agents.
+- Only `@<agent> <task>` takes it: a command, a local task, a wait and a name
+  that is a teammate here refuse it, saying how to use it.
+- The authorization preview shows it under `metadata`, absent when the call
+  gave none. `peer::Message` gains `metadata` and `with_metadata`.
+- Needs mentra 0.30.1.
+
 ## 0.18.0 — 2026-10-14
 
 ### The core speaks to a peer ([ADR-0038](docs/adr/0038-the-core-speaks-to-a-peer.md))
