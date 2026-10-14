@@ -6,7 +6,7 @@ use std::sync::atomic::{AtomicUsize, Ordering};
 use super::*;
 use crate::a2a::configured::A2A_RETRY_BACKOFF;
 use crate::a2a::configured::testing::{agent_at, free_port, serve_card};
-use crate::a2a::resolver::AgentResolver;
+use crate::agents::AgentResolver;
 
 /// A set whose change hook counts how often it was told the set changed.
 async fn counted(port: u16) -> (ConfiguredAgents, Arc<AtomicUsize>) {

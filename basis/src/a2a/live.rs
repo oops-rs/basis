@@ -21,9 +21,9 @@ use super::{
     A2aAgent, A2aConfig, A2aError, A2aReload, DEFAULT_GLOBAL_A2A_FILE,
     configured::ConfiguredAgents,
     remote::RemoteAgents,
-    resolver::{AgentResolver, OnChange},
     watch::{self, A2aWatch, A2aWatchError, Stamp},
 };
+use crate::agents::{AgentResolver, OnChange};
 use crate::{event::ContextFile, runtime::Runtime};
 
 /// What a workspace open knows about its remote agents: where it looked, what

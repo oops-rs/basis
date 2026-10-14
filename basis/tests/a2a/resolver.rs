@@ -5,7 +5,7 @@
 use std::sync::{Arc, Mutex};
 
 use basis::{
-    AgentResolver, Resolved, Route, Taught, TaughtAgent, Unresolved, a2a::OnChange, async_trait,
+    AgentResolver, Resolved, Route, Taught, TaughtAgent, Unresolved, agents::OnChange, async_trait,
 };
 
 use crate::support::{CardServer, a2a_file, offline_runtime, pinned, write};

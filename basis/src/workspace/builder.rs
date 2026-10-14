@@ -27,7 +27,8 @@ use std::{
 use mentra::{ModelInfo, ModelSelector};
 
 #[cfg(feature = "a2a")]
-use crate::a2a::{A2aConfig, AgentResolver, live::LiveA2a};
+use crate::a2a::{A2aConfig, live::LiveA2a};
+use crate::agents::AgentResolver;
 #[cfg(feature = "mcp")]
 use crate::mcp::{self, McpConfig, connections::McpConnections};
 use crate::{

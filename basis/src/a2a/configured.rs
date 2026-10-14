@@ -46,10 +46,8 @@ use std::{
 use async_trait::async_trait;
 use mentra::a2a::{A2aClient, A2aError as ClientError};
 
-use super::{
-    A2aAgent,
-    resolver::{AgentResolver, OnChange, Resolved, Route, Taught, TaughtAgent, Unresolved},
-};
+use super::A2aAgent;
+use crate::agents::{AgentResolver, OnChange, Resolved, Route, Taught, TaughtAgent, Unresolved};
 
 /// How long an unreachable agent is left alone after a connect attempt
 /// before `@<agent>` tries it again (ADR-0031 §2).

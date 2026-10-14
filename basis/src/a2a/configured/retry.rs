@@ -17,7 +17,7 @@ use std::{
 use mentra::a2a::A2aClient;
 
 use super::{ConfiguredAgents, RemoteAgent, Roster};
-use crate::a2a::resolver::{Resolved, Route, Unresolved};
+use crate::agents::{Resolved, Route, Unresolved};
 
 impl RemoteAgent {
     /// How long until this agent is due a retry; zero when it is due now.

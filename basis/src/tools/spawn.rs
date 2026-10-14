@@ -454,7 +454,7 @@ impl SpawnTool {
         let Some(agents) = self.remote_agents_of(agent_id) else {
             return Ok(None);
         };
-        if agents.route(name) == crate::a2a::Route::Unknown {
+        if agents.route(name) == crate::agents::Route::Unknown {
             return Ok(None);
         }
         remote::authorize(&agents, name)?;

@@ -11,9 +11,9 @@
 //! # A name is resolved
 //!
 //! ADR-0037: what this module reads from files is one way to answer
-//! `@<name>`. A host may install an [`AgentResolver`] of its own
+//! `@<name>`. A host may install an [`AgentResolver`](crate::agents::AgentResolver) of its own
 //! ([`WorkspaceBuilder::with_agent_resolver`](crate::WorkspaceBuilder::with_agent_resolver)),
-//! asked before the configured set; [`resolver`] has the contract. Everything
+//! asked before the configured set; [`crate::agents`] has the contract. Everything
 //! below describes the configured set.
 //!
 //! # The set is live
@@ -86,7 +86,6 @@ mod file;
 pub(crate) mod live;
 mod reload;
 pub(crate) mod remote;
-pub mod resolver;
 mod watch;
 
 use std::path::{Path, PathBuf};
@@ -99,7 +98,6 @@ pub use configured::A2A_RETRY_BACKOFF;
 pub use mentra::a2a::{A2aAgentConfig, A2aLimits};
 pub use mentra::mcp::SecretString;
 pub use reload::A2aReload;
-pub use resolver::{AgentResolver, OnChange, Resolved, Route, Taught, TaughtAgent, Unresolved};
 pub use watch::{A2aWatch, A2aWatchError, DEFAULT_A2A_WATCH_INTERVAL};
 
 /// The URI of basis's hops extension (`docs/a2a/hops-v1.md`, ADR-0030 §9):

@@ -46,7 +46,7 @@ mod conversation;
 
 use std::{path::PathBuf, sync::Arc};
 
-use super::resolver::{AgentResolver, Resolved, Route, Taught, Unresolved};
+use crate::agents::{AgentResolver, Resolved, Route, Taught, Unresolved};
 
 pub(crate) use conversation::{Conversation, Outstanding, Remembered, Waiting, forget};
 

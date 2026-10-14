@@ -272,40 +272,43 @@ async fn a_reload_keeps_every_conversation_whatever_it_did_to_the_agent() {
 struct Registry {
     name: &'static str,
     port: u16,
-    hook: std::sync::Mutex<Option<crate::a2a::OnChange>>,
+    hook: std::sync::Mutex<Option<crate::agents::OnChange>>,
 }
 
 #[async_trait::async_trait]
-impl crate::a2a::AgentResolver for Registry {
-    async fn resolve(&self, name: &str) -> Result<crate::a2a::Resolved, crate::a2a::Unresolved> {
+impl crate::agents::AgentResolver for Registry {
+    async fn resolve(
+        &self,
+        name: &str,
+    ) -> Result<crate::agents::Resolved, crate::agents::Unresolved> {
         if name != self.name {
-            return Err(crate::a2a::Unresolved::Unknown);
+            return Err(crate::agents::Unresolved::Unknown);
         }
         let client = mentra::a2a::A2aClient::connect(agent_at(name, self.port).config())
             .await
             .map(Arc::new)
-            .map_err(|error| crate::a2a::Unresolved::Unreachable {
+            .map_err(|error| crate::agents::Unresolved::Unreachable {
                 error: error.to_string(),
                 retry_in: None,
             })?;
-        Ok(crate::a2a::Resolved::new(client, format!("team/{name}")).with_id("agt_1"))
+        Ok(crate::agents::Resolved::new(client, format!("team/{name}")).with_id("agt_1"))
     }
 
-    fn route(&self, name: &str) -> crate::a2a::Route {
+    fn route(&self, name: &str) -> crate::agents::Route {
         if name == self.name {
-            crate::a2a::Route::Known
+            crate::agents::Route::Known
         } else {
-            crate::a2a::Route::Unknown
+            crate::agents::Route::Unknown
         }
     }
 
-    fn taught(&self) -> crate::a2a::Taught {
-        crate::a2a::Taught::default()
-            .with_agent(crate::a2a::TaughtAgent::new(self.name))
+    fn taught(&self) -> crate::agents::Taught {
+        crate::agents::Taught::default()
+            .with_agent(crate::agents::TaughtAgent::new(self.name))
             .with_note("`@<team>/<agent>` reaches any agent in the registry.")
     }
 
-    fn on_change(&self, hook: crate::a2a::OnChange) {
+    fn on_change(&self, hook: crate::agents::OnChange) {
         *self.hook.lock().unwrap() = Some(hook);
     }
 }
@@ -313,7 +316,7 @@ impl crate::a2a::AgentResolver for Registry {
 #[tokio::test]
 async fn the_hosts_resolver_is_asked_first_and_an_unknown_name_falls_through() {
     use crate::a2a::configured::testing::{free_port, serve_card};
-    use crate::a2a::{Route, Unresolved};
+    use crate::agents::{Route, Unresolved};
 
     let port = free_port();
     serve_card(port);
@@ -325,8 +328,8 @@ async fn the_hosts_resolver_is_asked_first_and_an_unknown_name_falls_through() {
     let configured = Arc::new(ConfiguredAgents::connect(vec![agent_at("nous", port)]).await);
     let agents = RemoteAgents::over(
         vec![
-            Arc::clone(&registry) as Arc<dyn crate::a2a::AgentResolver>,
-            Arc::clone(&configured) as Arc<dyn crate::a2a::AgentResolver>,
+            Arc::clone(&registry) as Arc<dyn crate::agents::AgentResolver>,
+            Arc::clone(&configured) as Arc<dyn crate::agents::AgentResolver>,
         ],
         None,
     );

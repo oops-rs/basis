@@ -61,8 +61,9 @@ name is a label; every agent it reaches has a permanent id.**
 2. **What crosses the seam.** A name in; a connected client, the agent's id,
    its canonical name and the endpoint out. Connecting, caching, credentials
    and retries are the resolver's. basis holds the client for the whole
-   exchange (ADR-0031 §6 unchanged). The trait, behind the default-on `a2a`
-   feature in `basis::a2a`:
+   exchange (ADR-0031 §6 unchanged). The trait, in `basis::agents` — naming
+   is `spawn`'s, not the wire's; the module needs the default-on `a2a`
+   feature only because the answer is mentra's A2A client:
 
    ```rust
    #[async_trait]

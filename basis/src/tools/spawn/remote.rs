@@ -23,7 +23,7 @@ use serde_json::{Value, json};
 use super::{describe::listed, no_remote_agents};
 use crate::a2a::HOPS_EXTENSION;
 use crate::a2a::remote::{Conversation, Outstanding, Remembered, RemoteAgents, Waiting};
-use crate::a2a::resolver::{Resolved, Route, Unresolved};
+use crate::agents::{Resolved, Route, Unresolved};
 
 /// Whether `@<name>` can go anywhere, asked in the preview — before the
 /// approver, and without waiting on the network (ADR-0037 §4).

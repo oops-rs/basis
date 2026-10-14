@@ -80,13 +80,16 @@ async fn the_description_follows_the_set_from_the_next_capture_on() {
 struct OpenEnded;
 
 #[async_trait::async_trait]
-impl crate::a2a::AgentResolver for OpenEnded {
-    async fn resolve(&self, _name: &str) -> Result<crate::a2a::Resolved, crate::a2a::Unresolved> {
-        Err(crate::a2a::Unresolved::Unknown)
+impl crate::agents::AgentResolver for OpenEnded {
+    async fn resolve(
+        &self,
+        _name: &str,
+    ) -> Result<crate::agents::Resolved, crate::agents::Unresolved> {
+        Err(crate::agents::Unresolved::Unknown)
     }
 
-    fn taught(&self) -> crate::a2a::Taught {
-        crate::a2a::Taught::default()
+    fn taught(&self) -> crate::agents::Taught {
+        crate::agents::Taught::default()
             .with_note("`@<team>/<agent>` reaches any agent in the company registry.")
     }
 }
