@@ -4,7 +4,7 @@
 //! order: the one a host installs
 //! ([`WorkspaceBuilder::with_agent_resolver`](crate::WorkspaceBuilder::with_agent_resolver)),
 //! then the set its files configure (`.basis/a2a.json`, the global file, the
-//! host-supplied list — [`super::configured`]). A resolver that does not know
+//! host-supplied list — `configured`, inside this module). A resolver that does not know
 //! a name says [`Unresolved::Unknown`] and the next one is asked; the first
 //! other answer stands.
 //!

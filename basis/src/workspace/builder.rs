@@ -27,7 +27,7 @@ use std::{
 use mentra::{ModelInfo, ModelSelector};
 
 #[cfg(feature = "a2a")]
-use crate::a2a::{A2aConfig, live::LiveA2a};
+use crate::a2a::{A2aConfig, AgentResolver, live::LiveA2a};
 #[cfg(feature = "mcp")]
 use crate::mcp::{self, McpConfig, connections::McpConnections};
 use crate::{
@@ -87,6 +87,10 @@ pub struct WorkspaceBuilder {
     mcp: McpConfig,
     #[cfg(feature = "a2a")]
     a2a: A2aConfig,
+    /// The host's own answer to `@<name>`, asked before the configured set
+    /// (ADR-0037 §1). `None` for most workspaces.
+    #[cfg(feature = "a2a")]
+    agent_resolver: Option<Arc<dyn AgentResolver>>,
     templates: TemplatesConfig,
     hooks: HooksConfig,
     tools: ToolsConfig,
@@ -148,6 +152,13 @@ impl std::fmt::Debug for WorkspaceBuilder {
             .field("tools", &self.tools)
             .field("host_tools", &self.host_tools.len())
             .field("shell", &self.shell)
+            .field("agent_resolver", &{
+                #[cfg(feature = "a2a")]
+                let installed = self.agent_resolver.is_some();
+                #[cfg(not(feature = "a2a"))]
+                let installed = false;
+                installed
+            })
             .field("compaction", &self.compaction)
             .finish_non_exhaustive()
     }
@@ -181,6 +192,8 @@ impl WorkspaceBuilder {
             mcp: McpConfig::default(),
             #[cfg(feature = "a2a")]
             a2a: A2aConfig::default(),
+            #[cfg(feature = "a2a")]
+            agent_resolver: None,
             templates: TemplatesConfig::default(),
             hooks: HooksConfig::default(),
             tools: ToolsConfig::default(),
@@ -451,6 +464,35 @@ impl WorkspaceBuilder {
     #[cfg(feature = "a2a")]
     pub fn with_a2a(self, a2a: A2aConfig) -> Self {
         Self { a2a, ..self }
+    }
+
+    /// Lets the host answer `@<name>` itself (ADR-0037).
+    ///
+    /// The resolver is asked before the set this workspace's files configure
+    /// — [`with_a2a`](Self::with_a2a), `.basis/a2a.json`, the global
+    /// `a2a.json` — and the first answer other than *unknown* stands, so a
+    /// host's registry outranks a file by name, as a supplied agent already
+    /// does. [`without_discovery`](Self::without_discovery) leaves the host's
+    /// resolver alone with whatever it supplied in code.
+    ///
+    /// What the resolver hands back is a connected client and who the agent
+    /// is; connecting, caching, credentials and retries are its own. basis
+    /// keeps the conversation with each agent it resolves, keyed by the id
+    /// the resolver gave, and `spawn` teaches what the resolver says it
+    /// teaches — the names it can list, and a sentence for those it cannot.
+    /// See [`AgentResolver`] for the contract, and [`crate::a2a`] for what
+    /// the configured set does with the same questions.
+    ///
+    /// The resolver is this workspace's: a sibling open of the same
+    /// directory with none installed reaches only what its own files
+    /// configure (ADR-0029 §3).
+    #[cfg(feature = "a2a")]
+    #[must_use]
+    pub fn with_agent_resolver(self, resolver: Arc<dyn AgentResolver>) -> Self {
+        Self {
+            agent_resolver: Some(resolver),
+            ..self
+        }
     }
 
     pub fn with_templates(self, templates: TemplatesConfig) -> Self {
@@ -935,7 +977,14 @@ impl WorkspaceBuilder {
         // sources this open did.
         #[cfg(feature = "a2a")]
         let a2a = Arc::new(
-            LiveA2a::connect(path.clone(), self.a2a, a2a_discovered, &runtime, None).await,
+            LiveA2a::connect(
+                path.clone(),
+                self.a2a,
+                a2a_discovered,
+                &runtime,
+                self.agent_resolver,
+            )
+            .await,
         );
 
         Ok(Workspace {

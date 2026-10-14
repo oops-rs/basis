@@ -12,6 +12,7 @@
 #![cfg(feature = "a2a")]
 
 mod live;
+mod resolver;
 mod routing;
 mod support;
 mod teaching;

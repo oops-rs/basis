@@ -75,3 +75,32 @@ async fn the_description_follows_the_set_from_the_next_capture_on() {
         "removing the last agent takes the paragraph away again"
     );
 }
+
+/// A resolver over names it cannot list, teaching a sentence instead.
+struct OpenEnded;
+
+#[async_trait::async_trait]
+impl crate::a2a::AgentResolver for OpenEnded {
+    async fn resolve(&self, _name: &str) -> Result<crate::a2a::Resolved, crate::a2a::Unresolved> {
+        Err(crate::a2a::Unresolved::Unknown)
+    }
+
+    fn taught(&self) -> crate::a2a::Taught {
+        crate::a2a::Taught::default()
+            .with_note("`@<team>/<agent>` reaches any agent in the company registry.")
+    }
+}
+
+#[test]
+fn a_resolver_that_cannot_list_its_names_teaches_its_note_instead() {
+    let set = Arc::new(RemoteAgents::over(vec![Arc::new(OpenEnded)], None));
+
+    let copy = SpawnTool::new().for_remote_agents(&set);
+    let text = described(&copy);
+
+    assert!(text.contains("`@<agent> <task>`"), "the grammar: {text}");
+    assert!(text.contains("company registry"), "the note: {text}");
+    assert!(!text.contains("Remote agents:"), "nothing to list: {text}");
+    let schema = copy.descriptor().provider.input_schema.to_string();
+    assert!(schema.contains("@<agent> <task>"), "{schema}");
+}

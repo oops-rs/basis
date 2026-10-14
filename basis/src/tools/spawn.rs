@@ -76,7 +76,7 @@ use mentra::tool::{
 };
 use serde_json::{Value, json};
 
-use describe::{Taught, description, input_schema, listed};
+use describe::{Remote, Taught, description, input_schema, listed};
 use parse::{Mode, Spawn, parse};
 
 // A guard that has to know whether a `spawn` call is a command must not
@@ -309,26 +309,30 @@ impl SpawnTool {
 
     /// The remote agents this copy teaches, as its resolvers teach them now
     /// (ADR-0037 §7): each with what its card says, or marked unreachable
-    /// when its card could not be fetched.
+    /// when its card could not be fetched, and a resolver's note about the
+    /// names it cannot list.
     #[cfg(feature = "a2a")]
-    fn taught(&self) -> Vec<Taught> {
+    fn taught(&self) -> Remote {
         let Some(remote) = &self.remote else {
-            return Vec::new();
+            return Remote::default();
         };
-        remote
-            .taught()
-            .agents
-            .into_iter()
-            .map(|agent| Taught {
-                name: agent.name,
-                summary: agent.summary,
-            })
-            .collect()
+        let taught = remote.taught();
+        Remote {
+            agents: taught
+                .agents
+                .into_iter()
+                .map(|agent| Taught {
+                    name: agent.name,
+                    summary: agent.summary,
+                })
+                .collect(),
+            note: taught.note,
+        }
     }
 
     #[cfg(not(feature = "a2a"))]
-    fn taught(&self) -> Vec<Taught> {
-        Vec::new()
+    fn taught(&self) -> Remote {
+        Remote::default()
     }
 
     /// The same copy, for an agent whose remote conversations are kept on disk

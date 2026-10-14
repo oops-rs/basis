@@ -109,14 +109,20 @@ impl RemoteAgents {
         Err(Unresolved::Unknown)
     }
 
-    /// What every resolver teaches, strongest first: the agents concatenated,
-    /// the notes joined.
+    /// What every resolver teaches, strongest first: the agents concatenated
+    /// — one entry per name, the first resolver's, since that is the one a
+    /// call reaches — and the notes joined.
     pub(crate) fn taught(&self) -> Taught {
         let mut taught = Taught::default();
         let mut notes = Vec::new();
+        let mut seen = std::collections::BTreeSet::new();
         for resolver in &self.resolvers {
             let each = resolver.taught();
-            taught.agents.extend(each.agents);
+            taught.agents.extend(
+                each.agents
+                    .into_iter()
+                    .filter(|agent| seen.insert(agent.name.clone())),
+            );
             notes.extend(each.note);
         }
         if !notes.is_empty() {

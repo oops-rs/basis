@@ -20,13 +20,17 @@ use crate::{
 use crate::PreparedRun;
 
 impl Workspace {
-    /// The remote A2A agents this workspace configures now, by name — each
-    /// one a target the model reaches as `spawn "@<name> <task>"` (ADR-0029).
-    /// Verbatim: a remote agent is not a tool on the shared registry, so
-    /// nothing is claimed and no name is suffixed.
+    /// The remote A2A agents this workspace can name now — each one a target
+    /// the model reaches as `spawn "@<name> <task>"` (ADR-0029). Verbatim: a
+    /// remote agent is not a tool on the shared registry, so nothing is
+    /// claimed and no name is suffixed.
     ///
-    /// Every configured agent is listed, reachable or not, so a host can see
-    /// what the workspace asked for. Live: after a
+    /// What the host's resolver teaches comes first
+    /// ([`WorkspaceBuilder::with_agent_resolver`](crate::WorkspaceBuilder::with_agent_resolver),
+    /// ADR-0037), then every configured agent, reachable or not, so a host
+    /// can see what the workspace asked for; one name is listed once, under
+    /// the resolver that answers it. A resolver over names it cannot list
+    /// adds nothing here. Live: after a
     /// [`reload_a2a`](Self::reload_a2a) — or a change the
     /// [`watch_a2a`](Self::watch_a2a) poll picked up — it is the new set.
     /// Names only, for [`mcp_servers`](Self::mcp_servers)'s reason: nothing

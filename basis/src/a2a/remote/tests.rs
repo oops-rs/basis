@@ -266,3 +266,102 @@ async fn a_reload_keeps_every_conversation_whatever_it_did_to_the_agent() {
         working()
     );
 }
+
+/// A host's resolver: knows one name, connects it to a card server, and
+/// records the change hook it was given.
+struct Registry {
+    name: &'static str,
+    port: u16,
+    hook: std::sync::Mutex<Option<crate::a2a::OnChange>>,
+}
+
+#[async_trait::async_trait]
+impl crate::a2a::AgentResolver for Registry {
+    async fn resolve(&self, name: &str) -> Result<crate::a2a::Resolved, crate::a2a::Unresolved> {
+        if name != self.name {
+            return Err(crate::a2a::Unresolved::Unknown);
+        }
+        let client = mentra::a2a::A2aClient::connect(agent_at(name, self.port).config())
+            .await
+            .map(Arc::new)
+            .map_err(|error| crate::a2a::Unresolved::Unreachable {
+                error: error.to_string(),
+                retry_in: None,
+            })?;
+        Ok(crate::a2a::Resolved::new(client, format!("team/{name}")).with_id("agt_1"))
+    }
+
+    fn route(&self, name: &str) -> crate::a2a::Route {
+        if name == self.name {
+            crate::a2a::Route::Known
+        } else {
+            crate::a2a::Route::Unknown
+        }
+    }
+
+    fn taught(&self) -> crate::a2a::Taught {
+        crate::a2a::Taught::default()
+            .with_agent(crate::a2a::TaughtAgent::new(self.name))
+            .with_note("`@<team>/<agent>` reaches any agent in the registry.")
+    }
+
+    fn on_change(&self, hook: crate::a2a::OnChange) {
+        *self.hook.lock().unwrap() = Some(hook);
+    }
+}
+
+#[tokio::test]
+async fn the_hosts_resolver_is_asked_first_and_an_unknown_name_falls_through() {
+    use crate::a2a::configured::testing::{free_port, serve_card};
+    use crate::a2a::{Route, Unresolved};
+
+    let port = free_port();
+    serve_card(port);
+    let registry = Arc::new(Registry {
+        name: "reviewer",
+        port,
+        hook: std::sync::Mutex::new(None),
+    });
+    let configured = Arc::new(ConfiguredAgents::connect(vec![agent_at("nous", port)]).await);
+    let agents = RemoteAgents::over(
+        vec![
+            Arc::clone(&registry) as Arc<dyn crate::a2a::AgentResolver>,
+            Arc::clone(&configured) as Arc<dyn crate::a2a::AgentResolver>,
+        ],
+        None,
+    );
+
+    let resolved = agents
+        .resolve("reviewer")
+        .await
+        .expect("the registry knows it");
+    assert_eq!(resolved.id, "agt_1", "the id the resolver gave");
+    assert_eq!(
+        resolved.name, "team/reviewer",
+        "the canonical name it expanded"
+    );
+    assert_eq!(agents.route("reviewer"), Route::Known);
+
+    let through = agents
+        .resolve("nous")
+        .await
+        .expect("the file configures it");
+    assert_eq!(through.id, "nous", "a configured agent's id is its name");
+    assert_eq!(agents.route("nous"), Route::Known);
+
+    assert!(matches!(
+        agents.resolve("nobody").await,
+        Err(Unresolved::Unknown)
+    ));
+    assert_eq!(agents.route("nobody"), Route::Unknown);
+
+    assert_eq!(
+        agents.names(),
+        ["reviewer", "nous"],
+        "taught names are the host's first"
+    );
+    assert_eq!(
+        agents.taught().note.as_deref(),
+        Some("`@<team>/<agent>` reaches any agent in the registry.")
+    );
+}
