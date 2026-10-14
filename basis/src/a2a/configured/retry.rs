@@ -48,7 +48,7 @@ impl RemoteAgent {
     /// endpoint is the configuration's fingerprint rather than the URL, so a
     /// record written before this resolver existed still reads the same.
     fn resolved(&self, client: Arc<A2aClient>) -> Resolved {
-        Resolved::new(client, self.name()).with_endpoint(self.agent.endpoint())
+        Resolved::over_a2a(client, self.name()).with_endpoint(self.agent.endpoint())
     }
 }
 

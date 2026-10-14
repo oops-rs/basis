@@ -7,6 +7,25 @@ Releases before 0.15.0 are described by their tags and ADRs only.
 
 ## Unreleased
 
+### The core speaks to a peer ([ADR-0038](docs/adr/0038-the-core-speaks-to-a-peer.md))
+
+- Naming is core, A2A is a feature. `basis::agents` — `AgentResolver`, the
+  resolver chain, the conversation record and `spawn`'s whole `@<name>`
+  path — needs no cargo feature. A resolver answers with `Resolved::new(peer,
+  name, endpoint)`, where `peer` is any `Arc<dyn Peer>`: one method hands a
+  `Request` over within `ExchangeBounds` and returns an `Outcome` (replied,
+  finished, working, needs input, needs authorization, failed) or a
+  `PeerError`; one reports the output cap. The decision table in `spawn` is
+  written against those and nothing else.
+- `basis::a2a::A2aPeer` is mentra's client as a peer — the exchange, the
+  hops extension, the framing — and `Resolved::over_a2a(client, name)` is the
+  one-line way a host's resolver uses it. The `a2a` feature gates exactly
+  that module: a2a.json, the configured set, reload, watch and the adapter.
+- `WorkspaceBuilder::with_agent_resolver`, `Workspace::a2a_agents`,
+  `Workspace::remote_conversation` and `PreparedRun::with_remote_conversations`
+  are plain API in every build. `RunError` gains `Forget` for a conversation
+  record that could not be removed.
+
 ### An agent is named ([ADR-0037](docs/adr/0037-an-agent-is-named.md))
 
 - `@<name>` is resolved. `WorkspaceBuilder::with_agent_resolver` installs the

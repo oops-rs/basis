@@ -1,29 +1,24 @@
 //! Handing a task to a remote agent, once the answer is in (ADR-0029).
 //!
-//! The exchange — submit with `returnImmediately`, wait for the task to
-//! settle within the agent's wait bound (following its stream when the card
-//! offers one, polling otherwise, never resending), cancel when the run is
-//! cancelled — is mentra's ([`mentra::a2a::exchange`]), and so is the
-//! framing that marks the remote agent's words as its own. What is basis's is everything the model
-//! would otherwise have had to carry: which conversation a task belongs to,
-//! and which task is still outstanding (ADR-0029 §5). So every guidance line
-//! here is written in `spawn`'s grammar, and none of them mentions an id.
+//! The agent is reached through the [`Peer`] its resolver handed back
+//! (ADR-0038): the peer runs the exchange and frames the agent's words; what
+//! is basis's is everything the model would otherwise have had to carry —
+//! which conversation a task belongs to, and which task is still outstanding
+//! (ADR-0029 §5). So every guidance line here is written in `spawn`'s
+//! grammar, and none of them mentions an id.
+//!
+//! [`Peer`]: crate::agents::Peer
 
-use mentra::a2a::{
-    A2aError as ClientError, A2aExchange, A2aExchangeError, A2aRequest, A2aRpcError, A2aSend,
-    A2aStillWorking, A2aSubmitted, is_settled, remote_output, remote_reply, settle as settle_task,
-    submit, types::TaskState,
-};
 use std::time::SystemTime;
 
-use chrono::{DateTime, SecondsFormat, Utc};
 use mentra::tool::{ParallelToolContext, ToolContext, ToolResult};
-use serde_json::{Value, json};
 
 use super::{describe::listed, no_remote_agents};
-use crate::a2a::HOPS_EXTENSION;
-use crate::a2a::remote::{Conversation, Outstanding, Remembered, RemoteAgents, Waiting};
-use crate::agents::{Resolved, Route, Unresolved};
+use crate::agents::{
+    ExchangeBounds, Failure, Message, Outcome, PeerError, Request, Resolved, Route, Started,
+    StillWorking, Unresolved,
+    remote::{Conversation, Outstanding, Remembered, RemoteAgents, Waiting},
+};
 
 /// Whether `@<name>` can go anywhere, asked in the preview — before the
 /// approver, and without waiting on the network (ADR-0037 §4).
@@ -79,7 +74,7 @@ fn seconds(wait: std::time::Duration) -> u64 {
     wait.as_secs_f64().ceil().max(1.0) as u64
 }
 
-/// What the model reads when there is no client to hand the task to.
+/// What the model reads when there is no peer to hand the task to.
 fn unresolved(agents: &RemoteAgents, name: &str, why: Unresolved) -> String {
     match why {
         Unresolved::Backoff(wait) => backing_off(name, wait),
@@ -105,8 +100,8 @@ fn unresolved(agents: &RemoteAgents, name: &str, why: Unresolved) -> String {
 ///
 /// `remembered` says where the calling agent's record is kept: on disk by
 /// agent for one a workspace minted or resumed, under a host's key for one
-/// bound to it, in memory for a delegated child (`crate::a2a::remote` has the
-/// rule).
+/// bound to it, in memory for a delegated child (`crate::agents::remote`
+/// has the rule).
 pub(super) async fn delegate(
     ctx: ToolContext<'_>,
     agents: &RemoteAgents,
@@ -118,10 +113,7 @@ pub(super) async fn delegate(
     // changes what the *next* `@<agent>` reaches, never this exchange
     // (ADR-0031 §6). An unreachable agent due a retry is connected here.
     let Resolved {
-        client,
-        id,
-        endpoint,
-        ..
+        peer, id, endpoint, ..
     } = agents
         .resolve(name)
         .await
@@ -141,8 +133,8 @@ pub(super) async fn delegate(
         hop: agents.hop().saturating_add(1),
         deadline: options.deadline,
     };
-    let mut conversation = agents.conversation(&caller, id, remembered);
-    let request = request(name, body, &conversation, hop)?;
+    let before = agents.conversation(&caller, id, remembered);
+    let request = request(name, body, &before, hop)?;
 
     let ctx: ParallelToolContext = ctx.into();
     let progress = |text: String| ctx.emit_progress(text);
@@ -155,38 +147,46 @@ pub(super) async fn delegate(
             ));
         }
     };
-
-    let outcome = match submit(&client, request).await {
-        Ok(A2aSubmitted::Task(task)) if !is_settled(&task.status.state) => {
-            // Recorded before waiting, which is the whole point of submitting
-            // separately: a process that dies while this waits comes back
-            // knowing the task exists, and `@<agent>` alone picks it up
-            // instead of the model handing the work off a second time.
-            conversation = Conversation {
-                context_id: Some(task.context_id.clone()),
-                outstanding: Some(Outstanding {
-                    task_id: task.id.clone(),
-                    waiting_for: Waiting::Agent,
-                    endpoint: Some(endpoint.clone()),
-                }),
-            };
-            save(conversation.clone());
-            settle_task(&client, task, &options, &progress).await
-        }
-        Ok(A2aSubmitted::Task(task)) => Ok(A2aExchange::Settled(task)),
-        Ok(A2aSubmitted::Reply(message)) => Ok(A2aExchange::Reply(message)),
-        Ok(_) => {
-            return Err(format!(
-                "Remote agent `{name}` answered in a way spawn does not understand."
-            ));
-        }
-        Err(error) => Err(error),
+    // Recorded before the peer waits, which is the whole point of being
+    // told: a process that dies while this waits comes back knowing the task
+    // exists, and `@<agent>` alone picks it up instead of the model handing
+    // the work off a second time.
+    let started = |started: Started| {
+        save(Conversation {
+            context_id: started.context_id.or_else(|| before.context_id.clone()),
+            outstanding: Some(Outstanding {
+                task_id: started.task_id,
+                waiting_for: Waiting::Agent,
+                endpoint: Some(endpoint.clone()),
+            }),
+        });
     };
 
-    let max_output_bytes = client.limits().max_output_bytes;
-    let (next, result) = settle(name, conversation, outcome, max_output_bytes, &endpoint);
+    let outcome = peer
+        .exchange(
+            request,
+            &ExchangeBounds {
+                options: &options,
+                progress: &progress,
+                started: &started,
+            },
+        )
+        .await;
+
+    let (next, result) = settle(name, before, outcome, &endpoint);
     save(next);
     result
+}
+
+/// Where one outbound message stands in a chain of agents
+/// (`docs/a2a/hops-v1.md`): `hop` is this message's — the runtime's own
+/// plus one, so a top-level caller sends 1 — and `deadline` is when this
+/// side stops waiting, which the run's options already hold as the earlier
+/// of its own and any it inherited.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+struct Hop {
+    hop: u32,
+    deadline: Option<SystemTime>,
 }
 
 /// What this call sends, given where the conversation stands — or why it
@@ -196,9 +196,9 @@ fn request(
     body: &str,
     conversation: &Conversation,
     hop: Hop,
-) -> Result<A2aRequest, String> {
+) -> Result<Request, String> {
     match (&conversation.outstanding, body.is_empty()) {
-        (Some(outstanding), true) => Ok(A2aRequest::resume(&outstanding.task_id)),
+        (Some(outstanding), true) => Ok(Request::wait(&outstanding.task_id)),
         (None, true) => Err(format!(
             "`{name}` has nothing outstanding to wait on; write `@{name} <task>` to hand it one"
         )),
@@ -212,53 +212,17 @@ fn request(
             "`{name}` is still working on the last task you handed it, and takes one task at a \
              time; write `@{name}` alone to keep waiting for that one first"
         )),
-        (Some(outstanding), false) => Ok(send(
-            body,
-            Some(&outstanding.task_id),
-            conversation.context_id.as_deref(),
-            hop,
+        (Some(outstanding), false) => Ok(Request::Send(
+            Message::new(body)
+                .in_context(conversation.context_id.clone())
+                .answering(Some(outstanding.task_id.clone()))
+                .at_hop(hop.hop, hop.deadline),
         )),
-        (None, false) => Ok(send(body, None, conversation.context_id.as_deref(), hop)),
-    }
-}
-
-/// A message continuing `context_id`, answering `task_id` when it is set,
-/// and saying which hop it is.
-fn send(body: &str, task_id: Option<&str>, context_id: Option<&str>, hop: Hop) -> A2aRequest {
-    let mut message = A2aSend::new(body)
-        .with_extension(HOPS_EXTENSION)
-        .with_metadata(HOPS_EXTENSION, hop.metadata());
-    if let Some(task_id) = task_id {
-        message = message.with_task_id(task_id);
-    }
-    if let Some(context_id) = context_id {
-        message = message.with_context_id(context_id);
-    }
-    message.into()
-}
-
-/// Where one outbound message stands in a chain of agents
-/// (`docs/a2a/hops-v1.md`): `hop` is this message's — the runtime's own
-/// plus one, so a top-level caller sends 1 — and `deadline` is when this
-/// side stops waiting, which the run's options already hold as the earlier
-/// of its own and any it inherited. A deadline therefore only shrinks across
-/// a hop, which is the extension's rule.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-struct Hop {
-    hop: u32,
-    deadline: Option<SystemTime>,
-}
-
-impl Hop {
-    /// The object the extension puts under its URI in a message's metadata.
-    fn metadata(self) -> Value {
-        let mut object = json!({ "hop": self.hop });
-        if let Some(deadline) = self.deadline {
-            object["deadline"] = Value::String(
-                DateTime::<Utc>::from(deadline).to_rfc3339_opts(SecondsFormat::Millis, true),
-            );
-        }
-        object
+        (None, false) => Ok(Request::Send(
+            Message::new(body)
+                .in_context(conversation.context_id.clone())
+                .at_hop(hop.hop, hop.deadline),
+        )),
     }
 }
 
@@ -268,8 +232,7 @@ impl Hop {
 fn settle(
     name: &str,
     before: Conversation,
-    outcome: Result<A2aExchange, A2aExchangeError>,
-    max_output_bytes: usize,
+    outcome: Result<Outcome, PeerError>,
     endpoint: &str,
 ) -> (Conversation, ToolResult) {
     let outstanding = |task_id: String, waiting_for: Waiting| {
@@ -279,113 +242,100 @@ fn settle(
             endpoint: Some(endpoint.to_string()),
         })
     };
+    let settled = |context_id: Option<String>| Conversation {
+        context_id: context_id.or_else(|| before.context_id.clone()),
+        outstanding: None,
+    };
     match outcome {
-        Ok(A2aExchange::Reply(message)) => (
+        Ok(Outcome::Replied { context_id, text }) => (
+            settled(context_id),
+            Ok(said(format!("Remote agent `{name}` replied:"), text)),
+        ),
+        Ok(Outcome::Finished {
+            context_id, text, ..
+        }) => (
+            settled(context_id),
+            Ok(said(format!("Remote agent `{name}` replied:"), text)),
+        ),
+        Ok(Outcome::NeedsInput {
+            task_id,
+            context_id,
+            text,
+        }) => (
             Conversation {
-                context_id: message.context_id.clone().or(before.context_id),
-                outstanding: None,
+                context_id: context_id.or_else(|| before.context_id.clone()),
+                outstanding: outstanding(task_id, Waiting::Input),
             },
             Ok(said(
-                format!("Remote agent `{name}` replied:"),
-                remote_reply(name, &message, max_output_bytes),
+                format!(
+                    "Remote agent `{name}` needs more before it can finish. Answer with \
+                     `@{name} <your answer>`."
+                ),
+                text,
             )),
         ),
-        Ok(A2aExchange::Settled(task)) => {
-            let output = remote_output(name, &task, max_output_bytes);
-            let context_id = Some(task.context_id.clone());
-            match task.status.state {
-                TaskState::InputRequired => (
-                    Conversation {
-                        context_id,
-                        outstanding: outstanding(task.id.clone(), Waiting::Input),
-                    },
-                    Ok(said(
-                        format!(
-                            "Remote agent `{name}` needs more before it can finish. Answer with \
-                             `@{name} <your answer>`."
-                        ),
-                        output,
-                    )),
+        Ok(Outcome::NeedsAuthorization {
+            context_id, text, ..
+        }) => (
+            settled(context_id),
+            Err(said(
+                format!(
+                    "Remote agent `{name}` needs authorization this conversation cannot give \
+                     it, so the task stopped there."
                 ),
-                TaskState::AuthRequired => (
-                    Conversation {
-                        context_id,
-                        outstanding: None,
-                    },
-                    Err(said(
-                        format!(
-                            "Remote agent `{name}` needs authorization this conversation cannot \
-                             give it, so the task stopped there."
-                        ),
-                        output,
-                    )),
+                text,
+            )),
+        ),
+        Ok(Outcome::Failed {
+            context_id,
+            text,
+            how,
+            ..
+        }) => (
+            settled(context_id),
+            Err(said(
+                format!(
+                    "Remote agent `{name}` {}.",
+                    match how {
+                        Failure::Rejected => "rejected the task",
+                        Failure::Canceled => "reports the task was canceled",
+                        _ => "reports the task failed",
+                    }
                 ),
-                TaskState::Failed | TaskState::Rejected | TaskState::Canceled => (
-                    Conversation {
-                        context_id,
-                        outstanding: None,
-                    },
-                    Err(said(
-                        format!(
-                            "Remote agent `{name}` {}.",
-                            match task.status.state {
-                                TaskState::Rejected => "rejected the task",
-                                TaskState::Canceled => "reports the task was canceled",
-                                _ => "reports the task failed",
-                            }
-                        ),
-                        output,
-                    )),
-                ),
-                _ => (
-                    Conversation {
-                        context_id,
-                        outstanding: None,
-                    },
-                    Ok(said(format!("Remote agent `{name}` replied:"), output)),
-                ),
-            }
-        }
-        Ok(A2aExchange::StillWorking { task, reason }) => {
-            let why = match reason {
-                A2aStillWorking::WaitBound(waited) => {
+                text,
+            )),
+        ),
+        Ok(Outcome::Working {
+            task_id,
+            context_id,
+            text,
+            why,
+        }) => {
+            let why = match why {
+                StillWorking::WaitBound(waited) => {
                     format!("did not finish within {}s", waited.as_secs().max(1))
                 }
-                A2aStillWorking::RunStopping => {
-                    "was still working when this run began to stop".to_string()
-                }
-                _ => "was still working".to_string(),
+                _ => "was still working when this run began to stop".to_string(),
             };
             (
                 Conversation {
-                    context_id: Some(task.context_id.clone()),
-                    outstanding: outstanding(task.id.clone(), Waiting::Agent),
+                    context_id: context_id.or_else(|| before.context_id.clone()),
+                    outstanding: outstanding(task_id, Waiting::Agent),
                 },
                 Ok(said(
                     format!(
                         "Remote agent `{name}` {why}; it keeps working remotely. Write `@{name}` \
                          alone to keep waiting for it, and do not hand it the task again."
                     ),
-                    remote_output(name, &task, max_output_bytes),
+                    text,
                 )),
             )
         }
-        Ok(_) => (
-            before,
-            Err(format!(
-                "Remote agent `{name}` answered in a way spawn does not understand."
-            )),
-        ),
-        // The task basis kept for it is one the agent does not know — most
-        // often because a reload moved the agent to a new endpoint while the
-        // task was outstanding (ADR-0031 §5). Waiting on it again could only
-        // fail again, so the record ends here, and the conversation with it:
-        // its context is the old endpoint's too.
         // The agent moved since this task was handed over, and the new
         // endpoint could not pick it up — whatever it answered: one that does
-        // not know a task need not say `TaskNotFound` (an HTTP 404, an
-        // invalid-params refusal). Waiting again would fail the same way for
-        // good, so the record ends here, and nothing is sent again.
+        // not know a task need not say so (an HTTP 404, an invalid-params
+        // refusal). Waiting again would fail the same way for good, so the
+        // record ends here, and nothing is sent again.
         Err(error) if moved(&before, endpoint) && cause(&error).is_some() => (
             Conversation::default(),
             Err(format!(
@@ -396,7 +346,7 @@ fn settle(
                 cause(&error).expect("checked by the guard")
             )),
         ),
-        Err(error) if before.outstanding.is_some() && task_not_found(&error) => (
+        Err(PeerError::UnknownTask) if before.outstanding.is_some() => (
             Conversation::default(),
             Err(format!(
                 "Remote agent `{name}` no longer knows the task it was working on — it may have \
@@ -405,13 +355,20 @@ fn settle(
                  doing."
             )),
         ),
-        Err(A2aExchangeError::Send(error)) => (
+        Err(PeerError::UnknownTask) => (
+            before,
+            Err(format!(
+                "Handing the task to remote agent `{name}` failed: it does not know the task \
+                 this answers"
+            )),
+        ),
+        Err(PeerError::Send(error)) => (
             before,
             Err(format!(
                 "Handing the task to remote agent `{name}` failed: {error}"
             )),
         ),
-        Err(A2aExchangeError::Poll { task_id, error }) => (
+        Err(PeerError::Check { task_id, error }) => (
             Conversation {
                 outstanding: outstanding(task_id, Waiting::Agent),
                 ..before
@@ -421,7 +378,7 @@ fn settle(
                  running; write `@{name}` alone to check on it again."
             )),
         ),
-        Err(A2aExchangeError::Abandoned { canceled, .. }) => (
+        Err(PeerError::Abandoned { canceled, .. }) => (
             Conversation {
                 outstanding: None,
                 ..before
@@ -457,34 +414,19 @@ fn moved(conversation: &Conversation, endpoint: &str) -> bool {
         .is_some_and(|recorded| recorded != endpoint)
 }
 
-/// The client's own error behind a request or a poll that failed — which
-/// names no task id, unlike the exchange error around it.
-fn cause(error: &A2aExchangeError) -> Option<&ClientError> {
+/// The words behind a request or a check that failed — which name no task
+/// id, unlike the error around it. `None` for an abandoned or unrecognized
+/// exchange, which is not evidence of a move.
+fn cause(error: &PeerError) -> Option<String> {
     match error {
-        A2aExchangeError::Send(error) | A2aExchangeError::Poll { error, .. } => Some(error),
+        PeerError::Send(error) | PeerError::Check { error, .. } => Some(error.clone()),
+        PeerError::UnknownTask => Some(error.to_string()),
         _ => None,
     }
 }
 
-/// Whether the agent answered that it does not know the task asked about.
-fn task_not_found(error: &A2aExchangeError) -> bool {
-    let not_found = |error: &ClientError| {
-        matches!(
-            error,
-            ClientError::Rpc {
-                error: A2aRpcError::TaskNotFound,
-                ..
-            }
-        )
-    };
-    match error {
-        A2aExchangeError::Send(error) | A2aExchangeError::Poll { error, .. } => not_found(error),
-        _ => false,
-    }
-}
-
 /// A headline in basis's words, then the remote agent's own, already framed
-/// as its output by mentra.
+/// as its output by the peer.
 fn said(headline: String, output: String) -> String {
     if output.is_empty() {
         return headline;

@@ -146,12 +146,11 @@ async fn an_exchange_in_flight_keeps_its_client_across_a_reload() {
     agents.reload(vec![down("reviewer", new)]).await;
 
     assert_eq!(
-        in_flight.client.card_url().port(),
-        Some(old),
-        "still the client it started with, alive and unchanged"
+        in_flight.endpoint,
+        down("reviewer", old).endpoint(),
+        "still the peer it started with, reaching the old address"
     );
     let next = agents.reach("reviewer").await.expect("connected");
-    assert_eq!(next.client.card_url().port(), Some(new));
-    assert!(!Arc::ptr_eq(&in_flight.client, &next.client));
+    assert_eq!(next.endpoint, down("reviewer", new).endpoint());
     assert_ne!(in_flight.endpoint, next.endpoint);
 }

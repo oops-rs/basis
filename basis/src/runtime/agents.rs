@@ -108,8 +108,7 @@ pub(crate) struct AgentTools {
     /// workspace mints or resumes, even with nothing configured, so an agent a
     /// reload adds is reachable without touching the row; `None` only on rows
     /// no workspace wrote.
-    #[cfg(feature = "a2a")]
-    pub(crate) remote: Option<Arc<crate::a2a::remote::RemoteAgents>>,
+    pub(crate) remote: Option<Arc<crate::agents::remote::RemoteAgents>>,
     /// The teammates this agent has made and may reach again by name or id
     /// (ADR-0037 §5): the children `spawn "@<name> …"` kept rather than
     /// dropped. This agent's own — a child's are its own too — and gone with
@@ -126,7 +125,6 @@ impl AgentTools {
             #[cfg(feature = "mcp")]
             mcp_servers: self.mcp_servers.clone(),
             host_tools: self.host_tools.clone(),
-            #[cfg(feature = "a2a")]
             remote: self.remote.clone(),
             teammates: Default::default(),
         }
@@ -479,7 +477,6 @@ mod tests {
             #[cfg(feature = "mcp")]
             mcp_servers: Vec::new(),
             host_tools: Vec::new(),
-            #[cfg(feature = "a2a")]
             remote: None,
             teammates: Default::default(),
         }
@@ -498,7 +495,6 @@ mod tests {
                 hidden: BTreeSet::new(),
                 mcp_servers: vec!["prod-db".to_string()],
                 host_tools: Vec::new(),
-                #[cfg(feature = "a2a")]
                 remote: None,
                 teammates: Default::default(),
             },

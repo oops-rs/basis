@@ -305,7 +305,6 @@ pub struct Runtime {
     transcripts: PathBuf,
     /// Where sessions remember their remote A2A conversations, or `None` when
     /// history is kept nowhere (ADR-0029 §5).
-    #[cfg(feature = "a2a")]
     a2a_conversations: Option<PathBuf>,
     /// What this runtime's builder said about every policy it hands out, kept
     /// so a workspace's own policy gets the same shaping the runtime's did.
@@ -407,7 +406,6 @@ impl Runtime {
     /// because a host that wants to say where it goes says it once, with
     /// [`with_store_dir`](RuntimeBuilder::with_store_dir), and a reader here
     /// would invite a second answer.
-    #[cfg(feature = "a2a")]
     pub(crate) fn a2a_conversations_dir(&self) -> Option<&Path> {
         self.a2a_conversations.as_deref()
     }

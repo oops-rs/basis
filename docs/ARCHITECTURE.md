@@ -404,11 +404,13 @@ flowchart LR
   stream when the card declares one and polling `GetTask` otherwise, never resending. basis keeps
   each conversation's ids beside the session's store, so a resumed task picks up remote work
   rather than sending it twice.
-- **A name is resolved, or it is a teammate** (ADR-0037). `@<name>` is answered by the open's
-  resolvers in order — the host's, installed with `WorkspaceBuilder::with_agent_resolver`, then
-  the set its files configure — and the first answer other than *unknown* stands; a resolver hands
-  back a connected client and who the agent is (id, canonical name, endpoint), and basis keeps the
-  conversation under the id. A name nobody resolves is a teammate: the one-off child kept on the
+- **A name is resolved, or it is a teammate** (ADR-0037, ADR-0038). `@<name>` is answered by the
+  open's resolvers in order — the host's, installed with `WorkspaceBuilder::with_agent_resolver`,
+  then the set its files configure — and the first answer other than *unknown* stands; a resolver
+  hands back a `Peer` and who the agent is (id, canonical name, endpoint), and basis keeps the
+  conversation under the id. The peer contract (`basis::agents::Peer`: one exchange, one output
+  cap) is the core's and needs no feature; mentra's A2A client is one peer (`basis::a2a::A2aPeer`),
+  behind the `a2a` feature with a2a.json, the configured set, reload and watch. A name nobody resolves is a teammate: the one-off child kept on the
   caller's ledger row instead of dropped, minted through the child policy (which sees the name)
   and run one more turn per `@<name> <task>`, on the parent's bounds, for as long as the row lives.
   The `reach` field (`auto`, `remote`, `local`; `RuntimeBuilder::with_reach_policy` fixes it)

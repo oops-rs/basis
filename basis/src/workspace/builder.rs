@@ -90,7 +90,6 @@ pub struct WorkspaceBuilder {
     a2a: A2aConfig,
     /// The host's own answer to `@<name>`, asked before the configured set
     /// (ADR-0037 §1). `None` for most workspaces.
-    #[cfg(feature = "a2a")]
     agent_resolver: Option<Arc<dyn AgentResolver>>,
     templates: TemplatesConfig,
     hooks: HooksConfig,
@@ -153,13 +152,7 @@ impl std::fmt::Debug for WorkspaceBuilder {
             .field("tools", &self.tools)
             .field("host_tools", &self.host_tools.len())
             .field("shell", &self.shell)
-            .field("agent_resolver", &{
-                #[cfg(feature = "a2a")]
-                let installed = self.agent_resolver.is_some();
-                #[cfg(not(feature = "a2a"))]
-                let installed = false;
-                installed
-            })
+            .field("agent_resolver", &self.agent_resolver.is_some())
             .field("compaction", &self.compaction)
             .finish_non_exhaustive()
     }
@@ -193,7 +186,6 @@ impl WorkspaceBuilder {
             mcp: McpConfig::default(),
             #[cfg(feature = "a2a")]
             a2a: A2aConfig::default(),
-            #[cfg(feature = "a2a")]
             agent_resolver: None,
             templates: TemplatesConfig::default(),
             hooks: HooksConfig::default(),
@@ -470,14 +462,15 @@ impl WorkspaceBuilder {
     /// Lets the host answer `@<name>` itself (ADR-0037).
     ///
     /// The resolver is asked before the set this workspace's files configure
-    /// — [`with_a2a`](Self::with_a2a), `.basis/a2a.json`, the global
+    /// — `with_a2a`, `.basis/a2a.json`, the global
     /// `a2a.json` — and the first answer other than *unknown* stands, so a
     /// host's registry outranks a file by name, as a supplied agent already
     /// does. [`without_discovery`](Self::without_discovery) leaves the host's
     /// resolver alone with whatever it supplied in code.
     ///
-    /// What the resolver hands back is a connected client and who the agent
-    /// is; connecting, caching, credentials and retries are its own. basis
+    /// What the resolver hands back is a peer to talk to and who the agent
+    /// is (ADR-0038); connecting, caching, credentials and retries are its
+    /// own. basis
     /// keeps the conversation with each agent it resolves, keyed by the id
     /// the resolver gave, and `spawn` teaches what the resolver says it
     /// teaches — the names it can list, and a sentence for those it cannot.
@@ -487,7 +480,6 @@ impl WorkspaceBuilder {
     /// The resolver is this workspace's: a sibling open of the same
     /// directory with none installed reaches only what its own files
     /// configure (ADR-0029 §3).
-    #[cfg(feature = "a2a")]
     #[must_use]
     pub fn with_agent_resolver(self, resolver: Arc<dyn AgentResolver>) -> Self {
         Self {
@@ -977,15 +969,27 @@ impl WorkspaceBuilder {
         // because the set is live (ADR-0031) and a reload reads the same
         // sources this open did.
         #[cfg(feature = "a2a")]
-        let a2a = Arc::new(
-            LiveA2a::connect(
-                path.clone(),
-                self.a2a,
-                a2a_discovered,
-                &runtime,
-                self.agent_resolver,
+        let a2a =
+            Arc::new(LiveA2a::connect(path.clone(), self.a2a, a2a_discovered, &runtime).await);
+        // Who answers `@<name>` for this open: the host's resolver first,
+        // then — with `a2a` on — what the files configure (ADR-0037 §1). The
+        // host's is handed the descriptor refresh here; the configured set
+        // was handed it when it connected.
+        let mut resolvers: Vec<Arc<dyn AgentResolver>> = Vec::new();
+        if let Some(host) = self.agent_resolver {
+            host.on_change(runtime.refresher());
+            resolvers.push(host);
+        }
+        #[cfg(feature = "a2a")]
+        resolvers.push(a2a.configured());
+        let remote = Arc::new(
+            crate::agents::remote::RemoteAgents::over(
+                resolvers,
+                runtime
+                    .a2a_conversations_dir()
+                    .map(std::path::Path::to_path_buf),
             )
-            .await,
+            .with_hop(runtime.a2a_hop()),
         );
 
         Ok(Workspace {
@@ -1034,6 +1038,7 @@ impl WorkspaceBuilder {
             mcp_connections,
             #[cfg(feature = "a2a")]
             a2a,
+            remote,
         })
     }
 }

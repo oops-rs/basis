@@ -14,7 +14,7 @@
 //!
 //! ADR-0037: `@<name>` is resolved. The resolvers are asked in order — the
 //! host's, when it installed one, then the set the open's files configure
-//! ([`super::configured`]) — and the first that does not answer
+//! (`crate::a2a`, behind its feature) — and the first that does not answer
 //! [`Unresolved::Unknown`] decides. What a resolver hands back is a connected
 //! client and who the agent is; what this module keeps around it is
 //! everything the model would otherwise carry.
@@ -46,7 +46,7 @@ mod conversation;
 
 use std::{path::PathBuf, sync::Arc};
 
-use crate::agents::{AgentResolver, Resolved, Route, Taught, Unresolved};
+use super::{AgentResolver, Resolved, Route, Taught, Unresolved};
 
 pub(crate) use conversation::{Conversation, Outstanding, Remembered, Waiting, forget};
 
@@ -185,29 +185,30 @@ impl std::fmt::Debug for RemoteAgents {
 
 #[cfg(test)]
 impl RemoteAgents {
+    /// Over no resolver at all, remembering under `dir` when given: enough
+    /// to exercise the conversation record.
+    pub(crate) fn alone(dir: Option<&std::path::Path>) -> Self {
+        Self::over(Vec::new(), dir.map(std::path::Path::to_path_buf))
+    }
+}
+
+#[cfg(all(test, feature = "a2a"))]
+impl RemoteAgents {
     /// Agents that were configured but never connected — enough to exercise
     /// routing and refusals without a server.
     pub(crate) fn unreachable(names: &[&str]) -> Self {
         Self::over(
-            vec![Arc::new(super::configured::ConfiguredAgents::unreachable(
-                names,
-            ))],
+            vec![Arc::new(
+                crate::a2a::configured::ConfiguredAgents::unreachable(names),
+            )],
             None,
         )
     }
 
-    /// The same, remembering under `dir`.
-    pub(crate) fn unreachable_in(names: &[&str], dir: &std::path::Path) -> Self {
-        Self::over(
-            vec![Arc::new(super::configured::ConfiguredAgents::unreachable(
-                names,
-            ))],
-            Some(dir.to_path_buf()),
-        )
-    }
-
     /// Over one configured set, which the test keeps a handle on to reload.
-    pub(crate) fn over_configured(configured: &Arc<super::configured::ConfiguredAgents>) -> Self {
+    pub(crate) fn over_configured(
+        configured: &Arc<crate::a2a::configured::ConfiguredAgents>,
+    ) -> Self {
         Self::over(vec![Arc::clone(configured) as Arc<dyn AgentResolver>], None)
     }
 }

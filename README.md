@@ -310,7 +310,8 @@ than the public card does. The other direction needs no command: name a remote a
 `.basis/a2a.json` and the model hands it work through `spawn`, the same tool it delegates with
 locally — `@<name> <task>` ([ADR-0029](docs/adr/0029-a-remote-agent-is-a-spawn-target.md)) — put
 to the approver like any external call. A host answers `@<name>` its own way with an
-`AgentResolver` — a registry of `@team/agent` handles, say — asked before the file, and a name
+`AgentResolver` — a registry of `@team/agent` handles, say — asked before the file, answering with
+any `Peer` (A2A is one, behind its feature), and a name
 nobody resolves is a teammate: a subagent made under that name and continued by every later
 `@<name> <task>`, so `@reviewer look at the diff` then `@reviewer and the tests?` is one
 conversation ([ADR-0037](docs/adr/0037-an-agent-is-named.md)); the optional `reach` field pins a

@@ -260,6 +260,15 @@ pub enum RunError {
     #[cfg(feature = "a2a")]
     A2a(#[from] A2aError),
 
+    /// A forgotten conversation's record of the remote work it handed off
+    /// could not be removed ([`crate::store::forget`]).
+    #[error("failed to remove remembered remote conversations {path}: {source}")]
+    Forget {
+        path: std::path::PathBuf,
+        #[source]
+        source: std::io::Error,
+    },
+
     #[error("failed to load prompt templates: {0}")]
     Templates(#[from] crate::templates::TemplateError),
 

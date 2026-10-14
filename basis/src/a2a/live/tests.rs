@@ -27,14 +27,7 @@ async fn live_in(root: &Path) -> LiveA2a {
     let discovery = discovered(root, &config)
         .map_err(|(_, error)| error)
         .unwrap();
-    LiveA2a::connect(
-        root.to_path_buf(),
-        config,
-        discovery,
-        &offline_runtime(),
-        None,
-    )
-    .await
+    LiveA2a::connect(root.to_path_buf(), config, discovery, &offline_runtime()).await
 }
 
 fn configure(root: &Path, port: u16) {

@@ -5,13 +5,13 @@
 //! order: the one a host installs
 //! ([`WorkspaceBuilder::with_agent_resolver`](crate::WorkspaceBuilder::with_agent_resolver)),
 //! then the set its files configure (`.basis/a2a.json`, the global file, the
-//! host-supplied list — `ConfiguredAgents`, inside [`crate::a2a`]). A resolver that does not know
+//! host-supplied list — `ConfiguredAgents`, inside `basis::a2a`). A resolver that does not know
 //! a name says [`Unresolved::Unknown`] and the next one is asked; the first
 //! other answer stands.
 //!
-//! What crosses the seam is small on purpose: a name in, a connected client
-//! out — mentra's A2A client, which is why this module needs the `a2a`
-//! feature though nothing else about naming does. Connecting, caching, credentials and retries are the resolver's.
+//! What crosses the seam is small on purpose: a name in, a [`Peer`] out —
+//! something a task can be handed to and that answers (ADR-0038). A2A is one
+//! peer, behind its feature (`crate::a2a::A2aPeer`); naming needs none. Connecting, caching, credentials and retries are the resolver's.
 //! basis keeps everything around it — the conversation with each agent, the
 //! hop metadata, the exchange, and the one `spawn` door — so a host never
 //! reimplements ADR-0029 §5 to answer a name its own way.
@@ -21,10 +21,16 @@
 //! the resolver already knows. Its execution can wait, so
 //! [`AgentResolver::resolve`] does the work.
 
+mod peer;
+pub(crate) mod remote;
+
 use std::{sync::Arc, time::Duration};
 
 use async_trait::async_trait;
-use mentra::a2a::A2aClient;
+
+pub use peer::{
+    ExchangeBounds, Failure, Message, Outcome, Peer, PeerError, Request, Started, StillWorking,
+};
 
 /// What a resolver calls after its set changes — an agent added, removed or
 /// reached — so the description `spawn` is registered with is captured again
@@ -44,9 +50,9 @@ pub trait AgentResolver: Send + Sync {
     /// The client `@name` is handed to, or why there is none.
     ///
     /// Connecting, caching, credentials and retries are the resolver's; basis
-    /// holds the client it is given for the whole exchange, so a resolver
-    /// that hands out a new client changes what the *next* `@name` reaches,
-    /// never an exchange in flight (ADR-0031 §6).
+    /// holds the peer it is given for the whole exchange, so a resolver that
+    /// hands out a new peer changes what the *next* `@name` reaches, never an
+    /// exchange in flight (ADR-0031 §6).
     async fn resolve(&self, name: &str) -> Result<Resolved, Unresolved>;
 
     /// Where `@name` stands without waiting on anything — the authorization
@@ -90,34 +96,43 @@ pub enum Route {
     Refused(String),
 }
 
-/// A remote agent, resolved: the client to talk to, and who it is.
-#[derive(Debug, Clone)]
+/// A remote agent, resolved: the peer to talk to, and who it is.
+#[derive(Clone)]
 #[non_exhaustive]
 pub struct Resolved {
-    /// The client to hand the task to.
-    pub client: Arc<A2aClient>,
+    /// What the task is handed to.
+    pub peer: Arc<dyn Peer>,
     /// The permanent identity the conversation is kept under (ADR-0037 §6).
     /// The canonical name when the resolver has nothing more permanent.
     pub id: String,
     /// The canonical name: `ns/name` for a short handle the resolver
     /// expanded.
     pub name: String,
-    /// Where the client connected, as a string stable across processes, so a
-    /// task outstanding elsewhere reads as moved (ADR-0031 §5). The client's
-    /// endpoint URL unless the resolver says otherwise.
+    /// Where the peer reaches the agent, as a string stable across
+    /// processes, so a task outstanding elsewhere reads as moved
+    /// (ADR-0031 §5).
     pub endpoint: String,
 }
 
+impl std::fmt::Debug for Resolved {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("Resolved")
+            .field("id", &self.id)
+            .field("name", &self.name)
+            .field("endpoint", &self.endpoint)
+            .finish_non_exhaustive()
+    }
+}
+
 impl Resolved {
-    /// A resolved agent whose id is its name and whose endpoint is the
-    /// client's own.
-    pub fn new(client: Arc<A2aClient>, name: impl Into<String>) -> Self {
+    /// A resolved agent whose id is its name.
+    pub fn new(peer: Arc<dyn Peer>, name: impl Into<String>, endpoint: impl Into<String>) -> Self {
         let name = name.into();
         Self {
-            endpoint: client.endpoint().to_string(),
+            peer,
             id: name.clone(),
             name,
-            client,
+            endpoint: endpoint.into(),
         }
     }
 
@@ -130,8 +145,7 @@ impl Resolved {
         }
     }
 
-    /// Records `endpoint` with an outstanding task instead of the client's
-    /// URL.
+    /// Records `endpoint` with an outstanding task instead.
     #[must_use]
     pub fn with_endpoint(self, endpoint: impl Into<String>) -> Self {
         Self {

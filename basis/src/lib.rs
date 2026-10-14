@@ -67,7 +67,6 @@
 
 #[cfg(feature = "a2a")]
 pub mod a2a;
-#[cfg(feature = "a2a")]
 pub mod agents;
 pub mod approval;
 pub mod budget;
@@ -102,8 +101,10 @@ pub use a2a::{
     A2aAgent, A2aAgentConfig, A2aConfig, A2aError, A2aLimits, A2aReload, A2aSource, A2aWatch,
     A2aWatchError, DEFAULT_A2A_WATCH_INTERVAL, DEFAULT_GLOBAL_A2A_FILE, DEFAULT_WORKSPACE_A2A_FILE,
 };
-#[cfg(feature = "a2a")]
-pub use agents::{AgentResolver, Resolved, Route, Taught, TaughtAgent, Unresolved};
+pub use agents::{
+    AgentResolver, ExchangeBounds, Failure, Message, Outcome, Peer, PeerError, Request, Resolved,
+    Route, Started, StillWorking, Taught, TaughtAgent, Unresolved,
+};
 // `ToolSideEffectLevel` is mentra's, and comes to the root under the same rule
 // as `CancellationToken` below: `is_consequential` and
 // `ApprovalRequest::side_effect_level` both make a caller name it, and a policy
@@ -204,6 +205,5 @@ pub use tools::declared::{
     DEFAULT_GLOBAL_TOOLS_FILE, DEFAULT_WORKSPACE_TOOLS_FILE, DeclaredToolError,
     TOOLS_SCHEMA_VERSION, ToolsConfig, ToolsSource,
 };
-#[cfg(feature = "a2a")]
 pub use workspace::RemoteConversationState;
 pub use workspace::{RunProfile, RunSpec, ToolRoster, Workspace, WorkspaceBuilder};

@@ -682,7 +682,6 @@ impl RuntimeBuilder {
         // conversation, derived beside the store it belongs next to so
         // `with_store_dir` moves both or neither — `History::transcripts`.
         let transcripts = History::transcripts(self.history.as_ref());
-        #[cfg(feature = "a2a")]
         let a2a_conversations = History::a2a_conversations(self.history.as_ref());
 
         // A base URL is the only place the wire is a question: a preset
@@ -729,7 +728,6 @@ impl RuntimeBuilder {
             retry_policy: self.retry_policy,
             ephemeral_history,
             transcripts,
-            #[cfg(feature = "a2a")]
             a2a_conversations,
             policy_shaping,
             host_interceptors,

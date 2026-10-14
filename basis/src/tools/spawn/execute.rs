@@ -339,13 +339,10 @@ fn teach(tool: &SpawnTool, child: &mut mentra::agent::Agent, inherited: Option<&
         return;
     };
     let copy = tool.for_agent(child.id(), refresh);
-    #[cfg(feature = "a2a")]
     let copy = match inherited.and_then(|row| row.remote.as_ref()) {
         Some(remote) => copy.for_remote_agents(remote),
         None => copy,
     };
-    #[cfg(not(feature = "a2a"))]
-    let _ = inherited;
     child.register_tool(copy);
 }
 

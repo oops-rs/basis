@@ -64,7 +64,6 @@ mod describe;
 mod execute;
 mod parse;
 mod reach;
-#[cfg(feature = "a2a")]
 mod remote;
 pub(crate) mod teammate;
 
@@ -78,9 +77,7 @@ use mentra::tool::{
 };
 use serde_json::{Value, json};
 
-#[cfg(feature = "a2a")]
-use describe::Taught;
-use describe::{Names, Remote, description, input_schema, listed};
+use describe::{Names, Remote, Taught, description, input_schema, listed};
 use parse::{Mode, Spawn, parse};
 use teammate::Teammate;
 
@@ -152,15 +149,13 @@ pub struct SpawnTool {
     /// Description only. *Routing* reads the calling agent's ledger row, which
     /// is the one place that knows which open's agents — and credentials — a
     /// call may use.
-    #[cfg(feature = "a2a")]
-    remote: Option<Arc<crate::a2a::remote::RemoteAgents>>,
+    remote: Option<Arc<crate::agents::remote::RemoteAgents>>,
     /// Where the agent this copy belongs to keeps its remote conversations
     /// (ADR-0029 §5): on disk by agent for the copy a workspace registers for
     /// an agent it minted or resumed, under a host's key for one bound to it
     /// (ADR-0035), and in memory for a delegated child's, which is not
     /// resumed and so has nothing to pick back up.
-    #[cfg(feature = "a2a")]
-    remembers: crate::a2a::remote::Remembered,
+    remembers: crate::agents::remote::Remembered,
     /// The agent this copy belongs to, so it can list that agent's teammates
     /// (ADR-0037 §7). `None` on the runtime's own instance, which belongs to
     /// nobody and lists none.
@@ -194,9 +189,8 @@ enum SpawnDecision {
         workspace: Option<std::path::PathBuf>,
     },
     /// A task for a remote agent the calling agent's workspace connected.
-    #[cfg(feature = "a2a")]
     Remote {
-        agents: Arc<crate::a2a::remote::RemoteAgents>,
+        agents: Arc<crate::agents::remote::RemoteAgents>,
         name: String,
     },
 }
@@ -274,10 +268,8 @@ impl SpawnTool {
                 .collect(),
             policy: None,
             agents: None,
-            #[cfg(feature = "a2a")]
             remote: None,
-            #[cfg(feature = "a2a")]
-            remembers: crate::a2a::remote::Remembered::Not,
+            remembers: crate::agents::remote::Remembered::Not,
             owner: None,
             refresh: None,
             reach: ReachPolicy::default(),
@@ -357,11 +349,13 @@ impl SpawnTool {
     /// sessions already running, and the copy's description is computed from
     /// the set each time mentra captures it, so an empty set reads as the
     /// `spawn` every other agent sees, word for word.
-    #[cfg(feature = "a2a")]
-    pub(crate) fn for_remote_agents(&self, remote: &Arc<crate::a2a::remote::RemoteAgents>) -> Self {
+    pub(crate) fn for_remote_agents(
+        &self,
+        remote: &Arc<crate::agents::remote::RemoteAgents>,
+    ) -> Self {
         Self {
             remote: Some(Arc::clone(remote)),
-            remembers: crate::a2a::remote::Remembered::Not,
+            remembers: crate::agents::remote::Remembered::Not,
             ..self.clone()
         }
     }
@@ -389,7 +383,6 @@ impl SpawnTool {
         }
     }
 
-    #[cfg(feature = "a2a")]
     fn taught_remote(&self) -> Remote {
         let Some(remote) = &self.remote else {
             return Remote::default();
@@ -408,37 +401,29 @@ impl SpawnTool {
         }
     }
 
-    #[cfg(not(feature = "a2a"))]
-    fn taught_remote(&self) -> Remote {
-        Remote::default()
-    }
-
     /// The same copy, for an agent whose remote conversations are kept on disk
     /// — one a workspace minted or resumed.
-    #[cfg(feature = "a2a")]
     #[must_use]
     pub(crate) fn remembering(self) -> Self {
         Self {
-            remembers: crate::a2a::remote::Remembered::ByAgent,
+            remembers: crate::agents::remote::Remembered::ByAgent,
             ..self
         }
     }
 
     /// The same copy, keeping its remote conversations under a host's `key`
     /// rather than its agent's id (ADR-0035).
-    #[cfg(feature = "a2a")]
     #[must_use]
     pub(crate) fn remembering_under(self, key: String) -> Self {
         Self {
-            remembers: crate::a2a::remote::Remembered::ByKey(key),
+            remembers: crate::agents::remote::Remembered::ByKey(key),
             ..self
         }
     }
 
     /// The live set of remote agents the calling agent's workspace holds,
     /// read from its ledger row — `None` for an agent basis did not mint.
-    #[cfg(feature = "a2a")]
-    fn remote_agents_of(&self, agent_id: &str) -> Option<Arc<crate::a2a::remote::RemoteAgents>> {
+    fn remote_agents_of(&self, agent_id: &str) -> Option<Arc<crate::agents::remote::RemoteAgents>> {
         self.agents.as_ref()?.of(agent_id)?.remote.clone()
     }
 
@@ -449,7 +434,6 @@ impl SpawnTool {
     /// A refusal here is a fact, not a judgement, so it is refused in the
     /// preview like an unregistered command target: no approver is asked
     /// about an agent tried too recently to be worth trying again.
-    #[cfg(feature = "a2a")]
     fn remote_route(&self, agent_id: &str, name: &str) -> Result<Option<SpawnDecision>, String> {
         let Some(agents) = self.remote_agents_of(agent_id) else {
             return Ok(None);
@@ -464,20 +448,13 @@ impl SpawnTool {
         }))
     }
 
-    #[cfg(not(feature = "a2a"))]
-    fn remote_route(&self, _agent_id: &str, _name: &str) -> Result<Option<SpawnDecision>, String> {
-        Ok(None)
-    }
-
     /// The refusal for `@<name>` under `reach: remote` when no resolver knows
     /// the name: the configured names when there are any, else that there is
     /// nowhere to send it.
     fn no_remote_agent(&self, agent_id: &str, name: &str) -> String {
-        #[cfg(feature = "a2a")]
         if let Some(agents) = self.remote_agents_of(agent_id) {
             return remote::unknown(&agents, name);
         }
-        let _ = agent_id;
         no_remote_agents(name)
     }
 
@@ -705,7 +682,6 @@ impl ToolExecutor for SpawnTool {
         })?;
         let (cwd, child, named) = match decision {
             SpawnDecision::Command => (ctx.resolve_working_directory(None)?, None, None),
-            #[cfg(feature = "a2a")]
             SpawnDecision::Remote { .. } => (
                 ctx.resolve_working_directory(None)?,
                 None,
@@ -776,7 +752,6 @@ impl ToolExecutor for SpawnTool {
 
         match decision {
             SpawnDecision::Command => execute::command(&ctx, spawn.body(), spawn.target()).await,
-            #[cfg(feature = "a2a")]
             SpawnDecision::Remote { agents, name } => {
                 remote::delegate(ctx, &agents, &name, spawn.body(), &self.remembers).await
             }

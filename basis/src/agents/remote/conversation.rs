@@ -38,8 +38,6 @@ use std::{
 
 use serde::{Deserialize, Serialize};
 
-use crate::a2a::A2aError;
-
 /// Where one session's conversation with one remote agent stands.
 #[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
 pub(crate) struct Conversation {
@@ -314,8 +312,9 @@ fn store(file: &Path, conversations: &Conversations) -> std::io::Result<()> {
 }
 
 /// Removes `agent_id`'s record from `dir`, when it has one — what
-/// [`crate::store::forget`] does for the conversation's remote work.
-pub(crate) fn forget(dir: &Path, agent_id: &str) -> Result<(), A2aError> {
+/// [`crate::store::forget`] does for the conversation's remote work. A
+/// failure names the file it could not remove.
+pub(crate) fn forget(dir: &Path, agent_id: &str) -> Result<(), (PathBuf, std::io::Error)> {
     if !is_file_safe(agent_id) {
         return Ok(());
     }
@@ -323,6 +322,6 @@ pub(crate) fn forget(dir: &Path, agent_id: &str) -> Result<(), A2aError> {
     match std::fs::remove_file(&path) {
         Ok(()) => Ok(()),
         Err(error) if error.kind() == std::io::ErrorKind::NotFound => Ok(()),
-        Err(source) => Err(A2aError::Forget { path, source }),
+        Err(source) => Err((path, source)),
     }
 }

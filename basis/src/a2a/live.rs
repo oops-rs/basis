@@ -20,10 +20,9 @@ use std::{
 use super::{
     A2aAgent, A2aConfig, A2aError, A2aReload, DEFAULT_GLOBAL_A2A_FILE,
     configured::ConfiguredAgents,
-    remote::RemoteAgents,
     watch::{self, A2aWatch, A2aWatchError, Stamp},
 };
-use crate::agents::{AgentResolver, OnChange};
+use crate::agents::AgentResolver;
 use crate::{event::ContextFile, runtime::Runtime};
 
 /// What a workspace open knows about its remote agents: where it looked, what
@@ -40,11 +39,8 @@ pub(crate) struct LiveA2a {
     /// The files that took effect on the last successful read.
     files: RwLock<Vec<ContextFile>>,
     /// The resolver over what the files configure — what a reload applies
-    /// to.
+    /// to, and what the open chains after the host's own (ADR-0037 §1).
     configured: Arc<ConfiguredAgents>,
-    /// Every resolver of this open, the host's first, with the conversations
-    /// basis keeps — what every agent minted or resumed from this open holds.
-    remote: Arc<RemoteAgents>,
     /// Held across a whole reload — reading, connecting, applying — so two
     /// reloads, a host's and the watch's say, apply one after the other
     /// rather than each diffing against a set the other is about to replace.
@@ -53,26 +49,16 @@ pub(crate) struct LiveA2a {
 
 impl LiveA2a {
     /// Connects what [`discovered`] found on `runtime`, and keeps what it
-    /// took to find it. `host` is the resolver the host installed, asked
-    /// before the configured set (ADR-0037 §1).
+    /// took to find it. The configured set is told to refresh descriptions
+    /// when it changes (ADR-0031 §3).
     pub(crate) async fn connect(
         root: PathBuf,
         config: A2aConfig,
         discovery: Discovery,
         runtime: &Arc<Runtime>,
-        host: Option<Arc<dyn AgentResolver>>,
     ) -> Self {
-        let remembered_in = runtime.a2a_conversations_dir().map(Path::to_path_buf);
         let configured = Arc::new(ConfiguredAgents::connect(discovery.agents).await);
-        let refresh: OnChange = runtime.refresher();
-        let mut resolvers: Vec<Arc<dyn AgentResolver>> = Vec::new();
-        if let Some(host) = host {
-            host.on_change(Arc::clone(&refresh));
-            resolvers.push(host);
-        }
-        configured.on_change(refresh);
-        resolvers.push(Arc::clone(&configured) as Arc<dyn AgentResolver>);
-        let remote = RemoteAgents::over(resolvers, remembered_in).with_hop(runtime.a2a_hop());
+        configured.on_change(runtime.refresher());
         Self {
             paths: sources(&root, &config),
             seen: Mutex::new(discovery.seen),
@@ -80,20 +66,20 @@ impl LiveA2a {
             config,
             files: RwLock::new(discovery.files),
             configured,
-            remote: Arc::new(remote),
             reloading: tokio::sync::Mutex::new(()),
         }
     }
 
-    /// The live set, as every agent minted or resumed from this open holds it.
-    pub(crate) fn remote(&self) -> &Arc<RemoteAgents> {
-        &self.remote
+    /// The resolver over the configured set, for the open to chain after the
+    /// host's own.
+    pub(crate) fn configured(&self) -> Arc<dyn AgentResolver> {
+        Arc::clone(&self.configured) as Arc<dyn AgentResolver>
     }
 
-    /// Every taught name, the host's resolver's first, then configuration
-    /// order.
+    /// Every configured name, in configuration order.
+    #[cfg(test)]
     pub(crate) fn names(&self) -> Vec<String> {
-        self.remote.names()
+        self.configured.names()
     }
 
     /// The files in effect, most specific first.
@@ -217,7 +203,7 @@ impl std::fmt::Debug for LiveA2a {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         f.debug_struct("LiveA2a")
             .field("files", &self.files())
-            .field("agents", &self.remote)
+            .field("agents", &self.configured)
             .finish_non_exhaustive()
     }
 }

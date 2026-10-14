@@ -11,6 +11,9 @@
 > — a delegation gains the `reach` dimension; the number of doors stays one.
 > Preserves the ruling in `basis/src/workspace/roster.rs` that mentra's team
 > tools stay hidden: a teammate arrives through `spawn`, not a second door.
+> Amended by [`0038-the-core-speaks-to-a-peer.md`](0038-the-core-speaks-to-a-peer.md):
+> a resolver answers with a `Peer`, not an A2A client, and nothing here
+> needs the `a2a` feature (§2).
 
 ## Context
 

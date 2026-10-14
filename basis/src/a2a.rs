@@ -5,8 +5,8 @@
 //! sending a task and waiting on it — and basis owns the convention half:
 //! which file names an agent, where that file lives, and what its fields mean.
 //! The model reaches a named agent through `spawn` (`@<agent> <task>`,
-//! ADR-0029); `remote` holds the agents an open reaches, and `spawn` does the
-//! talking.
+//! ADR-0029); [`A2aPeer`] is how an A2A agent answers the contract `spawn`
+//! speaks (ADR-0038), and `crate::agents` holds the agents an open reaches.
 //!
 //! # A name is resolved
 //!
@@ -84,8 +84,8 @@
 pub(crate) mod configured;
 mod file;
 pub(crate) mod live;
+mod peer;
 mod reload;
-pub(crate) mod remote;
 mod watch;
 
 use std::path::{Path, PathBuf};
@@ -97,6 +97,7 @@ use crate::context::ContextScope;
 pub use configured::A2A_RETRY_BACKOFF;
 pub use mentra::a2a::{A2aAgentConfig, A2aLimits};
 pub use mentra::mcp::SecretString;
+pub use peer::A2aPeer;
 pub use reload::A2aReload;
 pub use watch::{A2aWatch, A2aWatchError, DEFAULT_A2A_WATCH_INTERVAL};
 
@@ -313,15 +314,6 @@ pub enum A2aError {
         origin: String,
         name: String,
         reason: String,
-    },
-
-    /// A forgotten conversation's record of the remote work it handed off
-    /// could not be removed ([`crate::store::forget`]).
-    #[error("failed to remove remembered A2A conversations {path}: {source}")]
-    Forget {
-        path: PathBuf,
-        #[source]
-        source: std::io::Error,
     },
 }
 

@@ -31,7 +31,7 @@ impl AgentResolver for Registry {
                 error: error.to_string(),
                 retry_in: None,
             })?;
-        Ok(Resolved::new(client, name))
+        Ok(Resolved::over_a2a(client, name))
     }
 
     fn route(&self, name: &str) -> Route {

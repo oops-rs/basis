@@ -121,13 +121,14 @@ pub struct PreparedRun {
     /// The minting workspace's remote agents, live (ADR-0031), so the header
     /// each turn opens with names the set as it stands then rather than as it
     /// stood at mint. `None` off the workspace path.
+    remote: Option<Arc<crate::agents::remote::RemoteAgents>>,
+    /// The A2A files the minting workspace read, live for the same reason.
     #[cfg(feature = "a2a")]
     a2a: Option<Arc<crate::a2a::live::LiveA2a>>,
     /// The copy of `spawn` the minting workspace registered on this session
     /// for its remote agents, kept so
     /// [`with_remote_conversations`](Self::with_remote_conversations) can
     /// register it again bound to a key. `None` off the workspace path.
-    #[cfg(feature = "a2a")]
     remote_spawn: Option<crate::tools::SpawnTool>,
 }
 
@@ -159,9 +160,9 @@ impl PreparedRun {
             agent_row: None,
             retry_policy: RetryPolicy::default(),
             context_snapshot: ContextSnapshot::default(),
+            remote: None,
             #[cfg(feature = "a2a")]
             a2a: None,
-            #[cfg(feature = "a2a")]
             remote_spawn: None,
         }
     }
@@ -190,7 +191,6 @@ impl PreparedRun {
     ///
     /// A no-op for a run no workspace minted, which has no remote agents.
     /// Delegated children keep their own conversations in memory, as before.
-    #[cfg(feature = "a2a")]
     #[must_use]
     pub fn with_remote_conversations(mut self, key: impl Into<String>) -> Self {
         if let Some(copy) = &self.remote_spawn {
@@ -201,7 +201,6 @@ impl PreparedRun {
     }
 
     /// Remembers the copy of `spawn` the workspace registered for this run.
-    #[cfg(feature = "a2a")]
     pub(crate) fn with_remote_spawn(self, copy: crate::tools::SpawnTool) -> Self {
         Self {
             remote_spawn: Some(copy),
@@ -209,7 +208,18 @@ impl PreparedRun {
         }
     }
 
-    /// Lets this run's header follow the minting workspace's live A2A set.
+    /// Lets this run's header follow the minting workspace's remote agents.
+    pub(crate) fn with_remote_agents(
+        self,
+        remote: Arc<crate::agents::remote::RemoteAgents>,
+    ) -> Self {
+        Self {
+            remote: Some(remote),
+            ..self
+        }
+    }
+
+    /// Lets this run's header follow the minting workspace's A2A files.
     #[cfg(feature = "a2a")]
     pub(crate) fn with_live_a2a(self, a2a: Arc<crate::a2a::live::LiveA2a>) -> Self {
         Self {
@@ -222,20 +232,13 @@ impl PreparedRun {
     /// describes the run as minted, but a long-lived session's later turns
     /// should not announce a set of remote agents a reload already replaced.
     fn header_now(&self, session_id: &str) -> Event {
-        #[allow(unused_mut, reason = "mutated only with the `a2a` feature")]
         let mut header = header_for(session_id, &self.run);
+        if let (Some(remote), Event::RunStarted { a2a_agents, .. }) = (&self.remote, &mut header) {
+            *a2a_agents = remote.names();
+        }
         #[cfg(feature = "a2a")]
-        if let (
-            Some(live),
-            Event::RunStarted {
-                a2a_files,
-                a2a_agents,
-                ..
-            },
-        ) = (&self.a2a, &mut header)
-        {
+        if let (Some(live), Event::RunStarted { a2a_files, .. }) = (&self.a2a, &mut header) {
             *a2a_files = live.files();
-            *a2a_agents = live.names();
         }
         header
     }

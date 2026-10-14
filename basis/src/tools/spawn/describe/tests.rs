@@ -7,13 +7,11 @@ use std::sync::Arc;
 use mentra::tool::ToolDefinition;
 
 use crate::{
-    a2a::{
-        configured::{
-            ConfiguredAgents,
-            testing::{agent_at, free_port, serve_card},
-        },
-        remote::RemoteAgents,
+    a2a::configured::{
+        ConfiguredAgents,
+        testing::{agent_at, free_port, serve_card},
     },
+    agents::remote::RemoteAgents,
     tools::SpawnTool,
 };
 

@@ -3,10 +3,11 @@
 //! And the set they are kept beside is live (ADR-0031): a reload reports what
 //! it changed by name and keeps every conversation whatever it did.
 
-use std::sync::Arc;
-
 use super::*;
+#[cfg(feature = "a2a")]
 use crate::a2a::configured::{ConfiguredAgents, testing::agent_at};
+#[cfg(feature = "a2a")]
+use std::sync::Arc;
 
 fn working() -> Conversation {
     Conversation {
@@ -22,14 +23,14 @@ fn working() -> Conversation {
 #[test]
 fn a_remembered_agent_finds_its_outstanding_task_after_a_restart() {
     let dir = tempfile::tempdir().unwrap();
-    let before = RemoteAgents::unreachable_in(&["reviewer"], dir.path());
+    let before = RemoteAgents::alone(Some(dir.path()));
     before
         .record("agent-1", "reviewer", working(), &Remembered::ByAgent)
         .expect("written through");
     drop(before);
 
     // A new process: nothing in memory, the same directory on disk.
-    let after = RemoteAgents::unreachable_in(&["reviewer"], dir.path());
+    let after = RemoteAgents::alone(Some(dir.path()));
 
     assert_eq!(
         after.conversation("agent-1", "reviewer", &Remembered::ByAgent),
@@ -45,7 +46,7 @@ fn a_remembered_agent_finds_its_outstanding_task_after_a_restart() {
 #[test]
 fn a_child_keeps_its_conversation_in_memory_only() {
     let dir = tempfile::tempdir().unwrap();
-    let agents = RemoteAgents::unreachable_in(&["reviewer"], dir.path());
+    let agents = RemoteAgents::alone(Some(dir.path()));
 
     agents
         .record("child-1", "reviewer", working(), &Remembered::Not)
@@ -64,7 +65,7 @@ fn a_child_keeps_its_conversation_in_memory_only() {
 
 #[test]
 fn a_runtime_that_keeps_no_history_keeps_no_record() {
-    let agents = RemoteAgents::unreachable(&["reviewer"]);
+    let agents = RemoteAgents::alone(None);
 
     agents
         .record("agent-1", "reviewer", working(), &Remembered::ByAgent)
@@ -79,7 +80,7 @@ fn a_runtime_that_keeps_no_history_keeps_no_record() {
 #[test]
 fn forgetting_a_conversation_removes_its_record() {
     let dir = tempfile::tempdir().unwrap();
-    let agents = RemoteAgents::unreachable_in(&["reviewer"], dir.path());
+    let agents = RemoteAgents::alone(Some(dir.path()));
     agents
         .record("agent-1", "reviewer", working(), &Remembered::ByAgent)
         .expect("written through");
@@ -87,7 +88,7 @@ fn forgetting_a_conversation_removes_its_record() {
     forget(dir.path(), "agent-1").expect("removed");
     forget(dir.path(), "agent-1").expect("and absent is not an error");
 
-    let after = RemoteAgents::unreachable_in(&["reviewer"], dir.path());
+    let after = RemoteAgents::alone(Some(dir.path()));
     assert_eq!(
         after.conversation("agent-1", "reviewer", &Remembered::ByAgent),
         Conversation::default()
@@ -97,7 +98,7 @@ fn forgetting_a_conversation_removes_its_record() {
 #[test]
 fn an_id_that_is_not_a_file_name_is_never_made_into_a_path() {
     let dir = tempfile::tempdir().unwrap();
-    let agents = RemoteAgents::unreachable_in(&["reviewer"], dir.path());
+    let agents = RemoteAgents::alone(Some(dir.path()));
 
     agents
         .record("../escape", "reviewer", working(), &Remembered::ByAgent)
@@ -117,14 +118,14 @@ fn by_key(key: &str) -> Remembered {
 #[test]
 fn runs_bound_to_one_key_share_its_record_across_opens_and_agents() {
     let dir = tempfile::tempdir().unwrap();
-    let first = RemoteAgents::unreachable_in(&["nous"], dir.path());
+    let first = RemoteAgents::alone(Some(dir.path()));
     first
         .record("agent-1", "nous", working(), &by_key("chat-7"))
         .expect("written through");
 
     // Another open on the same store, another minted agent: the same record,
     // read afresh rather than from anything cached.
-    let second = RemoteAgents::unreachable_in(&["nous"], dir.path());
+    let second = RemoteAgents::alone(Some(dir.path()));
     assert_eq!(
         second.conversation("agent-2", "nous", &by_key("chat-7")),
         working()
@@ -155,7 +156,7 @@ fn runs_bound_to_one_key_share_its_record_across_opens_and_agents() {
 #[test]
 fn different_keys_are_isolated_and_one_record_keeps_every_agent() {
     let dir = tempfile::tempdir().unwrap();
-    let agents = RemoteAgents::unreachable_in(&["nous", "reviewer"], dir.path());
+    let agents = RemoteAgents::alone(Some(dir.path()));
     agents
         .record("agent-1", "nous", working(), &by_key("chat-1"))
         .unwrap();
@@ -177,7 +178,7 @@ fn different_keys_are_isolated_and_one_record_keeps_every_agent() {
 
 #[test]
 fn a_runtime_that_keeps_no_history_shares_a_key_in_memory() {
-    let agents = RemoteAgents::unreachable(&["nous"]);
+    let agents = RemoteAgents::alone(None);
     agents
         .record("agent-1", "nous", working(), &by_key("chat-1"))
         .unwrap();
@@ -191,7 +192,7 @@ fn a_runtime_that_keeps_no_history_shares_a_key_in_memory() {
 fn a_key_is_never_made_into_a_path_outside_its_directory() {
     let dir = tempfile::tempdir().unwrap();
     let store = dir.path().join("store");
-    let agents = RemoteAgents::unreachable_in(&["nous"], &store);
+    let agents = RemoteAgents::alone(Some(&store));
     for key in [
         "../../escape",
         "/etc/passwd",
@@ -250,6 +251,7 @@ fn a_plain_key_is_its_own_file_name_and_any_other_is_made_one() {
     assert!(conversation::file_name_of(&"x".repeat(500)).len() <= 64 + 17);
 }
 
+#[cfg(feature = "a2a")]
 #[tokio::test]
 async fn a_reload_keeps_every_conversation_whatever_it_did_to_the_agent() {
     let configured = Arc::new(ConfiguredAgents::connect(vec![agent_at("reviewer", 1)]).await);
@@ -269,12 +271,14 @@ async fn a_reload_keeps_every_conversation_whatever_it_did_to_the_agent() {
 
 /// A host's resolver: knows one name, connects it to a card server, and
 /// records the change hook it was given.
+#[cfg(feature = "a2a")]
 struct Registry {
     name: &'static str,
     port: u16,
     hook: std::sync::Mutex<Option<crate::agents::OnChange>>,
 }
 
+#[cfg(feature = "a2a")]
 #[async_trait::async_trait]
 impl crate::agents::AgentResolver for Registry {
     async fn resolve(
@@ -284,14 +288,16 @@ impl crate::agents::AgentResolver for Registry {
         if name != self.name {
             return Err(crate::agents::Unresolved::Unknown);
         }
-        let client = mentra::a2a::A2aClient::connect(agent_at(name, self.port).config())
-            .await
-            .map(Arc::new)
-            .map_err(|error| crate::agents::Unresolved::Unreachable {
-                error: error.to_string(),
-                retry_in: None,
-            })?;
-        Ok(crate::agents::Resolved::new(client, format!("team/{name}")).with_id("agt_1"))
+        let client = mentra::a2a::A2aClient::connect(
+            crate::a2a::configured::testing::agent_at(name, self.port).config(),
+        )
+        .await
+        .map(std::sync::Arc::new)
+        .map_err(|error| crate::agents::Unresolved::Unreachable {
+            error: error.to_string(),
+            retry_in: None,
+        })?;
+        Ok(crate::agents::Resolved::over_a2a(client, format!("team/{name}")).with_id("agt_1"))
     }
 
     fn route(&self, name: &str) -> crate::agents::Route {
@@ -313,6 +319,7 @@ impl crate::agents::AgentResolver for Registry {
     }
 }
 
+#[cfg(feature = "a2a")]
 #[tokio::test]
 async fn the_hosts_resolver_is_asked_first_and_an_unknown_name_falls_through() {
     use crate::a2a::configured::testing::{free_port, serve_card};

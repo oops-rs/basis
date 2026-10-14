@@ -50,6 +50,7 @@ mod a2a;
 mod builder;
 mod lifecycle;
 mod profile;
+mod remote;
 mod roster;
 mod spec;
 
@@ -58,10 +59,9 @@ use std::sync::Arc;
 
 use mentra::{ModelInfo, Session, agent::AgentConfig, provider::ReasoningOptions};
 
-#[cfg(feature = "a2a")]
-pub use a2a::RemoteConversationState;
 pub use builder::WorkspaceBuilder;
 pub use profile::RunProfile;
+pub use remote::RemoteConversationState;
 pub use roster::ToolRoster;
 pub(crate) use spec::DEFAULT_SESSION_NAME;
 pub use spec::RunSpec;
@@ -212,6 +212,10 @@ pub struct Workspace {
     /// later reaches sessions already running.
     #[cfg(feature = "a2a")]
     a2a: Arc<LiveA2a>,
+    /// Who answers `@<name>` for this open — the host's resolver, then the
+    /// configured set — with the conversations basis keeps (ADR-0037 §1,
+    /// ADR-0038). What every agent minted or resumed from this open holds.
+    remote: Arc<crate::agents::remote::RemoteAgents>,
 }
 
 /// Hand-written because neither the runtime nor the registration is `Debug`
@@ -305,10 +309,7 @@ impl Workspace {
         let run = self
             .minted(session, spec, model_id, context_snapshot)
             .with_agent_row(row);
-        #[cfg(feature = "a2a")]
         let run = run.with_remote_spawn(remote_spawn);
-        #[cfg(not(feature = "a2a"))]
-        drop(remote_spawn);
         Ok(run)
     }
 
@@ -420,10 +421,7 @@ impl Workspace {
         let run = self
             .minted(session, spec, model, context_snapshot)
             .with_agent_row(row);
-        #[cfg(feature = "a2a")]
         let run = run.with_remote_spawn(remote_spawn);
-        #[cfg(not(feature = "a2a"))]
-        drop(remote_spawn);
         Ok(run)
     }
 
@@ -522,14 +520,25 @@ impl Workspace {
         &self.mcp_servers
     }
 
-    /// The remote A2A agents this workspace configures: none, in a build
-    /// without the `a2a` feature. Kept so the method — like the header field
-    /// it feeds — does not vanish with a cargo feature.
-    #[cfg(not(feature = "a2a"))]
+    /// The remote agents this workspace can name now — each one a target
+    /// the model reaches as `spawn "@<name> <task>"` (ADR-0029). Verbatim: a
+    /// remote agent is not a tool on the shared registry, so nothing is
+    /// claimed and no name is suffixed.
+    ///
+    /// What the host's resolver teaches comes first
+    /// ([`WorkspaceBuilder::with_agent_resolver`], ADR-0037), then every
+    /// configured agent, reachable or not, so a host can see what the
+    /// workspace asked for; one name is listed once, under the resolver that
+    /// answers it. A resolver over names it cannot list adds nothing here.
+    /// Live: after a reload, or a change a watch picked up, it is the new
+    /// set. Names only: nothing here echoes a URL or a credential.
     pub fn a2a_agents(&self) -> Vec<String> {
-        Vec::new()
+        self.remote.names()
     }
 
+    /// The A2A files in effect: none, in a build without the `a2a` feature.
+    /// Kept so the header field it feeds does not vanish with a cargo
+    /// feature.
     #[cfg(not(feature = "a2a"))]
     fn a2a_files(&self) -> Vec<ContextFile> {
         Vec::new()
@@ -681,8 +690,7 @@ impl Workspace {
             #[cfg(feature = "mcp")]
             mcp_servers: self.mcp_servers.clone(),
             host_tools: self.host_tools.clone(),
-            #[cfg(feature = "a2a")]
-            remote: Some(Arc::clone(self.a2a.remote())),
+            remote: Some(Arc::clone(&self.remote)),
             teammates: Default::default(),
         }
     }
@@ -712,8 +720,7 @@ impl Workspace {
             #[cfg(feature = "mcp")]
             mcp_servers: self.mcp_servers.clone(),
             host_tools: self.host_tools.clone(),
-            #[cfg(feature = "a2a")]
-            remote: Some(Arc::clone(self.a2a.remote())),
+            remote: Some(Arc::clone(&self.remote)),
             teammates: Default::default(),
         }
     }
@@ -721,9 +728,8 @@ impl Workspace {
     /// Gives a freshly minted or resumed session its own copy of `spawn`:
     /// the one that knows which agent it belongs to, so it can list that
     /// agent's teammates (ADR-0037 §7) and keep what `spawn` teaches current
-    /// when one is made — and, with `a2a` on, the one bound to this open's
-    /// remote agents (ADR-0029 §4, ADR-0031 §3), whether or not any is
-    /// configured yet.
+    /// when one is made — and the one bound to this open's remote agents
+    /// (ADR-0029 §4, ADR-0031 §3), whether or not any is resolvable yet.
     ///
     /// Registered on the session's agent alone, which is the isolation: a
     /// sibling open of this directory shares this audience but not this
@@ -736,8 +742,7 @@ impl Workspace {
             .runtime
             .spawn_tool()
             .for_agent(session.agent_id(), self.runtime.refresher());
-        #[cfg(feature = "a2a")]
-        let copy = copy.for_remote_agents(self.a2a.remote()).remembering();
+        let copy = copy.for_remote_agents(&self.remote).remembering();
         session.register_tool(copy.clone());
         copy
     }
@@ -782,6 +787,7 @@ impl Workspace {
         // a per-run option.
         .with_retry_policy(self.runtime.retry_policy())
         .with_context_snapshot(context_snapshot);
+        let run = run.with_remote_agents(Arc::clone(&self.remote));
         #[cfg(feature = "a2a")]
         let run = run.with_live_a2a(Arc::clone(&self.a2a));
         run
