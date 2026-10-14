@@ -248,25 +248,30 @@ async fn a_sibling_open_of_the_same_directory_cannot_reach_the_agent() {
         .await
         .expect("the sibling's run completes");
 
-    let spawn_failed = |events: &[Event]| {
+    let spawn_result = |events: &[Event]| {
         events.iter().find_map(|event| match event {
             Event::ToolCompleted {
                 tool_name,
                 is_error,
+                summary,
                 ..
-            } if tool_name == "spawn" => Some(*is_error),
+            } if tool_name == "spawn" => Some((*is_error, summary.clone())),
             _ => None,
         })
     };
-    assert_eq!(spawn_failed(owned.sink.events()), Some(false));
-    assert_eq!(
-        spawn_failed(guessed.sink.events()),
-        Some(true),
-        "a guessed name reaches nothing"
+    let (failed, _) = spawn_result(owned.sink.events()).expect("the owner's spawn ran");
+    assert!(!failed);
+    // ADR-0037 §3: a name no resolver of the sibling's knows is a teammate
+    // of its own, here — never the owner's agent.
+    let (failed, summary) = spawn_result(guessed.sink.events()).expect("the sibling's spawn ran");
+    assert!(!failed, "{summary}");
+    assert!(
+        summary.starts_with("Made teammate `helper`"),
+        "a guessed name reaches a teammate here, not the owner's agent: {summary}"
     );
 
     let requests = caller_model.requests();
-    assert_eq!(requests.len(), 4);
+    assert_eq!(requests.len(), 5, "the sibling's teammate took one turn");
     assert!(requests[0].contains("`helper`"), "the owner is taught it");
     assert!(
         !requests[2].contains("@<agent>"),
@@ -274,9 +279,9 @@ async fn a_sibling_open_of_the_same_directory_cannot_reach_the_agent() {
         requests[2]
     );
     assert!(
-        requests[3].contains("no remote agents"),
-        "and its guess is refused before anything is sent: {}",
-        requests[3]
+        requests[4].contains("Made teammate `helper`"),
+        "and its guess made a teammate rather than sending anything: {}",
+        requests[4]
     );
     assert_eq!(
         served_model.requests().len(),

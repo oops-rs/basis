@@ -37,6 +37,7 @@ fn preview_with_child(input: &str, child: Option<Value>) -> ToolAuthorizationPre
         &tool.descriptor(),
         &call(input),
         child,
+        None,
     )
 }
 
@@ -608,4 +609,231 @@ fn a_command_is_never_refused_for_being_deep() {
 
     assert!(tool.depth.authorize_delegation("deep").is_err());
     assert_eq!(parsed("!cargo test").mode(), Mode::Command);
+}
+
+// ADR-0037: `@<name>` is resolved, or a teammate; `reach` says which is
+// allowed; the preview says which was decided.
+
+fn call_reaching(input: &str, reach: &str) -> Value {
+    json!({ INPUT_FIELD: input, parse::REACH_FIELD: reach })
+}
+
+#[test]
+fn reach_is_a_typed_field_beside_the_string() {
+    assert_eq!(parsed("@reviewer look").reach(), None, "unsaid is unsaid");
+    for (said, reach) in [
+        ("auto", Reach::Auto),
+        ("remote", Reach::Remote),
+        ("local", Reach::Local),
+    ] {
+        let spawn = parse(&call_reaching("@reviewer look", said)).expect("parses");
+        assert_eq!(spawn.reach(), Some(reach));
+        assert_eq!(spawn.target(), Some("reviewer"));
+    }
+    let spawn = parse(&call_reaching("!cargo test", "local")).expect("parses");
+    assert_eq!(spawn.mode(), Mode::Command, "a command ignores the field");
+}
+
+#[test]
+fn a_bad_reach_is_taught_the_three_values() {
+    let error = parse(&call_reaching("@reviewer look", "anywhere")).expect_err("refused");
+    assert!(error.contains("`auto`, `remote` or `local`"), "{error}");
+    let error = parse(&json!({ INPUT_FIELD: "@reviewer look", parse::REACH_FIELD: 3 }))
+        .expect_err("refused");
+    assert!(error.contains("is a string"), "{error}");
+}
+
+/// A ledger with one minted agent on it, held for the test's life.
+fn ledger(
+    agent_id: &str,
+) -> (
+    Arc<crate::runtime::agents::AgentRegistry>,
+    crate::runtime::agents::AgentRow,
+) {
+    let registry = Arc::new(crate::runtime::agents::AgentRegistry::default());
+    let row =
+        registry.record_for_workspace(agent_id, crate::runtime::agents::AgentTools::default());
+    (registry, row)
+}
+
+fn decided(tool: &SpawnTool, agent_id: &str, input: Value) -> Result<SpawnDecision, String> {
+    let spawn = parse(&input).expect("parses");
+    tool.decide(&spawn, agent_id, || Ok(PathBuf::from("/repo")))
+}
+
+#[test]
+fn a_name_nobody_resolves_is_a_teammate_when_the_caller_keeps_any() {
+    let (registry, _row) = ledger("agent-1");
+    let tool = SpawnTool::new().with_agents(registry);
+
+    let decision = decided(&tool, "agent-1", call("@reviewer look at this")).expect("decided");
+    let SpawnDecision::Teammate { name, existing, .. } = decision else {
+        panic!("a new teammate");
+    };
+    assert_eq!(name, "reviewer");
+    assert!(existing.is_none(), "none made yet");
+}
+
+#[test]
+fn a_runtime_with_no_ledger_keeps_no_teammates_and_says_so() {
+    let error = decided(&SpawnTool::new(), "agent-1", call("@reviewer look")).expect_err("refused");
+
+    assert!(error.contains("keeps no teammates"), "{error}");
+    assert!(error.contains("`@@`"), "{error}");
+}
+
+#[test]
+fn reach_remote_refuses_a_name_no_resolver_knows() {
+    let (registry, _row) = ledger("agent-1");
+    let tool = SpawnTool::new().with_agents(registry);
+
+    let error = decided(&tool, "agent-1", call_reaching("@reviewer look", "remote"))
+        .expect_err("no resolver knows it");
+
+    assert!(error.contains("no remote agents"), "{error}");
+}
+
+#[test]
+fn a_fixed_reach_policy_refuses_the_other_values_in_the_preview() {
+    let (registry, _row) = ledger("agent-1");
+    let tool = SpawnTool::new()
+        .with_agents(registry)
+        .with_reach_policy(ReachPolicy::fixed(Reach::Remote));
+
+    let error = decided(&tool, "agent-1", call_reaching("@reviewer look", "local"))
+        .expect_err("not allowed");
+    assert!(error.contains("`reach: local` is not allowed"), "{error}");
+
+    let error = decided(&tool, "agent-1", call("@reviewer look")).expect_err("remote only");
+    assert!(
+        error.contains("no remote agents"),
+        "silence means remote under this policy: {error}"
+    );
+}
+
+#[test]
+fn a_teammate_named_alone_is_told_the_task_form() {
+    let (registry, _row) = ledger("agent-1");
+    let tool = SpawnTool::new().with_agents(registry);
+
+    let error = decided(&tool, "agent-1", call("@reviewer")).expect_err("nothing to do");
+
+    assert!(error.contains("names nobody yet"), "{error}");
+    assert!(error.contains("`@reviewer <task>`"), "{error}");
+}
+
+#[test]
+fn the_policy_shapes_a_teammate_by_its_name_when_it_is_made() {
+    let (registry, _row) = ledger("agent-1");
+    let tool =
+        SpawnTool::new()
+            .with_agents(registry)
+            .with_child_policy(|child: &ChildContext<'_>| match child.name() {
+                Some("triage") => ChildSpec::inherit().with_system("Answer yes or no."),
+                _ => ChildSpec::inherit(),
+            });
+
+    let SpawnDecision::Teammate { spec, .. } =
+        decided(&tool, "agent-1", call("@triage is this real?")).expect("decided")
+    else {
+        panic!("a teammate");
+    };
+    assert!(!spec.is_inherit(), "the policy saw the name");
+
+    let SpawnDecision::Teammate { spec, .. } =
+        decided(&tool, "agent-1", call("@reviewer is this real?")).expect("decided")
+    else {
+        panic!("a teammate");
+    };
+    assert!(spec.is_inherit());
+}
+
+#[test]
+fn a_named_delegation_tells_the_approver_what_it_was_decided_to_reach() {
+    let spawn = parsed("@reviewer look at this");
+    let tool = SpawnTool::new();
+    let descriptor = tool.descriptor();
+
+    let local = preview(
+        &spawn,
+        PathBuf::from("/repo"),
+        &descriptor,
+        &call("@reviewer look at this"),
+        None,
+        Some(Named {
+            reach: Reach::Local,
+            agent_id: Some("agent-7".to_string()),
+        }),
+    );
+    assert_eq!(
+        local.structured_input,
+        json!({
+            "mode": "agent",
+            "body": "look at this",
+            "cwd": "/repo",
+            "target": "reviewer",
+            "reach": "local",
+            "agent_id": "agent-7",
+        })
+    );
+    assert_eq!(local.side_effect_level, ToolSideEffectLevel::LocalState);
+
+    let remote = preview(
+        &spawn,
+        PathBuf::from("/repo"),
+        &descriptor,
+        &call("@reviewer look at this"),
+        None,
+        Some(Named {
+            reach: Reach::Remote,
+            agent_id: None,
+        }),
+    );
+    assert_eq!(remote.structured_input["reach"], "remote");
+    assert!(
+        remote.structured_input.get("agent_id").is_none(),
+        "not known yet"
+    );
+    assert_eq!(remote.side_effect_level, ToolSideEffectLevel::External);
+}
+
+#[test]
+fn a_copy_that_keeps_teammates_teaches_them_and_the_plain_tool_does_not() {
+    let (registry, _row) = ledger("agent-1");
+    let plain = SpawnTool::new().with_agents(Arc::clone(&registry));
+    let plain_text = plain.descriptor().provider.description.expect("described");
+    assert!(
+        !plain_text.contains("teammate"),
+        "the runtime's own instance belongs to nobody: {plain_text}"
+    );
+
+    let owned = plain.for_agent("agent-1", Arc::new(|| {}));
+    let descriptor = owned.descriptor();
+    let text = descriptor.provider.description.clone().expect("described");
+    assert!(text.contains("`@<name> <task>`"), "{text}");
+    assert!(text.contains("`@reviewer look at this diff`"), "{text}");
+    assert!(!text.contains("Your teammates:"), "none made yet: {text}");
+    let schema = descriptor.provider.input_schema;
+    assert_eq!(
+        schema["properties"][parse::REACH_FIELD]["enum"],
+        json!(["auto", "remote", "local"])
+    );
+    assert_eq!(schema["required"], json!([INPUT_FIELD]), "still optional");
+
+    let fixed = owned.with_reach_policy(ReachPolicy::fixed(Reach::Local));
+    let descriptor = fixed.descriptor();
+    assert!(
+        descriptor.provider.input_schema["properties"]
+            .get(parse::REACH_FIELD)
+            .is_none(),
+        "no choice, no field"
+    );
+    assert!(
+        !descriptor
+            .provider
+            .description
+            .expect("described")
+            .contains("`reach`"),
+        "no choice, nothing taught about it"
+    );
 }

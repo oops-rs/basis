@@ -64,7 +64,7 @@ impl LiveA2a {
     ) -> Self {
         let remembered_in = runtime.a2a_conversations_dir().map(Path::to_path_buf);
         let configured = Arc::new(ConfiguredAgents::connect(discovery.agents).await);
-        let refresh = refresher(runtime);
+        let refresh: OnChange = runtime.refresher();
         let mut resolvers: Vec<Arc<dyn AgentResolver>> = Vec::new();
         if let Some(host) = host {
             host.on_change(Arc::clone(&refresh));
@@ -176,23 +176,6 @@ fn sources(workspace: &Path, config: &A2aConfig) -> Vec<PathBuf> {
                 .map(|global| global.join(DEFAULT_GLOBAL_A2A_FILE)),
         )
         .collect()
-}
-
-/// Asks mentra to capture every registered tool's description again, so the
-/// next model request of every agent holding the set is told the set as it
-/// is (ADR-0031 §3).
-///
-/// Weak, because the set is held by the `spawn` copies mentra's registry owns:
-/// a strong runtime here would be a cycle through that registry, and the
-/// runtime would never drop — the reason `spawn` reads the agent ledger
-/// through its own `Arc` rather than the runtime's.
-fn refresher(runtime: &Arc<Runtime>) -> OnChange {
-    let runtime = Arc::downgrade(runtime);
-    Arc::new(move || {
-        if let Some(runtime) = runtime.upgrade() {
-            runtime.mentra_runtime().refresh_tool_descriptors();
-        }
-    })
 }
 
 /// Discovers the remote agents a workspace can reach, and which files said

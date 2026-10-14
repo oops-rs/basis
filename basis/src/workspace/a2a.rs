@@ -7,13 +7,10 @@
 
 use std::time::Duration;
 
-use mentra::Session;
-
 use super::Workspace;
 use crate::{
     a2a::{A2aError, A2aReload, A2aWatch, A2aWatchError, remote::Waiting},
     event::ContextFile,
-    tools::SpawnTool,
 };
 
 #[cfg(doc)]
@@ -93,30 +90,6 @@ impl Workspace {
     /// [`DEFAULT_A2A_WATCH_INTERVAL`]: crate::a2a::DEFAULT_A2A_WATCH_INTERVAL
     pub fn watch_a2a(&self, interval: Duration) -> Result<A2aWatch, A2aWatchError> {
         self.a2a.watch(interval)
-    }
-
-    /// Gives a freshly minted or resumed session the copy of `spawn` bound to
-    /// this open's live set of remote agents (ADR-0029 §4, ADR-0031 §3).
-    ///
-    /// Always, even when the set is empty: the copy's description is read
-    /// from the set whenever mentra captures it, so it is the plain `spawn`
-    /// until an agent is configured, and an agent added by a reload is taught
-    /// to this session from its next model request on.
-    ///
-    /// Registered on the session's agent alone, which is the isolation: a
-    /// sibling open of this directory shares this audience but not this agent,
-    /// so it is neither told about these agents nor routed to them.
-    ///
-    /// Returns the copy, for [`PreparedRun::with_remote_conversations`] to
-    /// register again bound to a host's key.
-    pub(super) fn teach_remote_agents(&self, session: &mut Session) -> SpawnTool {
-        let copy = self
-            .runtime
-            .spawn_tool()
-            .for_remote_agents(self.a2a.remote())
-            .remembering();
-        session.register_tool(copy.clone());
-        copy
     }
 
     /// Where the conversation with the remote agent `agent` stands for runs

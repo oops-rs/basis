@@ -84,7 +84,7 @@ use crate::{
     runtime::{HookChainHold, Runtime, SessionScope, agents::AgentTools},
     skills::SkillRoots,
     templates::Template,
-    tools::{declared::DeclaredTools, host::WorkspaceHostTools},
+    tools::{SpawnTool, declared::DeclaredTools, host::WorkspaceHostTools},
 };
 
 /// One workspace, resolved: the runtime it borrows, the model, and everything
@@ -297,8 +297,7 @@ impl Workspace {
             .runtime
             .agents()
             .record_for_workspace(session.agent_id(), tools);
-        #[cfg(feature = "a2a")]
-        let remote_spawn = self.teach_remote_agents(&mut session);
+        let remote_spawn = self.teach(&mut session);
         if !spec.profile.decides_reasoning() {
             apply_effort(&mut session, spec.effort.or(self.effort))?;
         }
@@ -308,6 +307,8 @@ impl Workspace {
             .with_agent_row(row);
         #[cfg(feature = "a2a")]
         let run = run.with_remote_spawn(remote_spawn);
+        #[cfg(not(feature = "a2a"))]
+        drop(remote_spawn);
         Ok(run)
     }
 
@@ -395,8 +396,7 @@ impl Workspace {
             .runtime
             .agents()
             .record_for_workspace(agent_id, self.resumed_tools(&session));
-        #[cfg(feature = "a2a")]
-        let remote_spawn = self.teach_remote_agents(&mut session);
+        let remote_spawn = self.teach(&mut session);
         let model = if let Some(model) = spec.profile.resolved_model() {
             session.set_model(model.clone())?;
             model.id.clone()
@@ -422,6 +422,8 @@ impl Workspace {
             .with_agent_row(row);
         #[cfg(feature = "a2a")]
         let run = run.with_remote_spawn(remote_spawn);
+        #[cfg(not(feature = "a2a"))]
+        drop(remote_spawn);
         Ok(run)
     }
 
@@ -681,6 +683,7 @@ impl Workspace {
             host_tools: self.host_tools.clone(),
             #[cfg(feature = "a2a")]
             remote: Some(Arc::clone(self.a2a.remote())),
+            teammates: Default::default(),
         }
     }
 
@@ -711,7 +714,32 @@ impl Workspace {
             host_tools: self.host_tools.clone(),
             #[cfg(feature = "a2a")]
             remote: Some(Arc::clone(self.a2a.remote())),
+            teammates: Default::default(),
         }
+    }
+
+    /// Gives a freshly minted or resumed session its own copy of `spawn`:
+    /// the one that knows which agent it belongs to, so it can list that
+    /// agent's teammates (ADR-0037 §7) and keep what `spawn` teaches current
+    /// when one is made — and, with `a2a` on, the one bound to this open's
+    /// remote agents (ADR-0029 §4, ADR-0031 §3), whether or not any is
+    /// configured yet.
+    ///
+    /// Registered on the session's agent alone, which is the isolation: a
+    /// sibling open of this directory shares this audience but not this
+    /// agent, so it is neither told about these agents nor routed to them.
+    ///
+    /// Returns the copy, for `PreparedRun::with_remote_conversations` to
+    /// register again bound to a host's key.
+    fn teach(&self, session: &mut Session) -> SpawnTool {
+        let copy = self
+            .runtime
+            .spawn_tool()
+            .for_agent(session.agent_id(), self.runtime.refresher());
+        #[cfg(feature = "a2a")]
+        let copy = copy.for_remote_agents(self.a2a.remote()).remembering();
+        session.register_tool(copy.clone());
+        copy
     }
 
     /// Wraps a freshly created or resumed session in the run context this

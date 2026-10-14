@@ -13,9 +13,11 @@ use mentra::{
     tool::{ToolContext, ToolResult},
 };
 
+use std::sync::Arc;
+
 use crate::runtime::agents::AgentTools;
 
-use super::{SpawnTool, child::ChildSpec};
+use super::{SpawnTool, child::ChildSpec, teammate::Teammate};
 
 /// Runs a command on mentra's own execution path, at the place it named.
 ///
@@ -153,14 +155,7 @@ pub(super) async fn delegate(
         .map_err(|error| format!("spawn could not start a subagent: {error}"))?;
     let child_id = child.id().to_string();
 
-    // The child inherits its parent's row below, remote agents included, so
-    // it may reach them — and is told so, by the same per-agent copy of this
-    // tool its parent was given (ADR-0029 §4). Its own conversation with each,
-    // because a child is a conversation of its own.
-    #[cfg(feature = "a2a")]
-    if let Some(remote) = inherited.as_ref().and_then(|row| row.remote.as_ref()) {
-        child.register_tool(tool.for_remote_agents(remote));
-    }
+    teach(tool, &mut child, inherited.as_deref());
 
     // Held for the child's whole run, like the depth entry below, and read by
     // both of the ledger's readers. A child of this child asks it the same
@@ -329,6 +324,164 @@ async fn spawn_child(
     }
 
     ctx.spawn_subagent_from(template).await
+}
+
+/// Gives a child its own copy of this tool: the one that knows whose it is,
+/// so it keeps and lists the child's own teammates (ADR-0037 §7), and — when
+/// the parent's row holds remote agents — bound to that set, so the child may
+/// reach them and is told so (ADR-0029 §4). Its own conversation with each,
+/// because a child is a conversation of its own.
+fn teach(tool: &SpawnTool, child: &mut mentra::agent::Agent, inherited: Option<&AgentTools>) {
+    let Some(refresh) = tool.refresh.clone() else {
+        // The runtime's own instance belongs to nobody and refreshes nothing;
+        // a host driving mentra directly gets the plain tool its child
+        // inherits.
+        return;
+    };
+    let copy = tool.for_agent(child.id(), refresh);
+    #[cfg(feature = "a2a")]
+    let copy = match inherited.and_then(|row| row.remote.as_ref()) {
+        Some(remote) => copy.for_remote_agents(remote),
+        None => copy,
+    };
+    #[cfg(not(feature = "a2a"))]
+    let _ = inherited;
+    child.register_tool(copy);
+}
+
+/// Runs one turn of the teammate `name` (ADR-0037 §5): the one the caller
+/// has, or — on the first `@<name> <task>` — one made now through the child
+/// policy and kept on the caller's row.
+///
+/// Everything a one-off delegation does per run, this does per turn: the
+/// parent's bounds, the depth entry, the announcement on the parent's
+/// stream, the usage relay, the delegation entries in the transcript. The
+/// one thing it does not do is drop the child.
+pub(super) async fn teammate(
+    tool: &SpawnTool,
+    ctx: &mut ToolContext<'_>,
+    name: &str,
+    prompt: &str,
+    depth: usize,
+    existing: Option<Arc<Teammate>>,
+    spec: ChildSpec,
+) -> ToolResult {
+    let agents = tool.agents.as_ref();
+    let inherited = agents.and_then(|agents| agents.of(&ctx.agent_id));
+    let (teammate, made) = match existing {
+        Some(teammate) => (teammate, false),
+        None => {
+            let mut child = spawn_child(ctx, spec, inherited.as_deref())
+                .await
+                .map_err(|error| format!("spawn could not start a teammate: {error}"))?;
+            teach(tool, &mut child, inherited.as_deref());
+            // The row lives as long as the teammate: judged by the parent's
+            // guard throughout, and able to keep teammates of its own.
+            let row = agents.and_then(|agents| agents.adopt(&ctx.agent_id, child.id()));
+            let teammate = Arc::new(Teammate::new(name, child, row));
+            if let Some(row) = &inherited {
+                row.teammates.keep(Arc::clone(&teammate));
+            }
+            // Told from the next model request on, like an agent a reload
+            // added (ADR-0031 §3).
+            if let Some(refresh) = &tool.refresh {
+                refresh();
+            }
+            (teammate, true)
+        }
+    };
+    // Called by id or by name, it is its name the reply and the record say.
+    let name = teammate.name();
+    let Some(mut child) = teammate.take() else {
+        return Err(format!(
+            "`{name}` is still working on the last task you handed it, and takes one task at a \
+             time; wait for that answer before handing it another"
+        ));
+    };
+    let child_id = teammate.id().to_string();
+
+    let _entered = tool.depth.entered(&child_id, depth + 1);
+    let started = ctx.register_subagent(&child);
+    let _usage_relay = ctx.relay_subagent_usage(&child);
+
+    let edge = DelegationEdge {
+        kind: DelegationKind::Subagent,
+        local_agent_id: ctx.agent_id.clone(),
+        remote_agent_id: child_id.clone(),
+    };
+    let requested = ctx.record_delegation_request(
+        format!(
+            "<delegation-request agent=\"{}\" teammate=\"{name}\" model=\"{}\">\n{prompt}\n\
+             </delegation-request>",
+            started.name, started.model
+        ),
+        teammate_artifact(&started, name, prompt, DelegationStatus::Requested, None),
+        Some(edge.clone()),
+    );
+    note(ctx, requested);
+
+    let options = ctx.child_run_options();
+    let answer = Box::pin(child.run(vec![ContentBlock::text(prompt)], options)).await;
+    drop(child);
+
+    let outcome = answer
+        .as_ref()
+        .map(|message| said(message.text()))
+        .map_err(ToString::to_string);
+
+    ctx.finish_subagent(
+        &child_id,
+        match &outcome {
+            Ok(_) => SpawnedAgentStatus::Finished,
+            Err(error) => SpawnedAgentStatus::Failed(error.clone()),
+        },
+    );
+
+    let (status, told, summary) = match &outcome {
+        Ok(text) => (DelegationStatus::Finished, "finished", text),
+        Err(error) => (DelegationStatus::Failed, "failed", error),
+    };
+    let returned = ctx.record_delegation_result(
+        format!(
+            "<delegation-result agent=\"{}\" teammate=\"{name}\" status=\"{told}\">\n{summary}\n\
+             </delegation-result>",
+            started.name
+        ),
+        teammate_artifact(&started, name, prompt, status, Some(summary.clone())),
+        Some(edge),
+    );
+    note(ctx, returned);
+
+    ctx.refresh_tasks().map_err(|error| {
+        format!("the delegated run finished but its tasks did not load: {error}")
+    })?;
+
+    // The name and the id open every reply (ADR-0037 §6), so a fresh
+    // teammate after a restart reads as a different agent.
+    let headline = if made {
+        format!("Made teammate `{name}` (id `{child_id}`). It replied:")
+    } else {
+        format!("Teammate `{name}` (id `{child_id}`) replied:")
+    };
+    match outcome {
+        Ok(text) => Ok(format!("{headline}\n\n{text}")),
+        Err(error) => Err(format!("the teammate `{name}`'s turn failed: {error}")),
+    }
+}
+
+/// The delegation entry for one teammate turn: the shape a one-off child's
+/// has, with the name the parent reaches it by as its role.
+fn teammate_artifact(
+    child: &SpawnedAgentSummary,
+    name: &str,
+    prompt: &str,
+    status: DelegationStatus,
+    result_summary: Option<String>,
+) -> DelegationArtifact {
+    DelegationArtifact {
+        role: Some(format!("teammate:{name}")),
+        ..artifact(child, prompt, status, result_summary)
+    }
 }
 
 /// What the model reads back, with a name for the case where a subagent

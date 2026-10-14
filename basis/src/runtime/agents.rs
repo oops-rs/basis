@@ -110,6 +110,27 @@ pub(crate) struct AgentTools {
     /// no workspace wrote.
     #[cfg(feature = "a2a")]
     pub(crate) remote: Option<Arc<crate::a2a::remote::RemoteAgents>>,
+    /// The teammates this agent has made and may reach again by name or id
+    /// (ADR-0037 §5): the children `spawn "@<name> …"` kept rather than
+    /// dropped. This agent's own — a child's are its own too — and gone with
+    /// the row.
+    pub(crate) teammates: crate::tools::spawn::teammate::Teammates,
+}
+
+impl AgentTools {
+    /// What a delegated child inherits: everything its parent was minted
+    /// with, and no teammates yet — a teammate's teammates are its own.
+    pub(crate) fn for_child(&self) -> Self {
+        Self {
+            hidden: self.hidden.clone(),
+            #[cfg(feature = "mcp")]
+            mcp_servers: self.mcp_servers.clone(),
+            host_tools: self.host_tools.clone(),
+            #[cfg(feature = "a2a")]
+            remote: self.remote.clone(),
+            teammates: Default::default(),
+        }
+    }
 }
 
 /// Which handle a registry row belongs to *now*.
@@ -186,7 +207,7 @@ impl AgentRegistry {
     /// basis-minted agent, which is the same answer a reader would have got
     /// for the parent anyway.
     pub(crate) fn adopt(self: &Arc<Self>, parent: &str, child: &str) -> Option<AgentRow> {
-        let tools = self.of(parent)?;
+        let tools = Arc::new(self.of(parent)?.for_child());
         let owner = self.new_owner();
         self.agents
             .write()
@@ -235,10 +256,14 @@ impl AgentRegistry {
     }
 
     fn record(&self, owner: AgentOwner, agent_id: &str, tools: Arc<AgentTools>) {
-        self.agents
+        let replaced = self
+            .agents
             .write()
             .expect("agent registry poisoned")
             .insert(agent_id.to_string(), Entry { owner, tools });
+        // Dropped outside the lock: a row holds teammates, each holding a row
+        // of its own, and releasing one takes this same lock.
+        drop(replaced);
     }
 
     /// Takes `agent_id` off the registry, but only while `owner` is still the
@@ -256,16 +281,24 @@ impl AgentRegistry {
         // still a map, and refusing to release a row would leave the ledger
         // claiming an agent nothing is running. Same posture as
         // `PreparedRun::observe_usage`.
-        let mut agents = self
-            .agents
-            .write()
-            .unwrap_or_else(std::sync::PoisonError::into_inner);
-        if agents
-            .get(agent_id)
-            .is_some_and(|entry| entry.owner == owner)
-        {
-            agents.remove(agent_id);
-        }
+        let removed = {
+            let mut agents = self
+                .agents
+                .write()
+                .unwrap_or_else(std::sync::PoisonError::into_inner);
+            if agents
+                .get(agent_id)
+                .is_some_and(|entry| entry.owner == owner)
+            {
+                agents.remove(agent_id)
+            } else {
+                None
+            }
+        };
+        // Dropped outside the lock: a row holds teammates (ADR-0037 §5), each
+        // holding a row of its own, and releasing one of those takes this
+        // same lock — under it, that is a deadlock.
+        drop(removed);
     }
 }
 
@@ -448,6 +481,7 @@ mod tests {
             host_tools: Vec::new(),
             #[cfg(feature = "a2a")]
             remote: None,
+            teammates: Default::default(),
         }
     }
 
@@ -466,6 +500,7 @@ mod tests {
                 host_tools: Vec::new(),
                 #[cfg(feature = "a2a")]
                 remote: None,
+                teammates: Default::default(),
             },
         );
         let _stranger = registry.record_for_workspace("stranger", tools(&[]));

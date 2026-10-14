@@ -14,6 +14,7 @@
 mod live;
 mod resolver;
 mod routing;
+mod shadow;
 mod support;
 mod teaching;
 mod watching;

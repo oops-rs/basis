@@ -23,8 +23,14 @@
 
 use serde_json::Value;
 
+use super::reach::Reach;
+
 /// The field the model fills in. One string, because the tool takes one thing.
 pub const INPUT_FIELD: &str = "input";
+
+/// The one optional field beside it: which agents `@<name>` may reach
+/// (ADR-0037 §3). Typed, never read out of the string.
+pub const REACH_FIELD: &str = "reach";
 
 /// What the wire contract calls *here*, and therefore a name no target may
 /// take (ADR-0021).
@@ -67,10 +73,13 @@ impl Mode {
 pub struct Spawn {
     mode: Mode,
     body: String,
-    /// Where a command runs (ADR-0021), or the remote agent a delegation is
-    /// for (ADR-0029); `None` for *here* — this process for a command, a
-    /// subagent on this runtime for a delegation.
+    /// Where a command runs (ADR-0021), or the agent a delegation names
+    /// (ADR-0029, ADR-0037); `None` for *here* — this process for a command, a
+    /// one-off subagent on this runtime for a delegation.
     target: Option<String>,
+    /// What the model said `@<name>` may reach, or `None` when it said
+    /// nothing and the runtime's policy decides.
+    reach: Option<Reach>,
 }
 
 impl Spawn {
@@ -82,16 +91,21 @@ impl Spawn {
         &self.body
     }
 
+    /// What the model said `@<name>` may reach (ADR-0037 §3), when it said.
+    pub const fn reach(&self) -> Option<Reach> {
+        self.reach
+    }
+
     /// The target this call named — a command's executor, or a delegation's
-    /// remote agent — or `None` for here. Never `Some("local")`: `local` is the
+    /// agent — or `None` for here. Never `Some("local")`: `local` is the
     /// reserved wire spelling for this process, not a name anything can take.
     pub fn target(&self) -> Option<&str> {
         self.target.as_deref()
     }
 
-    /// Whether this is a delegation to a remote agent that hands it nothing
-    /// new: `@<agent>` alone, which waits again on that agent's outstanding
-    /// task (ADR-0029 §5). The one call whose body may be empty.
+    /// Whether this is a delegation to a named agent that hands it nothing
+    /// new: `@<agent>` alone, which waits again on a remote agent's
+    /// outstanding task (ADR-0029 §5). The one call whose body may be empty.
     pub fn is_remote_wait(&self) -> bool {
         self.mode == Mode::Agent && self.target.is_some() && self.body.is_empty()
     }
@@ -114,7 +128,23 @@ pub fn parse(input: &Value) -> Result<Spawn, String> {
         })?;
 
     let mode = classify_spawn_input(input).expect("the same string field was read above");
-    read(raw, mode)
+    let reach = match input.get(REACH_FIELD) {
+        None | Some(Value::Null) => None,
+        Some(Value::String(said)) => Some(Reach::parse(said).ok_or_else(|| {
+            format!(
+                "`{REACH_FIELD}` is one of `auto`, `remote` or `local`, not `{said}`; leave it \
+                 out to let a name reach a remote agent or a teammate here, whichever has it"
+            )
+        })?),
+        Some(_) => {
+            return Err(format!(
+                "`{REACH_FIELD}` is a string, one of `auto`, `remote` or `local`"
+            ));
+        }
+    };
+    let mut spawn = read(raw, mode)?;
+    spawn.reach = reach;
+    Ok(spawn)
 }
 
 /// Classifies the lexical spawn mode without validating that the body is
@@ -240,11 +270,13 @@ fn command(body: &str, target: Option<String>) -> Result<Spawn, String> {
         mode: Mode::Command,
         body: body.to_string(),
         target,
+        reach: None,
     })
 }
 
-/// `@<agent> <task>` — a delegation to a remote agent (ADR-0029), read here
-/// and nowhere else.
+/// `@<agent> <task>` — a delegation to a named agent (ADR-0029, ADR-0037:
+/// a remote agent a resolver knows, or a teammate here), read here and
+/// nowhere else.
 ///
 /// Read like `!@`'s target: the name runs to the first whitespace, a space
 /// straight after `@` names nothing, and every refusal spells the working form
@@ -253,7 +285,7 @@ fn command(body: &str, target: Option<String>) -> Result<Spawn, String> {
 fn remote(rest: &str) -> Result<Spawn, String> {
     if rest.is_empty() || rest.starts_with(char::is_whitespace) {
         return Err(
-            "`@` names a remote agent and needs its name right after it: write \
+            "`@` names an agent and needs its name right after it: write \
              `@<agent> <task>`, as `@reviewer look at this diff`, or `@@` to begin a task with \
              a literal `@`"
                 .to_string(),
@@ -282,6 +314,7 @@ fn remote(rest: &str) -> Result<Spawn, String> {
         // agent's outstanding task rather than sending a new one.
         body: body.trim().to_string(),
         target: Some(name.to_string()),
+        reach: None,
     })
 }
 
@@ -298,5 +331,6 @@ fn delegation(body: &str) -> Result<Spawn, String> {
         body: body.to_string(),
         // A delegation with no `@` is a subagent on this runtime.
         target: None,
+        reach: None,
     })
 }

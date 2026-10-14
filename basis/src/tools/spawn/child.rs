@@ -69,6 +69,7 @@ pub struct ChildContext<'a> {
     prompt: &'a str,
     parent_agent_id: &'a str,
     workspace_dir: &'a Path,
+    name: Option<&'a str>,
 }
 
 impl<'a> ChildContext<'a> {
@@ -77,12 +78,30 @@ impl<'a> ChildContext<'a> {
             prompt,
             parent_agent_id,
             workspace_dir,
+            name: None,
+        }
+    }
+
+    /// The same delegation, minting the teammate called `name`.
+    pub(crate) fn named(self, name: &'a str) -> Self {
+        Self {
+            name: Some(name),
+            ..self
         }
     }
 
     /// The task the parent is delegating, exactly as the child will read it.
     pub fn prompt(&self) -> &str {
         self.prompt
+    }
+
+    /// The name the child is minted under when it is a teammate the parent
+    /// will reach again as `@<name>` (ADR-0037 §5) — what lets a policy give
+    /// `@triage` a cheap model. `None` for a one-off subagent. Consulted
+    /// only when the teammate is made: a later `@<name> <task>` continues the
+    /// child this answer shaped.
+    pub fn name(&self) -> Option<&str> {
+        self.name
     }
 
     /// The persisted agent id of the delegating parent.

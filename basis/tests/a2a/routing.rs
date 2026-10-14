@@ -15,6 +15,7 @@ use basis::{
         ContentBlock, ProviderCapabilities, ProviderDescriptor, ProviderError, ProviderEventStream,
         Request, Response, Role, provider_event_stream_from_response,
     },
+    tools::spawn::{Reach, ReachPolicy},
 };
 use serde_json::json;
 
@@ -122,6 +123,10 @@ async fn a_reload_reaches_only_the_open_that_reloaded() {
         Runtime::builder()
             .with_provider_instance(Scripted::asking_for_nous(3))
             .with_ephemeral_history()
+            // Remote only, so a guess at a name is a refusal rather than a
+            // teammate (ADR-0037 §3): what is under test is that the guess
+            // reaches nothing, and a refusal says so directly.
+            .with_reach_policy(ReachPolicy::fixed(Reach::Remote))
             .build()
             .expect("builds"),
     );

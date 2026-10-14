@@ -353,12 +353,18 @@ pub struct Runtime {
     /// runtime would never drop — and each workspace's interception chain.
     agents: Arc<agents::AgentRegistry>,
     /// The `spawn` this runtime registered, kept so a workspace can give one
-    /// agent a copy told about that agent's remote agents (ADR-0029 §4). The
-    /// copy shares this one's ledgers, so depth and the child policy are one
-    /// thing however many copies there are.
-    #[cfg(feature = "a2a")]
+    /// agent a copy that knows whose it is — for its teammates (ADR-0037 §7)
+    /// and, with `a2a` on, its remote agents (ADR-0029 §4). The copy shares
+    /// this one's ledgers, so depth and the child policy are one thing
+    /// however many copies there are.
     spawn: crate::tools::SpawnTool,
 }
+
+/// What asks mentra to capture every registered tool's description again
+/// (ADR-0031 §3, ADR-0037 §7): called by whatever changed what `spawn`
+/// teaches — a resolver's set, a teammate made. Shared, because several
+/// things of one runtime are handed the same one.
+pub type Refresh = Arc<dyn Fn() + Send + Sync>;
 
 /// Hand-written because mentra's runtime is not `Debug`. No credential lives
 /// here — the key was consumed building the provider — so nothing is redacted.
@@ -423,14 +429,30 @@ impl Runtime {
         self.ephemeral_history
     }
 
-    /// Which workspace each live agent here answers for, for the two readers
-    /// that cannot ask an audience: a workspace's own interception chain, and
-    /// `spawn`. See [`agents`].
-    #[cfg(feature = "a2a")]
+    /// The `spawn` this runtime registered, for a workspace to copy per agent.
     pub(crate) fn spawn_tool(&self) -> &crate::tools::SpawnTool {
         &self.spawn
     }
 
+    /// Asks mentra to capture every registered tool's description again, so
+    /// the next model request of every agent is told what `spawn` teaches as
+    /// it is now (ADR-0031 §3, ADR-0037 §7).
+    ///
+    /// Weak, because what holds it is held by the `spawn` copies mentra's
+    /// registry owns: a strong runtime there would be a cycle through that
+    /// registry, and the runtime would never drop.
+    pub(crate) fn refresher(self: &Arc<Self>) -> Refresh {
+        let runtime = Arc::downgrade(self);
+        Arc::new(move || {
+            if let Some(runtime) = runtime.upgrade() {
+                runtime.mentra_runtime().refresh_tool_descriptors();
+            }
+        })
+    }
+
+    /// Which workspace each live agent here answers for, for the two readers
+    /// that cannot ask an audience: a workspace's own interception chain, and
+    /// `spawn`. See [`agents`].
     pub(crate) fn agents(&self) -> &Arc<agents::AgentRegistry> {
         &self.agents
     }

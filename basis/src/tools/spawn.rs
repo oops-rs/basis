@@ -63,8 +63,10 @@ mod depth;
 mod describe;
 mod execute;
 mod parse;
+mod reach;
 #[cfg(feature = "a2a")]
 mod remote;
+pub(crate) mod teammate;
 
 use std::{collections::BTreeSet, sync::Arc};
 
@@ -76,18 +78,22 @@ use mentra::tool::{
 };
 use serde_json::{Value, json};
 
-use describe::{Remote, Taught, description, input_schema, listed};
+#[cfg(feature = "a2a")]
+use describe::Taught;
+use describe::{Names, Remote, description, input_schema, listed};
 use parse::{Mode, Spawn, parse};
+use teammate::Teammate;
 
 // A guard that has to know whether a `spawn` call is a command must not
 // become a second reader of the `!` prefix — the module docs above make the
 // rule: it is read exactly once, here. Exported so a host's interceptor asks
 // this parser rather than writing its own.
 pub use parse::{
-    INPUT_FIELD as SPAWN_INPUT_FIELD, Mode as SpawnMode, Spawn as SpawnInput, classify_spawn_input,
-    parse as parse_spawn_input,
+    INPUT_FIELD as SPAWN_INPUT_FIELD, Mode as SpawnMode, REACH_FIELD as SPAWN_REACH_FIELD,
+    Spawn as SpawnInput, classify_spawn_input, parse as parse_spawn_input,
 };
 pub(crate) use parse::{LOCAL_TARGET, is_target_name};
+pub use reach::{Reach, ReachPolicy};
 
 pub use child::{ChildContext, ChildSpec};
 pub use depth::DEFAULT_DELEGATION_DEPTH;
@@ -155,9 +161,20 @@ pub struct SpawnTool {
     /// resumed and so has nothing to pick back up.
     #[cfg(feature = "a2a")]
     remembers: crate::a2a::remote::Remembered,
+    /// The agent this copy belongs to, so it can list that agent's teammates
+    /// (ADR-0037 §7). `None` on the runtime's own instance, which belongs to
+    /// nobody and lists none.
+    owner: Option<String>,
+    /// What to call when this copy changes what `spawn` teaches — a teammate
+    /// made — so the next model request is told. `None` on the runtime's own
+    /// instance.
+    refresh: Option<crate::runtime::Refresh>,
+    /// What `@<name>` may reach (ADR-0037 §3), the runtime's say.
+    reach: ReachPolicy,
 }
 
 /// The per-call facts both authorization preview and execution must decide.
+#[derive(Debug)]
 enum SpawnDecision {
     Command,
     Agent {
@@ -166,12 +183,30 @@ enum SpawnDecision {
         /// Resolved only when a child policy needed it.
         workspace: Option<std::path::PathBuf>,
     },
+    /// A turn for a teammate of the calling agent (ADR-0037 §5): one it has,
+    /// or one to make under `name`.
+    Teammate {
+        depth: usize,
+        name: String,
+        existing: Option<Arc<Teammate>>,
+        /// Consulted only when the teammate is made.
+        spec: Box<ChildSpec>,
+        workspace: Option<std::path::PathBuf>,
+    },
     /// A task for a remote agent the calling agent's workspace connected.
     #[cfg(feature = "a2a")]
     Remote {
         agents: Arc<crate::a2a::remote::RemoteAgents>,
         name: String,
     },
+}
+
+/// What a named delegation adds to the preview (ADR-0037 §4): which kind of
+/// agent the name was decided to reach, and the agent's id when it is
+/// already known.
+struct Named {
+    reach: Reach,
+    agent_id: Option<String>,
 }
 
 /// Hand-written for the policy field: a `dyn Fn` has no `Debug`, and presence
@@ -183,7 +218,9 @@ impl std::fmt::Debug for SpawnTool {
             .field("targets", &self.targets)
             .field("policy", &self.policy.as_ref().map(|_| "<child policy>"))
             .field("agents", &self.agents.as_ref().map(|_| "<agent ledger>"))
-            .field("remote", &self.taught())
+            .field("owner", &self.owner)
+            .field("reach", &self.reach)
+            .field("remote", &self.taught().remote)
             .finish()
     }
 }
@@ -241,7 +278,18 @@ impl SpawnTool {
             remote: None,
             #[cfg(feature = "a2a")]
             remembers: crate::a2a::remote::Remembered::Not,
+            owner: None,
+            refresh: None,
+            reach: ReachPolicy::default(),
         }
+    }
+
+    /// Says what `@<name>` may reach (ADR-0037 §3). basis's own
+    /// [`RuntimeBuilder::with_reach_policy`](crate::RuntimeBuilder::with_reach_policy)
+    /// calls this; a host driving mentra directly calls it itself.
+    #[must_use]
+    pub fn with_reach_policy(self, reach: ReachPolicy) -> Self {
+        Self { reach, ..self }
     }
 
     /// Gives this tool's delegations a child policy (D4): consulted per
@@ -291,6 +339,17 @@ impl SpawnTool {
         }
     }
 
+    /// A copy of this tool for the agent `owner`: the one that lists that
+    /// agent's teammates (ADR-0037 §7) and calls `refresh` when it makes one,
+    /// so the next model request is told.
+    pub(crate) fn for_agent(&self, owner: &str, refresh: crate::runtime::Refresh) -> Self {
+        Self {
+            owner: Some(owner.to_string()),
+            refresh: Some(refresh),
+            ..self.clone()
+        }
+    }
+
     /// A copy of this tool for one agent whose workspace holds `remote`,
     /// teaching it that live set (ADR-0029 §4, ADR-0031 §3).
     ///
@@ -307,12 +366,31 @@ impl SpawnTool {
         }
     }
 
-    /// The remote agents this copy teaches, as its resolvers teach them now
-    /// (ADR-0037 §7): each with what its card says, or marked unreachable
-    /// when its card could not be fetched, and a resolver's note about the
-    /// names it cannot list.
+    /// Everything this copy teaches about named agents, read each time
+    /// mentra captures the descriptor: the remote agents its resolvers teach
+    /// now (ADR-0037 §7) — each with what its card says, or marked
+    /// unreachable when its card could not be fetched, and a resolver's note
+    /// about the names it cannot list — the owner's teammates by name and id,
+    /// and which `reach` values the model may choose between.
+    fn taught(&self) -> Names {
+        let teammates = self.owner.as_ref().and_then(|owner| {
+            // Teammates are kept on the ledger, so a copy on a runtime with
+            // none — a host's own `SpawnTool` — keeps none and teaches none.
+            Some(self.agents.as_ref()?.of(owner)?.teammates.listed())
+        });
+        Names {
+            remote: self.taught_remote(),
+            teammates,
+            reach: if self.reach.offers_a_choice() {
+                self.reach.allowed().collect()
+            } else {
+                Vec::new()
+            },
+        }
+    }
+
     #[cfg(feature = "a2a")]
-    fn taught(&self) -> Remote {
+    fn taught_remote(&self) -> Remote {
         let Some(remote) = &self.remote else {
             return Remote::default();
         };
@@ -331,7 +409,7 @@ impl SpawnTool {
     }
 
     #[cfg(not(feature = "a2a"))]
-    fn taught(&self) -> Remote {
+    fn taught_remote(&self) -> Remote {
         Remote::default()
     }
 
@@ -364,26 +442,125 @@ impl SpawnTool {
         self.agents.as_ref()?.of(agent_id)?.remote.clone()
     }
 
-    /// Routes `@<name>` for `agent_id`, or says why it cannot go anywhere.
+    /// Where `@<name>` stands with the calling agent's remote agents, without
+    /// waiting on anything: the decision to hand the task over, the refusal
+    /// to read instead, or `Ok(None)` when no resolver knows the name.
     ///
-    /// A fact, not a judgement, so it is refused in the preview like an
-    /// unregistered command target: no approver is asked about an agent that
-    /// is not there, or one tried too recently to be worth trying again.
+    /// A refusal here is a fact, not a judgement, so it is refused in the
+    /// preview like an unregistered command target: no approver is asked
+    /// about an agent tried too recently to be worth trying again.
     #[cfg(feature = "a2a")]
-    fn authorize_remote(&self, agent_id: &str, name: &str) -> Result<SpawnDecision, String> {
+    fn remote_route(&self, agent_id: &str, name: &str) -> Result<Option<SpawnDecision>, String> {
         let Some(agents) = self.remote_agents_of(agent_id) else {
-            return Err(no_remote_agents(name));
+            return Ok(None);
         };
+        if agents.route(name) == crate::a2a::Route::Unknown {
+            return Ok(None);
+        }
         remote::authorize(&agents, name)?;
-        Ok(SpawnDecision::Remote {
+        Ok(Some(SpawnDecision::Remote {
             agents,
             name: name.to_string(),
-        })
+        }))
     }
 
     #[cfg(not(feature = "a2a"))]
-    fn authorize_remote(&self, _agent_id: &str, name: &str) -> Result<SpawnDecision, String> {
-        Err(no_remote_agents(name))
+    fn remote_route(&self, _agent_id: &str, _name: &str) -> Result<Option<SpawnDecision>, String> {
+        Ok(None)
+    }
+
+    /// The refusal for `@<name>` under `reach: remote` when no resolver knows
+    /// the name: the configured names when there are any, else that there is
+    /// nowhere to send it.
+    fn no_remote_agent(&self, agent_id: &str, name: &str) -> String {
+        #[cfg(feature = "a2a")]
+        if let Some(agents) = self.remote_agents_of(agent_id) {
+            return remote::unknown(&agents, name);
+        }
+        let _ = agent_id;
+        no_remote_agents(name)
+    }
+
+    /// Decides a `@<name>` delegation (ADR-0037 §3, §6): the calling agent's
+    /// own teammate when it has one by that id or name and `reach` allows
+    /// local, else a remote agent when a resolver knows the name and `reach`
+    /// allows remote, else a new teammate when `reach` allows local, else
+    /// the refusal that says so.
+    fn decide_named(
+        &self,
+        spawn: &Spawn,
+        agent_id: &str,
+        name: &str,
+        resolve_workspace: impl FnOnce() -> Result<std::path::PathBuf, String>,
+    ) -> Result<SpawnDecision, String> {
+        let reach = self.reach.decide(spawn.reach())?;
+        let row = self.agents.as_ref().and_then(|agents| agents.of(agent_id));
+        let mine = row.as_ref().and_then(|row| row.teammates.find(name));
+
+        if reach != Reach::Remote
+            && let Some(existing) = mine
+        {
+            // A bound name stays bound: a conversation in progress never
+            // moves to a remote agent a reload added under the same name.
+            return self.teammate_turn(spawn, agent_id, name, Some(existing), resolve_workspace);
+        }
+        if reach != Reach::Local
+            && let Some(remote) = self.remote_route(agent_id, name)?
+        {
+            return Ok(remote);
+        }
+        if reach == Reach::Remote {
+            return Err(self.no_remote_agent(agent_id, name));
+        }
+        if row.is_none() {
+            return Err(format!(
+                "spawn keeps no teammates on this runtime, so there is nobody to hand `@{name}` \
+                 to; write the task with no `@` to hand it to a subagent here, or `@@` to begin \
+                 it with a literal `@`"
+            ));
+        }
+        self.teammate_turn(spawn, agent_id, name, None, resolve_workspace)
+    }
+
+    /// One turn for a teammate: the one the caller has, or one to make.
+    fn teammate_turn(
+        &self,
+        spawn: &Spawn,
+        agent_id: &str,
+        name: &str,
+        existing: Option<Arc<Teammate>>,
+        resolve_workspace: impl FnOnce() -> Result<std::path::PathBuf, String>,
+    ) -> Result<SpawnDecision, String> {
+        if spawn.body().is_empty() {
+            return Err(match &existing {
+                Some(_) => format!(
+                    "`@{name}` is a teammate here and has nothing outstanding to wait on; write \
+                     `@{name} <task>` to hand it one"
+                ),
+                None => format!(
+                    "`@{name}` names nobody yet; write `@{name} <task>` to make a teammate called \
+                     `{name}` and hand it that task"
+                ),
+            });
+        }
+        let depth = self.depth.authorize_delegation(agent_id)?;
+        let (spec, workspace) = match (&existing, self.policy.as_ref()) {
+            // The policy shapes a teammate when it is made, not on every turn.
+            (None, Some(policy)) => {
+                let workspace = resolve_workspace()?;
+                let spec =
+                    policy(&ChildContext::new(spawn.body(), agent_id, &workspace).named(name));
+                (spec, Some(workspace))
+            }
+            _ => (ChildSpec::inherit(), None),
+        };
+        Ok(SpawnDecision::Teammate {
+            depth,
+            name: name.to_string(),
+            existing,
+            spec: Box::new(spec),
+            workspace,
+        })
     }
 
     /// What the policy says this delegation's child is — asked identically on
@@ -446,7 +623,7 @@ impl SpawnTool {
             // Not an `if let` guard: those are newer than `rust-version`.
             Mode::Agent => {
                 if let Some(name) = spawn.target() {
-                    return self.authorize_remote(agent_id, name);
+                    return self.decide_named(spawn, agent_id, name, resolve_workspace);
                 }
                 let depth = self.depth.authorize_delegation(agent_id)?;
                 let (spec, workspace) = match self.policy.as_ref() {
@@ -482,10 +659,10 @@ impl ToolDefinition for SpawnTool {
     /// something milder when asked in the abstract. Per-call precision is
     /// [`ToolExecutor::authorization_preview`]'s job.
     fn descriptor(&self) -> RuntimeToolDescriptor {
-        let taught = self.taught();
+        let names = self.taught();
         RuntimeToolDescriptor::builder(SPAWN)
-            .description(description(&self.targets, &taught))
-            .input_schema(input_schema(&self.targets, &taught))
+            .description(description(&self.targets, &names))
+            .input_schema(input_schema(&self.targets, &names))
             .capabilities(vec![
                 ToolCapability::ProcessExec,
                 ToolCapability::FilesystemWrite,
@@ -516,10 +693,17 @@ impl ToolExecutor for SpawnTool {
         let decision = self.decide(&spawn, &ctx.agent_id, || {
             ctx.resolve_working_directory(None)
         })?;
-        let (cwd, child) = match decision {
-            SpawnDecision::Command => (ctx.resolve_working_directory(None)?, None),
+        let (cwd, child, named) = match decision {
+            SpawnDecision::Command => (ctx.resolve_working_directory(None)?, None, None),
             #[cfg(feature = "a2a")]
-            SpawnDecision::Remote { .. } => (ctx.resolve_working_directory(None)?, None),
+            SpawnDecision::Remote { .. } => (
+                ctx.resolve_working_directory(None)?,
+                None,
+                Some(Named {
+                    reach: Reach::Remote,
+                    agent_id: None,
+                }),
+            ),
             SpawnDecision::Agent {
                 spec, workspace, ..
             } => {
@@ -527,11 +711,40 @@ impl ToolExecutor for SpawnTool {
                     Some(workspace) => workspace,
                     None => ctx.resolve_working_directory(None)?,
                 };
-                (cwd, spec.preview_value())
+                (cwd, spec.preview_value(), None)
+            }
+            SpawnDecision::Teammate {
+                spec,
+                workspace,
+                existing,
+                ..
+            } => {
+                let cwd = match workspace {
+                    Some(workspace) => workspace,
+                    None => ctx.resolve_working_directory(None)?,
+                };
+                // What the child will be is said when it is made; after that
+                // it is who it is, and the id says so.
+                let child = existing.is_none().then(|| spec.preview_value()).flatten();
+                (
+                    cwd,
+                    child,
+                    Some(Named {
+                        reach: Reach::Local,
+                        agent_id: existing.map(|teammate| teammate.id().to_string()),
+                    }),
+                )
             }
         };
 
-        Ok(preview(&spawn, cwd, &self.descriptor(), input, child))
+        Ok(preview(
+            &spawn,
+            cwd,
+            &self.descriptor(),
+            input,
+            child,
+            named,
+        ))
     }
 
     /// Both modes run in the exclusive lane — a command mutates the workspace
@@ -560,6 +773,15 @@ impl ToolExecutor for SpawnTool {
             SpawnDecision::Agent { depth, spec, .. } => {
                 execute::delegate(self, &mut ctx, spawn.body(), depth, *spec).await
             }
+            SpawnDecision::Teammate {
+                depth,
+                name,
+                existing,
+                spec,
+                ..
+            } => {
+                execute::teammate(self, &mut ctx, &name, spawn.body(), depth, existing, *spec).await
+            }
         }
     }
 }
@@ -572,6 +794,7 @@ fn preview(
     descriptor: &RuntimeToolDescriptor,
     raw_input: &Value,
     child: Option<Value>,
+    named: Option<Named>,
 ) -> ToolAuthorizationPreview {
     // The wire contract of ADR-0016, widened by ADR-0021 to
     // `{mode, body, cwd, target}`, and still never the string the model wrote.
@@ -610,11 +833,24 @@ fn preview(
             .expect("built as an object two lines up")
             .insert("child".to_string(), child);
     }
+    // ADR-0037 §4: a named delegation says which kind of agent the name was
+    // decided to reach — never `auto` — and, once it is known, which agent.
+    // Additive on the same ground as `child`: absent from every call that
+    // names nobody, so a rule written against the four keys still matches.
+    if let Some(named) = &named {
+        let object = structured_input
+            .as_object_mut()
+            .expect("built as an object above");
+        object.insert("reach".to_string(), json!(named.reach.as_str()));
+        if let Some(agent_id) = &named.agent_id {
+            object.insert("agent_id".to_string(), json!(agent_id));
+        }
+    }
 
     ToolAuthorizationPreview {
         working_directory: cwd,
         capabilities: capabilities(spawn.mode()),
-        side_effect_level: side_effect_level(spawn),
+        side_effect_level: side_effect_level(spawn, named.as_ref()),
         durability: descriptor.durability,
         execution_category: execution_category(spawn.mode()),
         approval_category: approval_category(spawn.mode()),
@@ -626,13 +862,13 @@ fn preview(
 /// `Process` for a command, `LocalState` for a delegation here — the levels
 /// `shell` and `task` declared, now decided per call instead of per name — and
 /// `External` for a delegation to a remote agent, which hands work to a system
-/// this process does not control (ADR-0029 §2). None is `None`, so no call can
-/// present as read-only.
-fn side_effect_level(spawn: &Spawn) -> ToolSideEffectLevel {
-    match (spawn.mode(), spawn.target()) {
+/// this process does not control (ADR-0029 §2). A teammate is a delegation
+/// here (ADR-0037 §4). None is `None`, so no call can present as read-only.
+fn side_effect_level(spawn: &Spawn, named: Option<&Named>) -> ToolSideEffectLevel {
+    match (spawn.mode(), named.map(|named| named.reach)) {
         (Mode::Command, _) => ToolSideEffectLevel::Process,
-        (Mode::Agent, Some(_)) => ToolSideEffectLevel::External,
-        (Mode::Agent, None) => ToolSideEffectLevel::LocalState,
+        (Mode::Agent, Some(Reach::Remote | Reach::Auto)) => ToolSideEffectLevel::External,
+        (Mode::Agent, Some(Reach::Local) | None) => ToolSideEffectLevel::LocalState,
     }
 }
 

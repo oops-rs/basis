@@ -33,7 +33,10 @@ use crate::{
     hooks::Interceptor,
     shell::ShellAccess,
     store,
-    tools::{ChildContext, ChildSpec, SpawnTool, spawn::ChildPolicy},
+    tools::{
+        ChildContext, ChildSpec, SpawnTool,
+        spawn::{ChildPolicy, ReachPolicy},
+    },
 };
 
 use execution::{PolicyShaping, shared_policy, validate_target_names, workspace_policy};
@@ -149,6 +152,8 @@ pub struct RuntimeBuilder {
     /// decision D4). `None` — the default — is inherit-everything, on the code
     /// path every runtime has always used.
     child_policy: Option<ChildPolicy>,
+    /// What `@<name>` may reach ([`with_reach_policy`](Self::with_reach_policy)).
+    reach_policy: ReachPolicy,
     /// How completed tool results are bounded before the next provider
     /// request. `None` preserves the Mentra policy derived for this runtime;
     /// `Some` overlays only bytes, physical lines, and spill posture.
@@ -208,6 +213,7 @@ impl std::fmt::Debug for RuntimeBuilder {
                 "child_policy",
                 &self.child_policy.as_ref().map(|_| "<child policy>"),
             )
+            .field("reach_policy", &self.reach_policy)
             .field(
                 "command_environment",
                 &self.command_environment.keys().collect::<Vec<_>>(),
@@ -244,6 +250,7 @@ impl Default for RuntimeBuilder {
             host_tools: Vec::new(),
             delegation_depth: crate::tools::DEFAULT_DELEGATION_DEPTH,
             child_policy: None,
+            reach_policy: ReachPolicy::default(),
             tool_result_policy: None,
             host_provider: None,
             gateway_ring: None,
@@ -475,6 +482,25 @@ impl RuntimeBuilder {
         }
     }
 
+    /// Says what `spawn "@<name> …"` may reach (ADR-0037 §3): a remote agent a
+    /// resolver knows, a teammate on this runtime, or — the default,
+    /// `auto` — whichever has the name, remote first.
+    ///
+    /// The default policy allows the model every value and reads an absent
+    /// `reach` as `auto`. A host that serves only remote agents, or that
+    /// wants the behavior before ADR-0037 — an unknown name is a refusal,
+    /// never a new teammate — passes [`ReachPolicy::fixed`]`(`[`Reach::Remote`](crate::tools::spawn::Reach::Remote)`)`.
+    /// A value the policy disallows is refused in the preview, before the
+    /// approver. Runtime-scoped, like the child policy and for the same
+    /// reason.
+    #[must_use]
+    pub fn with_reach_policy(self, reach_policy: ReachPolicy) -> Self {
+        Self {
+            reach_policy,
+            ..self
+        }
+    }
+
     /// Builds the workspace-agnostic runtime: the substrate an N-repository
     /// host hands to every [`WorkspaceBuilder::with_runtime`](crate::WorkspaceBuilder::with_runtime).
     ///
@@ -569,6 +595,7 @@ impl RuntimeBuilder {
             target_names,
             self.delegation_depth,
             self.child_policy,
+            self.reach_policy,
             Arc::clone(&agents),
         );
         let builder = mentra::Runtime::builder()
@@ -712,7 +739,6 @@ impl RuntimeBuilder {
             skill_root_holders: Mutex::new(HashMap::new()),
             hook_chains: Mutex::new(HashMap::new()),
             agents,
-            #[cfg(feature = "a2a")]
             spawn,
         })
     }
@@ -730,14 +756,16 @@ fn spawn_tool(
     targets: Vec<String>,
     delegation_depth: usize,
     child_policy: Option<ChildPolicy>,
+    reach_policy: ReachPolicy,
     agents: Arc<super::agents::AgentRegistry>,
 ) -> SpawnTool {
     let tool = SpawnTool::with_targets_and_depth(targets, delegation_depth)
-        // Read for one question — what is this delegation's parent denied —
+        // Read for two questions — what is this delegation's parent denied,
         // so a roster override cannot hand a narrowed child a sibling
-        // workspace's tools, and so the child is judged by the same guard its
-        // parent is.
-        .with_agents(agents);
+        // workspace's tools and the child is judged by the same guard its
+        // parent is; and which teammates the parent keeps (ADR-0037 §5).
+        .with_agents(agents)
+        .with_reach_policy(reach_policy);
 
     match child_policy {
         // The stored `Arc` goes straight through: re-wrapping it in a closure

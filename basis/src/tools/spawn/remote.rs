@@ -53,7 +53,7 @@ fn refused(name: &str, reason: &str) -> String {
 }
 
 /// The refusal for a name no resolver of the calling agent's workspace knows.
-fn unknown(agents: &RemoteAgents, name: &str) -> String {
+pub(super) fn unknown(agents: &RemoteAgents, name: &str) -> String {
     let configured = agents.names();
     if configured.is_empty() {
         return no_remote_agents(name);
