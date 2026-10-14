@@ -234,7 +234,7 @@ impl std::fmt::Debug for Workspace {
             .field("skills", &self.skills.len())
             .field("templates", &self.templates.len())
             .field("mcp_servers", &self.mcp_servers)
-            .field("a2a_agents", &self.a2a_agents())
+            .field("remote_agents", &self.remote_agents())
             .field("declared_tools", &self.declared_tools)
             .field("host_tools", &self.host_tools)
             .finish_non_exhaustive()
@@ -532,7 +532,7 @@ impl Workspace {
     /// answers it. A resolver over names it cannot list adds nothing here.
     /// Live: after a reload, or a change a watch picked up, it is the new
     /// set. Names only: nothing here echoes a URL or a credential.
-    pub fn a2a_agents(&self) -> Vec<String> {
+    pub fn remote_agents(&self) -> Vec<String> {
         self.remote.names()
     }
 
@@ -776,7 +776,7 @@ impl Workspace {
                 mcp_files: self.mcp_files.clone(),
                 mcp_servers: self.mcp_servers.clone(),
                 a2a_files: self.a2a_files(),
-                a2a_agents: self.a2a_agents(),
+                remote_agents: self.remote_agents(),
             },
         )
         .with_bounds(bounds)

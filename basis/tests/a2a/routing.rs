@@ -149,9 +149,9 @@ async fn a_reload_reaches_only_the_open_that_reloaded() {
         .reload_a2a()
         .await
         .expect("reloads, finding nothing");
-    assert_eq!(owner.a2a_agents(), ["nous"]);
+    assert_eq!(owner.remote_agents(), ["nous"]);
     assert!(
-        sibling.a2a_agents().is_empty(),
+        sibling.remote_agents().is_empty(),
         "the sibling did not reload"
     );
 

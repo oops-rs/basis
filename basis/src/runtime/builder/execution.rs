@@ -77,7 +77,7 @@ impl RuntimeBuilder {
         self
     }
 
-    /// Says the work this runtime does arrived over A2A at `hop` — the
+    /// Says the work this runtime does arrived at `hop` in a chain of agents — the
     /// number of agent-to-agent hands it is from a top-level caller — so the
     /// remote agents its sessions reach in turn are told `hop + 1`
     /// (ADR-0030 §9, `docs/a2a/hops-v1.md`).
@@ -87,11 +87,8 @@ impl RuntimeBuilder {
     /// and a served task's hop is a fact about the whole task. A server
     /// such as `basis-a2a` sets it from the hop the task was reached at; a
     /// host driving its own work leaves it alone.
-    pub fn with_a2a_hop(self, hop: u32) -> Self {
-        Self {
-            a2a_hop: hop,
-            ..self
-        }
+    pub fn with_hop(self, hop: u32) -> Self {
+        Self { hop, ..self }
     }
 }
 

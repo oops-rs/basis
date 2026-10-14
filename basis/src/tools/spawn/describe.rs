@@ -189,8 +189,8 @@ fn remote_paragraph(remote: &Remote) -> String {
         .first()
         .map_or_else(|| "<agent>".to_string(), |agent| agent.name.clone());
     let mut text = format!(
-        "A task can also go to a remote agent — another agent, running elsewhere, reached over \
-         the A2A protocol: `@<agent> <task>` hands it the task and returns its answer, as \
+        "A task can also go to a remote agent — another agent, running elsewhere: \
+         `@<agent> <task>` hands it the task and returns its answer, as \
          `@{example} <task>`. Successive tasks to one agent continue one conversation with it. \
          If it is still working when the wait ends, write `@<agent>` alone to keep waiting, and \
          never hand it the same task twice; if it asks a question, `@<agent> <answer>` answers \

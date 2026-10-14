@@ -986,10 +986,10 @@ impl WorkspaceBuilder {
             crate::agents::remote::RemoteAgents::over(
                 resolvers,
                 runtime
-                    .a2a_conversations_dir()
+                    .remote_conversations_dir()
                     .map(std::path::Path::to_path_buf),
             )
-            .with_hop(runtime.a2a_hop()),
+            .with_hop(runtime.hop()),
         );
 
         Ok(Workspace {

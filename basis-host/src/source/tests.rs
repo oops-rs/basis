@@ -271,7 +271,7 @@ async fn a_cached_workspace_picks_up_an_agent_added_while_it_is_open() {
         .await
         .expect("the session opens");
     let workspace = Arc::clone(&source.opened()[0]);
-    assert!(workspace.a2a_agents().is_empty());
+    assert!(workspace.remote_agents().is_empty());
 
     // Unreachable on purpose: a configured agent is reported whether or not
     // it answers, and nothing here should depend on the network.
@@ -280,7 +280,7 @@ async fn a_cached_workspace_picks_up_an_agent_added_while_it_is_open() {
     std::fs::write(&file, r#"{"agents":{"nous":{"url":"http://127.0.0.1:1"}}}"#).unwrap();
 
     let deadline = tokio::time::Instant::now() + Duration::from_secs(5);
-    while workspace.a2a_agents() != ["nous"] {
+    while workspace.remote_agents() != ["nous"] {
         assert!(
             tokio::time::Instant::now() < deadline,
             "the watch never picked the file up"

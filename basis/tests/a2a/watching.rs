@@ -14,11 +14,11 @@ const INTERVAL: Duration = Duration::from_millis(20);
 /// Waits up to five seconds for the workspace to configure exactly `names`.
 async fn settles_on(workspace: &Workspace, names: &[&str]) {
     let deadline = tokio::time::Instant::now() + Duration::from_secs(5);
-    while workspace.a2a_agents() != names {
+    while workspace.remote_agents() != names {
         assert!(
             tokio::time::Instant::now() < deadline,
             "never settled on {names:?}; configured {:?}",
-            workspace.a2a_agents()
+            workspace.remote_agents()
         );
         tokio::time::sleep(INTERVAL).await;
     }
@@ -82,7 +82,7 @@ async fn a_watch_keeps_the_set_through_a_save_that_does_not_parse() {
     write(&file, r#"{"agents":{"nous":{"url":"#);
     several_polls().await;
     assert_eq!(
-        workspace.a2a_agents(),
+        workspace.remote_agents(),
         ["nous"],
         "a typo never drops an agent"
     );
@@ -110,7 +110,7 @@ async fn dropping_the_watch_stops_it() {
     );
     several_polls().await;
 
-    assert!(workspace.a2a_agents().is_empty());
+    assert!(workspace.remote_agents().is_empty());
     assert_eq!(server.fetches(), 0);
 }
 
@@ -138,7 +138,7 @@ async fn a_save_that_renames_the_file_away_and_writes_a_new_one_never_drops_an_a
     // could put successive polls in different missing windows, with no poll
     // ever observing the file in between.
     tokio::time::sleep(interval / 5).await;
-    assert_eq!(workspace.a2a_agents(), ["nous"], "dropped mid-save");
+    assert_eq!(workspace.remote_agents(), ["nous"], "dropped mid-save");
     write(
         &file,
         &a2a_file(&[("nous", &server.base), ("scout", &server.base)]),

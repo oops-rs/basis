@@ -44,7 +44,7 @@ pub struct RunContext {
     /// The remote agents those files and the host named at mint, after
     /// layering, by the names that took effect. Names only, for
     /// `mcp_servers`'s reason; live in the header, as `a2a_files` is.
-    pub a2a_agents: Vec<String>,
+    pub remote_agents: Vec<String>,
 }
 
 /// A skill available to the run, without its body.
@@ -117,7 +117,7 @@ pub(super) fn header_for(session_id: &str, run: &RunContext) -> Event {
         mcp_files: run.mcp_files.clone(),
         mcp_servers: run.mcp_servers.clone(),
         a2a_files: run.a2a_files.clone(),
-        a2a_agents: run.a2a_agents.clone(),
+        remote_agents: run.remote_agents.clone(),
     }
 }
 

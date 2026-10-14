@@ -394,7 +394,7 @@ flowchart LR
 - **Hops bound a chain of agents** (ADR-0030 §9). The hops extension
   ([`a2a/hops-v1.md`](a2a/hops-v1.md)) carries a hop count and a deadline in each message's
   metadata. The server refuses past its cap (8 by default) and clamps the task's deadline to the
-  caller's; the task's hop reaches its runtime through `RuntimeBuilder::with_a2a_hop` and its
+  caller's; the task's hop reaches its runtime through `RuntimeBuilder::with_hop` and its
   commands as `BASIS_HOP`, and its own `@agent` messages send the next hop and the earlier
   deadline. Absent metadata is hop 0, so agents that are not basis interoperate.
 - **The client is mentra's, behind `spawn`** (ADR-0029). Each agent in `.basis/a2a.json` is a

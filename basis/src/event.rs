@@ -326,7 +326,7 @@ pub enum Event {
         /// ADR-0031). Names only — a URL or a header is configuration, and
         /// this line travels into logs.
         #[serde(default, skip_serializing_if = "Vec::is_empty")]
-        a2a_agents: Vec<String>,
+        remote_agents: Vec<String>,
     },
 
     UserMessage {
@@ -645,7 +645,7 @@ mod tests {
                 mcp_files: Vec::new(),
                 mcp_servers: Vec::new(),
                 a2a_files: Vec::new(),
-                a2a_agents: Vec::new(),
+                remote_agents: Vec::new(),
             },
         );
         let json = serde_json::to_value(&line).expect("serializes");
@@ -722,7 +722,7 @@ mod tests {
                 mcp_files: Vec::new(),
                 mcp_servers: Vec::new(),
                 a2a_files: Vec::new(),
-                a2a_agents: Vec::new(),
+                remote_agents: Vec::new(),
             },
         );
         let json = serde_json::to_value(&line).expect("serializes");
@@ -874,7 +874,7 @@ mod tests {
                 }],
                 mcp_servers: vec!["github".to_string()],
                 a2a_files: Vec::new(),
-                a2a_agents: Vec::new(),
+                remote_agents: Vec::new(),
             },
         );
         let text = serde_json::to_string(&line).expect("serializes");

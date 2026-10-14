@@ -542,7 +542,7 @@ mod tests {
             mcp_files: Vec::new(),
             mcp_servers: Vec::new(),
             a2a_files: Vec::new(),
-            a2a_agents: Vec::new(),
+            remote_agents: Vec::new(),
         })
     }
 

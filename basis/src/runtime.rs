@@ -264,8 +264,8 @@ pub struct Runtime {
     /// borrows it from. Shared with the executor rather than copied, so there
     /// is one statement and not two.
     command_environment: Arc<std::collections::BTreeMap<String, String>>,
-    /// From [`RuntimeBuilder::with_a2a_hop`].
-    a2a_hop: u32,
+    /// From [`RuntimeBuilder::with_hop`].
+    hop: u32,
     /// The id this runtime's provider is registered under — resolution's
     /// answer, or a host-supplied instance's own descriptor. Models resolve
     /// against it at workspace open, and its string is what workspaces copy
@@ -303,9 +303,9 @@ pub struct Runtime {
     /// beside it in that config are the workspace's
     /// ([`Compaction`](crate::Compaction)), the directory is this.
     transcripts: PathBuf,
-    /// Where sessions remember their remote A2A conversations, or `None` when
+    /// Where sessions remember their conversations with remote agents, or `None` when
     /// history is kept nowhere (ADR-0029 §5).
-    a2a_conversations: Option<PathBuf>,
+    remote_conversations: Option<PathBuf>,
     /// What this runtime's builder said about every policy it hands out, kept
     /// so a workspace's own policy gets the same shaping the runtime's did.
     /// See [`session_policy`](Self::session_policy).
@@ -406,8 +406,8 @@ impl Runtime {
     /// because a host that wants to say where it goes says it once, with
     /// [`with_store_dir`](RuntimeBuilder::with_store_dir), and a reader here
     /// would invite a second answer.
-    pub(crate) fn a2a_conversations_dir(&self) -> Option<&Path> {
-        self.a2a_conversations.as_deref()
+    pub(crate) fn remote_conversations_dir(&self) -> Option<&Path> {
+        self.remote_conversations.as_deref()
     }
 
     pub(crate) fn transcripts_dir(&self) -> &Path {
@@ -475,10 +475,10 @@ impl Runtime {
     /// A `Vec` rather than the map it is stored as, because that is the shape
     /// `crate::subprocess::execute` takes and what a declared tool merges its
     /// own `env` over. Sorted, because the map is.
-    /// The hop the work this runtime does arrived at over A2A — zero for a
-    /// top-level caller. See [`RuntimeBuilder::with_a2a_hop`].
-    pub fn a2a_hop(&self) -> u32 {
-        self.a2a_hop
+    /// The hop the work this runtime does arrived at in a chain of agents —
+    /// zero for a top-level caller. See [`RuntimeBuilder::with_hop`].
+    pub fn hop(&self) -> u32 {
+        self.hop
     }
 
     pub(crate) fn command_environment(&self) -> Vec<(String, String)> {

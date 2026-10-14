@@ -106,7 +106,7 @@ async fn a_workspace_hands_work_to_a_served_agent_and_reads_its_answer() {
         .open()
         .await
         .expect("the caller opens");
-    assert_eq!(workspace.a2a_agents(), ["helper"]);
+    assert_eq!(workspace.remote_agents(), ["helper"]);
 
     // `AllowAll` stands in for the approver: a remote delegation declares
     // `External` side effects, so the call reaches the approval gate exactly

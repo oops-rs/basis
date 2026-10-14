@@ -72,7 +72,7 @@ async fn a_hosts_resolver_is_reported_first_and_the_file_still_counts() {
         .expect("opens");
 
     assert_eq!(
-        workspace.a2a_agents(),
+        workspace.remote_agents(),
         ["reviewer", "nous"],
         "what the host resolves, then what the file configures"
     );
@@ -108,7 +108,7 @@ async fn a_hosts_resolver_outranks_the_file_by_name() {
         .expect("opens");
 
     assert_eq!(
-        workspace.a2a_agents(),
+        workspace.remote_agents(),
         ["reviewer"],
         "one name is one agent, and the host's answer is the one that resolves"
     );

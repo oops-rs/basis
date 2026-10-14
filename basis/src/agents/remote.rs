@@ -14,7 +14,7 @@
 //!
 //! ADR-0037: `@<name>` is resolved. The resolvers are asked in order — the
 //! host's, when it installed one, then the set the open's files configure
-//! (`crate::a2a`, behind its feature) — and the first that does not answer
+//! (the `a2a` feature's, when it is on) — and the first that does not answer
 //! [`Unresolved::Unknown`] decides. What a resolver hands back is a connected
 //! client and who the agent is; what this module keeps around it is
 //! everything the model would otherwise carry.
@@ -22,7 +22,7 @@
 //! # The conversation is basis's
 //!
 //! ADR-0029 §5: within one session, successive delegations to one remote agent
-//! continue one A2A conversation, and a task the remote agent has not finished
+//! continue one conversation, and a task the remote agent has not finished
 //! is that agent's *outstanding* task. [`RemoteAgents::conversation`] is where
 //! both live — keyed by the calling agent and the remote agent's id
 //! (ADR-0037 §6) — so the model never carries an id.
@@ -56,8 +56,8 @@ pub(crate) struct RemoteAgents {
     /// Asked in order; the first answer other than *unknown* stands.
     resolvers: Vec<Arc<dyn AgentResolver>>,
     conversations: conversation::Book,
-    /// The hop the work behind these delegations arrived at over A2A, from
-    /// the runtime ([`crate::Runtime::a2a_hop`]); every message sent is the
+    /// The hop the work behind these delegations arrived at in a chain of
+    /// agents, from the runtime ([`crate::Runtime::hop`]); every message sent is the
     /// next one.
     hop: u32,
 }
@@ -77,7 +77,7 @@ impl RemoteAgents {
         }
     }
 
-    /// Says the work these agents are handed arrived over A2A at `hop`.
+    /// Says the work these agents are handed arrived at `hop`.
     pub(crate) fn with_hop(self, hop: u32) -> Self {
         Self { hop, ..self }
     }
@@ -132,7 +132,7 @@ impl RemoteAgents {
     }
 
     /// Every taught name, strongest first — what
-    /// [`Workspace::a2a_agents`](crate::Workspace::a2a_agents) reports.
+    /// [`Workspace::remote_agents`](crate::Workspace::remote_agents) reports.
     pub(crate) fn names(&self) -> Vec<String> {
         self.taught()
             .agents

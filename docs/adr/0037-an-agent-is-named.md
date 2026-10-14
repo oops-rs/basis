@@ -177,7 +177,8 @@ name is a label; every agent it reaches has a permanent id.**
 9. **What today's a2a module becomes.** `ConfiguredAgents`, the resolver
    built from `A2aConfig`: the three sources, connect at open, backoff retry,
    reload, watch, removed-name tracking. Same code, same tests, under the
-   trait. `Workspace::reload_a2a` and `watch_a2a` act on it; `a2a_agents`
+   trait. `Workspace::reload_a2a` and `watch_a2a` act on it; `remote_agents`
+   (`a2a_agents` until ADR-0038)
    reports every taught remote name, host resolver first.
 
 ## Consequences

@@ -997,7 +997,7 @@ fn task_runtime(data: &DataDir, task: &str, meta: &TaskMeta) -> Result<RuntimeBu
         // runtime, so each remote agent it reaches is told the next hop.
         runtime = runtime
             .with_command_environment(crate::BASIS_HOP, meta.hop.to_string())
-            .with_a2a_hop(meta.hop);
+            .with_hop(meta.hop);
     }
     Ok(runtime)
 }

@@ -9,8 +9,8 @@
 //!
 //! So this is the whole of what crosses to a peer: a [`Request`] in, an
 //! [`Outcome`] or a [`PeerError`] out, with the ids basis records and the
-//! text already framed as the remote agent's own words. A2A implements it
-//! (`crate::a2a::A2aPeer`, behind the feature); a host implements it for
+//! text already framed as the remote agent's own words. The `a2a` feature
+//! implements it for A2A; a host implements it for
 //! anything else that can take a task and answer.
 
 use std::time::{Duration, SystemTime};
@@ -69,7 +69,8 @@ pub struct Message {
     /// The task this answers, when the agent asked something.
     pub answering: Option<String>,
     /// Which hop this message is in a chain of agents: the sender's own plus
-    /// one, so a top-level caller sends 1 (`docs/a2a/hops-v1.md`).
+    /// one, so a top-level caller sends 1. A peer carries it however its wire
+    /// can, or not at all.
     pub hop: u32,
     /// When this side stops waiting, when it knows.
     pub deadline: Option<SystemTime>,

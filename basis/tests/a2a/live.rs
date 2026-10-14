@@ -8,14 +8,14 @@ use crate::support::{CardServer, a2a_file, offline_runtime, pinned, write};
 
 fn reported(header: Event) -> (Vec<String>, usize) {
     let Event::RunStarted {
-        a2a_agents,
+        remote_agents,
         a2a_files,
         ..
     } = header
     else {
         panic!("the header is run_started");
     };
-    (a2a_agents, a2a_files.len())
+    (remote_agents, a2a_files.len())
 }
 
 #[tokio::test]
@@ -37,7 +37,7 @@ async fn a_file_written_after_open_is_connected_on_reload() {
 
     assert_eq!(report.added, ["nous"]);
     assert!(report.unreachable.is_empty(), "{report:?}");
-    assert_eq!(workspace.a2a_agents(), ["nous"]);
+    assert_eq!(workspace.remote_agents(), ["nous"]);
     assert_eq!(
         reported(run.header()),
         (vec!["nous".to_string()], 1),
@@ -69,7 +69,7 @@ async fn a_half_typed_file_never_drops_an_agent() {
 
     assert!(matches!(error, A2aError::Parse { .. }), "{error}");
     assert!(error.to_string().contains("a2a.json"), "{error}");
-    assert_eq!(workspace.a2a_agents(), ["nous"], "the set stands");
+    assert_eq!(workspace.remote_agents(), ["nous"], "the set stands");
     assert_eq!(reported(run.header()), (vec!["nous".to_string()], 1));
     assert_eq!(server.fetches(), 1, "nothing was reconnected");
 
@@ -108,7 +108,7 @@ async fn a_reload_removes_changes_and_refetches_by_name() {
     assert_eq!(report.changed, ["moved"]);
     assert_eq!(report.refreshed, ["kept"]);
     assert!(report.added.is_empty() && report.unreachable.is_empty());
-    assert_eq!(workspace.a2a_agents(), ["kept", "moved"]);
+    assert_eq!(workspace.remote_agents(), ["kept", "moved"]);
     assert_eq!(
         server.fetches(),
         fetched_at_open + 2,

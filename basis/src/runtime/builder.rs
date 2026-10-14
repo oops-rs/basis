@@ -83,8 +83,8 @@ pub struct RuntimeBuilder {
     interceptors: Vec<Arc<dyn Interceptor>>,
     command_environment: BTreeMap<String, String>,
     /// How many agent-to-agent hands the work this runtime does is from a
-    /// top-level caller ([`with_a2a_hop`](Self::with_a2a_hop)).
-    a2a_hop: u32,
+    /// top-level caller ([`with_hop`](Self::with_hop)).
+    hop: u32,
     /// How patiently a run waits out a failing provider, and how many attempts
     /// it gets ([`with_provider_retry`](Self::with_provider_retry) and
     /// [`with_provider_retry_budget`](Self::with_provider_retry_budget) set the
@@ -245,7 +245,7 @@ impl Default for RuntimeBuilder {
             wire: Wire::ChatCompletions,
             file_tools: FileToolProfile::Split,
             command_environment: BTreeMap::new(),
-            a2a_hop: 0,
+            hop: 0,
             command_targets: CommandTargets::new(),
             host_tools: Vec::new(),
             delegation_depth: crate::tools::DEFAULT_DELEGATION_DEPTH,
@@ -682,7 +682,7 @@ impl RuntimeBuilder {
         // conversation, derived beside the store it belongs next to so
         // `with_store_dir` moves both or neither — `History::transcripts`.
         let transcripts = History::transcripts(self.history.as_ref());
-        let a2a_conversations = History::a2a_conversations(self.history.as_ref());
+        let remote_conversations = History::remote_conversations(self.history.as_ref());
 
         // A base URL is the only place the wire is a question: a preset
         // carries the one its vendor speaks, and an instance *is* its wire —
@@ -720,7 +720,7 @@ impl RuntimeBuilder {
         Ok(Runtime {
             mentra,
             command_environment,
-            a2a_hop: self.a2a_hop,
+            hop: self.hop,
             provider,
             // Unsaid is the newest the provider offers, which is what this
             // builder has always resolved for a caller that named no model.
@@ -728,7 +728,7 @@ impl RuntimeBuilder {
             retry_policy: self.retry_policy,
             ephemeral_history,
             transcripts,
-            a2a_conversations,
+            remote_conversations,
             policy_shaping,
             host_interceptors,
             #[cfg(feature = "mcp")]

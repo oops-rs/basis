@@ -139,11 +139,15 @@ const LEGACY_SQLITE_FILENAME: &str = "runtime.sqlite";
 /// nobody said anything.
 const TRANSCRIPTS_DIRNAME: &str = "transcripts";
 
-/// Where a session's conversations with remote A2A agents are remembered,
+/// Where a session's conversations with remote agents are remembered,
 /// beside the store that holds the session itself (ADR-0029 §5): one file per
 /// agent id, so a resumed session picks up the remote work it had handed off
 /// rather than handing it off again.
-const A2A_CONVERSATIONS_DIRNAME: &str = "a2a-conversations";
+// The name records were first written under, kept so a store from before
+// ADR-0038 still finds them.
+// The name records were first written under, kept so a store from before
+// ADR-0038 still finds them.
+const REMOTE_CONVERSATIONS_DIRNAME: &str = "a2a-conversations";
 
 /// The runtime identifier for conversations in `workspace`.
 ///
@@ -344,7 +348,7 @@ pub fn forget_in(dir: &Path, agent_id: &str) -> Result<(), RunError> {
 
     // The conversation's record of remote work it handed off is a row it
     // wrote, too; it goes with the rest. Absent is the ordinary case.
-    crate::agents::remote::forget(&a2a_conversations_in(dir), agent_id)
+    crate::agents::remote::forget(&remote_conversations_in(dir), agent_id)
         .map_err(|(path, source)| RunError::Forget { path, source })?;
 
     Ok(())
@@ -451,8 +455,8 @@ pub(crate) fn transcripts_in(dir: &Path) -> PathBuf {
 /// Where a store under `dir` remembers its sessions' remote conversations,
 /// beside the sessions themselves so [`RuntimeBuilder::with_store_dir`](crate::RuntimeBuilder::with_store_dir)
 /// moves both.
-pub(crate) fn a2a_conversations_in(dir: &Path) -> PathBuf {
-    dir.join(A2A_CONVERSATIONS_DIRNAME)
+pub(crate) fn remote_conversations_in(dir: &Path) -> PathBuf {
+    dir.join(REMOTE_CONVERSATIONS_DIRNAME)
 }
 
 /// Where they go when nobody said where the history lives.

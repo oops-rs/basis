@@ -84,11 +84,11 @@ impl History {
     /// beside the store, for the transcripts' reason — or `None` for a runtime
     /// whose history is kept nowhere: a conversation that cannot be resumed
     /// has nothing to pick back up, so its record stays in memory.
-    pub(super) fn a2a_conversations(posture: Option<&Self>) -> Option<PathBuf> {
+    pub(super) fn remote_conversations(posture: Option<&Self>) -> Option<PathBuf> {
         match posture {
-            Some(Self::Directory(dir)) => Some(store::a2a_conversations_in(dir)),
+            Some(Self::Directory(dir)) => Some(store::remote_conversations_in(dir)),
             Some(Self::Ephemeral) => None,
-            None => Some(store::a2a_conversations_in(&store::default_directory())),
+            None => Some(store::remote_conversations_in(&store::default_directory())),
         }
     }
 }

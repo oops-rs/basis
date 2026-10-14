@@ -170,7 +170,7 @@ impl PreparedRun {
     /// Keeps this run's conversations with remote agents under the host's
     /// `key` rather than under this run's own agent (ADR-0035).
     ///
-    /// By default, what `spawn "@<agent> …"` remembers — the A2A context it
+    /// By default, what `spawn "@<agent> …"` remembers — the conversation it
     /// continues and a task still outstanding, such as one waiting for an
     /// answer — belongs to the calling agent, so a host that mints a fresh
     /// agent per message of one chat loses it between messages: the answer
@@ -180,7 +180,7 @@ impl PreparedRun {
     /// and `@<agent> <task>` continues the same remote context. Runs on
     /// different keys never see each other's.
     ///
-    /// The record lives beside this runtime's other A2A records, in a file
+    /// The record lives beside this runtime's other remote-conversation records, in a file
     /// named for the key (any string; one that is not a plain file name is
     /// made into one, so a key never names a path elsewhere), and is read
     /// afresh on every call. A runtime whose history is kept nowhere keeps it
@@ -228,13 +228,14 @@ impl PreparedRun {
         }
     }
 
-    /// The header line, with the A2A half read now: [`context`](Self::context)
+    /// The header line, with the live half read now: [`context`](Self::context)
     /// describes the run as minted, but a long-lived session's later turns
     /// should not announce a set of remote agents a reload already replaced.
     fn header_now(&self, session_id: &str) -> Event {
         let mut header = header_for(session_id, &self.run);
-        if let (Some(remote), Event::RunStarted { a2a_agents, .. }) = (&self.remote, &mut header) {
-            *a2a_agents = remote.names();
+        if let (Some(remote), Event::RunStarted { remote_agents, .. }) = (&self.remote, &mut header)
+        {
+            *remote_agents = remote.names();
         }
         #[cfg(feature = "a2a")]
         if let (Some(live), Event::RunStarted { a2a_files, .. }) = (&self.a2a, &mut header) {

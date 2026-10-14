@@ -19,7 +19,7 @@ use crate::PreparedRun;
 
 impl Workspace {
     /// The A2A files in effect now, most specific first — what the run header
-    /// reports beside [`a2a_agents`](Self::a2a_agents).
+    /// reports beside [`remote_agents`](Self::remote_agents).
     pub(super) fn a2a_files(&self) -> Vec<ContextFile> {
         self.a2a.files()
     }

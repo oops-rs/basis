@@ -21,10 +21,16 @@ Releases before 0.15.0 are described by their tags and ADRs only.
   hops extension, the framing — and `Resolved::over_a2a(client, name)` is the
   one-line way a host's resolver uses it. The `a2a` feature gates exactly
   that module: a2a.json, the configured set, reload, watch and the adapter.
-- `WorkspaceBuilder::with_agent_resolver`, `Workspace::a2a_agents`,
+- `WorkspaceBuilder::with_agent_resolver`, `Workspace::remote_agents`,
   `Workspace::remote_conversation` and `PreparedRun::with_remote_conversations`
   are plain API in every build. `RunError` gains `Forget` for a conversation
   record that could not be removed.
+- The core's vocabulary is the core's: `Workspace::a2a_agents` is
+  `remote_agents`, the `RunStarted` event's and `RunContext`'s `a2a_agents`
+  field is `remote_agents`, and `Runtime::a2a_hop` /
+  `RuntimeBuilder::with_a2a_hop` are `hop` / `with_hop` — a hop is a hop
+  whatever carried it. `a2a_files` keeps its name: it is about a2a.json. A
+  build without the feature sees no A2A name outside the `a2a` module.
 
 ### An agent is named ([ADR-0037](docs/adr/0037-an-agent-is-named.md))
 
@@ -51,8 +57,8 @@ Releases before 0.15.0 are described by their tags and ADRs only.
   remote agent `External`.
 - A target name may be namespaced with `/` between parts: `@team/reviewer`,
   `!@team/box`. A namespaced name always means a resolver's agent.
-- `Workspace::a2a_agents` reports every taught name, the host's resolver's
-  first, one entry per name.
+- `Workspace::remote_agents` (`a2a_agents` until ADR-0038) reports every
+  taught name, the host's resolver's first, one entry per name.
 
 ### Breaking
 
@@ -62,6 +68,10 @@ Releases before 0.15.0 are described by their tags and ADRs only.
 - A remembered `spawn` rule that globs `target` with `*` no longer matches a
   namespaced name: mentra's glob does not cross `/`. Write `**` for every
   agent or `team/*` for a team, as the `cwd` key already requires.
+- **Renamed** (ADR-0038): `Workspace::a2a_agents` → `remote_agents`, the
+  `a2a_agents` field of `RunStarted` and `RunContext` → `remote_agents` (a
+  wire-schema change for a client reading the event stream),
+  `Runtime::a2a_hop` → `hop`, `RuntimeBuilder::with_a2a_hop` → `with_hop`.
 - The authorization preview of a `@<name>` delegation carries two more keys,
   `reach` and (when known) `agent_id`; a rule matching the whole serialized
   input exactly needs updating, one globbing around `target` does not.

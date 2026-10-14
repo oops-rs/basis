@@ -4,14 +4,14 @@
 //! A workspace open answers `@<name>` through one or more resolvers, asked in
 //! order: the one a host installs
 //! ([`WorkspaceBuilder::with_agent_resolver`](crate::WorkspaceBuilder::with_agent_resolver)),
-//! then the set its files configure (`.basis/a2a.json`, the global file, the
-//! host-supplied list — `ConfiguredAgents`, inside `basis::a2a`). A resolver that does not know
+//! then whatever the build adds (the `a2a` feature's configured set, when it
+//! is on). A resolver that does not know
 //! a name says [`Unresolved::Unknown`] and the next one is asked; the first
 //! other answer stands.
 //!
 //! What crosses the seam is small on purpose: a name in, a [`Peer`] out —
 //! something a task can be handed to and that answers (ADR-0038). A2A is one
-//! peer, behind its feature (`crate::a2a::A2aPeer`); naming needs none. Connecting, caching, credentials and retries are the resolver's.
+//! peer, behind its feature; naming needs none. Connecting, caching, credentials and retries are the resolver's.
 //! basis keeps everything around it — the conversation with each agent, the
 //! hop metadata, the exchange, and the one `spawn` door — so a host never
 //! reimplements ADR-0029 §5 to answer a name its own way.

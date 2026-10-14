@@ -43,7 +43,7 @@ async fn a_supplied_agent_is_named_and_connected_without_registering_a_tool() {
         .await
         .expect("opens");
 
-    assert_eq!(workspace.a2a_agents(), ["nous"]);
+    assert_eq!(workspace.remote_agents(), ["nous"]);
     assert_no_agent_tools(&runtime, mine.path());
     assert_no_agent_tools(&runtime, theirs.path());
     assert_eq!(server.fetches(), 1, "the card is fetched once, at open");
@@ -66,13 +66,13 @@ async fn the_workspace_file_is_discovered_and_named_in_the_run_header() {
 
     let Event::RunStarted {
         a2a_files,
-        a2a_agents,
+        remote_agents,
         ..
     } = header
     else {
         panic!("the header is run_started");
     };
-    assert_eq!(a2a_agents, ["nous"]);
+    assert_eq!(remote_agents, ["nous"]);
     assert_eq!(a2a_files.len(), 1);
     assert!(a2a_files[0].path.ends_with(".basis/a2a.json"));
     assert_eq!(a2a_files[0].scope, "workspace");
@@ -96,7 +96,7 @@ async fn a_supplied_agent_outranks_the_file_by_name() {
         .await
         .expect("opens");
 
-    assert_eq!(workspace.a2a_agents(), ["nous"], "one name is one agent");
+    assert_eq!(workspace.remote_agents(), ["nous"], "one name is one agent");
     assert_eq!(
         server.fetches(),
         1,
@@ -116,7 +116,7 @@ async fn an_unreachable_agent_degrades_and_is_still_reported() {
         .expect("one unreachable agent must not sink the open");
 
     assert_eq!(
-        workspace.a2a_agents(),
+        workspace.remote_agents(),
         ["nous"],
         "a configured agent is the workspace's whether or not it came up"
     );
@@ -168,9 +168,9 @@ async fn two_workspaces_naming_one_agent_both_keep_the_name() {
     let second = open(two.path().to_path_buf()).await;
     let sibling = open(one.path().to_path_buf()).await;
 
-    assert_eq!(first.a2a_agents(), ["nous"]);
-    assert_eq!(second.a2a_agents(), ["nous"]);
-    assert_eq!(sibling.a2a_agents(), ["nous"]);
+    assert_eq!(first.remote_agents(), ["nous"]);
+    assert_eq!(second.remote_agents(), ["nous"]);
+    assert_eq!(sibling.remote_agents(), ["nous"]);
 }
 
 #[tokio::test]
@@ -196,7 +196,7 @@ async fn discovery_off_still_connects_a_supplied_agent_and_reads_no_file() {
         .expect("the malformed discovered file stays unread");
 
     assert_eq!(
-        workspace.a2a_agents(),
+        workspace.remote_agents(),
         ["from-host"],
         "being handed an agent is not finding one"
     );

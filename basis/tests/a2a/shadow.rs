@@ -136,7 +136,7 @@ async fn a_teammate_keeps_its_name_from_a_remote_agent_until_reach_says_remote()
         .open()
         .await
         .expect("opens");
-    assert_eq!(workspace.a2a_agents(), ["reviewer"]);
+    assert_eq!(workspace.remote_agents(), ["reviewer"]);
     let fetched_at_open = server.fetches();
 
     let results = results(&workspace).await;

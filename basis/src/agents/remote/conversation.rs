@@ -41,7 +41,7 @@ use serde::{Deserialize, Serialize};
 /// Where one session's conversation with one remote agent stands.
 #[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
 pub(crate) struct Conversation {
-    /// The A2A `contextId` the remote agent minted on the first task, sent
+    /// The conversation id the remote agent minted on the first task, sent
     /// with every later one so they read as one conversation.
     pub(crate) context_id: Option<String>,
     /// The task the remote agent has not finished, when there is one.
@@ -53,11 +53,11 @@ pub(crate) struct Conversation {
 pub(crate) struct Outstanding {
     pub(crate) task_id: String,
     pub(crate) waiting_for: Waiting,
-    /// The endpoint the task was handed to ([`A2aAgent::endpoint`]), so a
+    /// The endpoint the task was handed to ([`Resolved::endpoint`]), so a
     /// call after the agent moved can tell that the task belongs to the old
     /// one. `None` on a record written before basis kept it.
     ///
-    /// [`A2aAgent::endpoint`]: crate::a2a::A2aAgent
+    /// [`Resolved::endpoint`]: crate::agents::Resolved
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub(crate) endpoint: Option<String>,
 }
@@ -130,7 +130,7 @@ impl Book {
         let mut by_caller = self
             .by_caller
             .lock()
-            .expect("A2A conversation map poisoned");
+            .expect("remote conversation map poisoned");
         if !by_caller.contains_key(caller) {
             let loaded = self
                 .file(caller, remembered)
@@ -162,7 +162,7 @@ impl Book {
         let mut by_caller = self
             .by_caller
             .lock()
-            .expect("A2A conversation map poisoned");
+            .expect("remote conversation map poisoned");
         let own = by_caller.entry(caller.to_string()).or_default();
         own.agents.insert(remote.to_string(), conversation);
         match self.file(caller, remembered) {
@@ -179,7 +179,7 @@ impl Book {
             None => self
                 .by_key
                 .lock()
-                .expect("A2A conversation map poisoned")
+                .expect("remote conversation map poisoned")
                 .get(key)?
                 .agents
                 .get(remote)
@@ -196,7 +196,10 @@ impl Book {
         remote: &str,
         conversation: Conversation,
     ) -> std::io::Result<()> {
-        let mut by_key = self.by_key.lock().expect("A2A conversation map poisoned");
+        let mut by_key = self
+            .by_key
+            .lock()
+            .expect("remote conversation map poisoned");
         match &self.remembered_in {
             Some(dir) => {
                 let file = keyed_file(dir, key);
@@ -275,7 +278,7 @@ fn load(file: &Path) -> Conversations {
     match std::fs::read(file) {
         Ok(bytes) => serde_json::from_slice(&bytes).unwrap_or_else(|error| {
             eprintln!(
-                "Warning: ignoring unreadable A2A conversation record {}: {error}",
+                "Warning: ignoring unreadable remote conversation record {}: {error}",
                 file.display()
             );
             Conversations::default()
@@ -283,7 +286,7 @@ fn load(file: &Path) -> Conversations {
         Err(error) if error.kind() == std::io::ErrorKind::NotFound => Conversations::default(),
         Err(error) => {
             eprintln!(
-                "Warning: ignoring unreadable A2A conversation record {}: {error}",
+                "Warning: ignoring unreadable remote conversation record {}: {error}",
                 file.display()
             );
             Conversations::default()

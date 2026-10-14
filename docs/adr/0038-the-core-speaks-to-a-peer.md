@@ -86,5 +86,9 @@ implements it behind its feature.**
 - Breaking for a resolver written against ADR-0037's first cut:
   `Resolved::new` takes a peer and an endpoint; `Resolved::over_a2a` keeps
   the one-line case.
-- `Runtime::a2a_hop` and the `a2a_*` fields of `RunStarted` keep their names:
-  a hop is a hop whatever carried it, and the header's shape is a client's.
+- The core's names are the core's: `Runtime::hop`, `RuntimeBuilder::with_hop`,
+  `Workspace::remote_agents` and the `remote_agents` field of `RunStarted` and
+  `RunContext` (all `a2a_*` before). A hop is a hop whatever carried it. The
+  `a2a_files` field keeps its name, since it is about a2a.json, and the
+  records' directory keeps its on-disk name for stores written before this.
+  A build without the feature sees no A2A name outside the `a2a` module.

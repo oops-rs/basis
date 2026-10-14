@@ -3,7 +3,7 @@
 /// What [`Workspace::reload_a2a`](crate::Workspace::reload_a2a) changed, by
 /// agent name.
 ///
-/// Names only, for [`Workspace::a2a_agents`](crate::Workspace::a2a_agents)'s
+/// Names only, for [`Workspace::remote_agents`](crate::Workspace::remote_agents)'s
 /// reason: this is what a host logs, and a URL or a header value is a
 /// credential as often as not. Each list is in configuration order, except
 /// `removed`, which is in the order the agents were configured before.

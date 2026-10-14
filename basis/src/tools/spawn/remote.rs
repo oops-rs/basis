@@ -178,8 +178,8 @@ pub(super) async fn delegate(
     result
 }
 
-/// Where one outbound message stands in a chain of agents
-/// (`docs/a2a/hops-v1.md`): `hop` is this message's — the runtime's own
+/// Where one outbound message stands in a chain of agents: `hop` is this
+/// message's — the runtime's own
 /// plus one, so a top-level caller sends 1 — and `deadline` is when this
 /// side stops waiting, which the run's options already hold as the earlier
 /// of its own and any it inherited.
