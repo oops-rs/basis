@@ -32,6 +32,19 @@ Releases before 0.15.0 are described by their tags and ADRs only.
   whatever carried it. `a2a_files` keeps its name: it is about a2a.json. A
   build without the feature sees no A2A name outside the `a2a` module.
 
+### Frontmatter is read without a YAML library
+
+- Templates and memories are read with `mentra::frontmatter` (mentra 0.30.0):
+  the same flat `key: value` reader `SKILL.md` uses, so the three conventions
+  share one scanner and one grammar. `serde_yaml_ng`, and the archived
+  `unsafe-libyaml` under it that failed cargo-deny (RUSTSEC-2024-0449), are
+  gone from basis. `MemoryKind::as_str` and `MemoryKind::parse` name the
+  `type` values; `basis::memory::file_contents` writes quoted values the
+  reader takes back exactly.
+- mentra 0.30.0 also announces a teammate's later turns as
+  `SubagentResumed` rather than a repeated spawn, and keeps one snapshot
+  entry per teammate.
+
 ### The header reports bindings ([ADR-0039](docs/adr/0039-the-header-reports-bindings.md))
 
 - `run_started` carries `bindings`, one `{kind, files, names}` entry per
@@ -85,6 +98,10 @@ Releases before 0.15.0 are described by their tags and ADRs only.
 - **`run_started` schema 3**: `mcp_files`, `mcp_servers` and `a2a_files` are
   gone; read `bindings` and pick the `kind`. `RunContext` loses the same three
   fields; bindings are sources on the run.
+- A template or memory frontmatter block that used YAML beyond flat
+  `key: value` lines — a list, a nested mapping, a block scalar — is refused
+  with a message saying so, where it was silently ignored before. Quote a
+  value to keep it as text.
 - The authorization preview of a `@<name>` delegation carries two more keys,
   `reach` and (when known) `agent_id`; a rule matching the whole serialized
   input exactly needs updating, one globbing around `target` does not.

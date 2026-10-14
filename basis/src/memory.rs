@@ -55,7 +55,8 @@ use std::{
 use serde::{Deserialize, Serialize};
 use thiserror::Error;
 
-use crate::{context::ContextScope, frontmatter, named_roots};
+use crate::{context::ContextScope, named_roots};
+use mentra::frontmatter;
 
 /// The directory name both roots share: `memory/` inside the global config
 /// directory, `memory/` beside the store. One constant because it is one
@@ -152,6 +153,26 @@ pub enum MemoryKind {
     Reference,
 }
 
+impl MemoryKind {
+    /// Every kind, in the order the convention lists them.
+    pub const ALL: [Self; 4] = [Self::User, Self::Feedback, Self::Project, Self::Reference];
+
+    /// The spelling the `type` key takes.
+    pub const fn as_str(self) -> &'static str {
+        match self {
+            Self::User => "user",
+            Self::Feedback => "feedback",
+            Self::Project => "project",
+            Self::Reference => "reference",
+        }
+    }
+
+    /// The kind a `type` value names, if any.
+    pub fn parse(text: &str) -> Option<Self> {
+        Self::ALL.into_iter().find(|kind| kind.as_str() == text)
+    }
+}
+
 /// Anything that can go wrong while loading memories.
 #[derive(Debug, Error)]
 pub enum MemoryError {
@@ -184,16 +205,6 @@ pub enum MemoryError {
         first_path: PathBuf,
         second_path: PathBuf,
     },
-}
-
-/// The keys basis reads and writes. Unknown keys in a file are left alone — a
-/// memory written for a newer basis should still load here.
-#[derive(Debug, Clone, Serialize, Deserialize)]
-struct Frontmatter {
-    name: String,
-    description: String,
-    #[serde(rename = "type")]
-    kind: MemoryKind,
 }
 
 /// The roots that apply to one workspace, strongest first — resolved from the
@@ -306,11 +317,9 @@ fn read_memory(path: &Path, scope: &ContextScope) -> Result<Memory, MemoryError>
         source,
     })?;
 
-    let scanned = frontmatter::scan(&raw).map_err(|frontmatter::Unterminated| {
-        MemoryError::InvalidFrontmatter {
-            path: path.to_path_buf(),
-            message: "missing closing frontmatter delimiter".to_string(),
-        }
+    let scanned = frontmatter::scan(&raw).map_err(|error| MemoryError::InvalidFrontmatter {
+        path: path.to_path_buf(),
+        message: error.to_string(),
     })?;
 
     let block = match scanned.frontmatter {
@@ -322,19 +331,41 @@ fn read_memory(path: &Path, scope: &ContextScope) -> Result<Memory, MemoryError>
         }
     };
 
-    let meta: Frontmatter =
-        serde_yaml_ng::from_str(block).map_err(|error| MemoryError::InvalidFrontmatter {
-            path: path.to_path_buf(),
-            message: error.to_string(),
-        })?;
+    let fields = frontmatter::parse(block).map_err(|error| MemoryError::InvalidFrontmatter {
+        path: path.to_path_buf(),
+        message: error.to_string(),
+    })?;
 
-    let name = spoken_field(path, &meta.name, "name")?;
-    let description = spoken_field(path, &meta.description, "description")?;
+    let name = spoken_field(path, fields.text("name").unwrap_or_default(), "name")?;
+    let description = spoken_field(
+        path,
+        fields.text("description").unwrap_or_default(),
+        "description",
+    )?;
+    let kind = match fields.text("type") {
+        Some(kind) => MemoryKind::parse(kind).ok_or_else(|| MemoryError::InvalidFrontmatter {
+            path: path.to_path_buf(),
+            message: format!(
+                "`type` is one of {}, not `{kind}`",
+                MemoryKind::ALL
+                    .iter()
+                    .map(|kind| format!("`{}`", kind.as_str()))
+                    .collect::<Vec<_>>()
+                    .join(", ")
+            ),
+        })?,
+        None => {
+            return Err(MemoryError::InvalidFrontmatter {
+                path: path.to_path_buf(),
+                message: "missing field `type`".to_string(),
+            });
+        }
+    };
 
     Ok(Memory {
         name,
         description,
-        kind: meta.kind,
+        kind,
         path: path.to_path_buf(),
         scope: scope.clone(),
     })
@@ -392,14 +423,13 @@ pub(crate) fn index_block(memories: &[Memory]) -> Option<String> {
 /// helper: everything past composing the file is the filesystem the host
 /// already has.
 pub fn file_contents(name: &str, description: &str, kind: MemoryKind, body: &str) -> String {
-    let meta = serde_yaml_ng::to_string(&Frontmatter {
-        name: name.to_string(),
-        description: description.to_string(),
-        kind,
-    })
-    .expect("three string-or-enum fields always serialize");
-
-    format!("---\n{meta}---\n\n{}\n", body.trim_end())
+    format!(
+        "---\nname: {}\ndescription: {}\ntype: {}\n---\n\n{}\n",
+        frontmatter::quote(name),
+        frontmatter::quote(description),
+        kind.as_str(),
+        body.trim_end()
+    )
 }
 
 #[cfg(test)]

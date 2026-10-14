@@ -7,20 +7,18 @@
 
 use std::path::Path;
 
-use serde::Deserialize;
+use mentra::frontmatter;
 
 use super::TemplateError;
-use crate::frontmatter;
 
 /// The keys basis reads. Unknown keys are left alone — a template written for a
 /// newer basis, or for another harness, should still load here.
-#[derive(Debug, Clone, Default, Deserialize)]
+#[derive(Debug, Clone, Default)]
 pub struct Frontmatter {
     pub description: Option<String>,
     /// `argument-hint` is the spelling the convention uses. The underscore
     /// form is accepted too, because YAML tempts people into it and a key basis
     /// merely ignored would look exactly like a hint that never displayed.
-    #[serde(rename = "argument-hint", alias = "argument_hint")]
     pub argument_hint: Option<String>,
 }
 
@@ -32,11 +30,9 @@ pub struct Frontmatter {
 pub fn split(path: &Path, raw: &str) -> Result<(Frontmatter, String), TemplateError> {
     // The delimiter scanning — BOM, CRLF, the unterminated case — is shared
     // with the other frontmatter convention; see [`crate::frontmatter`].
-    let scanned = frontmatter::scan(raw).map_err(|frontmatter::Unterminated| {
-        TemplateError::InvalidFrontmatter {
-            path: path.to_path_buf(),
-            message: "missing closing frontmatter delimiter".to_string(),
-        }
+    let scanned = frontmatter::scan(raw).map_err(|error| TemplateError::InvalidFrontmatter {
+        path: path.to_path_buf(),
+        message: error.to_string(),
     })?;
 
     let meta = match scanned.frontmatter {
@@ -47,17 +43,18 @@ pub fn split(path: &Path, raw: &str) -> Result<(Frontmatter, String), TemplateEr
     Ok((meta, scanned.body.to_string()))
 }
 
-fn parse(path: &Path, frontmatter: &str) -> Result<Frontmatter, TemplateError> {
-    // Empty frontmatter deserializes to YAML null, which is not a mapping and
-    // so is not a `Frontmatter`. `---\n---\n` is a person declaring nothing,
-    // not a person making a mistake.
-    if frontmatter.trim().is_empty() {
-        return Ok(Frontmatter::default());
-    }
-
-    serde_yaml_ng::from_str(frontmatter).map_err(|error| TemplateError::InvalidFrontmatter {
+fn parse(path: &Path, block: &str) -> Result<Frontmatter, TemplateError> {
+    // `---\n---\n` is a person declaring nothing, not a person making a
+    // mistake, and an empty block parses to no fields.
+    let fields = frontmatter::parse(block).map_err(|error| TemplateError::InvalidFrontmatter {
         path: path.to_path_buf(),
         message: error.to_string(),
+    })?;
+    Ok(Frontmatter {
+        description: fields.text("description").map(str::to_string),
+        argument_hint: fields
+            .text_any(&["argument-hint", "argument_hint"])
+            .map(str::to_string),
     })
 }
 

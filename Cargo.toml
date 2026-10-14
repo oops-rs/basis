@@ -259,7 +259,7 @@ basis-tasks = { version = "0.17", path = "basis-tasks" }
 # mentra#62/#63): both bindings, streaming settle, message metadata for the
 # hops extension, and `refresh_tool_descriptors`; and an interrupted tool round
 # continued rather than recorded as finished (ADR-0032, mentra#64).
-mentra = { version = "0.29.0", default-features = false }
+mentra = { version = "0.30.0", default-features = false }
 
 async-trait = "0.1"
 # ACP carries an image in a prompt as base64; basis's `PromptPart` carries the
@@ -294,7 +294,6 @@ serde = { version = "1", features = ["derive"] }
 serde_json = "1"
 # The same YAML implementation mentra parses skill frontmatter with, so a
 # template's frontmatter and a skill's are read by one dialect rather than two.
-serde_yaml_ng = "0.10"
 tempfile = "3"
 thiserror = "2"
 tokio = { version = "1", features = ["io-util", "macros", "net", "rt-multi-thread", "signal", "sync", "time"] }
