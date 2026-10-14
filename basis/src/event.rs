@@ -15,7 +15,7 @@
 //! does not understand. The last line is always [`Event::RunFinished`].
 //!
 //! ```jsonl
-//! {"seq":0,"type":"run_started","schema":2,"basis":"0.1.0","workspace":"/repo",...}
+//! {"seq":0,"type":"run_started","schema":3,"basis":"0.1.0","workspace":"/repo",...}
 //! {"seq":1,"type":"assistant_delta","text":"Looking at "}
 //! {"seq":2,"type":"run_finished","status":"ok"}
 //! ```
@@ -39,7 +39,7 @@ pub use jsonl::JsonlWriter;
 /// field on an existing event, a new internally tagged enum variant makes a
 /// schema-1 serde reader reject that line, so the header must let a reader
 /// refuse the stream before encountering it.
-pub const EVENT_SCHEMA_VERSION: u32 = 2;
+pub const EVENT_SCHEMA_VERSION: u32 = 3;
 
 /// One line of the stream: a sequence number and the event itself, flattened
 /// so a line is a single flat JSON object.
@@ -258,6 +258,40 @@ pub struct ContextFile {
     pub scope: String,
 }
 
+/// One binding's footprint in a run, as `run_started` reports it
+/// (ADR-0039): which binding, the configuration files that took effect,
+/// weakest precedence first, and what they produced, by name only.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct Binding {
+    /// The binding's name: `mcp`, `a2a`, or a host's own.
+    pub kind: String,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub files: Vec<ContextFile>,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub names: Vec<String>,
+}
+
+impl Binding {
+    /// A binding that configured nothing yet.
+    pub fn new(kind: impl Into<String>) -> Self {
+        Self {
+            kind: kind.into(),
+            files: Vec::new(),
+            names: Vec::new(),
+        }
+    }
+
+    #[must_use]
+    pub fn with_files(self, files: Vec<ContextFile>) -> Self {
+        Self { files, ..self }
+    }
+
+    #[must_use]
+    pub fn with_names(self, names: Vec<String>) -> Self {
+        Self { names, ..self }
+    }
+}
+
 /// Everything that can appear on the stream.
 ///
 /// `RunStarted` and `RunFinished` are basis's own bookends; the rest are
@@ -297,30 +331,21 @@ pub enum Event {
         /// client can offer as commands.
         #[serde(default, skip_serializing_if = "Vec::is_empty")]
         templates: Vec<TemplateSummary>,
-        /// MCP configuration files in effect, weakest precedence first.
+        /// What each binding this build has configured for the run (ADR-0039):
+        /// the configuration files in effect and the names they produced,
+        /// one entry per binding — `mcp` for `.mcp.json` and its servers,
+        /// `a2a` for `a2a.json` and its agents. Named for the same reason
+        /// context files are, and more urgently: such a file says which
+        /// programs to spawn or which remote agents to hand work to, and
+        /// carries the credentials for it, so it is the last thing that
+        /// should take effect without appearing anywhere. Names only —
+        /// commands, URLs and headers stay out of the stream.
         ///
-        /// Named for the same reason context files are, and more urgently: an
-        /// `.mcp.json` says which programs to spawn and carries the
-        /// credentials to spawn them with, so it is the last thing that should
-        /// take effect without appearing anywhere.
+        /// A binding whose set is live (ADR-0031) is reported as it stands
+        /// when this turn begins, so a later turn of the same session may
+        /// name others. Omitted when no binding configured anything.
         #[serde(default, skip_serializing_if = "Vec::is_empty")]
-        mcp_files: Vec<ContextFile>,
-        /// The servers those files produced, after layering. Names only —
-        /// commands, arguments, and environment stay out of the stream, which
-        /// is the same no-echo rule `McpError` follows.
-        #[serde(default, skip_serializing_if = "Vec::is_empty")]
-        mcp_servers: Vec<String>,
-        /// A2A configuration files in effect (`.basis/a2a.json`, the global
-        /// `a2a.json`), named for `mcp_files`' reason: such a file says which
-        /// remote agents may be handed this repository's work, and with which
-        /// credential. As of the turn this header opens: the set is live
-        /// (ADR-0031), so a later turn of the same session may name others.
-        ///
-        /// Additive and omitted when empty, so a schema-2 reader written
-        /// before the field existed reads a stream that has it, and a stream
-        /// written before it existed reads as naming none — no version bump.
-        #[serde(default, skip_serializing_if = "Vec::is_empty")]
-        a2a_files: Vec<ContextFile>,
+        bindings: Vec<Binding>,
         /// The remote agents configured for this run's workspace when this
         /// turn began, each one a `spawn "@<agent> …"` target (ADR-0029,
         /// ADR-0031). Names only — a URL or a header is configuration, and
@@ -642,16 +667,17 @@ mod tests {
                 skills: Vec::new(),
                 templates_dirs: Vec::new(),
                 templates: Vec::new(),
-                mcp_files: Vec::new(),
-                mcp_servers: Vec::new(),
-                a2a_files: Vec::new(),
+                bindings: Vec::new(),
                 remote_agents: Vec::new(),
             },
         );
         let json = serde_json::to_value(&line).expect("serializes");
 
         assert_eq!(json["type"], "run_started");
-        assert_eq!(json["schema"], 2, "the new event tag requires schema 2");
+        assert_eq!(
+            json["schema"], 3,
+            "bindings replaced three fields in schema 3"
+        );
         assert_eq!(json["context_files"][0]["scope"], "workspace");
         assert!(
             json.get("skills_dirs").is_none() && json.get("skills").is_none(),
@@ -719,9 +745,7 @@ mod tests {
                 }],
                 templates_dirs: Vec::new(),
                 templates: Vec::new(),
-                mcp_files: Vec::new(),
-                mcp_servers: Vec::new(),
-                a2a_files: Vec::new(),
+                bindings: Vec::new(),
                 remote_agents: Vec::new(),
             },
         );
@@ -853,7 +877,7 @@ mod tests {
     }
 
     #[test]
-    fn the_header_names_mcp_files_and_servers_but_never_their_configuration() {
+    fn the_header_names_a_bindings_files_and_names_but_never_its_configuration() {
         let line = EventLine::new(
             0,
             Event::RunStarted {
@@ -868,12 +892,14 @@ mod tests {
                 skills: Vec::new(),
                 templates_dirs: Vec::new(),
                 templates: Vec::new(),
-                mcp_files: vec![ContextFile {
-                    path: PathBuf::from("/repo/.mcp.json"),
-                    scope: "workspace".to_string(),
-                }],
-                mcp_servers: vec!["github".to_string()],
-                a2a_files: Vec::new(),
+                bindings: vec![
+                    Binding::new("mcp")
+                        .with_files(vec![ContextFile {
+                            path: PathBuf::from("/repo/.mcp.json"),
+                            scope: "workspace".to_string(),
+                        }])
+                        .with_names(vec!["github".to_string()]),
+                ],
                 remote_agents: Vec::new(),
             },
         );
@@ -882,8 +908,8 @@ mod tests {
         assert!(text.contains("/repo/.mcp.json"), "the file must be named");
         assert!(text.contains("github"), "so must the server");
 
-        // A server list is names, never configuration. The type makes this
-        // true — `mcp_servers` is `Vec<String>` — and the test says why, so a
+        // A name list is names, never configuration. The type makes this
+        // true — `Binding::names` is `Vec<String>` — and the test says why, so a
         // later change to a richer summary has to argue with it first: an
         // `.mcp.json` holds the credentials its servers are spawned with, and
         // this line travels into logs and client error panes.

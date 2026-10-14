@@ -44,6 +44,7 @@ pub use output::{
     OutputAttempt, OutputAttemptReport, OutputDecision, OutputFailure, OutputReport,
     OutputReservation, OutputSpec,
 };
+pub use prepared::BindingSource;
 pub use prepared::{
     AgentEventTapGuard, Compacted, LoadedSkill, PreparedRun, PromptPart, RunContext,
 };
@@ -479,15 +480,12 @@ pub fn prepare_with_session(
             provider: provider.into(),
             model: model.into(),
             context: discovered,
-            // The caller owns the runtime, so it owns skill, MCP and A2A
+            // The caller owns the runtime, so it owns skill and binding
             // registration too.
             skills_dirs: Vec::new(),
             skills: Vec::new(),
             templates_dirs,
             templates,
-            mcp_files: Vec::new(),
-            mcp_servers: Vec::new(),
-            a2a_files: Vec::new(),
             remote_agents: Vec::new(),
         },
     )

@@ -32,6 +32,16 @@ Releases before 0.15.0 are described by their tags and ADRs only.
   whatever carried it. `a2a_files` keeps its name: it is about a2a.json. A
   build without the feature sees no A2A name outside the `a2a` module.
 
+### The header reports bindings ([ADR-0039](docs/adr/0039-the-header-reports-bindings.md))
+
+- `run_started` carries `bindings`, one `{kind, files, names}` entry per
+  binding the build has — `mcp` for `.mcp.json` and its servers, `a2a` for
+  `a2a.json` and its agents — in place of `mcp_files`, `mcp_servers` and
+  `a2a_files`. `basis::event::Binding` is the type, and every binding is
+  live: `PreparedRun::with_binding` takes a `BindingSource` read each time a
+  header is written. A new binding adds one source at the workspace's open
+  and touches nothing else. `EVENT_SCHEMA_VERSION` is 3.
+
 ### An agent is named ([ADR-0037](docs/adr/0037-an-agent-is-named.md))
 
 - `@<name>` is resolved. `WorkspaceBuilder::with_agent_resolver` installs the
@@ -72,6 +82,9 @@ Releases before 0.15.0 are described by their tags and ADRs only.
   `a2a_agents` field of `RunStarted` and `RunContext` → `remote_agents` (a
   wire-schema change for a client reading the event stream),
   `Runtime::a2a_hop` → `hop`, `RuntimeBuilder::with_a2a_hop` → `with_hop`.
+- **`run_started` schema 3**: `mcp_files`, `mcp_servers` and `a2a_files` are
+  gone; read `bindings` and pick the `kind`. `RunContext` loses the same three
+  fields; bindings are sources on the run.
 - The authorization preview of a `@<name>` delegation carries two more keys,
   `reach` and (when known) `agent_id`; a rule matching the whole serialized
   input exactly needs updating, one globbing around `target` does not.

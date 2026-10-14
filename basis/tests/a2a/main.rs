@@ -65,7 +65,7 @@ async fn the_workspace_file_is_discovered_and_named_in_the_run_header() {
     let header = workspace.prepare("go").expect("mints").header();
 
     let Event::RunStarted {
-        a2a_files,
+        bindings,
         remote_agents,
         ..
     } = header
@@ -73,9 +73,14 @@ async fn the_workspace_file_is_discovered_and_named_in_the_run_header() {
         panic!("the header is run_started");
     };
     assert_eq!(remote_agents, ["nous"]);
-    assert_eq!(a2a_files.len(), 1);
-    assert!(a2a_files[0].path.ends_with(".basis/a2a.json"));
-    assert_eq!(a2a_files[0].scope, "workspace");
+    let a2a = bindings
+        .iter()
+        .find(|binding| binding.kind == "a2a")
+        .expect("the a2a binding reports itself");
+    assert_eq!(a2a.files.len(), 1);
+    assert!(a2a.files[0].path.ends_with(".basis/a2a.json"));
+    assert_eq!(a2a.files[0].scope, "workspace");
+    assert_eq!(a2a.names, ["nous"]);
 }
 
 #[tokio::test]

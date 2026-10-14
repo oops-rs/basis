@@ -101,8 +101,7 @@ impl PreparedRun {
             retry_policy,
             context_snapshot,
             remote,
-            #[cfg(feature = "a2a")]
-            a2a,
+            bindings,
             remote_spawn,
         } = self;
 
@@ -115,8 +114,7 @@ impl PreparedRun {
             retry_policy,
             context_snapshot,
             remote,
-            #[cfg(feature = "a2a")]
-            a2a,
+            bindings,
             remote_spawn,
         }
     }

@@ -282,8 +282,8 @@ with mentra's `allowing_plaintext_credentials`. An `A2A-Version` header is
 refused too — the client speaks `1.0` and says so itself.
 
 Each card is fetched at open. An agent that cannot be reached warns and the
-open continues; it is still named in `run_started`'s `a2a_agents`, beside
-`a2a_files`, and in `Workspace::a2a_agents`, by the name configured — an agent
+open continues; it is still named in `run_started`'s `remote_agents` and in
+its `a2a` binding, and in `Workspace::remote_agents`, by the name configured — an agent
 is not a tool on the shared registry, so nothing is suffixed — and `@<agent>`
 tries it again when asked, at most once every 30 seconds, so an agent that
 comes up later is reached without anyone reloading.

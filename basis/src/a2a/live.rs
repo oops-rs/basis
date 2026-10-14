@@ -22,7 +22,7 @@ use super::{
     configured::ConfiguredAgents,
     watch::{self, A2aWatch, A2aWatchError, Stamp},
 };
-use crate::agents::AgentResolver;
+use crate::{agents::AgentResolver, event::Binding};
 use crate::{event::ContextFile, runtime::Runtime};
 
 /// What a workspace open knows about its remote agents: where it looked, what
@@ -74,6 +74,34 @@ impl LiveA2a {
     /// host's own.
     pub(crate) fn configured(&self) -> Arc<dyn AgentResolver> {
         Arc::clone(&self.configured) as Arc<dyn AgentResolver>
+    }
+
+    /// This binding's entry in a run header (ADR-0039), as it stands now:
+    /// the files in effect and the configured names.
+    pub(crate) fn binding(&self) -> Binding {
+        Binding::new("a2a").with_files(self.files()).with_names(
+            self.configured
+                .taught()
+                .agents
+                .into_iter()
+                .map(|a| a.name)
+                .collect(),
+        )
+    }
+
+    /// The same, read again each time a header is written. Weak, because
+    /// the run outlives the workspace and must not keep its open alive; a
+    /// dropped open reports what it last reported.
+    pub(crate) fn binding_source(self: &Arc<Self>) -> crate::run::BindingSource {
+        let live = Arc::downgrade(self);
+        let last = std::sync::Mutex::new(self.binding());
+        Arc::new(move || {
+            let mut last = last.lock().unwrap_or_else(|poisoned| poisoned.into_inner());
+            if let Some(live) = live.upgrade() {
+                *last = live.binding();
+            }
+            last.clone()
+        })
     }
 
     /// Every configured name, in configuration order.

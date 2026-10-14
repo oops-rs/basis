@@ -33,17 +33,9 @@ pub struct RunContext {
     /// The templates those directories produced, after layering, name-ordered.
     /// Over ACP these become the client's commands, mapped by `basis-acp`.
     pub templates: Vec<Template>,
-    /// MCP configuration files in effect, weakest precedence first.
-    pub mcp_files: Vec<ContextFile>,
-    /// The servers those files produced, after layering. Names only: the
-    /// header must not echo a command or a credential.
-    pub mcp_servers: Vec<String>,
-    /// A2A configuration files in effect at mint, most specific first. The
-    /// set is live (ADR-0031): the header a turn opens with reads it again.
-    pub a2a_files: Vec<ContextFile>,
-    /// The remote agents those files and the host named at mint, after
-    /// layering, by the names that took effect. Names only, for
-    /// `mcp_servers`'s reason; live in the header, as `a2a_files` is.
+    /// The remote agents the host and the build's bindings named at mint, by
+    /// the names that took effect. Names only: the header must not echo a URL
+    /// or a credential. Live in the header, read again each turn.
     pub remote_agents: Vec<String>,
 }
 
@@ -114,9 +106,9 @@ pub(super) fn header_for(session_id: &str, run: &RunContext) -> Event {
                 argument_hint: template.argument_hint.clone(),
             })
             .collect(),
-        mcp_files: run.mcp_files.clone(),
-        mcp_servers: run.mcp_servers.clone(),
-        a2a_files: run.a2a_files.clone(),
+        // Filled in when the header is written (ADR-0039 §2): every binding
+        // is read then, not at mint.
+        bindings: Vec::new(),
         remote_agents: run.remote_agents.clone(),
     }
 }

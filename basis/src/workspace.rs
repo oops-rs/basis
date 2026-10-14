@@ -77,9 +77,11 @@ use crate::{
     config::Config,
     context::WorkspaceContext,
     error::RunError,
+    event::Binding,
     event::ContextFile,
     fingerprint::{self, Snapshot},
     memory::Memory,
+    run::BindingSource,
     run::{Effort, LoadedSkill, PreparedRun, RunContext},
     runtime::{HookChainHold, Runtime, SessionScope, agents::AgentTools},
     skills::SkillRoots,
@@ -536,12 +538,23 @@ impl Workspace {
         self.remote.names()
     }
 
-    /// The A2A files in effect: none, in a build without the `a2a` feature.
-    /// Kept so the header field it feeds does not vanish with a cargo
-    /// feature.
-    #[cfg(not(feature = "a2a"))]
-    fn a2a_files(&self) -> Vec<ContextFile> {
-        Vec::new()
+    /// What each binding this build has reports for a run (ADR-0039), each
+    /// read again when a header is written — the one place a binding's cfg
+    /// appears in the header's making.
+    fn bindings(&self) -> Vec<BindingSource> {
+        let mut sources: Vec<BindingSource> = Vec::new();
+        // MCP's set is fixed at open, so its source answers the same each
+        // time; it is pushed only when there is one, which is never in a
+        // build without the feature, so it needs no cfg of its own.
+        if !self.mcp_files.is_empty() || !self.mcp_servers.is_empty() {
+            let mcp = Binding::new("mcp")
+                .with_files(self.mcp_files.clone())
+                .with_names(self.mcp_servers.clone());
+            sources.push(Arc::new(move || mcp.clone()));
+        }
+        #[cfg(feature = "a2a")]
+        sources.push(self.a2a.binding_source());
+        sources
     }
 
     /// The tools this workspace's manifests declared, by name, after layering
@@ -773,9 +786,6 @@ impl Workspace {
                 skills: self.skills.clone(),
                 templates_dirs: self.templates_dirs.clone(),
                 templates: self.templates.clone(),
-                mcp_files: self.mcp_files.clone(),
-                mcp_servers: self.mcp_servers.clone(),
-                a2a_files: self.a2a_files(),
                 remote_agents: self.remote_agents(),
             },
         )
@@ -787,10 +797,10 @@ impl Workspace {
         // a per-run option.
         .with_retry_policy(self.runtime.retry_policy())
         .with_context_snapshot(context_snapshot);
-        let run = run.with_remote_agents(Arc::clone(&self.remote));
-        #[cfg(feature = "a2a")]
-        let run = run.with_live_a2a(Arc::clone(&self.a2a));
-        run
+        self.bindings().into_iter().fold(
+            run.with_remote_agents(Arc::clone(&self.remote)),
+            |run, source| run.with_binding(source),
+        )
     }
 }
 

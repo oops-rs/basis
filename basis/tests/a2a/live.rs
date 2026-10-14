@@ -9,13 +9,17 @@ use crate::support::{CardServer, a2a_file, offline_runtime, pinned, write};
 fn reported(header: Event) -> (Vec<String>, usize) {
     let Event::RunStarted {
         remote_agents,
-        a2a_files,
+        bindings,
         ..
     } = header
     else {
         panic!("the header is run_started");
     };
-    (remote_agents, a2a_files.len())
+    let files = bindings
+        .iter()
+        .find(|binding| binding.kind == "a2a")
+        .map_or(0, |binding| binding.files.len());
+    (remote_agents, files)
 }
 
 #[tokio::test]

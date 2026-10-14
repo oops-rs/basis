@@ -27,7 +27,10 @@ use super::{
 use crate::{
     approval::Approver,
     context::WorkspaceContext,
-    event::{ContextFile, EVENT_SCHEMA_VERSION, Event, RunOutcome, SkillSummary, TemplateSummary},
+    event::{
+        Binding, ContextFile, EVENT_SCHEMA_VERSION, Event, RunOutcome, SkillSummary,
+        TemplateSummary,
+    },
     runtime::RetryPolicy,
     runtime::Role,
     templates::Template,
@@ -122,15 +125,21 @@ pub struct PreparedRun {
     /// each turn opens with names the set as it stands then rather than as it
     /// stood at mint. `None` off the workspace path.
     remote: Option<Arc<crate::agents::remote::RemoteAgents>>,
-    /// The A2A files the minting workspace read, live for the same reason.
-    #[cfg(feature = "a2a")]
-    a2a: Option<Arc<crate::a2a::live::LiveA2a>>,
+    /// What each binding reports for this run (ADR-0039), read again each
+    /// time a header is written: a set that changed after mint is reported as
+    /// it stands.
+    bindings: Vec<BindingSource>,
     /// The copy of `spawn` the minting workspace registered on this session
     /// for its remote agents, kept so
     /// [`with_remote_conversations`](Self::with_remote_conversations) can
     /// register it again bound to a key. `None` off the workspace path.
     remote_spawn: Option<crate::tools::SpawnTool>,
 }
+
+/// What reports one binding for a run (ADR-0039): read each time a header
+/// is written, so a set that is live (ADR-0031) is reported as it stands
+/// then, and one that is fixed costs a clone.
+pub type BindingSource = Arc<dyn Fn() -> Binding + Send + Sync>;
 
 /// Hand-written because mentra's `Session` is not `Debug`, and because the
 /// context documents hold whole files — a derived impl would dump them.
@@ -144,7 +153,7 @@ impl std::fmt::Debug for PreparedRun {
             .field("context_files", &self.run.context.documents().len())
             .field("skills", &self.run.skills.len())
             .field("templates", &self.run.templates.len())
-            .field("mcp_servers", &self.run.mcp_servers.len())
+            .field("bindings", &self.bindings.len())
             .field("bounds", &self.bounds)
             .finish_non_exhaustive()
     }
@@ -161,8 +170,7 @@ impl PreparedRun {
             retry_policy: RetryPolicy::default(),
             context_snapshot: ContextSnapshot::default(),
             remote: None,
-            #[cfg(feature = "a2a")]
-            a2a: None,
+            bindings: Vec::new(),
             remote_spawn: None,
         }
     }
@@ -219,13 +227,14 @@ impl PreparedRun {
         }
     }
 
-    /// Lets this run's header follow the minting workspace's A2A files.
-    #[cfg(feature = "a2a")]
-    pub(crate) fn with_live_a2a(self, a2a: Arc<crate::a2a::live::LiveA2a>) -> Self {
-        Self {
-            a2a: Some(a2a),
-            ..self
-        }
+    /// Adds a binding to what this run's header reports (ADR-0039):
+    /// `source` is read each time a header is written. basis registers its
+    /// MCP and A2A sets this way; a host with a binding of its own does the
+    /// same, under a `kind` of its own.
+    #[must_use]
+    pub fn with_binding(mut self, source: BindingSource) -> Self {
+        self.bindings.push(source);
+        self
     }
 
     /// The header line, with the live half read now: [`context`](Self::context)
@@ -237,9 +246,8 @@ impl PreparedRun {
         {
             *remote_agents = remote.names();
         }
-        #[cfg(feature = "a2a")]
-        if let (Some(live), Event::RunStarted { a2a_files, .. }) = (&self.a2a, &mut header) {
-            *a2a_files = live.files();
+        if let Event::RunStarted { bindings, .. } = &mut header {
+            *bindings = self.bindings.iter().map(|source| source()).collect();
         }
         header
     }

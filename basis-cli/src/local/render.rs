@@ -539,9 +539,7 @@ mod tests {
             skills: Vec::new(),
             templates_dirs: Vec::new(),
             templates: Vec::new(),
-            mcp_files: Vec::new(),
-            mcp_servers: Vec::new(),
-            a2a_files: Vec::new(),
+            bindings: Vec::new(),
             remote_agents: Vec::new(),
         })
     }

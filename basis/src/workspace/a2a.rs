@@ -9,21 +9,12 @@
 use std::time::Duration;
 
 use super::Workspace;
-use crate::{
-    a2a::{A2aError, A2aReload, A2aWatch, A2aWatchError},
-    event::ContextFile,
-};
+use crate::a2a::{A2aError, A2aReload, A2aWatch, A2aWatchError};
 
 #[cfg(doc)]
 use crate::PreparedRun;
 
 impl Workspace {
-    /// The A2A files in effect now, most specific first — what the run header
-    /// reports beside [`remote_agents`](Self::remote_agents).
-    pub(super) fn a2a_files(&self) -> Vec<ContextFile> {
-        self.a2a.files()
-    }
-
     /// Reads this workspace's A2A configuration again — the host-supplied
     /// agents, the workspace file, the global file, under every rule the open
     /// read them by — and applies the difference to the live set (ADR-0031
