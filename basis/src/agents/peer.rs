@@ -74,6 +74,9 @@ pub struct Message {
     pub hop: u32,
     /// When this side stops waiting, when it knows.
     pub deadline: Option<SystemTime>,
+    /// Parameters for the agent beside the message — over A2A, the request's
+    /// `metadata` — when the delegation gave some (ADR-0040).
+    pub metadata: Option<serde_json::Map<String, serde_json::Value>>,
 }
 
 impl Message {
@@ -84,7 +87,17 @@ impl Message {
             answering: None,
             hop: 1,
             deadline: None,
+            metadata: None,
         }
+    }
+
+    /// Sends `metadata` beside the message.
+    #[must_use]
+    pub fn with_metadata(
+        self,
+        metadata: Option<serde_json::Map<String, serde_json::Value>>,
+    ) -> Self {
+        Self { metadata, ..self }
     }
 
     #[must_use]

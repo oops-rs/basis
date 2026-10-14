@@ -204,6 +204,11 @@ fn message(send: Message) -> A2aSend {
     if let Some(context_id) = send.context_id {
         message = message.with_context_id(context_id);
     }
+    // A delegation's parameters are the request's metadata, beside the
+    // message — the hops extension keeps the message's own (ADR-0040).
+    for (key, value) in send.metadata.into_iter().flatten() {
+        message = message.with_request_metadata(key, value);
+    }
     message
 }
 
@@ -232,6 +237,23 @@ mod tests {
 
     const NAME: &str = "reviewer";
     const MAX: usize = 64 * 1024;
+
+    #[test]
+    fn a_delegations_parameters_are_the_requests_metadata() {
+        let mut parameters = serde_json::Map::new();
+        parameters.insert("project".into(), serde_json::json!("lama"));
+        let send = message(Message::new("where is login?").with_metadata(Some(parameters)));
+        assert_eq!(
+            send.request_metadata.get("project"),
+            Some(&serde_json::json!("lama"))
+        );
+        assert!(
+            send.metadata.contains_key(HOPS_EXTENSION),
+            "the message keeps its own metadata for the hops extension"
+        );
+        assert!(!send.metadata.contains_key("project"), "not in the message");
+        assert!(message(Message::new("hi")).request_metadata.is_empty());
+    }
 
     fn task(state: TaskState, answer: Option<&str>) -> Task {
         Task {

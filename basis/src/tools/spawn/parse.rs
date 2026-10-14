@@ -32,6 +32,11 @@ pub const INPUT_FIELD: &str = "input";
 /// (ADR-0037 §3). Typed, never read out of the string.
 pub const REACH_FIELD: &str = "reach";
 
+/// Parameters for a remote agent, beside the task: a JSON object sent with
+/// it — over A2A, as the request's `metadata` (ADR-0040). Only with
+/// `@<agent> <task>`.
+pub const METADATA_FIELD: &str = "metadata";
+
 /// What the wire contract calls *here*, and therefore a name no target may
 /// take (ADR-0021).
 ///
@@ -80,6 +85,8 @@ pub struct Spawn {
     /// What the model said `@<name>` may reach, or `None` when it said
     /// nothing and the runtime's policy decides.
     reach: Option<Reach>,
+    /// Parameters for the remote agent a task is handed to (ADR-0040).
+    metadata: Option<serde_json::Map<String, Value>>,
 }
 
 impl Spawn {
@@ -94,6 +101,11 @@ impl Spawn {
     /// What the model said `@<name>` may reach (ADR-0037 §3), when it said.
     pub const fn reach(&self) -> Option<Reach> {
         self.reach
+    }
+
+    /// The parameters sent beside a task for a remote agent (ADR-0040).
+    pub fn metadata(&self) -> Option<&serde_json::Map<String, Value>> {
+        self.metadata.as_ref()
     }
 
     /// The target this call named — a command's executor, or a delegation's
@@ -144,6 +156,29 @@ pub fn parse(input: &Value) -> Result<Spawn, String> {
     };
     let mut spawn = read(raw, mode)?;
     spawn.reach = reach;
+    spawn.metadata = match input.get(METADATA_FIELD) {
+        None | Some(Value::Null) => None,
+        Some(Value::Object(map)) if map.is_empty() => None,
+        Some(Value::Object(map)) => {
+            // Parameters travel with a task to an agent elsewhere, and with
+            // nothing else: a command, a local task and a wait have nowhere
+            // to put them, and dropping them would be a call quietly unlike
+            // the one written.
+            if spawn.mode != Mode::Agent || spawn.target.is_none() || spawn.body.is_empty() {
+                return Err(format!(
+                    "`{METADATA_FIELD}` goes with a task for a remote agent, `@<agent> <task>`: \
+                     it is sent beside the task as the agent's parameters"
+                ));
+            }
+            Some(map.clone())
+        }
+        Some(_) => {
+            return Err(format!(
+                "`{METADATA_FIELD}` is a JSON object of parameters for the agent, as \
+                 {{\"project\": \"lama\"}}"
+            ));
+        }
+    };
     Ok(spawn)
 }
 
@@ -286,6 +321,7 @@ fn command(body: &str, target: Option<String>) -> Result<Spawn, String> {
         body: body.to_string(),
         target,
         reach: None,
+        metadata: None,
     })
 }
 
@@ -331,6 +367,7 @@ fn remote(rest: &str) -> Result<Spawn, String> {
         body: body.trim().to_string(),
         target: Some(name.to_string()),
         reach: None,
+        metadata: None,
     })
 }
 
@@ -348,5 +385,6 @@ fn delegation(body: &str) -> Result<Spawn, String> {
         // A delegation with no `@` is a subagent on this runtime.
         target: None,
         reach: None,
+        metadata: None,
     })
 }

@@ -107,6 +107,7 @@ pub(super) async fn delegate(
     agents: &RemoteAgents,
     name: &str,
     body: &str,
+    metadata: Option<&serde_json::Map<String, serde_json::Value>>,
     remembered: &Remembered,
 ) -> ToolResult {
     // Held to the end of this call: a reload that swaps the set meanwhile
@@ -135,6 +136,10 @@ pub(super) async fn delegate(
     };
     let before = agents.conversation(&caller, id, remembered);
     let request = request(name, body, &before, hop)?;
+    let request = match request {
+        Request::Send(message) => Request::Send(message.with_metadata(metadata.cloned())),
+        wait => wait,
+    };
 
     let ctx: ParallelToolContext = ctx.into();
     let progress = |text: String| ctx.emit_progress(text);

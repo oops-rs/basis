@@ -873,3 +873,67 @@ fn a_copy_that_keeps_teammates_teaches_them_and_the_plain_tool_does_not() {
         "no choice, nothing taught about it"
     );
 }
+
+// ── ADR-0040: a delegation's parameters ──────────────────────────────────
+
+fn with_metadata(input: &str, metadata: Value) -> Value {
+    json!({ INPUT_FIELD: input, "metadata": metadata })
+}
+
+#[test]
+fn parameters_ride_with_a_task_for_a_named_agent() {
+    let spawn = parse(&with_metadata(
+        "@wenext-android where is login?",
+        json!({"project": "lama", "deep": true}),
+    ))
+    .expect("parsed");
+    assert_eq!(spawn.body(), "where is login?");
+    assert_eq!(
+        spawn.metadata().map(|m| Value::Object(m.clone())),
+        Some(json!({"project": "lama", "deep": true}))
+    );
+    // Absent, null and empty all mean none.
+    for metadata in [Value::Null, json!({})] {
+        let spawn = parse(&with_metadata("@nous hi", metadata)).expect("parsed");
+        assert_eq!(spawn.metadata(), None);
+    }
+    assert_eq!(parsed("@nous hi").metadata(), None);
+}
+
+#[test]
+fn parameters_anywhere_but_a_remote_task_are_refused() {
+    for input in ["!cargo test", "!@mac ls", "summarise the diff", "@nous"] {
+        let refused = parse(&with_metadata(input, json!({"project": "lama"})))
+            .expect_err("nowhere to put them");
+        assert!(refused.contains("`@<agent> <task>`"), "{input}: {refused}");
+    }
+    let refused = parse(&with_metadata("@nous hi", json!("lama"))).expect_err("not an object");
+    assert!(refused.contains("JSON object"), "{refused}");
+}
+
+#[test]
+fn the_approver_sees_the_parameters() {
+    let spawn = parse(&with_metadata(
+        "@reviewer look at this",
+        json!({"project": "lama"}),
+    ))
+    .expect("parsed");
+    let tool = SpawnTool::new();
+    let remote = preview(
+        &spawn,
+        PathBuf::from("/repo"),
+        &tool.descriptor(),
+        &call("@reviewer look at this"),
+        None,
+        Some(Named {
+            reach: Reach::Remote,
+            agent_id: None,
+        }),
+    );
+    assert_eq!(
+        remote.structured_input["metadata"],
+        json!({"project": "lama"})
+    );
+    let plain = preview_of("@reviewer look at this");
+    assert!(plain.structured_input.get("metadata").is_none(), "additive");
+}

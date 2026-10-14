@@ -10,7 +10,7 @@
 use serde_json::{Value, json};
 
 use super::{
-    parse::{INPUT_FIELD, REACH_FIELD},
+    parse::{INPUT_FIELD, METADATA_FIELD, REACH_FIELD},
     reach::Reach,
 };
 
@@ -275,6 +275,21 @@ pub(super) fn input_schema(targets: &[String], names: &Names) -> Value {
                 "enum": names.reach.iter().map(|reach| reach.as_str()).collect::<Vec<_>>(),
                 "description": "Which agents `@<name>` may reach; see the description. Leave it \
                                 out for the default.",
+            }),
+        );
+    }
+
+    // ADR-0040: parameters beside a task for a remote agent, offered only
+    // where there is a remote agent to send them to.
+    if !remote.is_empty() {
+        properties.insert(
+            METADATA_FIELD.to_string(),
+            json!({
+                "type": "object",
+                "description": "Parameters for the remote agent, sent beside the task (over A2A, \
+                                as the request's metadata) — only with `@<agent> <task>`, and \
+                                only when the agent's description asks for some, as \
+                                {\"project\": \"lama\"}.",
             }),
         );
     }

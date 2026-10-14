@@ -680,6 +680,7 @@ impl ToolExecutor for SpawnTool {
         let decision = self.decide(&spawn, &ctx.agent_id, || {
             ctx.resolve_working_directory(None)
         })?;
+        parameters_reach_a_remote_agent(&spawn, &decision)?;
         let (cwd, child, named) = match decision {
             SpawnDecision::Command => (ctx.resolve_working_directory(None)?, None, None),
             SpawnDecision::Remote { .. } => (
@@ -749,11 +750,20 @@ impl ToolExecutor for SpawnTool {
         let decision = self.decide(&spawn, &ctx.agent_id, || {
             ctx.resolve_working_directory(None)
         })?;
+        parameters_reach_a_remote_agent(&spawn, &decision)?;
 
         match decision {
             SpawnDecision::Command => execute::command(&ctx, spawn.body(), spawn.target()).await,
             SpawnDecision::Remote { agents, name } => {
-                remote::delegate(ctx, &agents, &name, spawn.body(), &self.remembers).await
+                remote::delegate(
+                    ctx,
+                    &agents,
+                    &name,
+                    spawn.body(),
+                    spawn.metadata(),
+                    &self.remembers,
+                )
+                .await
             }
             SpawnDecision::Agent { depth, spec, .. } => {
                 execute::delegate(self, &mut ctx, spawn.body(), depth, *spec).await
@@ -768,6 +778,22 @@ impl ToolExecutor for SpawnTool {
                 execute::teammate(self, &mut ctx, &name, spawn.body(), depth, existing, *spec).await
             }
         }
+    }
+}
+
+/// A delegation's parameters go to a remote agent and nowhere else
+/// (ADR-0040): a name that turned out to be a teammate here has nowhere to
+/// put them, and dropping them would be a call quietly unlike the one
+/// written.
+fn parameters_reach_a_remote_agent(spawn: &Spawn, decision: &SpawnDecision) -> Result<(), String> {
+    match (spawn.metadata(), decision) {
+        (Some(_), SpawnDecision::Remote { .. }) | (None, _) => Ok(()),
+        (Some(_), _) => Err(format!(
+            "`{}` goes to a remote agent, and `@{}` is not one here; leave the parameters out, \
+             or name a remote agent",
+            parse::METADATA_FIELD,
+            spawn.target().unwrap_or_default()
+        )),
     }
 }
 
@@ -830,6 +856,14 @@ fn preview(
         if let Some(agent_id) = &named.agent_id {
             object.insert("agent_id".to_string(), json!(agent_id));
         }
+    }
+    // ADR-0040: what goes beside the task is shown to whoever approves it.
+    // Additive on the same ground: absent unless the call gave parameters.
+    if let Some(metadata) = spawn.metadata() {
+        structured_input
+            .as_object_mut()
+            .expect("built as an object above")
+            .insert("metadata".to_string(), Value::Object(metadata.clone()));
     }
 
     ToolAuthorizationPreview {
