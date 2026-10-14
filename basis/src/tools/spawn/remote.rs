@@ -22,36 +22,37 @@ use serde_json::{Value, json};
 
 use super::{describe::listed, no_remote_agents};
 use crate::a2a::HOPS_EXTENSION;
-use crate::a2a::remote::{
-    Conversation, Outstanding, Reached, Remembered, RemoteAgents, Route, Unreached, Waiting,
-};
+use crate::a2a::remote::{Conversation, Outstanding, Remembered, RemoteAgents, Waiting};
+use crate::a2a::resolver::{Resolved, Route, Unresolved};
 
 /// Whether `@<name>` can go anywhere, asked in the preview — before the
-/// approver, and without waiting on the network.
+/// approver, and without waiting on the network (ADR-0037 §4).
 ///
-/// An unreachable agent due a retry is let through: connecting it is the
-/// first thing [`delegate`] does (ADR-0031 §2), and refusing it here would
-/// mean an agent that came up is never reached without a reload. One tried
-/// too recently is refused, with how long until it is worth asking again.
+/// A known agent is let through whether or not it is reachable now:
+/// resolving it is the first thing [`delegate`] does (ADR-0031 §2), and
+/// refusing it here would mean an agent that came up is never reached
+/// without a reload. So is a name a resolver cannot classify without the
+/// network. One tried too recently is refused, with how long until it is
+/// worth asking again.
 pub(super) fn authorize(agents: &RemoteAgents, name: &str) -> Result<(), String> {
     match agents.route(name) {
-        Route::Connected | Route::Retry => Ok(()),
+        Route::Known | Route::Maybe => Ok(()),
         Route::Backoff(wait) => Err(backing_off(name, wait)),
-        Route::Removed => Err(removed(name)),
+        Route::Refused(reason) => Err(refused(name, &reason)),
         Route::Unknown => Err(unknown(agents, name)),
     }
 }
 
-/// The refusal for an agent a reload took away: by name, so the model stops
-/// asking for it rather than guessing at a spelling (ADR-0031 §5).
-fn removed(name: &str) -> String {
+/// The refusal for an agent its resolver refused, in the resolver's words,
+/// then what to do instead (ADR-0031 §5).
+fn refused(name: &str, reason: &str) -> String {
     format!(
-        "the remote agent `{name}` is no longer configured for this workspace, so there is \
-         nothing to hand `@{name}` to; write the task with no `@` to hand it to a subagent here"
+        "{reason}, so there is nothing to hand `@{name}` to; write the task with no `@` to hand \
+         it to a subagent here"
     )
 }
 
-/// The refusal for a name the calling agent's workspace does not configure.
+/// The refusal for a name no resolver of the calling agent's workspace knows.
 fn unknown(agents: &RemoteAgents, name: &str) -> String {
     let configured = agents.names();
     if configured.is_empty() {
@@ -79,17 +80,23 @@ fn seconds(wait: std::time::Duration) -> u64 {
 }
 
 /// What the model reads when there is no client to hand the task to.
-fn unreached(agents: &RemoteAgents, name: &str, why: Unreached) -> String {
+fn unresolved(agents: &RemoteAgents, name: &str, why: Unresolved) -> String {
     match why {
-        Unreached::Backoff(wait) => backing_off(name, wait),
-        // mentra's error carries no server text and no header value.
-        Unreached::Failed { error, retry_in } => format!(
+        Unresolved::Backoff(wait) => backing_off(name, wait),
+        Unresolved::Unreachable {
+            error,
+            retry_in: Some(retry_in),
+        } => format!(
             "the remote agent `{name}` could not be reached: {error}. `@{name}` tries it again \
              in {}s",
             seconds(retry_in)
         ),
-        Unreached::Removed => removed(name),
-        Unreached::Unknown => unknown(agents, name),
+        Unresolved::Unreachable {
+            error,
+            retry_in: None,
+        } => format!("the remote agent `{name}` could not be reached: {error}"),
+        Unresolved::Refused(reason) => refused(name, &reason),
+        Unresolved::Unknown => unknown(agents, name),
     }
 }
 
@@ -110,10 +117,20 @@ pub(super) async fn delegate(
     // Held to the end of this call: a reload that swaps the set meanwhile
     // changes what the *next* `@<agent>` reaches, never this exchange
     // (ADR-0031 §6). An unreachable agent due a retry is connected here.
-    let Reached { client, endpoint } = agents
-        .reach(name)
+    let Resolved {
+        client,
+        id,
+        endpoint,
+        ..
+    } = agents
+        .resolve(name)
         .await
-        .map_err(|why| unreached(agents, name, why))?;
+        .map_err(|why| unresolved(agents, name, why))?;
+    // The conversation is the agent's, not the name's (ADR-0037 §6): kept
+    // under the id its resolver gave it, so a short handle and its full form
+    // are one conversation, and a label handed to another agent does not
+    // inherit one.
+    let id = id.as_str();
     let caller = ctx.agent_id.clone();
     // The run's own bounds — cancellation, stop, deadline — taken before the
     // context is handed over for progress, which is the one thing the
@@ -124,7 +141,7 @@ pub(super) async fn delegate(
         hop: agents.hop().saturating_add(1),
         deadline: options.deadline,
     };
-    let mut conversation = agents.conversation(&caller, name, remembered);
+    let mut conversation = agents.conversation(&caller, id, remembered);
     let request = request(name, body, &conversation, hop)?;
 
     let ctx: ParallelToolContext = ctx.into();
@@ -132,7 +149,7 @@ pub(super) async fn delegate(
     let save = |next: Conversation| {
         // Reported, not raised: the exchange it describes happened, and a
         // failed tool call would invite the model to do the work again.
-        if let Err(error) = agents.record(&caller, name, next, remembered) {
+        if let Err(error) = agents.record(&caller, id, next, remembered) {
             ctx.emit_progress(format!(
                 "the conversation with `{name}` was not saved: {error}"
             ));

@@ -307,23 +307,21 @@ impl SpawnTool {
         }
     }
 
-    /// The remote agents this copy teaches, from the set as it is now:
-    /// configuration order, each with what its card says, or marked
-    /// unreachable when its card could not be fetched.
+    /// The remote agents this copy teaches, as its resolvers teach them now
+    /// (ADR-0037 §7): each with what its card says, or marked unreachable
+    /// when its card could not be fetched.
     #[cfg(feature = "a2a")]
     fn taught(&self) -> Vec<Taught> {
         let Some(remote) = &self.remote else {
             return Vec::new();
         };
         remote
-            .snapshot()
-            .agents()
-            .iter()
+            .taught()
+            .agents
+            .into_iter()
             .map(|agent| Taught {
-                name: agent.name().to_string(),
-                summary: agent
-                    .client()
-                    .map(|client| mentra::a2a::card_summary(client.card())),
+                name: agent.name,
+                summary: agent.summary,
             })
             .collect()
     }

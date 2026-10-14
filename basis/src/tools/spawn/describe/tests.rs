@@ -7,9 +7,12 @@ use std::sync::Arc;
 use mentra::tool::ToolDefinition;
 
 use crate::{
-    a2a::remote::{
-        RemoteAgents,
-        testing::{agent_at, free_port, serve_card},
+    a2a::{
+        configured::{
+            ConfiguredAgents,
+            testing::{agent_at, free_port, serve_card},
+        },
+        remote::RemoteAgents,
     },
     tools::SpawnTool,
 };
@@ -53,18 +56,19 @@ fn an_unreachable_agent_is_taught_as_one_the_model_may_still_ask() {
 async fn the_description_follows_the_set_from_the_next_capture_on() {
     let port = free_port();
     serve_card(port);
-    let set = Arc::new(RemoteAgents::connect(Vec::new(), None).await);
+    let configured = Arc::new(ConfiguredAgents::connect(Vec::new()).await);
+    let set = Arc::new(RemoteAgents::over_configured(&configured));
     let copy = SpawnTool::new().for_remote_agents(&set);
     assert!(!described(&copy).contains("@<agent>"));
 
-    set.reload(vec![agent_at("reviewer", port)]).await;
+    configured.reload(vec![agent_at("reviewer", port)]).await;
 
     let text = described(&copy);
     assert!(text.contains("- `reviewer`"), "{text}");
     assert!(text.contains("Reviews diffs."), "its card's words: {text}");
     assert!(!text.contains("Not reachable"), "{text}");
 
-    set.reload(Vec::new()).await;
+    configured.reload(Vec::new()).await;
     assert_eq!(
         copy.descriptor(),
         SpawnTool::new().descriptor(),

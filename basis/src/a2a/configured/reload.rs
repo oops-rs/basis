@@ -12,7 +12,7 @@ use std::{collections::BTreeSet, sync::Arc};
 
 use mentra::a2a::A2aClient;
 
-use super::{RemoteAgent, RemoteAgents, Roster, connect_each, warned};
+use super::{ConfiguredAgents, RemoteAgent, Roster, connect_each, warned};
 use crate::a2a::{A2aAgent, A2aReload};
 
 /// What the configuration did to one agent that is configured now.
@@ -22,7 +22,7 @@ enum Fate {
     Unchanged,
 }
 
-impl RemoteAgents {
+impl ConfiguredAgents {
     /// Makes `agents` — strongest source first, one per name, as discovery
     /// layers them — the set, and reports the difference by name.
     ///

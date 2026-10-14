@@ -1,64 +1,23 @@
-//! Reaching one agent by name, retrying an unreachable one when it is asked
-//! for (ADR-0031 §2).
+//! Reaching one configured agent by name, retrying an unreachable one when it
+//! is asked for (ADR-0031 §2).
 //!
 //! Two questions, because `spawn` asks twice. Its preview runs before the
-//! approver and cannot wait on the network, so [`RemoteAgents::route`] answers
-//! from the set alone: connected, due a retry, or not worth asking about yet.
-//! Its execution can wait, so [`RemoteAgents::reach`] hands back the client to
-//! use — connecting an unreachable agent first when its backoff has passed.
-//! The claim on a retry is taken under the agent's own lock, so two calls
-//! racing for one down agent cost one connect attempt, not two.
+//! approver and cannot wait on the network, so [`ConfiguredAgents::standing`]
+//! answers from the set alone: known, due a retry, or not worth asking about
+//! yet. Its execution can wait, so [`ConfiguredAgents::reach`] hands back the
+//! client to use — connecting an unreachable agent first when its backoff has
+//! passed. The claim on a retry is taken under the agent's own lock, so two
+//! calls racing for one down agent cost one connect attempt, not two.
 
 use std::{
     sync::Arc,
     time::{Duration, Instant},
 };
 
-use mentra::a2a::{A2aClient, A2aError as ClientError};
+use mentra::a2a::A2aClient;
 
-use super::{RemoteAgent, RemoteAgents, Roster};
-
-/// Where `@<name>` stands, decided without waiting on anything.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub(crate) enum Route {
-    /// Connected: the task can be handed over.
-    Connected,
-    /// Configured and unreachable, and due a retry: the call may go ahead,
-    /// and connecting is the first thing it does.
-    Retry,
-    /// Configured and unreachable, and tried too recently to try again for
-    /// this long.
-    Backoff(Duration),
-    /// Configured once, and taken away by a reload (ADR-0031 §5).
-    Removed,
-    /// Not configured, and never was.
-    Unknown,
-}
-
-/// What [`RemoteAgents::reach`] hands back: the client to talk to, and which
-/// endpoint its configuration names.
-#[derive(Debug)]
-pub(crate) struct Reached {
-    pub(crate) client: Arc<A2aClient>,
-    pub(crate) endpoint: String,
-}
-
-/// Why [`RemoteAgents::reach`] has no client to hand back.
-#[derive(Debug)]
-pub(crate) enum Unreached {
-    /// Tried too recently; tried again after this long.
-    Backoff(Duration),
-    /// Tried just now, and the card could not be fetched; tried again after
-    /// `retry_in`.
-    Failed {
-        error: ClientError,
-        retry_in: Duration,
-    },
-    /// Configured once, and taken away by a reload.
-    Removed,
-    /// Not configured, and never was.
-    Unknown,
-}
+use super::{ConfiguredAgents, RemoteAgent, Roster};
+use crate::a2a::resolver::{Resolved, Route, Unresolved};
 
 impl RemoteAgent {
     /// How long until this agent is due a retry; zero when it is due now.
@@ -84,20 +43,29 @@ impl RemoteAgent {
         *attempted = Instant::now();
         Ok(())
     }
+
+    /// This agent, resolved through `client`: its name is its id, and its
+    /// endpoint is the configuration's fingerprint rather than the URL, so a
+    /// record written before this resolver existed still reads the same.
+    fn resolved(&self, client: Arc<A2aClient>) -> Resolved {
+        Resolved::new(client, self.name()).with_endpoint(self.agent.endpoint())
+    }
 }
 
-impl RemoteAgents {
-    /// Where `@<name>` stands now.
-    pub(crate) fn route(&self, name: &str) -> Route {
+impl ConfiguredAgents {
+    /// Where `@<name>` stands now, without waiting on anything.
+    pub(crate) fn standing(&self, name: &str) -> Route {
         let roster = self.snapshot();
         let Some(agent) = roster.get(name) else {
             return roster.absent(name);
         };
         if agent.client.is_some() {
-            return Route::Connected;
+            return Route::Known;
         }
         match agent.retry_in(self.backoff) {
-            wait if wait.is_zero() => Route::Retry,
+            // Due a retry: the call may go ahead, and reaching it is the
+            // first thing it does.
+            wait if wait.is_zero() => Route::Known,
             wait => Route::Backoff(wait),
         }
     }
@@ -110,36 +78,33 @@ impl RemoteAgents {
     /// this one (ADR-0031 §6). A retry that succeeds is put into the set, and
     /// the set says it changed, so every agent holding it is taught the agent
     /// is reachable again.
-    pub(crate) async fn reach(&self, name: &str) -> Result<Reached, Unreached> {
+    pub(crate) async fn reach(&self, name: &str) -> Result<Resolved, Unresolved> {
         let roster = self.snapshot();
         let Some(agent) = roster.get(name) else {
             return Err(match roster.absent(name) {
-                Route::Removed => Unreached::Removed,
-                _ => Unreached::Unknown,
+                Route::Refused(reason) => Unresolved::Refused(reason),
+                _ => Unresolved::Unknown,
             });
         };
-        let endpoint = agent.agent.endpoint();
         if let Some(client) = &agent.client {
-            return Ok(Reached {
-                client: Arc::clone(client),
-                endpoint,
-            });
+            return Ok(agent.resolved(Arc::clone(client)));
         }
         agent
             .claim_retry(self.backoff)
-            .map_err(Unreached::Backoff)?;
+            .map_err(Unresolved::Backoff)?;
 
         let client = A2aClient::connect(agent.agent.config())
             .await
             .map(Arc::new)
-            .map_err(|error| Unreached::Failed {
-                error,
-                retry_in: self.backoff,
+            .map_err(|error| Unresolved::Unreachable {
+                // mentra's error carries no server text and no header value.
+                error: error.to_string(),
+                retry_in: Some(self.backoff),
             })?;
         if self.install(agent, &client) {
             self.changed();
         }
-        Ok(Reached { client, endpoint })
+        Ok(agent.resolved(client))
     }
 
     /// Puts `client` into the set for `agent` — unless the set no longer holds
@@ -167,10 +132,14 @@ impl RemoteAgents {
 }
 
 impl Roster {
-    /// Why a name the set does not hold is not there.
+    /// Why a name the set does not hold is not there: refused by name when a
+    /// reload took it away (ADR-0031 §5), so the model stops asking for it
+    /// rather than guessing at a spelling; unknown otherwise.
     fn absent(&self, name: &str) -> Route {
         if self.removed.contains(name) {
-            Route::Removed
+            Route::Refused(format!(
+                "the remote agent `{name}` is no longer configured for this workspace"
+            ))
         } else {
             Route::Unknown
         }

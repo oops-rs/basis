@@ -8,6 +8,14 @@
 //! ADR-0029); `remote` holds the agents an open reaches, and `spawn` does the
 //! talking.
 //!
+//! # A name is resolved
+//!
+//! ADR-0037: what this module reads from files is one way to answer
+//! `@<name>`. A host may install an [`AgentResolver`] of its own
+//! ([`WorkspaceBuilder::with_agent_resolver`](crate::WorkspaceBuilder::with_agent_resolver)),
+//! asked before the configured set; [`resolver`] has the contract. Everything
+//! below describes the configured set.
+//!
 //! # The set is live
 //!
 //! ADR-0031: what an open connected is not fixed for its lifetime, because a
@@ -73,10 +81,12 @@
 //!
 //! Nothing read here is ever repeated back: see [`A2aError`].
 
+pub(crate) mod configured;
 mod file;
 pub(crate) mod live;
 mod reload;
 pub(crate) mod remote;
+pub mod resolver;
 mod watch;
 
 use std::path::{Path, PathBuf};
@@ -85,10 +95,11 @@ use thiserror::Error;
 
 use crate::context::ContextScope;
 
+pub use configured::A2A_RETRY_BACKOFF;
 pub use mentra::a2a::{A2aAgentConfig, A2aLimits};
 pub use mentra::mcp::SecretString;
 pub use reload::A2aReload;
-pub use remote::A2A_RETRY_BACKOFF;
+pub use resolver::{AgentResolver, OnChange, Resolved, Route, Taught, TaughtAgent, Unresolved};
 pub use watch::{A2aWatch, A2aWatchError, DEFAULT_A2A_WATCH_INTERVAL};
 
 /// The URI of basis's hops extension (`docs/a2a/hops-v1.md`, ADR-0030 §9):

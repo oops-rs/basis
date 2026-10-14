@@ -2,12 +2,15 @@
 //! server: which request a call sends given where the conversation stands, and
 //! where it stands after each kind of answer.
 
-use std::time::Duration;
+use std::{sync::Arc, time::Duration};
 
 use mentra::a2a::types::{Artifact, Part, Task, TaskStatus};
 
 use super::*;
-use crate::a2a::remote::testing::{agent_at, free_port, serve_card};
+use crate::a2a::configured::{
+    ConfiguredAgents,
+    testing::{agent_at, free_port, serve_card},
+};
 
 const AGENT: &str = "reviewer";
 /// A top-level caller's first hop, with no deadline.
@@ -306,7 +309,8 @@ fn a_new_task_refused_as_unknown_with_nothing_outstanding_keeps_the_conversation
 
 #[tokio::test]
 async fn a_removed_agent_is_refused_by_name_and_continues_when_it_comes_back() {
-    let agents = RemoteAgents::unreachable(&["reviewer"]);
+    let configured = Arc::new(ConfiguredAgents::unreachable(&["reviewer"]));
+    let agents = RemoteAgents::over_configured(&configured);
     let settled = Conversation {
         context_id: Some("context-1".to_string()),
         outstanding: None,
@@ -315,14 +319,14 @@ async fn a_removed_agent_is_refused_by_name_and_continues_when_it_comes_back() {
         .record("agent-1", AGENT, settled.clone(), &Remembered::Not)
         .expect("in memory");
 
-    agents.reload(Vec::new()).await;
+    configured.reload(Vec::new()).await;
     let refusal = authorize(&agents, AGENT).expect_err("removed");
     assert!(
         refusal.contains("`reviewer` is no longer configured"),
         "{refusal}"
     );
 
-    agents.reload(vec![agent_at(AGENT, free_port())]).await;
+    configured.reload(vec![agent_at(AGENT, free_port())]).await;
     assert_eq!(
         request(
             AGENT,
@@ -337,7 +341,8 @@ async fn a_removed_agent_is_refused_by_name_and_continues_when_it_comes_back() {
 
 #[tokio::test]
 async fn an_outstanding_task_follows_its_agent_to_a_new_address() {
-    let agents = RemoteAgents::unreachable(&["reviewer"]);
+    let configured = Arc::new(ConfiguredAgents::unreachable(&["reviewer"]));
+    let agents = RemoteAgents::over_configured(&configured);
     agents
         .record(
             "agent-1",
@@ -349,10 +354,13 @@ async fn an_outstanding_task_follows_its_agent_to_a_new_address() {
     let moved_to = free_port();
     serve_card(moved_to);
 
-    let report = agents.reload(vec![agent_at(AGENT, moved_to)]).await;
+    let report = configured.reload(vec![agent_at(AGENT, moved_to)]).await;
     assert_eq!(report.changed, [AGENT]);
 
-    let reached = agents.reach(AGENT).await.expect("the new address answers");
+    let reached = agents
+        .resolve(AGENT)
+        .await
+        .expect("the new address answers");
     assert_eq!(reached.client.card_url().port(), Some(moved_to));
     assert_eq!(
         request(
