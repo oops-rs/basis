@@ -474,7 +474,7 @@ impl WorkspaceBuilder {
     /// keeps the conversation with each agent it resolves, keyed by the id
     /// the resolver gave, and `spawn` teaches what the resolver says it
     /// teaches — the names it can list, and a sentence for those it cannot.
-    /// See [`AgentResolver`] for the contract, and [`crate::a2a`] for what
+    /// See [`AgentResolver`] for the contract, and `basis::a2a` for what
     /// the configured set does with the same questions.
     ///
     /// The resolver is this workspace's: a sibling open of the same
