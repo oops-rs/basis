@@ -167,7 +167,9 @@ pub fn parse(input: &Value) -> Result<Spawn, String> {
             if spawn.mode != Mode::Agent || spawn.target.is_none() || spawn.body.is_empty() {
                 return Err(format!(
                     "`{METADATA_FIELD}` goes with a task for a remote agent, `@<agent> <task>`: \
-                     it is sent beside the task as the agent's parameters"
+                     it is sent beside the task as the agent's parameters. `@<agent>` alone \
+                     keeps waiting on a task that already has its parameters, so leave \
+                     `{METADATA_FIELD}` out there"
                 ));
             }
             Some(map.clone())

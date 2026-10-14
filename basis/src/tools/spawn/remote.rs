@@ -367,10 +367,14 @@ fn settle(
                  this answers"
             )),
         ),
+        // Nothing came back to wait on, whatever the cause says — even "it
+        // may already be working on it", which forbids an automatic resend,
+        // not a deliberate one. The model is told what it can do, or it
+        // reads that as "wait", and a wait finds nothing outstanding.
         Err(PeerError::Send(error)) => (
             before,
             Err(format!(
-                "Handing the task to remote agent `{name}` failed: {error}"
+                "Handing the task to remote agent `{name}` failed: {error}. No task came back,                  so there is nothing to wait on. If the task is safe to repeat, such as a                  question, hand it over again with `@{name} <task>`; if it is not, say that it                  may have been received."
             )),
         ),
         Err(PeerError::Check { task_id, error }) => (
