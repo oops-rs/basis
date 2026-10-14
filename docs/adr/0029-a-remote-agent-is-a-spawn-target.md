@@ -14,6 +14,9 @@
 > the set an open connected is live — reloaded, watched and retried (§3, §4).
 > Extended by [`0035-a-host-may-key-remote-conversations.md`](0035-a-host-may-key-remote-conversations.md):
 > a host may key a run's remote conversations instead of the calling agent (§5).
+> Amended by [`0037-an-agent-is-named.md`](0037-an-agent-is-named.md): `@<name>`
+> is resolved rather than looked up in files, a name nobody resolves is a local
+> teammate, and a conversation is keyed by the agent's id (§1, §3, §5).
 
 ## Context
 

@@ -5,6 +5,8 @@
 > §3 and §4 — the set an open connected is no longer fixed for its lifetime.
 > Applies [`0005-mentra-coevolution-discipline.md`](0005-mentra-coevolution-discipline.md):
 > re-reading a registered tool's description is mentra's.
+> Amended by [`0037-an-agent-is-named.md`](0037-an-agent-is-named.md): the live
+> set is the configured resolver, one resolver among others.
 
 ## Context
 
