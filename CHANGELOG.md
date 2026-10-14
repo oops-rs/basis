@@ -5,6 +5,48 @@ All six crates — `basis`, `basis-host`, `basis-tasks`, `basis-acp`,
 live in `docs/adr/`; this file says what changed for someone upgrading.
 Releases before 0.15.0 are described by their tags and ADRs only.
 
+## Unreleased
+
+### An agent is named ([ADR-0037](docs/adr/0037-an-agent-is-named.md))
+
+- `@<name>` is resolved. `WorkspaceBuilder::with_agent_resolver` installs the
+  host's `AgentResolver`, asked before the set `.basis/a2a.json`, the global
+  file and `A2aConfig::supplied` configure; the first answer other than
+  unknown stands. A resolver hands back a connected `A2aClient` plus the
+  agent's id, canonical name and endpoint (`Resolved`); basis keeps the
+  conversation under the id, the hop, the exchange and the one `spawn` door.
+  `route`, `taught` and `on_change` have defaults, so a resolver over names it
+  cannot list teaches one sentence instead.
+- A name no resolver knows is a **teammate**: a subagent made under that name
+  on the first `@<name> <task>` and continued by every later one, kept on the
+  calling agent's ledger row for as long as it lives. It is minted through the
+  child policy, whose `ChildContext::name` now says which name, and run on the
+  parent's bounds. A reply opens with its name and id; `@<id>` reaches it
+  whatever it is called, and `spawn`'s description lists the caller's
+  teammates. A name already bound to a teammate stays bound when a remote
+  agent appears under it.
+- `spawn` gains an optional `reach` field — `auto` (default), `remote`,
+  `local` — and `RuntimeBuilder::with_reach_policy` fixes the default and the
+  allowed values. The authorization preview adds `reach` (the decision, never
+  `auto`) and `agent_id` once known; a teammate declares `LocalState`, a
+  remote agent `External`.
+- A target name may be namespaced with `/` between parts: `@team/reviewer`,
+  `!@team/box`. A namespaced name always means a resolver's agent.
+- `Workspace::a2a_agents` reports every taught name, the host's resolver's
+  first, one entry per name.
+
+### Breaking
+
+- **`@<unknown> <task>` makes a teammate instead of being refused.** A host
+  that serves only remote agents, or wants the old refusal, sets
+  `RuntimeBuilder::with_reach_policy(ReachPolicy::fixed(Reach::Remote))`.
+- A remembered `spawn` rule that globs `target` with `*` no longer matches a
+  namespaced name: mentra's glob does not cross `/`. Write `**` for every
+  agent or `team/*` for a team, as the `cwd` key already requires.
+- The authorization preview of a `@<name>` delegation carries two more keys,
+  `reach` and (when known) `agent_id`; a rule matching the whole serialized
+  input exactly needs updating, one globbing around `target` does not.
+
 ## 0.17.0 — 2026-10-13
 
 ### A server may authenticate its own way ([ADR-0036](docs/adr/0036-a-server-may-authenticate-its-own-way.md))

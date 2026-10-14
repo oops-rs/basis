@@ -309,7 +309,12 @@ server never fetches what a caller names. `--extended-card FILE` tells authentic
 than the public card does. The other direction needs no command: name a remote agent in
 `.basis/a2a.json` and the model hands it work through `spawn`, the same tool it delegates with
 locally — `@<name> <task>` ([ADR-0029](docs/adr/0029-a-remote-agent-is-a-spawn-target.md)) — put
-to the approver like any external call. basis follows the remote task's stream when its card
+to the approver like any external call. A host answers `@<name>` its own way with an
+`AgentResolver` — a registry of `@team/agent` handles, say — asked before the file, and a name
+nobody resolves is a teammate: a subagent made under that name and continued by every later
+`@<name> <task>`, so `@reviewer look at the diff` then `@reviewer and the tests?` is one
+conversation ([ADR-0037](docs/adr/0037-an-agent-is-named.md)); the optional `reach` field pins a
+call to `remote` or `local`. basis follows the remote task's stream when its card
 offers one and polls otherwise, and neither ever sends the task twice. A host that mints a fresh
 agent per chat message binds each run to the chat with `PreparedRun::with_remote_conversations`,
 so an `@<name>` question asked in one message is answered by `@<name> <answer>` in the next

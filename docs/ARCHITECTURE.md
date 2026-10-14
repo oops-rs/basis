@@ -404,6 +404,17 @@ flowchart LR
   stream when the card declares one and polling `GetTask` otherwise, never resending. basis keeps
   each conversation's ids beside the session's store, so a resumed task picks up remote work
   rather than sending it twice.
+- **A name is resolved, or it is a teammate** (ADR-0037). `@<name>` is answered by the open's
+  resolvers in order — the host's, installed with `WorkspaceBuilder::with_agent_resolver`, then
+  the set its files configure — and the first answer other than *unknown* stands; a resolver hands
+  back a connected client and who the agent is (id, canonical name, endpoint), and basis keeps the
+  conversation under the id. A name nobody resolves is a teammate: the one-off child kept on the
+  caller's ledger row instead of dropped, minted through the child policy (which sees the name)
+  and run one more turn per `@<name> <task>`, on the parent's bounds, for as long as the row lives.
+  The `reach` field (`auto`, `remote`, `local`; `RuntimeBuilder::with_reach_policy` fixes it)
+  says which a call may reach, and the preview carries the decision as `reach` and the agent's
+  `agent_id`. A bound name stays bound; `@<id>` reaches a teammate whatever it is called. Names
+  may be namespaced (`team/reviewer`), which always means a resolver.
 - **The remote agents are a live set** (ADR-0031). An open's agents sit behind one lock as an
   immutable roster swapped whole, and every agent minted or resumed from the open holds it, so a
   change reaches routing at once and reaches what `spawn` teaches at the next model request —

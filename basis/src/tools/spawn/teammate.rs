@@ -14,6 +14,11 @@
 //! runtime, already the id in every delegation edge — and `@<id>` reaches it
 //! whatever it is called.
 //!
+//! Each turn is announced on the parent's stream as a subagent run, with
+//! mentra's `register_subagent` and `finish_subagent`, which is the pair that
+//! exists; that a teammate's later turn therefore reads as a fresh spawn is
+//! [mentra#65](https://github.com/oops-rs/mentra/issues/65).
+//!
 //! Teammates live as long as the row that holds them: the run for a session,
 //! the delegation for a one-off child, the parent teammate for a teammate's
 //! own. A session resumed after a restart has none; the next `@<name> <task>`
