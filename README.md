@@ -12,7 +12,7 @@ layer ([ADR-0022](docs/adr/0022-the-task-layer-is-a-crate.md)); `basis-acp`, `ba
 `basis-cli` are the protocol and command shells.
 
 ```rust
-// [dependencies] basis = "0.17"
+// [dependencies] basis = "0.18.0"
 let workspace = basis::Workspace::open("/repo").await?;
 let mut run = workspace.prepare("what does this repo do?")?;
 let report = run

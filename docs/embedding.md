@@ -12,7 +12,7 @@ an embedding host compiles only what it runs
 
 ```toml
 [dependencies]
-basis = "0.17"
+basis = "0.18.0"
 ```
 
 MCP is a default-on `mcp` feature rather than a fixed part of the core:
@@ -878,7 +878,7 @@ directly:
 
 ```toml
 [dependencies]
-basis-tasks = "0.17"
+basis-tasks = "0.18.0"
 ```
 
 ```rust

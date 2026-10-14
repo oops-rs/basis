@@ -5,7 +5,7 @@ All six crates — `basis`, `basis-host`, `basis-tasks`, `basis-acp`,
 live in `docs/adr/`; this file says what changed for someone upgrading.
 Releases before 0.15.0 are described by their tags and ADRs only.
 
-## Unreleased
+## 0.18.0 — 2026-10-14
 
 ### The core speaks to a peer ([ADR-0038](docs/adr/0038-the-core-speaks-to-a-peer.md))
 
