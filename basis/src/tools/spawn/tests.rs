@@ -107,7 +107,10 @@ fn a_bad_target_spelling_is_taught_the_working_one() {
         ("!@ mac ls", "`!@<target> <command>`"),
         ("!@mac", "write the command after it"),
         ("!@mac   ", "write the command after it"),
-        ("!@ma/c ls", "letters, digits"),
+        ("!@ma.c ls", "letters, digits"),
+        ("!@/mac ls", "letters, digits"),
+        ("!@mac/ ls", "letters, digits"),
+        ("!@ma//c ls", "letters, digits"),
         ("!@\"mac\" ls", "letters, digits"),
     ] {
         let error = refusal(input);
@@ -188,6 +191,39 @@ fn a_bad_agent_spelling_is_taught_the_working_one_and_the_escape() {
         assert!(error.contains(taught), "{input}: {error}");
         assert!(error.contains("`@@`"), "{input} names the escape: {error}");
     }
+}
+
+#[test]
+fn a_name_may_be_namespaced_with_one_slash_between_parts() {
+    // ADR-0037 §8: `team/reviewer` is a registry's handle, for commands and
+    // agents alike — one charset for one `target` field.
+    assert_eq!(
+        parsed("@team/reviewer look at this").target(),
+        Some("team/reviewer")
+    );
+    assert_eq!(parsed("!@team/box cargo test").target(), Some("team/box"));
+    assert_eq!(parsed("@a/b/c deep").target(), Some("a/b/c"));
+    for input in ["@/reviewer look", "@reviewer/ look", "@team//reviewer look"] {
+        assert!(refusal(input).contains("letters, digits"), "{input}");
+    }
+}
+
+#[test]
+fn a_namespaced_name_nobody_resolves_is_never_a_teammate() {
+    let (registry, _row) = ledger("agent-1");
+    let tool = SpawnTool::new().with_agents(registry);
+
+    let error = decided(&tool, "agent-1", call("@team/reviewer look")).expect_err("not a teammate");
+    assert!(error.contains("namespaced"), "{error}");
+    assert!(error.contains("`@reviewer`"), "{error}");
+
+    let error = decided(
+        &tool,
+        "agent-1",
+        call_reaching("@team/reviewer look", "local"),
+    )
+    .expect_err("not a teammate");
+    assert!(error.contains("namespaced"), "{error}");
 }
 
 #[test]

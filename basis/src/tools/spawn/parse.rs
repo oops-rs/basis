@@ -224,8 +224,8 @@ fn target(rest: &str) -> Result<Spawn, String> {
 
     if !is_target_name(name) {
         return Err(format!(
-            "`{name}` is not a target name: a target is letters, digits, `_` or `-`, as \
-             `!@mac xcodebuild -list`"
+            "`{name}` is not a target name: a target is letters, digits, `_` or `-`, with `/` \
+             between parts, as `!@mac xcodebuild -list`"
         ));
     }
 
@@ -248,14 +248,29 @@ fn target(rest: &str) -> Result<Spawn, String> {
 
 /// The charset a target name may use, and the reason it is this narrow: the
 /// name is glob-matched inside a serialized rule pattern and printed into
-/// refusals, so a name carrying a quote, a slash or a space would be a name
-/// that means one thing to an operator writing a rule and another to the
-/// matcher reading it.
+/// refusals, so a name carrying a quote or a space would be a name that
+/// means one thing to an operator writing a rule and another to the matcher
+/// reading it.
+///
+/// `/` joins segments — `team/reviewer`, a registry's namespaced handle
+/// (ADR-0037 §8) — and nothing else: never first, never last, never doubled.
+/// It is the one character the glob treats specially (`*` does not cross
+/// it), which is a fact the ADR records for rule writers rather than a
+/// reason to keep it out.
 pub(crate) fn is_target_name(name: &str) -> bool {
     !name.is_empty()
+        && !name.starts_with('/')
+        && !name.ends_with('/')
+        && !name.contains("//")
         && name
             .chars()
-            .all(|c| c.is_ascii_alphanumeric() || c == '_' || c == '-')
+            .all(|c| c.is_ascii_alphanumeric() || c == '_' || c == '-' || c == '/')
+}
+
+/// Whether a name is namespaced — `team/reviewer` — which always means a
+/// resolver's agent, never a teammate here (ADR-0037 §8).
+pub(crate) fn is_namespaced(name: &str) -> bool {
+    name.contains('/')
 }
 
 fn command(body: &str, target: Option<String>) -> Result<Spawn, String> {
@@ -296,8 +311,9 @@ fn remote(rest: &str) -> Result<Spawn, String> {
 
     if !is_target_name(name) {
         return Err(format!(
-            "`{name}` is not an agent name: a name is letters, digits, `_` or `-`, as \
-             `@reviewer look at this diff`; write `@@` to begin a task with a literal `@`"
+            "`{name}` is not an agent name: a name is letters, digits, `_` or `-`, with `/` \
+             between parts, as `@reviewer look at this diff` or `@team/reviewer …`; write `@@` \
+             to begin a task with a literal `@`"
         ));
     }
 

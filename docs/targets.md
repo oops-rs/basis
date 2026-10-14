@@ -54,7 +54,10 @@ let runtime = Runtime::builder()
     .build()?;
 ```
 
-Names are `[A-Za-z0-9_-]+` and may not be `local`, which is what the wire
+Names are `[A-Za-z0-9_-]+`, joined by single `/`s for a namespaced one
+(`team/box`, [ADR-0037](adr/0037-an-agent-is-named.md) §8; a rule globbing
+`target` with `*` does not cross the `/`, so write `**` or `team/*`), and may
+not be `local`, which is what the wire
 contract calls a command that named no target. A bad name is a
 `RunError::CommandTarget` from `build()` — not a panic — so a host reading its
 targets out of its own configuration can report one the way it reports every

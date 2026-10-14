@@ -116,7 +116,7 @@ pub(super) fn validate_target_names(targets: &CommandTargets) -> Result<(), RunE
         if !is_target_name(name) {
             return Err(RunError::CommandTarget {
                 name: name.clone(),
-                reason: "a target name is one or more of letters, digits, `_` and `-`".to_string(),
+                reason: "a target name is one or more of letters, digits, `_` and `-`, with `/` between parts".to_string(),
             });
         }
 

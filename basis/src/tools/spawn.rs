@@ -92,7 +92,7 @@ pub use parse::{
     INPUT_FIELD as SPAWN_INPUT_FIELD, Mode as SpawnMode, REACH_FIELD as SPAWN_REACH_FIELD,
     Spawn as SpawnInput, classify_spawn_input, parse as parse_spawn_input,
 };
-pub(crate) use parse::{LOCAL_TARGET, is_target_name};
+pub(crate) use parse::{LOCAL_TARGET, is_namespaced, is_target_name};
 pub use reach::{Reach, ReachPolicy};
 
 pub use child::{ChildContext, ChildSpec};
@@ -511,6 +511,16 @@ impl SpawnTool {
         }
         if reach == Reach::Remote {
             return Err(self.no_remote_agent(agent_id, name));
+        }
+        if is_namespaced(name) {
+            // A teammate's name is flat: `team/reviewer` is a resolver's
+            // handle, and one nobody resolved is a refusal, not a teammate
+            // called that (ADR-0037 §8).
+            return Err(format!(
+                "`{name}` is a namespaced name, which reaches a remote agent, and no resolver \
+                 here knows it; a teammate's name has no `/`, as `@{}`",
+                name.rsplit('/').next().unwrap_or(name)
+            ));
         }
         if row.is_none() {
             return Err(format!(
