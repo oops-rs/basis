@@ -54,7 +54,7 @@ async fn a_body_past_the_limit_is_refused_by_its_declared_length() {
         &served,
         &format!(
             "POST / HTTP/1.1\r\nhost: localhost\r\ncontent-type: application/json\r\n\
-             a2a-version: 1.0\r\nauthorization: Bearer {}\r\ncontent-length: 9000000\r\n\r\n",
+             a2a-version: 1.0\r\nauthorization: Bearer {}\r\ncontent-length: 17000000\r\n\r\n",
             harness::TOKEN
         ),
     )

@@ -1,6 +1,7 @@
-//! Parts beyond text (ADR-0030 §6): data and inline textual files reach the
-//! model, anything else is refused, and the card lists exactly what is
-//! accepted.
+//! Parts beyond text (ADR-0030 §6, revised by ADR-0041 §6): data and inline
+//! textual files reach the model, any other inline file is saved in the
+//! workspace's inbox and named, a file by URL is refused, and the card says
+//! any media type is accepted.
 
 #[path = "support/harness.rs"]
 mod harness;
@@ -45,42 +46,54 @@ async fn data_and_a_textual_file_reach_the_model_and_the_history_keeps_them() {
 }
 
 #[tokio::test]
-async fn a_file_by_url_or_binary_bytes_is_refused() {
+async fn a_file_by_url_is_refused() {
     let served = Served::start().await;
-    for part in [
-        json!({"url": "https://example.com/notes.txt", "mediaType": "text/plain"}),
-        json!({"raw": "iVBORw0KGgo=", "mediaType": "image/png"}),
-    ] {
-        let message = json!({"messageId": "m", "role": "ROLE_USER", "parts": [part]});
-        assert_eq!(
-            served
-                .error_code("SendMessage", json!({"message": message}))
-                .await,
-            error_code::CONTENT_TYPE_NOT_SUPPORTED
-        );
-    }
+    let part = json!({"url": "https://example.com/notes.txt", "mediaType": "text/plain"});
+    let message = json!({"messageId": "m", "role": "ROLE_USER", "parts": [part]});
+    assert_eq!(
+        served
+            .error_code("SendMessage", json!({"message": message}))
+            .await,
+        error_code::CONTENT_TYPE_NOT_SUPPORTED
+    );
     assert!(served.model.requests().is_empty(), "nothing refused is run");
 }
 
 #[tokio::test]
-async fn the_card_lists_exactly_the_accepted_input_modes() {
+async fn an_image_is_saved_in_the_inbox_and_the_model_is_told_where() {
+    let served = Served::start().await;
+    // The PNG signature in base64.
+    let message = json!({
+        "messageId": "m-image", "role": "ROLE_USER",
+        "parts": [
+            {"text": "Why is the button red?"},
+            {"raw": "iVBORw0KGgo=", "mediaType": "image/png", "filename": "login.png"},
+        ],
+    });
+    let result = served
+        .result("SendMessage", json!({"message": message}))
+        .await;
+    assert_eq!(result["task"]["status"]["state"], "TASK_STATE_COMPLETED");
+
+    let sent = served.model.requests().concat();
+    let at = sent
+        .find("saved at `.basis/inbox/")
+        .unwrap_or_else(|| panic!("the model is told where: {sent}"));
+    let path = sent[at + "saved at `".len()..]
+        .split('`')
+        .next()
+        .unwrap()
+        .to_string();
+    assert!(path.ends_with("/login.png"), "{path}");
+    assert_eq!(
+        std::fs::read(served.workspace.path().join(&path)).expect("saved"),
+        b"\x89PNG\r\n\x1a\n"
+    );
+}
+
+#[tokio::test]
+async fn the_card_accepts_any_media_type() {
     let served = Served::start().await;
     let card = served.card().await;
-    let modes: Vec<&str> = card["defaultInputModes"]
-        .as_array()
-        .unwrap()
-        .iter()
-        .map(|mode| mode.as_str().unwrap())
-        .collect();
-    for mode in [
-        "text/plain",
-        "text/*",
-        "application/json",
-        "application/xml",
-        "application/yaml",
-    ] {
-        assert!(modes.contains(&mode), "{mode} in {modes:?}");
-    }
-    assert!(!modes.iter().any(|mode| mode.starts_with("image/")));
-    assert_eq!(card["defaultOutputModes"], json!(["text/plain"]));
+    assert_eq!(card["defaultInputModes"], json!(["*/*"]));
 }

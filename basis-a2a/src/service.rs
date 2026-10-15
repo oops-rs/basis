@@ -236,8 +236,8 @@ impl A2aService {
         let (backend, state_dir) = match source {
             Source::Workspace(workspace) => {
                 let tasks = match data_dir {
-                    Some(data_dir) => Tasks::open_at(data_dir, workspace)?,
-                    None => Tasks::open(workspace)?,
+                    Some(data_dir) => Tasks::open_at(data_dir, workspace.clone())?,
+                    None => Tasks::open(workspace.clone())?,
                 };
                 // `basis-tasks` spawns a task that will ask only from a
                 // `Tasks` that can; each is then driven through a host of
@@ -252,6 +252,7 @@ impl A2aService {
                 let host_dir = tasks.host_dir(HOST)?;
                 let backend = TasksBackend {
                     tasks,
+                    workspace,
                     approval,
                     shell,
                     run,

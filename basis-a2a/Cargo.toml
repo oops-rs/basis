@@ -19,6 +19,9 @@ basis.workspace = true
 # crate projects that lifecycle onto the wire and owns no second one. A host
 # that runs its own tasks serves them through `TaskHost` instead.
 basis-tasks.workspace = true
+# Already in the tree through `basis`; named for `mentra::media`, which reads
+# what kind of file a caller sent and makes its name safe to save (ADR-0041).
+mentra.workspace = true
 
 a2a-lf.workspace = true
 axum.workspace = true

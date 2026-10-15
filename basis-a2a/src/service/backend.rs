@@ -25,6 +25,9 @@ pub(crate) enum Backend {
 /// given.
 pub(crate) struct TasksBackend {
     pub(crate) tasks: Tasks,
+    /// The workspace the tasks run in, where the files a caller sends are
+    /// saved (ADR-0041 §6).
+    pub(crate) workspace: std::path::PathBuf,
     pub(crate) approval: InboundApproval,
     pub(crate) shell: bool,
     pub(crate) run: RunDefaults,

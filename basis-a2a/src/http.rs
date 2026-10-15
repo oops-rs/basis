@@ -38,9 +38,10 @@ use crate::{
     service::A2aService,
 };
 
-/// The largest request body accepted. A prompt is bounded at 256 KiB by
-/// `basis-tasks`; this leaves room for the envelope and nothing more.
-pub(crate) const MAX_BODY: usize = 512 * 1024;
+/// The largest request body accepted: 16 MiB, room for the files a caller
+/// sends (ADR-0041 §6) — 6 MiB from a basis caller, 8 once base64 — with the
+/// prompt, which `basis-tasks` bounds at 256 KiB, and the envelope.
+pub(crate) const MAX_BODY: usize = 16 * 1024 * 1024;
 
 /// Why a server could not be bound.
 #[derive(Debug, thiserror::Error)]

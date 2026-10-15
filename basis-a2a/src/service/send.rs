@@ -97,7 +97,13 @@ impl A2aService {
                 return_immediately,
             });
         }
-        let rendered = parts::render(&message)?;
+        // A served workspace saves what is not text under a folder of this
+        // message's own; a host is handed the parts (ADR-0041 §6).
+        let inbox = match self.backend() {
+            Backend::Tasks(_) => Some(format!("{}/{}", parts::INBOX, uuid::Uuid::new_v4())),
+            Backend::Hosted(_) => None,
+        };
+        let rendered = parts::render(&message, inbox.as_deref())?;
         let inbound = hops::inbound(&message)?;
         hops::check_cap(inbound, self.inner.hop_cap)?;
         let (context_id, latest) = self.conversation(caller, &message)?;
@@ -123,6 +129,9 @@ impl A2aService {
         let accepted_ms = now_ms();
         let started = match self.backend() {
             Backend::Tasks(backend) => {
+                // Saved last, once nothing is left to refuse the message, so
+                // a refused one leaves no files behind it.
+                save(&backend.workspace, &rendered.files).await?;
                 spawn::spawn(
                     backend,
                     &rendered.prompt,
@@ -230,7 +239,7 @@ impl A2aService {
         if !matches!(self.standing(&record).await?, Standing::HostAsking(_)) {
             return Err(not_waiting(task_id));
         }
-        let rendered = parts::render(&message)?;
+        let rendered = parts::render(&message, None)?;
         let reply = HostedReply {
             message_id: message.message_id,
             text: rendered.prompt,
@@ -330,4 +339,19 @@ impl A2aService {
             }
         }
     }
+}
+
+/// Writes the files a message carries under `workspace`, each at the path its
+/// prompt names.
+async fn save(workspace: &std::path::Path, files: &[parts::Received]) -> Result<(), A2AError> {
+    for file in files {
+        let path = workspace.join(&file.path);
+        if let Some(parent) = path.parent() {
+            tokio::fs::create_dir_all(parent).await.map_err(internal)?;
+        }
+        tokio::fs::write(&path, &file.data)
+            .await
+            .map_err(internal)?;
+    }
+    Ok(())
 }
