@@ -349,3 +349,8 @@ strip = true
 opt-level = "s"
 lto = true
 codegen-units = 1
+
+# Development only: unreleased mentra (tool images, read shows images, A2A
+# file parts — ADR-0041). Removed at release.
+[patch.crates-io]
+mentra = { path = "../mentra/mentra" }
