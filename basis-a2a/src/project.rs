@@ -150,7 +150,18 @@ impl Standing {
     pub(crate) fn read(tasks: &Tasks, record: &Record) -> Result<Self, A2AError> {
         let handle = handle_of(record)?;
         if let Some(terminal) = tasks.terminal(handle).map_err(internal)? {
-            return Ok(Self::Settled(terminal.into()));
+            let mut outcome = Outcome::from(terminal);
+            // A completed answer carries the files its task attached, after
+            // its text (ADR-0041 §7).
+            if let Outcome::Completed { parts, .. } = &mut outcome {
+                let files = tasks.answer_files(handle).map_err(internal)?;
+                parts.extend(files.into_iter().map(|file| {
+                    Part::raw(file.data)
+                        .with_filename(file.name)
+                        .with_media_type(file.media_type)
+                }));
+            }
+            return Ok(Self::Settled(outcome));
         }
         Ok(if tasks.is_attached(handle).map_err(internal)? {
             Self::Working

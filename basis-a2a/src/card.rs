@@ -79,7 +79,9 @@ pub(crate) fn build(identity: &AgentIdentity, endpoint: &str, features: Features
             extended_agent_card: Some(features.extended_card),
         },
         default_input_modes: INPUT_MODES.iter().map(|mode| mode.to_string()).collect(),
-        default_output_modes: vec![TEXT.to_string()],
+        // Every answer is text; a task may attach files of any type to it
+        // (ADR-0041 §7).
+        default_output_modes: vec![TEXT.to_string(), "*/*".to_string()],
         skills,
         provider: None,
         documentation_url: None,

@@ -84,9 +84,11 @@ pub(super) fn after(start_ms: u64, deadline: Duration) -> u64 {
 
 fn run_spec(backend: &TasksBackend, prompt: String, continuation: Continuation) -> RunSpec {
     let run = &backend.run;
+    // A caller can be handed files, so the task may attach some (ADR-0041 §7).
     let mut spec = RunSpec::new(prompt)
         .with_approve(backend.approval.into())
         .detached()
+        .answering()
         .continuing(continuation);
     if !backend.shell {
         spec = spec.without_shell();

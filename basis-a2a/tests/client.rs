@@ -163,6 +163,146 @@ async fn a_workspace_hands_work_to_a_served_agent_and_reads_its_answer() {
     );
 }
 
+/// Files both ways (ADR-0041): the caller sends a screenshot with its task,
+/// the served agent's model is told where it was saved and attaches a file to
+/// its answer, and that file lands in the caller's inbox, named in the result
+/// its model reads.
+#[tokio::test]
+async fn a_screenshot_goes_with_the_task_and_the_agents_file_comes_back() {
+    isolate_environment();
+    const SHOT: &[u8] = b"\x89PNG\r\n\x1a\nthe login page";
+    const FIXED: &[u8] = b"\x89PNG\r\n\x1a\nthe fixed page";
+
+    let served_model = ScriptedEndpoint::start(vec![
+        Reply::ToolCall {
+            name: "attach_file".to_string(),
+            arguments: json!({"path": "fixed.png"}).to_string(),
+        },
+        Reply::Text("the button was red because of a stale class".to_string()),
+    ]);
+    let served_data = tempfile::tempdir().unwrap();
+    let served_workspace = tempfile::tempdir().unwrap();
+    std::fs::write(served_workspace.path().join("fixed.png"), FIXED).unwrap();
+    let service = A2aService::open(
+        ServeConfig::new(
+            served_workspace.path(),
+            AgentIdentity::new("helper", "Fixes pages in tests."),
+        )
+        .with_data_dir(served_data.path())
+        .with_token(BearerToken::new(TOKEN).unwrap())
+        .with_run_defaults(
+            RunDefaults::default()
+                .with_base_url(&served_model.base_url)
+                .with_model("test-model")
+                .with_deadline(Duration::from_secs(60)),
+        ),
+    )
+    .expect("opens");
+    let server = A2aServer::bind("127.0.0.1:0".parse().unwrap(), service)
+        .await
+        .expect("binds loopback");
+    let base = format!("http://{}", server.local_addr());
+    tokio::spawn(server.serve());
+
+    let caller_model = ScriptedEndpoint::start(vec![
+        Reply::ToolCall {
+            name: "spawn".to_string(),
+            arguments: json!({
+                "input": "@helper why is the button red?",
+                "files": ["screens/login.png"],
+            })
+            .to_string(),
+        },
+        Reply::Text("done".to_string()),
+    ]);
+    let caller = tempfile::tempdir().unwrap();
+    std::fs::create_dir_all(caller.path().join("screens")).unwrap();
+    std::fs::write(caller.path().join("screens/login.png"), SHOT).unwrap();
+    std::fs::create_dir_all(caller.path().join(".basis")).unwrap();
+    std::fs::write(
+        caller.path().join(".basis/a2a.json"),
+        json!({"agents": {"helper": {
+            "url": base,
+            "headers": {"Authorization": format!("Bearer ${{{TOKEN_VARIABLE}}}")},
+        }}})
+        .to_string(),
+    )
+    .unwrap();
+    let workspace = Workspace::builder(caller.path())
+        .with_runtime_builder(
+            Runtime::builder()
+                .with_base_url(&caller_model.base_url)
+                .with_api_key("test-key")
+                .with_ephemeral_history(),
+        )
+        .with_model(ModelSelector::Id("test-model".to_string()))
+        .with_context(ContextConfig::none())
+        .with_memory(MemoryConfig::disabled())
+        .open()
+        .await
+        .expect("the caller opens");
+
+    let report = workspace
+        .prepare("ask the helper about the screenshot")
+        .expect("mints")
+        .execute_with_approver(CollectingSink::default(), AllowAll)
+        .await
+        .expect("the run completes");
+    assert!(report.succeeded(), "{:?}", report.outcome);
+
+    // The served agent was offered `attach_file`, told where the screenshot
+    // is, and the screenshot is there.
+    let served = served_model.requests();
+    assert!(
+        served[0].contains("\"attach_file\""),
+        "an answering task is offered attach_file: {}",
+        served[0]
+    );
+    let at = served[0]
+        .find("saved at `.basis/inbox/")
+        .unwrap_or_else(|| panic!("the model is told where the file is: {}", served[0]));
+    let path = served[0][at + "saved at `".len()..]
+        .split('`')
+        .next()
+        .unwrap()
+        .to_string();
+    assert!(path.ends_with("/login.png"), "{path}");
+    assert_eq!(
+        std::fs::read(served_workspace.path().join(&path)).unwrap(),
+        SHOT
+    );
+
+    // The file the agent attached came back into the caller's inbox, and the
+    // caller's model read where.
+    let requests = caller_model.requests();
+    assert_eq!(requests.len(), 2, "one turn to call, one to wrap up");
+    assert!(
+        requests[1].contains("Files it returned, saved in the workspace"),
+        "{}",
+        requests[1]
+    );
+    let inbox = caller.path().join(".basis/inbox");
+    let folders: Vec<_> = std::fs::read_dir(&inbox)
+        .expect("the inbox was made")
+        .map(|entry| entry.unwrap().path())
+        .collect();
+    assert_eq!(folders.len(), 1, "one task, one folder: {folders:?}");
+    assert_eq!(
+        std::fs::read(folders[0].join("fixed.png")).expect("saved"),
+        FIXED
+    );
+    let folder = folders[0]
+        .file_name()
+        .unwrap()
+        .to_string_lossy()
+        .into_owned();
+    assert!(
+        requests[1].contains(&format!(".basis/inbox/{folder}/fixed.png (image/png")),
+        "{}",
+        requests[1]
+    );
+}
+
 /// Two opens of one directory share a tool audience, so ADR-0029 decides
 /// reach per agent: the open that was handed the agent teaches it and routes
 /// to it, and the sibling that was handed none is neither told about it nor
