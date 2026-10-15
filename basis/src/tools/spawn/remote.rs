@@ -374,7 +374,10 @@ fn settle(
         Err(PeerError::Send(error)) => (
             before,
             Err(format!(
-                "Handing the task to remote agent `{name}` failed: {error}. No task came back,                  so there is nothing to wait on. If the task is safe to repeat, such as a                  question, hand it over again with `@{name} <task>`; if it is not, say that it                  may have been received."
+                "Handing the task to remote agent `{name}` failed: {error}. No task came back, \
+                 so there is nothing to wait on. If the task is safe to repeat, such as a \
+                 question, hand it over again with `@{name} <task>`; if it is not, say that it \
+                 may have been received."
             )),
         ),
         Err(PeerError::Check { task_id, error }) => (

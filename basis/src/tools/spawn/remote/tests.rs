@@ -522,3 +522,17 @@ mod configured {
         );
     }
 }
+
+#[test]
+fn a_send_that_left_nothing_says_what_to_do_in_plain_sentences() {
+    let (_, result) = settle(
+        AGENT,
+        Conversation::default(),
+        Err(PeerError::Send("connection reset".to_string())),
+        ENDPOINT,
+    );
+
+    let error = result.expect_err("nothing came back");
+    assert!(error.contains("nothing to wait on"), "{error}");
+    assert!(!error.contains("  "), "a line break leaked into the text: {error}");
+}
