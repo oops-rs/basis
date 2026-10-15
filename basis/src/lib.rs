@@ -172,6 +172,11 @@ pub use shell::ShellAccess;
 // `mentra::`, where an embedder that wants the runtime itself already is —
 // except what implementing `Provider` touches, which is [`runtime`]'s
 // provider-authoring re-export, beside the executor set and for its reason.
+/// What kind of file some bytes are, and a name safe to save one under: what
+/// a host serving or sending files needs (ADR-0041), re-exported for the same
+/// reason as [`tools`]'s authoring types — so a crate built on basis need not
+/// name mentra to answer it.
+pub use mentra::media;
 pub use mentra::provider_core;
 pub use mentra::{
     BuiltinProvider, ModelSelector, Provider, ProviderRequestOptions, ToolResultPagingConfig,

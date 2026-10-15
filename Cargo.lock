@@ -335,7 +335,6 @@ dependencies = [
  "basis-tasks",
  "chrono",
  "futures",
- "mentra",
  "reqwest",
  "serde",
  "serde_json",

@@ -139,7 +139,7 @@ fn media_type_of(part: &Part, bytes: &[u8]) -> String {
         .clone()
         .filter(|declared| !declared.trim().is_empty())
         .unwrap_or_else(|| {
-            mentra::media::media_type(part.filename.as_deref().unwrap_or_default(), bytes)
+            basis::media::media_type(part.filename.as_deref().unwrap_or_default(), bytes)
                 .to_string()
         })
 }
@@ -165,8 +165,8 @@ fn unique(taken: &mut BTreeSet<String>, part: &Part, media_type: &str, n: usize)
     let name = part
         .filename
         .as_deref()
-        .and_then(mentra::media::safe_file_name)
-        .unwrap_or_else(|| match mentra::media::extension_for(media_type) {
+        .and_then(basis::media::safe_file_name)
+        .unwrap_or_else(|| match basis::media::extension_for(media_type) {
             Some(extension) => format!("file-{n}.{extension}"),
             None => format!("file-{n}"),
         });
