@@ -29,7 +29,8 @@ use std::{sync::Arc, time::Duration};
 use async_trait::async_trait;
 
 pub use peer::{
-    ExchangeBounds, Failure, Message, Outcome, Peer, PeerError, Request, Started, StillWorking,
+    Attachment, ExchangeBounds, Failure, Message, Outcome, Peer, PeerError, Request, Started,
+    StillWorking,
 };
 
 /// What a resolver calls after its set changes — an agent added, removed or

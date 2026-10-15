@@ -101,8 +101,8 @@ pub use a2a::{
     A2aWatchError, DEFAULT_A2A_WATCH_INTERVAL, DEFAULT_GLOBAL_A2A_FILE, DEFAULT_WORKSPACE_A2A_FILE,
 };
 pub use agents::{
-    AgentResolver, ExchangeBounds, Failure, Message, Outcome, Peer, PeerError, Request, Resolved,
-    Route, Started, StillWorking, Taught, TaughtAgent, Unresolved,
+    AgentResolver, Attachment, ExchangeBounds, Failure, Message, Outcome, Peer, PeerError, Request,
+    Resolved, Route, Started, StillWorking, Taught, TaughtAgent, Unresolved,
 };
 // `ToolSideEffectLevel` is mentra's, and comes to the root under the same rule
 // as `CancellationToken` below: `is_consequential` and

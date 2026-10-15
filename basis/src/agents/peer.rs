@@ -77,6 +77,9 @@ pub struct Message {
     /// Parameters for the agent beside the message — over A2A, the request's
     /// `metadata` — when the delegation gave some (ADR-0040).
     pub metadata: Option<serde_json::Map<String, serde_json::Value>>,
+    /// Files sent with the message (ADR-0041). A peer whose wire cannot
+    /// carry them refuses the message rather than sending it without them.
+    pub files: Vec<Attachment>,
 }
 
 impl Message {
@@ -88,7 +91,14 @@ impl Message {
             hop: 1,
             deadline: None,
             metadata: None,
+            files: Vec::new(),
         }
+    }
+
+    /// Sends `files` with the message.
+    #[must_use]
+    pub fn with_files(self, files: Vec<Attachment>) -> Self {
+        Self { files, ..self }
     }
 
     /// Sends `metadata` beside the message.
@@ -123,6 +133,28 @@ impl Message {
     }
 }
 
+/// A file crossing to or from a peer: its bytes, the media type describing
+/// them, and the name it goes by when it has one (ADR-0041).
+#[derive(Debug, Clone, PartialEq, Eq)]
+#[non_exhaustive]
+pub struct Attachment {
+    /// The file's name — a name, not a path, and the sender's to choose —
+    /// or `None` when it was sent without one.
+    pub name: Option<String>,
+    pub media_type: String,
+    pub data: Vec<u8>,
+}
+
+impl Attachment {
+    pub fn new(name: Option<String>, media_type: impl Into<String>, data: Vec<u8>) -> Self {
+        Self {
+            name,
+            media_type: media_type.into(),
+            data,
+        }
+    }
+}
+
 /// The run's bounds on an exchange, and where to report while it waits.
 pub struct ExchangeBounds<'a> {
     /// The run's own cancellation, stop and deadline, which the wait obeys.
@@ -144,7 +176,9 @@ pub struct Started {
 /// What came back.
 ///
 /// `text` is what the agent said, already framed as its own words and cut
-/// to the peer's output cap; empty when it said nothing.
+/// to the peer's output cap; empty when it said nothing. `files` are the
+/// files it returned with what it said, in the order it gave them; a file it
+/// named by URL stays a URL, in the text.
 #[derive(Debug, Clone, PartialEq, Eq)]
 #[non_exhaustive]
 pub enum Outcome {
@@ -152,12 +186,14 @@ pub enum Outcome {
     Replied {
         context_id: Option<String>,
         text: String,
+        files: Vec<Attachment>,
     },
     /// The task finished.
     Finished {
         task_id: String,
         context_id: Option<String>,
         text: String,
+        files: Vec<Attachment>,
     },
     /// The task is still running when the wait ended; waiting again later
     /// picks it up.
@@ -165,6 +201,7 @@ pub enum Outcome {
         task_id: String,
         context_id: Option<String>,
         text: String,
+        files: Vec<Attachment>,
         why: StillWorking,
     },
     /// The agent asked something; the next message answers it.
@@ -172,18 +209,21 @@ pub enum Outcome {
         task_id: String,
         context_id: Option<String>,
         text: String,
+        files: Vec<Attachment>,
     },
     /// The agent needs an authorization this conversation cannot give.
     NeedsAuthorization {
         task_id: String,
         context_id: Option<String>,
         text: String,
+        files: Vec<Attachment>,
     },
     /// The task ended without doing the work.
     Failed {
         task_id: String,
         context_id: Option<String>,
         text: String,
+        files: Vec<Attachment>,
         how: Failure,
     },
 }

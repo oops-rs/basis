@@ -937,3 +937,62 @@ fn the_approver_sees_the_parameters() {
     let plain = preview_of("@reviewer look at this");
     assert!(plain.structured_input.get("metadata").is_none(), "additive");
 }
+
+// ── ADR-0041: a delegation's files ───────────────────────────────────────
+
+fn with_files(input: &str, files: Value) -> Value {
+    json!({ INPUT_FIELD: input, "files": files })
+}
+
+#[test]
+fn files_ride_with_a_task_for_any_agent() {
+    for input in ["@reviewer what is wrong here?", "summarise the log"] {
+        let spawn = parse(&with_files(
+            input,
+            json!(["screens/login.png", "build.log"]),
+        ))
+        .expect("parsed");
+        assert_eq!(spawn.files(), ["screens/login.png", "build.log"], "{input}");
+    }
+    for files in [Value::Null, json!([])] {
+        assert!(
+            parse(&with_files("@nous hi", files))
+                .expect("parsed")
+                .files()
+                .is_empty()
+        );
+    }
+    assert!(parsed("@nous hi").files().is_empty());
+}
+
+#[test]
+fn files_with_a_command_or_a_wait_or_in_the_wrong_shape_are_refused() {
+    for input in ["!cargo test", "!@mac ls", "@nous"] {
+        let refused = parse(&with_files(input, json!(["a.png"]))).expect_err("nowhere to put them");
+        assert!(refused.contains("goes with a task"), "{input}: {refused}");
+    }
+    for files in [json!("a.png"), json!([7]), json!([" "])] {
+        let refused = parse(&with_files("@nous hi", files)).expect_err("not a list of paths");
+        assert!(refused.contains("list of workspace paths"), "{refused}");
+    }
+}
+
+#[test]
+fn the_approver_sees_the_files() {
+    let spawn = parse(&with_files("@reviewer look at this", json!(["shot.png"]))).expect("parsed");
+    let tool = SpawnTool::new();
+    let remote = preview(
+        &spawn,
+        PathBuf::from("/repo"),
+        &tool.descriptor(),
+        &call("@reviewer look at this"),
+        None,
+        Some(Named {
+            reach: Reach::Remote,
+            agent_id: None,
+        }),
+    );
+    assert_eq!(remote.structured_input["files"], json!(["shot.png"]));
+    let plain = preview_of("@reviewer look at this");
+    assert!(plain.structured_input.get("files").is_none(), "additive");
+}

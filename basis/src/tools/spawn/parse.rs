@@ -37,6 +37,10 @@ pub const REACH_FIELD: &str = "reach";
 /// `@<agent> <task>`.
 pub const METADATA_FIELD: &str = "metadata";
 
+/// Files sent with a task: workspace paths, read when the task is handed
+/// over (ADR-0041). With a task for any agent — never a command or a wait.
+pub const FILES_FIELD: &str = "files";
+
 /// What the wire contract calls *here*, and therefore a name no target may
 /// take (ADR-0021).
 ///
@@ -87,6 +91,8 @@ pub struct Spawn {
     reach: Option<Reach>,
     /// Parameters for the remote agent a task is handed to (ADR-0040).
     metadata: Option<serde_json::Map<String, Value>>,
+    /// Workspace paths of the files sent with a task (ADR-0041), as written.
+    files: Vec<String>,
 }
 
 impl Spawn {
@@ -106,6 +112,12 @@ impl Spawn {
     /// The parameters sent beside a task for a remote agent (ADR-0040).
     pub fn metadata(&self) -> Option<&serde_json::Map<String, Value>> {
         self.metadata.as_ref()
+    }
+
+    /// The workspace paths of the files sent with a task (ADR-0041), as
+    /// written; empty when it sends none.
+    pub fn files(&self) -> &[String] {
+        &self.files
     }
 
     /// The target this call named — a command's executor, or a delegation's
@@ -181,7 +193,35 @@ pub fn parse(input: &Value) -> Result<Spawn, String> {
             ));
         }
     };
+    spawn.files = files(input.get(FILES_FIELD), &spawn)?;
     Ok(spawn)
+}
+
+/// The paths in `files`, when the call is one that can carry them: files go
+/// with a task, for an agent here or elsewhere, and a command or a wait has
+/// nowhere to put them.
+fn files(field: Option<&Value>, spawn: &Spawn) -> Result<Vec<String>, String> {
+    let shape =
+        || format!("`{FILES_FIELD}` is a list of workspace paths, as [\"screens/login.png\"]");
+    let paths = match field {
+        None | Some(Value::Null) => return Ok(Vec::new()),
+        Some(Value::Array(paths)) => paths
+            .iter()
+            .map(|path| match path {
+                Value::String(path) if !path.trim().is_empty() => Ok(path.clone()),
+                _ => Err(shape()),
+            })
+            .collect::<Result<Vec<_>, _>>()?,
+        Some(_) => return Err(shape()),
+    };
+    if !paths.is_empty() && (spawn.mode != Mode::Agent || spawn.body.is_empty()) {
+        return Err(format!(
+            "`{FILES_FIELD}` goes with a task: they are sent to the agent the task is handed \
+             to. A command has nowhere to put them, and `@<agent>` alone keeps waiting on a \
+             task that already has its files, so leave `{FILES_FIELD}` out there"
+        ));
+    }
+    Ok(paths)
 }
 
 /// Classifies the lexical spawn mode without validating that the body is
@@ -324,6 +364,7 @@ fn command(body: &str, target: Option<String>) -> Result<Spawn, String> {
         target,
         reach: None,
         metadata: None,
+        files: Vec::new(),
     })
 }
 
@@ -370,6 +411,7 @@ fn remote(rest: &str) -> Result<Spawn, String> {
         target: Some(name.to_string()),
         reach: None,
         metadata: None,
+        files: Vec::new(),
     })
 }
 
@@ -388,5 +430,6 @@ fn delegation(body: &str) -> Result<Spawn, String> {
         target: None,
         reach: None,
         metadata: None,
+        files: Vec::new(),
     })
 }

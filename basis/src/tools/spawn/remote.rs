@@ -13,10 +13,10 @@ use std::time::SystemTime;
 
 use mentra::tool::{ParallelToolContext, ToolContext, ToolResult};
 
-use super::{describe::listed, no_remote_agents};
+use super::{describe::listed, files, no_remote_agents};
 use crate::agents::{
-    ExchangeBounds, Failure, Message, Outcome, PeerError, Request, Resolved, Route, Started,
-    StillWorking, Unresolved,
+    Attachment, ExchangeBounds, Failure, Message, Outcome, PeerError, Request, Resolved, Route,
+    Started, StillWorking, Unresolved,
     remote::{Conversation, Outstanding, Remembered, RemoteAgents, Waiting},
 };
 
@@ -102,14 +102,27 @@ fn unresolved(agents: &RemoteAgents, name: &str, why: Unresolved) -> String {
 /// agent for one a workspace minted or resumed, under a host's key for one
 /// bound to it, in memory for a delegated child (`crate::agents::remote`
 /// has the rule).
+/// What one call hands a remote agent: the task in words, the parameters
+/// beside it (ADR-0040), and the files with it (ADR-0041). An empty body is a
+/// wait, which carries neither.
+pub(super) struct Task<'a> {
+    pub(super) body: &'a str,
+    pub(super) metadata: Option<&'a serde_json::Map<String, serde_json::Value>>,
+    pub(super) files: Vec<Attachment>,
+}
+
 pub(super) async fn delegate(
     ctx: ToolContext<'_>,
     agents: &RemoteAgents,
     name: &str,
-    body: &str,
-    metadata: Option<&serde_json::Map<String, serde_json::Value>>,
+    task: Task<'_>,
     remembered: &Remembered,
 ) -> ToolResult {
+    let Task {
+        body,
+        metadata,
+        files,
+    } = task;
     // Held to the end of this call: a reload that swaps the set meanwhile
     // changes what the *next* `@<agent>` reaches, never this exchange
     // (ADR-0031 §6). An unreachable agent due a retry is connected here.
@@ -137,7 +150,9 @@ pub(super) async fn delegate(
     let before = agents.conversation(&caller, id, remembered);
     let request = request(name, body, &before, hop)?;
     let request = match request {
-        Request::Send(message) => Request::Send(message.with_metadata(metadata.cloned())),
+        Request::Send(message) => {
+            Request::Send(message.with_metadata(metadata.cloned()).with_files(files))
+        }
         wait => wait,
     };
 
@@ -178,9 +193,58 @@ pub(super) async fn delegate(
         )
         .await;
 
+    // The files come off the outcome before it is told: saving them is this
+    // side's work, and what the model reads about them goes after the
+    // agent's words, outside its frame (ADR-0041 §4).
+    let (outcome, returned) = match outcome {
+        Ok(mut outcome) => {
+            let returned = take_files(&mut outcome);
+            (Ok(outcome), returned)
+        }
+        Err(error) => (Err(error), None),
+    };
     let (next, result) = settle(name, before, outcome, &endpoint);
     save(next);
-    result
+    let Some((folder, files)) = returned else {
+        return result;
+    };
+    let root = ctx
+        .resolve_working_directory(None)
+        .unwrap_or_else(|_| ctx.working_directory().to_path_buf());
+    let saved = files::save(&root, &folder, files, |path, bytes| {
+        ctx.write_file_bytes(path, bytes)
+    });
+    match result {
+        Ok(text) => Ok(said(text, saved)),
+        Err(text) => Err(said(text, saved)),
+    }
+}
+
+/// The files an outcome carries, taken off it, with the folder they are saved
+/// in: the task's id, or for a reply that started none, one of its own.
+/// `None` when it carries none.
+fn take_files(outcome: &mut Outcome) -> Option<(String, Vec<Attachment>)> {
+    let (task_id, files) = match outcome {
+        Outcome::Replied { files, .. } => (None, files),
+        Outcome::Finished { task_id, files, .. }
+        | Outcome::Working { task_id, files, .. }
+        | Outcome::NeedsInput { task_id, files, .. }
+        | Outcome::NeedsAuthorization { task_id, files, .. }
+        | Outcome::Failed { task_id, files, .. } => (Some(task_id.clone()), files),
+        // `Outcome` is non-exhaustive; a newer outcome's files are not known.
+        #[allow(unreachable_patterns)]
+        _ => return None,
+    };
+    if files.is_empty() {
+        return None;
+    }
+    let folder = task_id.unwrap_or_else(|| {
+        let now = SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap_or_default();
+        format!("reply-{}", now.as_millis())
+    });
+    Some((folder, std::mem::take(files)))
 }
 
 /// Where one outbound message stands in a chain of agents: `hop` is this
@@ -252,7 +316,9 @@ fn settle(
         outstanding: None,
     };
     match outcome {
-        Ok(Outcome::Replied { context_id, text }) => (
+        Ok(Outcome::Replied {
+            context_id, text, ..
+        }) => (
             settled(context_id),
             Ok(said(format!("Remote agent `{name}` replied:"), text)),
         ),
@@ -266,6 +332,7 @@ fn settle(
             task_id,
             context_id,
             text,
+            ..
         }) => (
             Conversation {
                 context_id: context_id.or_else(|| before.context_id.clone()),
@@ -315,6 +382,7 @@ fn settle(
             context_id,
             text,
             why,
+            ..
         }) => {
             let why = match why {
                 StillWorking::WaitBound(waited) => {

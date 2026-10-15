@@ -62,6 +62,7 @@ mod child;
 mod depth;
 mod describe;
 mod execute;
+mod files;
 mod parse;
 mod reach;
 mod remote;
@@ -751,22 +752,23 @@ impl ToolExecutor for SpawnTool {
             ctx.resolve_working_directory(None)
         })?;
         parameters_reach_a_remote_agent(&spawn, &decision)?;
+        // Read before anything is handed over, so a file that cannot be sent
+        // stops the call rather than leaving a task without it (ADR-0041).
+        let sent = files::read(spawn.files(), |path| ctx.read_file_bytes(path))?;
 
         match decision {
             SpawnDecision::Command => execute::command(&ctx, spawn.body(), spawn.target()).await,
             SpawnDecision::Remote { agents, name } => {
-                remote::delegate(
-                    ctx,
-                    &agents,
-                    &name,
-                    spawn.body(),
-                    spawn.metadata(),
-                    &self.remembers,
-                )
-                .await
+                let task = remote::Task {
+                    body: spawn.body(),
+                    metadata: spawn.metadata(),
+                    files: sent.into_iter().map(|sent| sent.file).collect(),
+                };
+                remote::delegate(ctx, &agents, &name, task, &self.remembers).await
             }
             SpawnDecision::Agent { depth, spec, .. } => {
-                execute::delegate(self, &mut ctx, spawn.body(), depth, *spec).await
+                let body = files::named(spawn.body(), &sent);
+                execute::delegate(self, &mut ctx, &body, depth, *spec).await
             }
             SpawnDecision::Teammate {
                 depth,
@@ -775,7 +777,8 @@ impl ToolExecutor for SpawnTool {
                 spec,
                 ..
             } => {
-                execute::teammate(self, &mut ctx, &name, spawn.body(), depth, existing, *spec).await
+                let body = files::named(spawn.body(), &sent);
+                execute::teammate(self, &mut ctx, &name, &body, depth, existing, *spec).await
             }
         }
     }
@@ -864,6 +867,14 @@ fn preview(
             .as_object_mut()
             .expect("built as an object above")
             .insert("metadata".to_string(), Value::Object(metadata.clone()));
+    }
+    // ADR-0041: the files that leave with the task, as written — shown on
+    // the same additive ground.
+    if !spawn.files().is_empty() {
+        structured_input
+            .as_object_mut()
+            .expect("built as an object above")
+            .insert(parse::FILES_FIELD.to_string(), json!(spawn.files()));
     }
 
     ToolAuthorizationPreview {

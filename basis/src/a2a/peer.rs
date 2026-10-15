@@ -15,15 +15,16 @@ use async_trait::async_trait;
 use chrono::{DateTime, SecondsFormat, Utc};
 use mentra::a2a::{
     A2aClient, A2aError as ClientError, A2aExchange, A2aExchangeError, A2aRequest, A2aRpcError,
-    A2aSend, A2aStillWorking, A2aSubmitted, is_settled, remote_output, remote_reply,
-    settle as settle_task, submit, types::TaskState,
+    A2aSend, A2aStillWorking, A2aSubmitted, is_settled, remote_files, remote_output, remote_reply,
+    reply_files, settle as settle_task, submit,
+    types::{Part, PartContent, TaskState},
 };
 use serde_json::{Value, json};
 
 use super::HOPS_EXTENSION;
 use crate::agents::{
-    ExchangeBounds, Failure, Message, Outcome, Peer, PeerError, Request, Resolved, Started,
-    StillWorking,
+    Attachment, ExchangeBounds, Failure, Message, Outcome, Peer, PeerError, Request, Resolved,
+    Started, StillWorking,
 };
 
 /// A remote agent reached over A2A.
@@ -114,10 +115,12 @@ fn map(
     match outcome {
         Ok(A2aExchange::Reply(message)) => Ok(Outcome::Replied {
             text: remote_reply(name, &message, max),
+            files: attachments(reply_files(&message)),
             context_id: message.context_id,
         }),
         Ok(A2aExchange::Settled(task)) => {
             let text = remote_output(name, &task, max);
+            let files = attachments(remote_files(&task));
             let task_id = task.id.clone();
             let context_id = Some(task.context_id.clone());
             Ok(match task.status.state {
@@ -125,16 +128,19 @@ fn map(
                     task_id,
                     context_id,
                     text,
+                    files,
                 },
                 TaskState::AuthRequired => Outcome::NeedsAuthorization {
                     task_id,
                     context_id,
                     text,
+                    files,
                 },
                 TaskState::Failed | TaskState::Rejected | TaskState::Canceled => Outcome::Failed {
                     task_id,
                     context_id,
                     text,
+                    files,
                     how: match task.status.state {
                         TaskState::Rejected => Failure::Rejected,
                         TaskState::Canceled => Failure::Canceled,
@@ -145,11 +151,13 @@ fn map(
                     task_id,
                     context_id,
                     text,
+                    files,
                 },
             })
         }
         Ok(A2aExchange::StillWorking { task, reason }) => Ok(Outcome::Working {
             text: remote_output(name, &task, max),
+            files: attachments(remote_files(&task)),
             task_id: task.id,
             context_id: Some(task.context_id),
             why: match reason {
@@ -209,7 +217,38 @@ fn message(send: Message) -> A2aSend {
     for (key, value) in send.metadata.into_iter().flatten() {
         message = message.with_request_metadata(key, value);
     }
+    // Files go after the text, each a `raw` part (ADR-0041).
+    for file in send.files {
+        let mut part = Part::raw(file.data).with_media_type(file.media_type);
+        if let Some(name) = file.name {
+            part = part.with_filename(name);
+        }
+        message = message.with_part(part);
+    }
     message
+}
+
+/// The files among `parts` that came as bytes, each with its media type —
+/// the one the agent declared, or else what the bytes and name say. A file by
+/// URL is not fetched (ADR-0041 §4): it stays in the text, as a URL.
+fn attachments(parts: Vec<&Part>) -> Vec<Attachment> {
+    parts
+        .into_iter()
+        .filter_map(|part| {
+            let PartContent::Raw(data) = &part.content else {
+                return None;
+            };
+            let name = part.filename.clone();
+            let media_type = part
+                .media_type
+                .clone()
+                .filter(|declared| !declared.trim().is_empty())
+                .unwrap_or_else(|| {
+                    mentra::media::media_type(name.as_deref().unwrap_or_default(), data).to_string()
+                });
+            Some(Attachment::new(name, media_type, data.clone()))
+        })
+        .collect()
 }
 
 /// The object the hops extension puts under its URI in a message's metadata
@@ -287,6 +326,46 @@ mod tests {
     }
 
     #[test]
+    fn a_messages_files_follow_its_text_as_raw_parts() {
+        let send = message(
+            Message::new("why is it red?").with_files(vec![Attachment::new(
+                Some("login.png".into()),
+                "image/png",
+                vec![0x89, b'P'],
+            )]),
+        );
+        assert_eq!(send.parts.len(), 1);
+        let part = &send.parts[0];
+        assert_eq!(part.filename.as_deref(), Some("login.png"));
+        assert_eq!(part.media_type.as_deref(), Some("image/png"));
+        assert_eq!(part.content, PartContent::Raw(vec![0x89, b'P']));
+    }
+
+    #[test]
+    fn a_task_returns_its_inline_files_and_leaves_a_url_in_the_text() {
+        let mut settled = task(TaskState::Completed, Some("here"));
+        let parts = &mut settled.artifacts.as_mut().unwrap()[0].parts;
+        parts.push(Part::raw(b"\x89PNG\r\n\x1a\nrest".to_vec()).with_filename("shot.png"));
+        parts.push(Part::url("https://example.com/big.zip").with_filename("big.zip"));
+
+        let Ok(Outcome::Finished { text, files, .. }) =
+            map(NAME, Ok(A2aExchange::Settled(settled)), MAX)
+        else {
+            panic!("finished");
+        };
+        assert_eq!(
+            files,
+            vec![Attachment::new(
+                Some("shot.png".into()),
+                "image/png",
+                b"\x89PNG\r\n\x1a\nrest".to_vec()
+            )],
+            "an undeclared type is read off the bytes"
+        );
+        assert!(text.contains("https://example.com/big.zip"), "{text}");
+    }
+
+    #[test]
     fn every_message_says_which_hop_it_is_and_when_this_side_stops_waiting() {
         let deadline = std::time::UNIX_EPOCH + Duration::from_millis(1_791_000_000_123);
         let message = message(Message::new("look").at_hop(3, Some(deadline)));
@@ -335,6 +414,7 @@ mod tests {
             task_id,
             context_id,
             text,
+            files,
         } = finished
         else {
             panic!("{finished:?}");
@@ -342,6 +422,7 @@ mod tests {
         assert_eq!(task_id, "task-1");
         assert_eq!(context_id.as_deref(), Some("context-1"));
         assert!(text.contains("looks good"), "{text}");
+        assert!(files.is_empty());
 
         assert!(matches!(
             map(

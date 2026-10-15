@@ -10,7 +10,7 @@
 use serde_json::{Value, json};
 
 use super::{
-    parse::{INPUT_FIELD, METADATA_FIELD, REACH_FIELD},
+    parse::{FILES_FIELD, INPUT_FIELD, METADATA_FIELD, REACH_FIELD},
     reach::Reach,
 };
 
@@ -290,6 +290,17 @@ pub(super) fn input_schema(targets: &[String], names: &Names) -> Value {
                                 as the request's metadata) — only with `@<agent> <task>`, and \
                                 only when the agent's description asks for some, as \
                                 {\"project\": \"lama\"}.",
+            }),
+        );
+        properties.insert(
+            FILES_FIELD.to_string(),
+            json!({
+                "type": "array",
+                "items": { "type": "string" },
+                "description": "Workspace paths of files to send with the task — a \
+                                screenshot, a log — up to 6 MiB together. A remote agent \
+                                gets the files; an agent here is told where they are. Files \
+                                an agent sends back are saved under `.basis/inbox/`.",
             }),
         );
     }

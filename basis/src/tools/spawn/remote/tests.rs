@@ -120,6 +120,7 @@ fn finished(text: &str) -> Result<Outcome, PeerError> {
         task_id: "task-1".to_string(),
         context_id: Some("context-1".to_string()),
         text: text.to_string(),
+        files: Vec::new(),
     })
 }
 
@@ -159,6 +160,7 @@ fn a_reply_with_no_task_keeps_the_context_it_had() {
         Ok(Outcome::Replied {
             context_id: None,
             text: "quick answer".to_string(),
+            files: Vec::new(),
         }),
         ENDPOINT,
     );
@@ -176,6 +178,7 @@ fn a_task_still_working_is_kept_and_the_model_is_told_how_to_wait() {
             task_id: "task-1".to_string(),
             context_id: Some("context-1".to_string()),
             text: String::new(),
+            files: Vec::new(),
             why: StillWorking::WaitBound(Duration::from_secs(300)),
         }),
         ENDPOINT,
@@ -200,6 +203,7 @@ fn a_question_from_the_agent_is_kept_and_the_model_is_told_how_to_answer() {
             task_id: "task-1".to_string(),
             context_id: Some("context-1".to_string()),
             text: "which branch?".to_string(),
+            files: Vec::new(),
         }),
         ENDPOINT,
     );
@@ -219,6 +223,7 @@ fn a_failed_task_is_an_error_and_ends_what_was_outstanding() {
             task_id: "task-1".to_string(),
             context_id: Some("context-1".to_string()),
             text: String::new(),
+            files: Vec::new(),
             how: Failure::Failed,
         }),
         ENDPOINT,
@@ -371,6 +376,7 @@ fn a_task_left_outstanding_records_the_endpoint_it_was_handed_to() {
             task_id: "task-1".to_string(),
             context_id: Some("context-1".to_string()),
             text: String::new(),
+            files: Vec::new(),
             why: StillWorking::WaitBound(Duration::from_secs(1)),
         }),
         ENDPOINT,
@@ -534,5 +540,8 @@ fn a_send_that_left_nothing_says_what_to_do_in_plain_sentences() {
 
     let error = result.expect_err("nothing came back");
     assert!(error.contains("nothing to wait on"), "{error}");
-    assert!(!error.contains("  "), "a line break leaked into the text: {error}");
+    assert!(
+        !error.contains("  "),
+        "a line break leaked into the text: {error}"
+    );
 }
