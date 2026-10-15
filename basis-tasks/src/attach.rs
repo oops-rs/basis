@@ -540,7 +540,7 @@ async fn run_model(
         Ok(runtime) => runtime,
         Err(error) => return record_failure(paths, meta, error, None),
     };
-    let (builder, spec) = match run_parts(meta, runtime) {
+    let (builder, spec) = match run_parts(meta, runtime, paths) {
         Ok(parts) => parts,
         Err(error) => return record_failure(paths, meta, error, None),
     };
@@ -933,6 +933,7 @@ async fn settle_children(
 fn run_parts(
     meta: &TaskMeta,
     runtime: RuntimeBuilder,
+    paths: &AgentPaths,
 ) -> Result<(WorkspaceBuilder, RunSpec), String> {
     let options = &meta.options;
     let (runtime, mut builder) = crate::configure_builders(
@@ -949,6 +950,11 @@ fn run_parts(
     // pre-0.6 two-string spelling into this one field.
     if let Some(system_prompt) = options.system_prompt.clone() {
         builder = builder.with_system_prompt(system_prompt);
+    }
+    // A task answering a caller can hand back files; no other has anyone to
+    // hand them to (ADR-0041 §7).
+    if options.answering {
+        builder = builder.with_tool(crate::answer::AttachFile::new(paths.dir().to_path_buf()));
     }
 
     let mut spec = RunSpec::new(meta.prompt.clone());

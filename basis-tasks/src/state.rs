@@ -76,6 +76,11 @@ pub(crate) struct RunOptions {
     pub deadline_ms: Option<u64>,
     pub tool_budget: Option<usize>,
     pub token_budget: Option<u64>,
+    /// Whether the task answers a caller who can be handed files, and so is
+    /// offered `attach_file` (ADR-0041 §7). Absent — and so false — in a
+    /// record from before it.
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub answering: bool,
 }
 
 impl RunOptions {

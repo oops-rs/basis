@@ -54,6 +54,7 @@ pub struct RunSpec {
     pub(crate) continuation: Continuation,
     pub(crate) hop: u32,
     pub(crate) not_after_ms: Option<u64>,
+    pub(crate) answering: bool,
 }
 
 impl RunSpec {
@@ -74,6 +75,18 @@ impl RunSpec {
             continuation: Continuation::default(),
             hop: 0,
             not_after_ms: None,
+            answering: false,
+        }
+    }
+
+    /// Marks the task as answering a caller, who can be handed files: the
+    /// task is offered [`ATTACH_FILE`](crate::ATTACH_FILE) to add a
+    /// workspace file to its answer, read back with
+    /// [`Tasks::answer_files`](crate::Tasks::answer_files) (ADR-0041 §7).
+    pub fn answering(self) -> Self {
+        Self {
+            answering: true,
+            ..self
         }
     }
 

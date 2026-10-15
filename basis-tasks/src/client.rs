@@ -194,6 +194,7 @@ impl Tasks {
             continuation,
             hop,
             not_after_ms,
+            answering,
         } = spec;
         if prompt.trim().is_empty() {
             return Err(Error::new("prompt is empty"));
@@ -224,6 +225,7 @@ impl Tasks {
             deadline_ms: Some(deadline_ms),
             tool_budget,
             token_budget,
+            answering,
         };
 
         let canonical = canonical_workspace(&self.workspace).map_err(|error| {
@@ -711,6 +713,19 @@ impl Tasks {
     /// the task actually runs under. `None` for a task with no deadline.
     pub fn deadline_at_ms(&self, handle: &TaskHandle) -> Result<Option<u64>, Error> {
         Ok(self.meta(handle)?.deadline_at_ms)
+    }
+
+    /// The files `handle`'s task attached to its answer, in the order it
+    /// attached them — empty for one that attached none, or that was not
+    /// spawned [`answering`](crate::RunSpec::answering) (ADR-0041 §7).
+    pub fn answer_files(&self, handle: &TaskHandle) -> Result<Vec<crate::AnswerFile>, Error> {
+        let paths = attach::resolve(&self.data, handle.as_str()).map_err(Error::new)?;
+        crate::answer::read(paths.dir()).map_err(|error| {
+            Error::new(format!(
+                "read the files of task {}: {error}",
+                handle.as_str()
+            ))
+        })
     }
 
     fn meta(&self, handle: &TaskHandle) -> Result<state::TaskMeta, Error> {

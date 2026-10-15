@@ -391,7 +391,7 @@ fn an_unknown_provider_fails_the_task_rather_than_going_unread() {
     let paths = record(&data, &task, None, true, None);
     let meta = load_meta(&paths).unwrap();
     let runtime = task_runtime(&data, &task, &meta).expect("base runtime");
-    assert!(run_parts(&meta, runtime).is_err());
+    assert!(run_parts(&meta, runtime, &paths).is_err());
 }
 
 // ---------------------------------------------------------------------------

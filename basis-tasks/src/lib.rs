@@ -43,6 +43,7 @@
 //! [`current_task`] reads the first of these back, for a host that wants to
 //! know whether *it* is running as a task's tool call.
 
+mod answer;
 mod approve;
 mod attach;
 mod builders;
@@ -61,6 +62,7 @@ mod stop;
 mod tasks;
 mod watch;
 
+pub use answer::{ATTACH_FILE, AnswerFile, MAX_ANSWER_FILES_BYTES};
 pub use approve::{Approve, PromptHost, validate_approval};
 pub use attach::POLL;
 pub use builders::configure_builders;
