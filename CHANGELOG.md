@@ -5,7 +5,7 @@ All six crates — `basis`, `basis-host`, `basis-tasks`, `basis-acp`,
 live in `docs/adr/`; this file says what changed for someone upgrading.
 Releases before 0.15.0 are described by their tags and ADRs only.
 
-## Unreleased
+## 0.19.0 — 2026-10-15
 
 Breaking: `peer::Message` gains `files` and every `Outcome` variant gains
 `files: Vec<Attachment>`, so a host that implements `Peer` or matches an
@@ -35,6 +35,7 @@ request bodies up to 16 MiB.
   workspace file into its answer (`RunSpec::answering`,
   `Tasks::answer_files`); the completed task's `result` artifact carries
   them as file parts after the text.
+- Needs mentra 0.31.0.
 
 ### Fixed
 

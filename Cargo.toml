@@ -5,7 +5,7 @@ resolver = "3"
 [workspace.package]
 # One version across the six: they are one product split by dependency
 # weight (ADR-0011), not six things that release on their own schedules.
-version = "0.18.1"
+version = "0.19.0"
 edition = "2024"
 # Rust 1.95 stabilizes the `if let` match guards used by spawn and
 # AtomicU64::try_update used by the shared budget counter.
@@ -18,14 +18,14 @@ homepage = "https://github.com/oops-rs/basis"
 [workspace.dependencies]
 # The layers of ADR-0011, named here so each crate states which of them it is
 # built on and cargo resolves one version of each.
-basis = { version = "0.18.1", path = "basis" }
-basis-a2a = { version = "0.18.1", path = "basis-a2a" }
-basis-acp = { version = "0.18.1", path = "basis-acp" }
-basis-host = { version = "0.18.1", path = "basis-host" }
+basis = { version = "0.19.0", path = "basis" }
+basis-a2a = { version = "0.19.0", path = "basis-a2a" }
+basis-acp = { version = "0.19.0", path = "basis-acp" }
+basis-host = { version = "0.19.0", path = "basis-host" }
 # The durable task layer (ADR-0017 over ADR-0019's substrate, D8): one crate
 # so the rules live once and are reachable from Rust, not only from the CLI
 # that is now merely their first client.
-basis-tasks = { version = "0.18.1", path = "basis-tasks" }
+basis-tasks = { version = "0.19.0", path = "basis-tasks" }
 
 # The 0.28 floor's reason is the same shape as 0.27's: one host-observable,
 # source-breaking addition basis's code does not compile against unmodified.
@@ -260,8 +260,10 @@ basis-tasks = { version = "0.18.1", path = "basis-tasks" }
 # hops extension, and `refresh_tool_descriptors`; and an interrupted tool round
 # continued rather than recorded as finished (ADR-0032, mentra#64). 0.30.1
 # adds request metadata through the exchange, which a delegation's
-# parameters ride in (ADR-0040).
-mentra = { version = "0.30.1", default-features = false }
+# parameters ride in (ADR-0040). 0.31.0 carries files (ADR-0041): images in a
+# tool's output and `read`, A2A file parts both ways, `mentra::media`, and
+# `read_file_bytes`/`write_file_bytes` under the file tools' policy.
+mentra = { version = "0.31.0", default-features = false }
 
 async-trait = "0.1"
 # ACP carries an image in a prompt as base64; basis's `PromptPart` carries the
@@ -350,7 +352,3 @@ opt-level = "s"
 lto = true
 codegen-units = 1
 
-# Development only: unreleased mentra (tool images, read shows images, A2A
-# file parts — ADR-0041). Removed at release.
-[patch.crates-io]
-mentra = { path = "../mentra/mentra" }
