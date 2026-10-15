@@ -5,6 +5,42 @@ All six crates — `basis`, `basis-host`, `basis-tasks`, `basis-acp`,
 live in `docs/adr/`; this file says what changed for someone upgrading.
 Releases before 0.15.0 are described by their tags and ADRs only.
 
+## Unreleased
+
+Breaking: `peer::Message` gains `files` and every `Outcome` variant gains
+`files: Vec<Attachment>`, so a host that implements `Peer` or matches an
+outcome exhaustively by field needs them. The A2A server's card lists `*/*`
+as its input modes and `text/plain`, `*/*` as its output modes, and accepts
+request bodies up to 16 MiB.
+
+### A delegation carries files ([ADR-0041](docs/adr/0041-a-delegation-carries-files.md))
+
+- `spawn` takes an optional `files` list of workspace paths beside `input`,
+  read under the file tools' read policy and bounded at 6 MiB together. A
+  remote agent receives them as A2A `raw` file parts after the text; an
+  agent here shares the workspace and is told the paths. A command or a wait
+  refuses them. Offered in the schema with `metadata`; shown in the
+  authorization preview under `files`.
+- Files a remote agent returns are saved under the calling agent's
+  `.basis/inbox/<task-id>/` and named in the tool result, outside the
+  agent's frame. A file by URL is never fetched; it stays a URL in the text.
+- `read` shows PNG, JPEG, GIF and WebP images to the model (mentra), so a
+  saved screenshot can be looked at.
+- `basis::agents::Attachment` is the file type the peer contract carries;
+  `basis::media` re-exports mentra's media-type helpers.
+- `basis-a2a` accepts any inline file (revising ADR-0030 §6): a textual one
+  is read into the prompt as before, any other is saved under the served
+  workspace's `.basis/inbox/<id>/` and named; a file by URL is still refused.
+- A task the A2A server spawns is offered `attach_file`, which copies a
+  workspace file into its answer (`RunSpec::answering`,
+  `Tasks::answer_files`); the completed task's `result` artifact carries
+  them as file parts after the text.
+
+### Fixed
+
+- A failed send's guidance no longer carries runs of spaces where its lines
+  were meant to join.
+
 ## 0.18.1 — 2026-10-14
 
 No breaking changes.

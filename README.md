@@ -304,8 +304,10 @@ it. A host with tasks of its own can serve them instead, behind the same server,
 pause one on a question to its caller as `INPUT_REQUIRED`, resuming the same task when the caller
 replies on its `taskId` ([ADR-0034](docs/adr/0034-a-hosted-task-may-ask-its-caller.md)). A caller whose stream drops subscribes again rather than resending, and one that cannot hold a
 connection at all registers a webhook and is called back on every status change (`--push`). A
-message may carry data and inline text files as well as text; a file by URL is refused, because the
-server never fetches what a caller names. `--extended-card FILE` tells authenticated callers more
+message may carry data and files as well as text: a text file is read into the prompt, any other
+— a screenshot, a PDF — is saved under the workspace's `.basis/inbox/` and named, and the task may
+hand files back with `attach_file`; a file by URL is refused, because the server never fetches
+what a caller names ([ADR-0041](docs/adr/0041-a-delegation-carries-files.md)). `--extended-card FILE` tells authenticated callers more
 than the public card does. The other direction needs no command: name a remote agent in
 `.basis/a2a.json` and the model hands it work through `spawn`, the same tool it delegates with
 locally — `@<name> <task>` ([ADR-0029](docs/adr/0029-a-remote-agent-is-a-spawn-target.md)) — put
@@ -315,7 +317,10 @@ any `Peer` (A2A is one, behind its feature), and a name
 nobody resolves is a teammate: a subagent made under that name and continued by every later
 `@<name> <task>`, so `@reviewer look at the diff` then `@reviewer and the tests?` is one
 conversation ([ADR-0037](docs/adr/0037-an-agent-is-named.md)); the optional `reach` field pins a
-call to `remote` or `local`. basis follows the remote task's stream when its card
+call to `remote` or `local`. A task carries files too — `"files": ["screens/login.png"]` beside
+the input, up to 6 MiB — sent to a remote agent and named to one here, and the files an agent
+sends back land in `.basis/inbox/<task>/`, where `read` shows an image
+([ADR-0041](docs/adr/0041-a-delegation-carries-files.md)). basis follows the remote task's stream when its card
 offers one and polls otherwise, and neither ever sends the task twice. A host that mints a fresh
 agent per chat message binds each run to the chat with `PreparedRun::with_remote_conversations`,
 so an `@<name>` question asked in one message is answered by `@<name> <answer>` in the next
@@ -550,7 +555,7 @@ for `--effort`, custom endpoints, and the hooks `shell`→`spawn` migration) ·
 [conventions.md](docs/conventions.md) (every file and variable basis reads, in precedence order) ·
 [embedding.md](docs/embedding.md) (the SDK in detail) · [targets.md](docs/targets.md) (running a
 command somewhere else) · [REDESIGN.md](docs/archive/REDESIGN.md) (closed ledger) ·
-[adr/](docs/adr/) (35 locked decisions) · [a2a/](docs/a2a/) (basis's two A2A extensions) ·
+[adr/](docs/adr/) (36 locked decisions) · [a2a/](docs/a2a/) (basis's two A2A extensions) ·
 [proposals/](docs/proposals/) (deferred ideas).
 
 ## License

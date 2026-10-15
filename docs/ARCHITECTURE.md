@@ -368,8 +368,12 @@ flowchart LR
   `pushNotifications`, the extended card and the two extensions when, and only when, each is on.
   gRPC stays deferred for its weight (proposal 0005 §6). Every request passes authentication
   before a byte of its body is read. Parts are text, data — handed to the model as JSON — and
-  inline files of a textual media type; a file by URL is refused, because the server never
-  fetches what a caller names.
+  inline files of any type (ADR-0041 §6): a textual one is fenced into the prompt, any other is
+  saved under the served workspace's `.basis/inbox/<id>/` and named there, so the model can
+  `read` it; a hosted backend is handed the parts as they are. A file by URL is refused, because
+  the server never fetches what a caller names. A task spawned to answer a caller is offered
+  `attach_file`, which copies a workspace file into the task's directory; a completed answer's
+  `result` artifact is its text part, then one file part per attached file.
 - **Who may call, and what each sees** (ADR-0030 §8, ADR-0036). An `Authenticator` turns each
   request's head into a principal before its body is read, and declares the card's security
   schemes; by default it is the server's named bearer tokens, and a server behind a gateway gives
@@ -404,6 +408,14 @@ flowchart LR
   stream when the card declares one and polling `GetTask` otherwise, never resending. basis keeps
   each conversation's ids beside the session's store, so a resumed task picks up remote work
   rather than sending it twice.
+- **A delegation carries files** (ADR-0041). `spawn`'s `files` lists workspace paths, read under
+  the file tools' own read policy (mentra's `read_file_bytes`) and bounded at 6 MiB together;
+  `peer::Message::files` carries them as `Attachment`s (bytes, media type, name) and every
+  `Outcome` carries the ones returned. Over A2A they are `raw` parts after the text. A local
+  agent shares the workspace and is told the paths instead. Returned files are saved under the
+  calling agent's `.basis/inbox/<task-id>/`, named in the tool result outside the agent's frame;
+  a file by URL stays a URL. A model sees an image by `read`ing it: mentra shows it after the
+  round's tool results, the turn shape every wire accepts.
 - **A name is resolved, or it is a teammate** (ADR-0037, ADR-0038). `@<name>` is answered by the
   open's resolvers in order — the host's, installed with `WorkspaceBuilder::with_agent_resolver`,
   then the set its files configure — and the first answer other than *unknown* stands; a resolver
