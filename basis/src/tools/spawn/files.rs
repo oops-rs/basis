@@ -91,7 +91,7 @@ pub(super) fn save(
     }
     let folder = format!(
         "{INBOX}/{}",
-        component(folder).unwrap_or_else(|| "task".to_string())
+        mentra::media::safe_file_name(folder).unwrap_or_else(|| "task".to_string())
     );
     let mut lines = Vec::with_capacity(files.len());
     for (index, file) in files.into_iter().enumerate() {
@@ -113,21 +113,11 @@ pub(super) fn save(
 /// path component, or `file-<n>` with its type's extension.
 fn file_name(given: Option<&str>, media_type: &str, n: usize) -> String {
     given
-        .and_then(component)
+        .and_then(mentra::media::safe_file_name)
         .unwrap_or_else(|| match mentra::media::extension_for(media_type) {
             Some(extension) => format!("file-{n}.{extension}"),
             None => format!("file-{n}"),
         })
-}
-
-/// `raw` as one safe path component: its last segment, without control
-/// characters, and never empty, `.` or `..`. The sender chose it, so it may
-/// try to climb out of the folder; this is what stops it.
-fn component(raw: &str) -> Option<String> {
-    let last = raw.rsplit(['/', '\\']).next().unwrap_or_default();
-    let cleaned: String = last.chars().filter(|c| !c.is_control()).collect();
-    let cleaned = cleaned.trim();
-    (!cleaned.is_empty() && cleaned != "." && cleaned != "..").then(|| cleaned.to_string())
 }
 
 /// `folder/name`, or `folder/stem-2.ext` and onward when that is taken.
@@ -150,18 +140,6 @@ fn unique(root: &Path, folder: &str, name: &str) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
-
-    #[test]
-    fn a_name_from_elsewhere_cannot_leave_its_folder() {
-        assert_eq!(component("../../etc/passwd").as_deref(), Some("passwd"));
-        assert_eq!(
-            component("C:\\Users\\x\\shot.png").as_deref(),
-            Some("shot.png")
-        );
-        assert_eq!(component(".."), None);
-        assert_eq!(component("dir/"), None);
-        assert_eq!(component("a\u{1b}[31mb").as_deref(), Some("a[31mb"));
-    }
 
     #[test]
     fn a_file_without_a_name_is_numbered_with_its_types_extension() {
