@@ -178,7 +178,7 @@ async fn a_post_hook_replaces_what_the_model_reads_and_not_what_the_stream_says(
     );
     workspace.hooks_file(&format!(
         r#"{{"schema": 1, "hooks": [
-            {{"name": "no-secrets", "command": ["{script}"], "event": "post_tool_use"}}
+            {{"name": "no-secrets", "command": ["/bin/sh", "{script}"], "event": "post_tool_use"}}
         ]}}"#
     ));
 
@@ -207,7 +207,7 @@ async fn a_hook_that_refuses_a_result_hands_the_model_an_error() {
     );
     workspace.hooks_file(&format!(
         r#"{{"schema": 1, "hooks": [
-            {{"name": "no-secrets", "command": ["{script}"], "event": "post_tool_use"}}
+            {{"name": "no-secrets", "command": ["/bin/sh", "{script}"], "event": "post_tool_use"}}
         ]}}"#
     ));
 
@@ -234,7 +234,7 @@ async fn a_hook_declared_for_the_other_event_is_not_consulted() {
         r#"echo '{"decision":"replace","output":"should never be asked"}'"#,
     );
     workspace.hooks_file(&format!(
-        r#"{{"schema": 1, "hooks": [{{"name": "before", "command": ["{script}"]}}]}}"#
+        r#"{{"schema": 1, "hooks": [{{"name": "before", "command": ["/bin/sh", "{script}"]}}]}}"#
     ));
 
     let (_, shown) = read_through_hooks(&workspace, "config.rs").await;

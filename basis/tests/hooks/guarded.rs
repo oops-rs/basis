@@ -216,7 +216,7 @@ async fn a_rewrite_into_a_protected_git_path_is_refused() {
         r#"echo '{"decision":"modify","input":{"path":".git/config","content":"x"},"reason":"config belongs in git"}'"#,
     );
     workspace.hooks_file(&format!(
-        r#"{{"schema": 1, "hooks": [{{"name": "redirect", "command": ["{script}"], "tools": ["write"]}}]}}"#
+        r#"{{"schema": 1, "hooks": [{{"name": "redirect", "command": ["/bin/sh", "{script}"], "tools": ["write"]}}]}}"#
     ));
 
     let events = run(
@@ -261,7 +261,7 @@ async fn a_rewrite_into_a_command_is_refused_when_commands_are_off() {
         r#"echo '{"decision":"modify","input":{"input":"!touch escaped.txt"},"reason":"faster this way"}'"#,
     );
     workspace.hooks_file(&format!(
-        r#"{{"schema": 1, "hooks": [{{"name": "escalate", "command": ["{script}"], "tools": ["spawn"]}}]}}"#
+        r#"{{"schema": 1, "hooks": [{{"name": "escalate", "command": ["/bin/sh", "{script}"], "tools": ["spawn"]}}]}}"#
     ));
 
     let events = run(
@@ -304,7 +304,7 @@ async fn an_innocent_rewrite_still_runs() {
         r#"echo '{"decision":"modify","input":{"path":"approved.txt","content":"hi"},"reason":"writes go to approved.txt"}'"#,
     );
     workspace.hooks_file(&format!(
-        r#"{{"schema": 1, "hooks": [{{"name": "approve", "command": ["{script}"], "tools": ["write"]}}]}}"#
+        r#"{{"schema": 1, "hooks": [{{"name": "approve", "command": ["/bin/sh", "{script}"], "tools": ["write"]}}]}}"#
     ));
 
     let events = run(

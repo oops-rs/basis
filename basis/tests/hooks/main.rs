@@ -25,7 +25,6 @@ mod results;
 
 use std::{
     fs,
-    os::unix::fs::PermissionsExt,
     path::{Path, PathBuf},
     time::{Duration, Instant},
 };
@@ -58,15 +57,17 @@ impl Workspace {
         self.dir.path()
     }
 
-    /// Writes an executable `/bin/sh` script under `hooks/` and returns the
-    /// workspace-relative path a hooks file would name.
+    /// Writes a script under `hooks/` for an explicit `/bin/sh` command.
+    /// Parallel tests can fork while another fixture is open for writing,
+    /// retaining that descriptor until exec even after `fs::write` returns.
+    /// Reading the script through the shell avoids Linux's `ETXTBSY` check
+    /// on executing a file that still has a writer.
     fn script(&self, name: &str, body: &str) -> String {
         let dir = self.path().join("hooks");
         fs::create_dir_all(&dir).expect("create hooks dir");
 
         let path = dir.join(name);
         fs::write(&path, format!("#!/bin/sh\n{body}\n")).expect("write script");
-        fs::set_permissions(&path, fs::Permissions::from_mode(0o755)).expect("chmod");
 
         format!("./hooks/{name}")
     }
@@ -113,7 +114,7 @@ async fn a_hook_that_allows_lets_the_call_through() {
     let workspace = Workspace::new();
     let script = workspace.script("allow.sh", r#"echo '{"decision":"allow"}'"#);
     workspace.hooks_file(&format!(
-        r#"{{"schema": 1, "hooks": [{{"name": "guard", "command": ["{script}"]}}]}}"#
+        r#"{{"schema": 1, "hooks": [{{"name": "guard", "command": ["/bin/sh", "{script}"]}}]}}"#
     ));
 
     assert_eq!(
@@ -130,7 +131,7 @@ async fn a_hook_that_denies_blocks_the_call_and_explains() {
         r#"echo '{"decision":"deny","reason":"force-push is not allowed here"}'"#,
     );
     workspace.hooks_file(&format!(
-        r#"{{"schema": 1, "hooks": [{{"name": "no-force-push", "command": ["{script}"]}}]}}"#
+        r#"{{"schema": 1, "hooks": [{{"name": "no-force-push", "command": ["/bin/sh", "{script}"]}}]}}"#
     ));
 
     let reason = deny_reason(
@@ -163,7 +164,7 @@ async fn a_hook_reads_the_call_it_is_being_asked_about() {
         "#,
     );
     workspace.hooks_file(&format!(
-        r#"{{"schema": 1, "hooks": [{{"name": "inspect", "command": ["{script}"]}}]}}"#
+        r#"{{"schema": 1, "hooks": [{{"name": "inspect", "command": ["/bin/sh", "{script}"]}}]}}"#
     ));
 
     let denied = workspace
@@ -191,7 +192,7 @@ async fn a_hook_is_told_which_schema_it_is_talking_to() {
         "#,
     );
     workspace.hooks_file(&format!(
-        r#"{{"schema": 1, "hooks": [{{"name": "version", "command": ["{script}"]}}]}}"#
+        r#"{{"schema": 1, "hooks": [{{"name": "version", "command": ["/bin/sh", "{script}"]}}]}}"#
     ));
 
     assert_eq!(
@@ -207,7 +208,7 @@ async fn a_hook_that_hangs_is_killed_and_the_call_is_denied() {
     let script = workspace.script("hang.sh", "sleep 60");
     workspace.hooks_file(&format!(
         r#"{{"schema": 1, "hooks": [
-            {{"name": "stuck", "command": ["{script}"], "timeout_ms": 250}}
+            {{"name": "stuck", "command": ["/bin/sh", "{script}"], "timeout_ms": 250}}
         ]}}"#
     ));
 
@@ -229,7 +230,7 @@ async fn a_hook_that_exits_non_zero_denies_by_default() {
     // what decides whether anything it said counts.
     let script = workspace.script("crash.sh", r#"echo '{"decision":"allow"}'; exit 2"#);
     workspace.hooks_file(&format!(
-        r#"{{"schema": 1, "hooks": [{{"name": "crasher", "command": ["{script}"]}}]}}"#
+        r#"{{"schema": 1, "hooks": [{{"name": "crasher", "command": ["/bin/sh", "{script}"]}}]}}"#
     ));
 
     let reason = deny_reason(workspace.decide("shell", "{}").await);
@@ -242,7 +243,7 @@ async fn a_hook_that_prints_something_else_denies_by_default() {
     let workspace = Workspace::new();
     let script = workspace.script("babble.sh", "echo looks fine to me");
     workspace.hooks_file(&format!(
-        r#"{{"schema": 1, "hooks": [{{"name": "babbler", "command": ["{script}"]}}]}}"#
+        r#"{{"schema": 1, "hooks": [{{"name": "babbler", "command": ["/bin/sh", "{script}"]}}]}}"#
     ));
 
     let reason = deny_reason(workspace.decide("shell", "{}").await);
@@ -258,11 +259,18 @@ async fn a_hook_that_prints_something_else_denies_by_default() {
 async fn a_hook_that_says_nothing_is_not_taken_as_consent() {
     let workspace = Workspace::new();
     let script = workspace.script("mute.sh", "exit 0");
+    // Model a descriptor retained by a concurrent fork deterministically:
+    // the script is complete, but a writer remains open until after the hook.
+    let writer = fs::OpenOptions::new()
+        .write(true)
+        .open(workspace.path().join(&script))
+        .expect("hold script open for writing");
     workspace.hooks_file(&format!(
-        r#"{{"schema": 1, "hooks": [{{"name": "mute", "command": ["{script}"]}}]}}"#
+        r#"{{"schema": 1, "hooks": [{{"name": "mute", "command": ["/bin/sh", "{script}"]}}]}}"#
     ));
 
     let reason = deny_reason(workspace.decide("shell", "{}").await);
+    drop(writer);
 
     assert!(reason.contains("printed nothing"), "got {reason}");
 }
@@ -286,8 +294,8 @@ async fn an_observer_hook_can_be_configured_to_fail_open() {
     let guard = workspace.script("guard.sh", r#"echo '{"decision":"allow"}'"#);
     workspace.hooks_file(&format!(
         r#"{{"schema": 1, "hooks": [
-            {{"name": "notify", "command": ["{broken}"], "on_failure": "allow"}},
-            {{"name": "guard", "command": ["{guard}"]}}
+            {{"name": "notify", "command": ["/bin/sh", "{broken}"], "on_failure": "allow"}},
+            {{"name": "guard", "command": ["/bin/sh", "{guard}"]}}
         ]}}"#
     ));
 
@@ -311,7 +319,7 @@ async fn a_hook_only_hears_about_the_tools_it_listed() {
     );
     workspace.hooks_file(&format!(
         r#"{{"schema": 1, "hooks": [
-            {{"name": "files-only", "command": ["{script}"], "tools": ["files"]}}
+            {{"name": "files-only", "command": ["/bin/sh", "{script}"], "tools": ["files"]}}
         ]}}"#
     ));
 
@@ -339,7 +347,7 @@ async fn a_global_denial_stops_a_workspace_hook_from_ever_running() {
         ),
     );
     workspace.hooks_file(&format!(
-        r#"{{"schema": 1, "hooks": [{{"name": "repo", "command": ["{workspace_script}"]}}]}}"#
+        r#"{{"schema": 1, "hooks": [{{"name": "repo", "command": ["/bin/sh", "{workspace_script}"]}}]}}"#
     ));
 
     let global_script = workspace.script(
@@ -349,7 +357,7 @@ async fn a_global_denial_stops_a_workspace_hook_from_ever_running() {
     write_json(
         &global.join(DEFAULT_GLOBAL_HOOKS_FILE),
         &format!(
-            r#"{{"schema": 1, "hooks": [{{"name": "personal", "command": ["{global_script}"]}}]}}"#
+            r#"{{"schema": 1, "hooks": [{{"name": "personal", "command": ["/bin/sh", "{global_script}"]}}]}}"#
         ),
     );
 
@@ -415,7 +423,7 @@ async fn a_hook_can_rewrite_the_call_instead_of_refusing_it() {
         r#"echo '{"decision":"modify","input":{"command":"deploy --token REDACTED"},"reason":"stripped a token"}'"#,
     );
     workspace.hooks_file(&format!(
-        r#"{{"schema": 1, "hooks": [{{"name": "redact", "command": ["{script}"]}}]}}"#
+        r#"{{"schema": 1, "hooks": [{{"name": "redact", "command": ["/bin/sh", "{script}"]}}]}}"#
     ));
 
     let outcome = workspace
@@ -455,8 +463,8 @@ async fn modifications_compose_and_a_later_hook_still_decides() {
     );
     workspace.hooks_file(&format!(
         r#"{{"schema": 1, "hooks": [
-            {{"name": "pin", "command": ["{first}"]}},
-            {{"name": "check", "command": ["{second}"]}}
+            {{"name": "pin", "command": ["/bin/sh", "{first}"]}},
+            {{"name": "check", "command": ["/bin/sh", "{second}"]}}
         ]}}"#
     ));
 
@@ -484,8 +492,8 @@ async fn a_rewrite_cannot_smuggle_a_call_past_a_later_guard() {
     );
     workspace.hooks_file(&format!(
         r#"{{"schema": 1, "hooks": [
-            {{"name": "rewrite", "command": ["{rewriter}"]}},
-            {{"name": "guard", "command": ["{guard}"]}}
+            {{"name": "rewrite", "command": ["/bin/sh", "{rewriter}"]}},
+            {{"name": "guard", "command": ["/bin/sh", "{guard}"]}}
         ]}}"#
     ));
 
@@ -504,7 +512,7 @@ async fn a_rewrite_lan_cannot_use_blocks_the_call() {
     // intervened, which is the one outcome nobody asked for.
     let script = workspace.script("broken.sh", r#"echo '{"decision":"modify","input":42}'"#);
     workspace.hooks_file(&format!(
-        r#"{{"schema": 1, "hooks": [{{"name": "broken", "command": ["{script}"]}}]}}"#
+        r#"{{"schema": 1, "hooks": [{{"name": "broken", "command": ["/bin/sh", "{script}"]}}]}}"#
     ));
 
     let reason = deny_reason(workspace.decide("shell", "{}").await);
@@ -578,7 +586,7 @@ async fn the_runtime_consults_a_hook_and_a_denial_reaches_the_model() {
         r#"echo '{"decision":"deny","reason":"this workspace is read-only today"}'"#,
     );
     workspace.hooks_file(&format!(
-        r#"{{"schema": 1, "hooks": [{{"name": "no-writes", "command": ["{script}"]}}]}}"#
+        r#"{{"schema": 1, "hooks": [{{"name": "no-writes", "command": ["/bin/sh", "{script}"]}}]}}"#
     ));
 
     let mock = runtime_creating(&workspace, "made.txt");
@@ -611,7 +619,7 @@ async fn a_rewritten_input_is_what_the_tool_runs_on() {
         r#"echo '{"decision":"modify","input":{"operations":[{"op":"create","path":"approved.txt","content":"hi"}]},"reason":"writes go to approved.txt"}'"#,
     );
     workspace.hooks_file(&format!(
-        r#"{{"schema": 1, "hooks": [{{"name": "redirect", "command": ["{script}"], "tools": ["files"]}}]}}"#
+        r#"{{"schema": 1, "hooks": [{{"name": "redirect", "command": ["/bin/sh", "{script}"], "tools": ["files"]}}]}}"#
     ));
 
     let mock = runtime_creating(&workspace, "wherever.txt");
