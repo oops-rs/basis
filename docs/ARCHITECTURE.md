@@ -674,6 +674,14 @@ temp directory), which the platform may erase between boots. A container or CI r
 should resume yesterday's agents therefore mounts the data root, not just the workspace:
 [`containerization.md`](containerization.md) has the volume.
 
+Since 0.7, conversations use plain files (`agents/`, `rules.json`, and `runs.jsonl`)
+instead of SQLite. **Pre-0.7 conversation databases are not migrated.** A store
+directory containing `runtime.sqlite` is refused rather than silently replaced
+with an empty file store. Use basis 0.6 to continue an old conversation. For new
+work, point `BASIS_DATA_DIR` (or the SDK's `RuntimeBuilder::with_store_dir`) at a
+fresh directory, or move the old store directory aside. The earlier 0.6 SDK API
+changes are recorded in the [archived redesign ledger](archive/REDESIGN.md).
+
 ### Effort, providers, and custom endpoints
 
 `--effort` accepts exactly `low`, `medium`, `high`, `xhigh`, or `max`.
