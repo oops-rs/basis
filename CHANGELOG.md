@@ -5,6 +5,23 @@ All six crates — `basis`, `basis-host`, `basis-tasks`, `basis-acp`,
 live in `docs/adr/`; this file says what changed for someone upgrading.
 Releases before 0.15.0 are described by their tags and ADRs only.
 
+## 0.20.1 — 2026-10-20
+
+No breaking changes.
+
+### A host's task scope reaches a background child
+
+- `RuntimeBuilder::with_task_scope` (and `SpawnTool::with_task_scope`) wraps
+  every future `spawn` spawns for a background child. The hook is called
+  synchronously on the spawning task, before the spawn, so a host whose
+  tools read tokio task-locals — which conversation, which caller — can
+  snapshot them there and re-scope them onto the future it hands back.
+  Without it a background child's tools found the locals unset, since a
+  task-local does not cross `tokio::spawn`; blocking delegations never had
+  the problem. `basis::tools::{TaskScope, TaskFuture}` name the types. A
+  scope that drops the future without running it is reported to the model
+  as a failed delegation rather than waited for.
+
 ## 0.20.0 — 2026-10-20
 
 Breaking: `SpawnMode` gains `Wait`, so a host matching it exhaustively needs
