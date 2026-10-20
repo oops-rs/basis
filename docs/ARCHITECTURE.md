@@ -416,6 +416,16 @@ flowchart LR
   calling agent's `.basis/inbox/<task-id>/`, named in the tool result outside the agent's frame;
   a file by URL stays a URL. A model sees an image by `read`ing it: mentra shows it after the
   round's tool results, the turn shape every wire accepts.
+- **A delegation may run in the background** (ADR-0042). `background: true` beside `spawn`'s
+  input starts the task and returns its handle at once — the subagent's id, the teammate's name
+  or id, the remote agent's name — and `wait: [handles]` (all, or `any: true` for the first)
+  or `@<handle>` alone collects it. The start is eager, on the parent's `RunOptions::child`;
+  the scope is structured: a child that finishes while the model works leaves its result with
+  mentra's `Deferred` handle and the runner delivers it before the next request, a wait records
+  it through the tool context, and when the model ends its turn with children still running
+  basis's own round strategy joins them first and mentra runs one more round. Depth counts;
+  width (`RuntimeBuilder::with_delegation_width`, four) bounds how many run at once. A child's
+  remote conversations are its own, so two background children may each ask one remote agent.
 - **A name is resolved, or it is a teammate** (ADR-0037, ADR-0038). `@<name>` is answered by the
   open's resolvers in order — the host's, installed with `WorkspaceBuilder::with_agent_resolver`,
   then the set its files configure — and the first answer other than *unknown* stands; a resolver

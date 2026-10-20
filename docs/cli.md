@@ -158,6 +158,13 @@ agents share the workspace and receive their paths. Returned files are saved in
 [file delegation contract](adr/0041-a-delegation-carries-files.md) for limits and
 storage ownership.
 
+The model can also start a task without waiting for it: `"background": true` beside
+the input returns the task's handle at once, the answer arrives on its own as a
+delegation result in a later message, and `"wait": [handles]` (or `@<handle>`
+alone) collects it sooner. A turn does not end while a task it started is still
+running. Up to four run at once unless the host says otherwise. See the
+[background delegation contract](adr/0042-a-delegation-may-run-in-the-background.md).
+
 Before exposing an A2A server:
 
 - Non-loopback addresses require bearer authentication: `--token-env VAR`, or

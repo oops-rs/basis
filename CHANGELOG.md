@@ -5,6 +5,44 @@ All six crates — `basis`, `basis-host`, `basis-tasks`, `basis-acp`,
 live in `docs/adr/`; this file says what changed for someone upgrading.
 Releases before 0.15.0 are described by their tags and ADRs only.
 
+## 0.20.0 — 2026-10-20
+
+Breaking: `SpawnMode` gains `Wait`, so a host matching it exhaustively needs
+an arm. `spawn`'s input schema no longer requires `input` on a runtime with an
+agent ledger (every one basis builds), since a wait has none.
+
+### A delegation may run in the background ([ADR-0042](docs/adr/0042-a-delegation-may-run-in-the-background.md))
+
+- `spawn` takes `background: true` beside `input`: the task — for a subagent,
+  a teammate or a remote agent — starts on a task of its own and the call
+  returns its handle at once: the subagent's id, the teammate's name or id,
+  the remote agent's name. A command cannot run in the background.
+- The answer arrives on its own: a child that finishes while the model is
+  doing something else leaves its result with mentra's `Deferred` handle, and
+  the runner puts it in front of the model before the next request, as a
+  `<delegation-result agent="…" id="…" status="…">` carrying the delegation's
+  own record and the child's end on the parent's stream.
+- `wait: [handles]` in a call with no `input` collects one or more — all of
+  them, or the first to finish with `any: true` — and `@<handle>` alone
+  collects one. A result a wait collected is never also delivered on its own.
+- A turn does not end while a child it started is still running: basis's
+  own round strategy (`JoinAtEnd`, composed in front of the host's) joins the
+  children when the model ends its turn, and mentra runs one more round so the
+  model reads what they answered. Children run on the parent's
+  `RunOptions::child` — its cancellation, stop, deadline and token counter.
+- `RuntimeBuilder::with_delegation_width` (and `SpawnTool::with_delegation_width`)
+  caps how many of one agent's delegations run in the background at once;
+  `DEFAULT_DELEGATION_WIDTH` is four. Checked in the preview like depth, so
+  no approval and no remembered rule lifts it. Zero turns the feature off.
+- The approver's preview carries `background: true` on a start and
+  `wait`/`any` on a wait; a wait presents as read-only (`None`) and is never
+  asked. A background start is mentra's `Background` approval category and
+  `BackgroundJob` execution category. `SPAWN_BACKGROUND_FIELD`,
+  `SPAWN_WAIT_FIELD` and `SPAWN_ANY_FIELD` name the fields.
+- A child's remote conversations are its own, so two background children may
+  each hand the same remote agent a task.
+- Needs mentra 0.32.0.
+
 ## 0.19.0 — 2026-10-15
 
 Breaking: `peer::Message` gains `files` and every `Outcome` variant gains

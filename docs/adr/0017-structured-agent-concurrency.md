@@ -1,7 +1,9 @@
 # 0017 — Structured agent concurrency
 
 > Status: Accepted · 2026-08-13; spawn's CLI routing narrowed by
-> [`0020-spawn-routing-is-decided-by-the-environment.md`](0020-spawn-routing-is-decided-by-the-environment.md) · 2026-08-16  
+> [`0020-spawn-routing-is-decided-by-the-environment.md`](0020-spawn-routing-is-decided-by-the-environment.md) · 2026-08-16;
+> the in-process half of §2 — a handle returned to a model's own turn — built by
+> [`0042-a-delegation-may-run-in-the-background.md`](0042-a-delegation-may-run-in-the-background.md) · 2026-10-20  
 > Extends [`0010-the-crate-is-the-workflow-surface.md`](0010-the-crate-is-the-workflow-surface.md),
 > [`0011-layered-crates.md`](0011-layered-crates.md), and
 > [`0015-cli-grammar.md`](0015-cli-grammar.md).  
