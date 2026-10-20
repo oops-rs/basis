@@ -44,6 +44,7 @@
 use std::{
     collections::HashMap,
     future::Future,
+    pin::Pin,
     sync::{Arc, Mutex},
 };
 
@@ -64,6 +65,21 @@ use crate::runtime::agents::AgentRegistry;
 /// token overshoot the module docs describe to four rounds. A host that wants
 /// a wider fan-out raises it and raises the token budget with it.
 pub const DEFAULT_DELEGATION_WIDTH: usize = 4;
+
+/// A future basis is about to spawn for a child, as a host's
+/// [`TaskScope`] sees it.
+pub type TaskFuture = Pin<Box<dyn Future<Output = ()> + Send + 'static>>;
+
+/// What a host wraps around every future basis spawns for a child
+/// ([`RuntimeBuilder::with_task_scope`](crate::RuntimeBuilder::with_task_scope)).
+///
+/// A background child runs on a task of its own, and a tokio task-local does
+/// not cross `tokio::spawn`: a host whose tools read where they are from one
+/// — which conversation, which caller, which card — would find them unset in
+/// a child. The hook is called synchronously on the spawning task, so the
+/// host can snapshot its locals there and re-scope them onto the future it
+/// hands back, which is what gets spawned. Identity when unset.
+pub type TaskScope = Arc<dyn Fn(TaskFuture) -> TaskFuture + Send + Sync>;
 
 /// What a background delegation settled to.
 pub(super) struct Settled {
@@ -168,9 +184,12 @@ impl Children {
     ///
     /// `deferred` is where the result goes when nothing has claimed it by
     /// then. The slot is reserved before the task exists, so a task that
-    /// finishes before the handle is in place still finds its slot.
+    /// finishes before the handle is in place still finds its slot. `scope`
+    /// is the host's [`TaskScope`], applied here — on the spawning task,
+    /// before the spawn — to the future that runs `work`.
     pub(super) fn start(
         &self,
+        scope: Option<&TaskScope>,
         id: String,
         name: Option<String>,
         kind: Kind,
@@ -188,8 +207,28 @@ impl Children {
         );
         let children = self.clone();
         let settled_id = id.clone();
-        let task = tokio::spawn(async move {
+        // The host wraps a future that yields nothing, so the result comes
+        // back on a channel: what the host hands back is what runs, and a
+        // scope that dropped the work without running it is reported rather
+        // than waited for forever.
+        let (tx, rx) = tokio::sync::oneshot::channel::<Settled>();
+        let body: TaskFuture = Box::pin(async move {
             let settled = work.await;
+            let _ = tx.send(settled);
+        });
+        let body = match scope {
+            Some(scope) => scope(body),
+            None => body,
+        };
+        let task = tokio::spawn(async move {
+            body.await;
+            let settled =
+                rx.await.unwrap_or_else(|_| Settled {
+                    outcome: Err(
+                        "the host's task scope ended the delegation before it ran".to_string()
+                    ),
+                    items: Vec::new(),
+                });
             children.settle(&settled_id, &deferred, settled)
         });
         if let Some(slot) = self.lock().get_mut(&id) {
@@ -409,6 +448,7 @@ mod tests {
         let children = Children::default();
         let (tx, rx) = tokio::sync::oneshot::channel::<()>();
         children.start(
+            None,
             "child".to_string(),
             None,
             Kind::Subagent,
@@ -443,6 +483,7 @@ mod tests {
     async fn a_released_handle_that_finished_meanwhile_is_handed_back() {
         let children = Children::default();
         children.start(
+            None,
             "quick".to_string(),
             Some("q".to_string()),
             Kind::Teammate,
@@ -465,10 +506,17 @@ mod tests {
     #[tokio::test]
     async fn join_all_waits_for_what_nobody_claimed() {
         let children = Children::default();
-        children.start("a".to_string(), None, Kind::Subagent, deferred(), async {
-            tokio::time::sleep(std::time::Duration::from_millis(30)).await;
-            settled("a done")
-        });
+        children.start(
+            None,
+            "a".to_string(),
+            None,
+            Kind::Subagent,
+            deferred(),
+            async {
+                tokio::time::sleep(std::time::Duration::from_millis(30)).await;
+                settled("a done")
+            },
+        );
         children.join_all().await;
         assert_eq!(
             children.running(),
@@ -479,6 +527,71 @@ mod tests {
             too_wide(4, 4),
             "4 delegations are already running in the background, and spawn runs no more than 4 \
              at once; wait for one with `wait` before starting another, or do this one here"
+        );
+    }
+
+    tokio::task_local! {
+        static WHERE: String;
+    }
+
+    /// The host's scope is applied on the spawning task — where its locals
+    /// are set — and what it hands back is what the child runs on.
+    #[tokio::test]
+    async fn the_host_scope_is_taken_on_the_spawning_task_and_wraps_the_child() {
+        let children = Children::default();
+        let scope: TaskScope = Arc::new(|future| {
+            // Snapshotted here, synchronously, on the parent's task.
+            let here = WHERE
+                .try_with(Clone::clone)
+                .unwrap_or_else(|_| "unset".to_string());
+            Box::pin(WHERE.scope(here, future))
+        });
+        let seen = Arc::new(Mutex::new(None::<String>));
+        let report = Arc::clone(&seen);
+        WHERE
+            .scope("the parent's turn".to_string(), async {
+                children.start(
+                    Some(&scope),
+                    "child".to_string(),
+                    None,
+                    Kind::Subagent,
+                    deferred(),
+                    async move {
+                        *report.lock().expect("slot") = Some(
+                            WHERE
+                                .try_with(Clone::clone)
+                                .unwrap_or_else(|_| "unset".to_string()),
+                        );
+                        settled("done")
+                    },
+                );
+            })
+            .await;
+        children.join_all().await;
+        assert_eq!(
+            seen.lock().expect("slot").as_deref(),
+            Some("the parent's turn"),
+            "the child saw the local the parent's task had set"
+        );
+    }
+
+    #[tokio::test]
+    async fn a_scope_that_drops_the_work_is_reported_not_awaited() {
+        let children = Children::default();
+        let scope: TaskScope = Arc::new(|_future| Box::pin(async {}));
+        children.start(
+            Some(&scope),
+            "dropped".to_string(),
+            None,
+            Kind::Subagent,
+            deferred(),
+            async { settled("never") },
+        );
+        let claimed = children.claim("dropped").expect("claims");
+        let (_, _, _, settled) = claimed.settled().await;
+        assert_eq!(
+            settled.outcome.as_deref().map_err(String::as_str),
+            Err("the host's task scope ended the delegation before it ran")
         );
     }
 }

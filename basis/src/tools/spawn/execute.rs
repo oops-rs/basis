@@ -383,6 +383,7 @@ pub(super) async fn delegate_in_background(
     let options = delegation.options.clone();
     let prompt = prompt.to_string();
     children.start(
+        tool.task_scope.as_ref(),
         id.clone(),
         None,
         Kind::Subagent,
@@ -616,6 +617,7 @@ pub(super) async fn teammate(
     if let Some(children) = children {
         let prompt = prompt.to_string();
         children.start(
+            tool.task_scope.as_ref(),
             child_id.clone(),
             Some(name.clone()),
             Kind::Teammate,

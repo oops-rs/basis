@@ -157,6 +157,9 @@ pub struct RuntimeBuilder {
     child_policy: Option<ChildPolicy>,
     /// What `@<name>` may reach ([`with_reach_policy`](Self::with_reach_policy)).
     reach_policy: ReachPolicy,
+    /// What the host wraps around every future `spawn` spawns for a
+    /// background child ([`with_task_scope`](Self::with_task_scope), ADR-0042).
+    task_scope: Option<crate::tools::TaskScope>,
     /// How completed tool results are bounded before the next provider
     /// request. `None` preserves the Mentra policy derived for this runtime;
     /// `Some` overlays only bytes, physical lines, and spill posture.
@@ -211,6 +214,7 @@ impl std::fmt::Debug for RuntimeBuilder {
             .field("file_tools", &self.file_tools)
             .field("delegation_depth", &self.delegation_depth)
             .field("delegation_width", &self.delegation_width)
+            .field("task_scope", &self.task_scope.as_ref().map(|_| "<scope>"))
             .field("tool_result_policy", &self.tool_result_policy)
             // Presence is all a `dyn` policy can honestly print.
             .field(
@@ -256,6 +260,7 @@ impl Default for RuntimeBuilder {
             delegation_width: crate::tools::DEFAULT_DELEGATION_WIDTH,
             child_policy: None,
             reach_policy: ReachPolicy::default(),
+            task_scope: None,
             tool_result_policy: None,
             host_provider: None,
             gateway_ring: None,
@@ -436,6 +441,44 @@ impl RuntimeBuilder {
     pub fn with_delegation_depth(self, depth: usize) -> Self {
         Self {
             delegation_depth: depth,
+            ..self
+        }
+    }
+
+    /// Wraps every future `spawn` spawns for a background child in `scope`
+    /// (ADR-0042).
+    ///
+    /// A background child runs on a tokio task of its own, and a task-local
+    /// does not cross `tokio::spawn`: a host whose tools read where they are
+    /// from one — which conversation, which caller — would find it unset in
+    /// a child, and a tool that fails quietly on that is the worst kind. The
+    /// scope is called synchronously on the spawning task, before the spawn,
+    /// so the host snapshots its locals there and re-scopes them onto the
+    /// future it hands back, which is what gets spawned:
+    ///
+    /// ```ignore
+    /// .with_task_scope(|future| {
+    ///     let turn = TURN.try_with(Clone::clone).ok();
+    ///     Box::pin(async move {
+    ///         match turn {
+    ///             Some(turn) => TURN.scope(turn, future).await,
+    ///             None => future.await,
+    ///         }
+    ///     })
+    /// })
+    /// ```
+    ///
+    /// Blocking delegations and mentra's exclusive-lane tools run inline on
+    /// the turn's task and need nothing. mentra's parallel lane spawns its
+    /// own tasks and is not covered here; a tool that must see the locals
+    /// declares an exclusive execution category.
+    #[must_use]
+    pub fn with_task_scope<F>(self, scope: F) -> Self
+    where
+        F: Fn(crate::tools::TaskFuture) -> crate::tools::TaskFuture + Send + Sync + 'static,
+    {
+        Self {
+            task_scope: Some(Arc::new(scope)),
             ..self
         }
     }
@@ -621,6 +664,7 @@ impl RuntimeBuilder {
             self.delegation_width,
             self.child_policy,
             self.reach_policy,
+            self.task_scope,
             Arc::clone(&agents),
         );
         let builder = mentra::Runtime::builder()
@@ -781,10 +825,16 @@ fn spawn_tool(
     delegation_width: usize,
     child_policy: Option<ChildPolicy>,
     reach_policy: ReachPolicy,
+    task_scope: Option<crate::tools::TaskScope>,
     agents: Arc<super::agents::AgentRegistry>,
 ) -> SpawnTool {
     let tool = SpawnTool::with_targets_and_depth(targets, delegation_depth)
-        .with_delegation_width(delegation_width)
+        .with_delegation_width(delegation_width);
+    let tool = match task_scope {
+        Some(scope) => tool.with_task_scope_arc(scope),
+        None => tool,
+    };
+    let tool = tool
         // Read for two questions — what is this delegation's parent denied,
         // so a roster override cannot hand a narrowed child a sibling
         // workspace's tools and the child is judged by the same guard its

@@ -65,5 +65,5 @@ pub use mentra::tool::{
 pub use spawn::{
     ChildContext, ChildSpec, DEFAULT_DELEGATION_DEPTH, DEFAULT_DELEGATION_WIDTH, SPAWN,
     SPAWN_ANY_FIELD, SPAWN_BACKGROUND_FIELD, SPAWN_INPUT_FIELD, SPAWN_WAIT_FIELD, SpawnInput,
-    SpawnMode, SpawnTool, classify_spawn_input, parse_spawn_input,
+    SpawnMode, SpawnTool, TaskFuture, TaskScope, classify_spawn_input, parse_spawn_input,
 };

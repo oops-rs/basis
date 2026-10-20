@@ -104,8 +104,8 @@ pub use parse::{
 pub(crate) use parse::{LOCAL_TARGET, is_namespaced, is_target_name};
 pub use reach::{Reach, ReachPolicy};
 
-pub use background::DEFAULT_DELEGATION_WIDTH;
 pub(crate) use background::{Children, JoinAtEnd};
+pub use background::{DEFAULT_DELEGATION_WIDTH, TaskFuture, TaskScope};
 pub use child::{ChildContext, ChildSpec};
 pub use depth::DEFAULT_DELEGATION_DEPTH;
 
@@ -185,6 +185,9 @@ pub struct SpawnTool {
     refresh: Option<crate::runtime::Refresh>,
     /// What `@<name>` may reach (ADR-0037 §3), the runtime's say.
     reach: ReachPolicy,
+    /// What the host wraps around every future this tool spawns for a
+    /// background child ([`TaskScope`]); `None` spawns the future as is.
+    task_scope: Option<TaskScope>,
 }
 
 impl Default for SpawnTool {
@@ -246,6 +249,7 @@ impl std::fmt::Debug for SpawnTool {
             .field("agents", &self.agents.as_ref().map(|_| "<agent ledger>"))
             .field("owner", &self.owner)
             .field("reach", &self.reach)
+            .field("task_scope", &self.task_scope.as_ref().map(|_| "<scope>"))
             .field("remote", &self.taught().remote)
             .finish()
     }
@@ -306,6 +310,31 @@ impl SpawnTool {
             owner: None,
             refresh: None,
             reach: ReachPolicy::default(),
+            task_scope: None,
+        }
+    }
+
+    /// Wraps every future this tool spawns for a background child in
+    /// `scope`, called on the spawning task before the spawn (ADR-0042). A
+    /// host whose tools read tokio task-locals snapshots them in `scope` and
+    /// re-scopes them onto the future it returns. basis's own
+    /// [`RuntimeBuilder::with_task_scope`](crate::RuntimeBuilder::with_task_scope)
+    /// calls this; a host driving mentra directly calls it itself.
+    #[must_use]
+    pub fn with_task_scope<F>(self, scope: F) -> Self
+    where
+        F: Fn(TaskFuture) -> TaskFuture + Send + Sync + 'static,
+    {
+        self.with_task_scope_arc(Arc::new(scope))
+    }
+
+    /// [`with_task_scope`](Self::with_task_scope) for a scope already behind
+    /// an `Arc` — basis's own builder.
+    #[must_use]
+    pub(crate) fn with_task_scope_arc(self, scope: TaskScope) -> Self {
+        Self {
+            task_scope: Some(scope),
+            ..self
         }
     }
 
@@ -911,6 +940,7 @@ impl ToolExecutor for SpawnTool {
                     let children = execute::children_of(self, &ctx.agent_id)?;
                     return remote::delegate_in_background(
                         &ctx,
+                        self.task_scope.as_ref(),
                         children,
                         agents,
                         &name,

@@ -25,7 +25,10 @@ use basis::{
     },
     skills::SkillsConfig,
     templates::TemplatesConfig,
-    tools::SPAWN,
+    tools::{
+        RuntimeToolDescriptor, SPAWN, ToolContext, ToolDefinition, ToolExecutor, ToolResult,
+        ToolSideEffectLevel,
+    },
 };
 use serde_json::{Value, json};
 
@@ -68,8 +71,44 @@ impl Turn {
         }])
     }
 
+    fn calling_tool(id: &str, tool: &str) -> Self {
+        Self(vec![ContentBlock::ToolUse {
+            id: id.to_string(),
+            name: tool.to_string(),
+            input: json!({}),
+        }])
+    }
+
     fn saying(text: &str) -> Self {
         Self(vec![ContentBlock::text(text)])
+    }
+}
+
+tokio::task_local! {
+    /// What a host's tools read to know where they are — the shape iBot's
+    /// turn context has — set around the parent's turn.
+    static WHERE: String;
+}
+
+/// A host tool that answers with the task-local it runs under, or `unset`.
+struct WhereAmI;
+
+impl ToolDefinition for WhereAmI {
+    fn descriptor(&self) -> RuntimeToolDescriptor {
+        RuntimeToolDescriptor::builder("where_am_i")
+            .description("says where this tool is running")
+            .input_schema(json!({ "type": "object", "properties": {} }))
+            .side_effect_level(ToolSideEffectLevel::None)
+            .build()
+    }
+}
+
+#[async_trait]
+impl ToolExecutor for WhereAmI {
+    async fn execute_mut(&self, _ctx: ToolContext<'_>, _input: Value) -> ToolResult {
+        Ok(WHERE
+            .try_with(Clone::clone)
+            .unwrap_or_else(|_| "unset".to_string()))
     }
 }
 
@@ -165,9 +204,30 @@ fn model() -> ModelInfo {
 }
 
 fn runtime(router: &Router, width: Option<usize>) -> Arc<Runtime> {
+    runtime_scoped(router, width, false)
+}
+
+/// The same runtime, with a host tool that reads a task-local and, when
+/// `scoped`, the host's task scope that carries it into background children.
+fn runtime_scoped(router: &Router, width: Option<usize>, scoped: bool) -> Arc<Runtime> {
     let builder = Runtime::builder()
         .with_provider_instance(router.clone())
-        .with_ephemeral_history();
+        .with_ephemeral_history()
+        .with_tool(WhereAmI);
+    let builder = if scoped {
+        builder.with_task_scope(|future| {
+            // Snapshotted on the spawning task, where the parent's turn set it.
+            let here = WHERE.try_with(Clone::clone).ok();
+            Box::pin(async move {
+                match here {
+                    Some(here) => WHERE.scope(here, future).await,
+                    None => future.await,
+                }
+            })
+        })
+    } else {
+        builder
+    };
     let builder = match width {
         Some(width) => builder.with_delegation_width(width),
         None => builder,
@@ -550,4 +610,63 @@ async fn any_returns_the_first_to_finish_and_the_turn_still_waits_for_the_rest()
         "and its answer reached the model: {}",
         last.all_text
     );
+}
+
+/// The host's tools read where they are from a tokio task-local set around
+/// the parent's turn. A background child runs on a task of its own, where
+/// the local is unset — unless the host's task scope carried it over.
+#[tokio::test]
+async fn a_host_task_scope_carries_the_parents_locals_into_a_background_child() {
+    let route = |seen: &Seen| {
+        if seen.last_text == "go" {
+            return now(Turn::calling(
+                "call-1",
+                json!({ "input": "ask where you are", "background": true }),
+            ));
+        }
+        if let Some(started) = seen.result_of("call-1") {
+            let handle = handle_in(started);
+            return now(Turn::calling("call-2", json!({ "wait": [handle] })));
+        }
+        if seen.result_of("call-2").is_some() {
+            return now(Turn::saying("done"));
+        }
+        if seen.last_text == "ask where you are" {
+            // Delayed like the other children, so the parent's wait is what
+            // collects the answer rather than the next round boundary.
+            return (
+                Turn::calling_tool("probe", "where_am_i"),
+                Duration::from_millis(50),
+            );
+        }
+        if let Some(answer) = seen.result_of("probe") {
+            return now(Turn::saying(&format!("I am in {answer}")));
+        }
+        panic!("an unexpected request: {seen:?}");
+    };
+
+    for (scoped, expected) in [
+        (true, "I am in the parent's turn"),
+        (false, "I am in unset"),
+    ] {
+        let router = Router::new(route);
+        let dir = tempfile::tempdir().unwrap();
+        let workspace = pinned(dir.path(), runtime_scoped(&router, None, scoped))
+            .open()
+            .await
+            .expect("opens");
+
+        let (events, _) = WHERE
+            .scope("the parent's turn".to_string(), drive(&workspace))
+            .await;
+
+        let results = results(&events);
+        assert_eq!(results.len(), 2, "{results:?}");
+        let (failed, collected) = &results[1];
+        assert!(!failed, "{collected}");
+        assert!(
+            collected.ends_with(&format!("finished:\n\n{expected}")),
+            "scoped={scoped}: {collected}"
+        );
+    }
 }

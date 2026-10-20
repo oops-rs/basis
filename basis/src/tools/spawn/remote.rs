@@ -22,7 +22,7 @@ use mentra::{
 };
 
 use super::{
-    background::{Children, Kind, Settled},
+    background::{Children, Kind, Settled, TaskScope},
     describe::listed,
     execute::started,
     files, no_remote_agents,
@@ -192,6 +192,7 @@ pub(super) async fn delegate(
 /// writes no delegation entry on either path.
 pub(super) fn delegate_in_background(
     ctx: &ToolContext<'_>,
+    scope: Option<&TaskScope>,
     children: Children,
     agents: Arc<RemoteAgents>,
     name: &str,
@@ -203,6 +204,7 @@ pub(super) fn delegate_in_background(
     let root = ctx.resolve_working_directory(None)?;
     let agent = name.to_string();
     children.start(
+        scope,
         name.to_string(),
         Some(name.to_string()),
         Kind::Remote,

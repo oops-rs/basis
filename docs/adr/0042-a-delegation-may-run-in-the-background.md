@@ -130,6 +130,13 @@ started it does not end before it does.** Design 3.
   being basis's own.
 - Width is a knob a host sets with the token budget it sets: a wider fan-out
   overshoots by more.
+- Amended 2026-10-20 (0.20.1): a background child runs on a task of its own,
+  and a tokio task-local does not cross `tokio::spawn`, so a host whose tools
+  read where they are from one found them unset in a child — iBot's first
+  blocker. `RuntimeBuilder::with_task_scope` wraps every future basis spawns
+  for a child, called synchronously on the spawning task so the host can
+  snapshot its locals there. mentra's parallel tool lane spawns tasks of its
+  own and is the ledger's open ask for a host context slot on `ToolContext`.
 - Not done: a per-wait timeout (the parent's deadline bounds every wait); a
   background *command* (a task may run one); delivering a child's progress
   to the parent while it runs. Each is a proposal when a host asks.
