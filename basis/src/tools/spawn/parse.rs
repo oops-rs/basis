@@ -18,6 +18,12 @@
 //! task to a remote agent, `@<agent>` alone waits again on what that agent is
 //! still working on, and `@@` escapes a task that begins with a literal `@`.
 //!
+//! ADR-0042 adds the two fields beside the string that make a delegation
+//! asynchronous: `background` starts a task and returns its handle, and
+//! `wait` — a call with no string at all — collects one or more handles.
+//! Typed fields rather than prefixes, like `reach`, `metadata` and `files`:
+//! each is a fact the approver sees under its own key.
+//!
 //! Nothing here touches the runtime, which is why it is a module of its own:
 //! the whole boundary is testable as a function.
 
@@ -41,6 +47,17 @@ pub const METADATA_FIELD: &str = "metadata";
 /// over (ADR-0041). With a task for any agent — never a command or a wait.
 pub const FILES_FIELD: &str = "files";
 
+/// `true` to start a task and return its handle at once instead of its
+/// answer (ADR-0042). With a task for any agent — never a command or a wait.
+pub const BACKGROUND_FIELD: &str = "background";
+
+/// The handles to wait for, in a call that carries no `input` (ADR-0042).
+pub const WAIT_FIELD: &str = "wait";
+
+/// `true` to return as soon as any of the handles in `wait` has finished,
+/// rather than once all have.
+pub const ANY_FIELD: &str = "any";
+
 /// What the wire contract calls *here*, and therefore a name no target may
 /// take (ADR-0021).
 ///
@@ -53,7 +70,7 @@ pub const FILES_FIELD: &str = "files";
 /// fooled by a model that spelled the reserved word out.
 pub(crate) const LOCAL_TARGET: &str = "local";
 
-/// Which of the two acts a call turned out to be.
+/// Which of the acts a call turned out to be.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Mode {
     /// `!…` — run this.
@@ -61,6 +78,9 @@ pub enum Mode {
     /// Anything else — a task for a subagent here, or for a remote agent when
     /// it begins `@<agent>`.
     Agent,
+    /// No string at all, and `wait` — collect what was started in the
+    /// background (ADR-0042).
+    Wait,
 }
 
 impl Mode {
@@ -71,13 +91,15 @@ impl Mode {
         match self {
             Self::Command => "command",
             Self::Agent => "agent",
+            Self::Wait => "wait",
         }
     }
 }
 
 /// Every fact the spawn input parser owns: mode, normalized body, and optional
-/// target — where a command runs, or which remote agent a task is for. The working directory is not model input; the tool context
-/// resolves it later when building the authorization preview.
+/// target — where a command runs, or which remote agent a task is for. The
+/// working directory is not model input; the tool context resolves it later
+/// when building the authorization preview.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Spawn {
     mode: Mode,
@@ -93,6 +115,12 @@ pub struct Spawn {
     metadata: Option<serde_json::Map<String, Value>>,
     /// Workspace paths of the files sent with a task (ADR-0041), as written.
     files: Vec<String>,
+    /// Whether the task is started and left running (ADR-0042).
+    background: bool,
+    /// The handles a wait collects (ADR-0042); empty for anything else.
+    wait: Vec<String>,
+    /// Whether a wait returns on the first handle to finish.
+    any: bool,
 }
 
 impl Spawn {
@@ -120,6 +148,24 @@ impl Spawn {
         &self.files
     }
 
+    /// Whether the task is started in the background and its handle returned
+    /// at once (ADR-0042).
+    pub const fn background(&self) -> bool {
+        self.background
+    }
+
+    /// The handles a wait collects (ADR-0042), as written; empty for any
+    /// call but a wait.
+    pub fn wait(&self) -> &[String] {
+        &self.wait
+    }
+
+    /// Whether a wait returns on the first handle to finish rather than once
+    /// all have.
+    pub const fn any(&self) -> bool {
+        self.any
+    }
+
     /// The target this call named — a command's executor, or a delegation's
     /// agent — or `None` for here. Never `Some("local")`: `local` is the
     /// reserved wire spelling for this process, not a name anything can take.
@@ -129,7 +175,8 @@ impl Spawn {
 
     /// Whether this is a delegation to a named agent that hands it nothing
     /// new: `@<agent>` alone, which waits again on a remote agent's
-    /// outstanding task (ADR-0029 §5). The one call whose body may be empty.
+    /// outstanding task (ADR-0029 §5) or on a background delegation under
+    /// that handle (ADR-0042). The one call whose body may be empty.
     pub fn is_remote_wait(&self) -> bool {
         self.mode == Mode::Agent && self.target.is_some() && self.body.is_empty()
     }
@@ -141,13 +188,17 @@ impl Spawn {
 /// failed preview into `Tool execution denied: <this>` — so it says what to
 /// write instead rather than merely that something was wrong.
 pub fn parse(input: &Value) -> Result<Spawn, String> {
+    if let Some(wait) = wait_call(input)? {
+        return Ok(wait);
+    }
     let raw = input
         .get(INPUT_FIELD)
         .and_then(Value::as_str)
         .ok_or_else(|| {
             format!(
                 "spawn takes one string field, `{INPUT_FIELD}`: a command to run when it starts \
-                 with `!`, otherwise a task to delegate"
+                 with `!`, otherwise a task to delegate — or `{WAIT_FIELD}` alone, a list of \
+                 handles to wait for"
             )
         })?;
 
@@ -194,7 +245,116 @@ pub fn parse(input: &Value) -> Result<Spawn, String> {
         }
     };
     spawn.files = files(input.get(FILES_FIELD), &spawn)?;
+    spawn.background = background(input.get(BACKGROUND_FIELD), &spawn)?;
+    if let Some(any) = input.get(ANY_FIELD)
+        && !any.is_null()
+    {
+        return Err(format!(
+            "`{ANY_FIELD}` goes with `{WAIT_FIELD}`: it says a wait returns on the first \
+             handle to finish. Leave it out of a call that starts something"
+        ));
+    }
     Ok(spawn)
+}
+
+/// A wait, when the call is one: `wait` given and non-empty, `input` absent
+/// or empty, nothing else beside it. `None` when the call is not a wait.
+fn wait_call(input: &Value) -> Result<Option<Spawn>, String> {
+    let shape = || {
+        format!(
+            "`{WAIT_FIELD}` is a list of handles to wait for, as [\"agent-12\", \"reviewer\"], \
+             in a call with no `{INPUT_FIELD}`"
+        )
+    };
+    let handles = match input.get(WAIT_FIELD) {
+        None | Some(Value::Null) => return Ok(None),
+        Some(Value::Array(handles)) => handles
+            .iter()
+            .map(|handle| match handle {
+                Value::String(handle) if !handle.trim().is_empty() => Ok(handle.trim().to_string()),
+                _ => Err(shape()),
+            })
+            .collect::<Result<Vec<_>, _>>()?,
+        Some(_) => return Err(shape()),
+    };
+    if handles.is_empty() {
+        return Err(format!(
+            "`{WAIT_FIELD}` names nothing to wait for; list the handles spawn gave you, or leave \
+             it out"
+        ));
+    }
+    if input
+        .get(INPUT_FIELD)
+        .and_then(Value::as_str)
+        .is_some_and(|raw| !raw.trim().is_empty())
+    {
+        return Err(format!(
+            "`{WAIT_FIELD}` and `{INPUT_FIELD}` are two different calls: one waits for handles, \
+             the other starts something. Make two calls"
+        ));
+    }
+    for field in [BACKGROUND_FIELD, METADATA_FIELD, FILES_FIELD, REACH_FIELD] {
+        if input.get(field).is_some_and(|value| !value.is_null()) {
+            return Err(format!(
+                "`{field}` goes with a task, and `{WAIT_FIELD}` starts none; leave it out of a \
+                 wait"
+            ));
+        }
+    }
+    let any = match input.get(ANY_FIELD) {
+        None | Some(Value::Null) => false,
+        Some(Value::Bool(any)) => *any,
+        Some(_) => {
+            return Err(format!(
+                "`{ANY_FIELD}` is `true` or `false`: whether to return on the first handle to \
+                 finish rather than once all have"
+            ));
+        }
+    };
+    Ok(Some(Spawn {
+        mode: Mode::Wait,
+        body: String::new(),
+        target: None,
+        reach: None,
+        metadata: None,
+        files: Vec::new(),
+        background: false,
+        wait: handles,
+        any,
+    }))
+}
+
+/// Whether the call starts its task in the background, when the call is one
+/// that can: a task, for an agent here or elsewhere. A command runs here, to
+/// completion, and a wait starts nothing.
+fn background(field: Option<&Value>, spawn: &Spawn) -> Result<bool, String> {
+    let background = match field {
+        None | Some(Value::Null) => return Ok(false),
+        Some(Value::Bool(background)) => *background,
+        Some(_) => {
+            return Err(format!(
+                "`{BACKGROUND_FIELD}` is `true` or `false`: whether to start the task and return \
+                 its handle at once instead of waiting for its answer"
+            ));
+        }
+    };
+    if !background {
+        return Ok(false);
+    }
+    if spawn.mode == Mode::Command {
+        return Err(format!(
+            "`{BACKGROUND_FIELD}` goes with a task for an agent; a command runs here, to \
+             completion. Hand the command to a subagent as a task if it should run while you \
+             work"
+        ));
+    }
+    if spawn.body.is_empty() {
+        return Err(format!(
+            "`@<agent>` alone already waits on what that agent is doing; `{BACKGROUND_FIELD}` \
+             goes with a task to start, so leave it out here"
+        ));
+    }
+    Ok(true)
 }
 
 /// The paths in `files`, when the call is one that can carry them: files go
@@ -229,7 +389,8 @@ fn files(field: Option<&Value>, spawn: &Spawn) -> Result<Vec<String>, String> {
 ///
 /// `None` means the input field is missing or not a string. Empty and
 /// whitespace-only strings are still lexically delegations even though
-/// [`parse`] subsequently refuses their empty body.
+/// [`parse`] subsequently refuses their empty body. A wait has no string and
+/// classifies as `None` too: it is read by [`parse`] from its own field.
 pub fn classify_spawn_input(input: &Value) -> Option<Mode> {
     let raw = input.get(INPUT_FIELD).and_then(Value::as_str)?;
     Some(classify_raw(raw))
@@ -365,6 +526,9 @@ fn command(body: &str, target: Option<String>) -> Result<Spawn, String> {
         reach: None,
         metadata: None,
         files: Vec::new(),
+        background: false,
+        wait: Vec::new(),
+        any: false,
     })
 }
 
@@ -412,6 +576,9 @@ fn remote(rest: &str) -> Result<Spawn, String> {
         reach: None,
         metadata: None,
         files: Vec::new(),
+        background: false,
+        wait: Vec::new(),
+        any: false,
     })
 }
 
@@ -431,5 +598,8 @@ fn delegation(body: &str) -> Result<Spawn, String> {
         reach: None,
         metadata: None,
         files: Vec::new(),
+        background: false,
+        wait: Vec::new(),
+        any: false,
     })
 }

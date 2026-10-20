@@ -37,7 +37,7 @@ pub(crate) struct Teammate {
     /// — every await in it — and a turn is the one thing that runs on it. A
     /// second caller does not wait: it is refused as *still working*, which
     /// is the remote rule (ADR-0029 §5) said once.
-    agent: tokio::sync::Mutex<mentra::agent::Agent>,
+    agent: Arc<tokio::sync::Mutex<mentra::agent::Agent>>,
     /// The ledger row that makes the teammate a basis agent for as long as it
     /// lives: judged by the parent's guard, and able to keep teammates of its
     /// own. `None` on a runtime with no ledger, which keeps no teammates.
@@ -49,7 +49,7 @@ impl Teammate {
         Self {
             id: agent.id().to_string(),
             name: name.to_string(),
-            agent: tokio::sync::Mutex::new(agent),
+            agent: Arc::new(tokio::sync::Mutex::new(agent)),
             _row: row,
         }
     }
@@ -63,8 +63,12 @@ impl Teammate {
     }
 
     /// The agent, for one turn — or `None` while another turn holds it.
-    pub(crate) fn take(&self) -> Option<tokio::sync::MutexGuard<'_, mentra::agent::Agent>> {
-        self.agent.try_lock().ok()
+    ///
+    /// Owned rather than borrowed, so a turn run in the background
+    /// (ADR-0042) can carry the lock onto its own task; the mutex is the
+    /// same one, so "one task at a time" holds whichever way a turn runs.
+    pub(crate) fn take_owned(&self) -> Option<tokio::sync::OwnedMutexGuard<mentra::agent::Agent>> {
+        Arc::clone(&self.agent).try_lock_owned().ok()
     }
 }
 

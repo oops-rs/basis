@@ -63,6 +63,7 @@ pub use mentra::tool::{
     ToolExecutionCategory, ToolExecutor, ToolResult, ToolSideEffectLevel,
 };
 pub use spawn::{
-    ChildContext, ChildSpec, DEFAULT_DELEGATION_DEPTH, SPAWN, SPAWN_INPUT_FIELD, SpawnInput,
+    ChildContext, ChildSpec, DEFAULT_DELEGATION_DEPTH, DEFAULT_DELEGATION_WIDTH, SPAWN,
+    SPAWN_ANY_FIELD, SPAWN_BACKGROUND_FIELD, SPAWN_INPUT_FIELD, SPAWN_WAIT_FIELD, SpawnInput,
     SpawnMode, SpawnTool, classify_spawn_input, parse_spawn_input,
 };

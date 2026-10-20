@@ -262,8 +262,10 @@ basis-tasks = { version = "0.19.0", path = "basis-tasks" }
 # adds request metadata through the exchange, which a delegation's
 # parameters ride in (ADR-0040). 0.31.0 carries files (ADR-0041): images in a
 # tool's output and `read`, A2A file parts both ways, `mentra::media`, and
-# `read_file_bytes`/`write_file_bytes` under the file tools' policy.
-mentra = { version = "0.31.0", default-features = false }
+# `read_file_bytes`/`write_file_bytes` under the file tools' policy. 0.32.0
+# adds `ToolContext::deferred` (ADR-0042): what a background delegation
+# leaves for its parent's next round, applied by mentra's runner.
+mentra = { version = "0.32.0", default-features = false }
 
 async-trait = "0.1"
 # ACP carries an image in a prompt as base64; basis's `PromptPart` carries the

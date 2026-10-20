@@ -705,6 +705,7 @@ impl Workspace {
             host_tools: self.host_tools.clone(),
             remote: Some(Arc::clone(&self.remote)),
             teammates: Default::default(),
+            background: Default::default(),
         }
     }
 
@@ -735,6 +736,7 @@ impl Workspace {
             host_tools: self.host_tools.clone(),
             remote: Some(Arc::clone(&self.remote)),
             teammates: Default::default(),
+            background: Default::default(),
         }
     }
 

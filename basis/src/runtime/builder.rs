@@ -148,6 +148,9 @@ pub struct RuntimeBuilder {
     /// How many levels of delegation `spawn` will start before refusing
     /// ([`with_delegation_depth`](Self::with_delegation_depth), decision D9).
     delegation_depth: usize,
+    /// How many delegations one agent may run in the background at once
+    /// ([`with_delegation_width`](Self::with_delegation_width), ADR-0042).
+    delegation_width: usize,
     /// Who a delegated child is ([`with_child_policy`](Self::with_child_policy),
     /// decision D4). `None` — the default — is inherit-everything, on the code
     /// path every runtime has always used.
@@ -207,6 +210,7 @@ impl std::fmt::Debug for RuntimeBuilder {
             .field("wire", &self.wire)
             .field("file_tools", &self.file_tools)
             .field("delegation_depth", &self.delegation_depth)
+            .field("delegation_width", &self.delegation_width)
             .field("tool_result_policy", &self.tool_result_policy)
             // Presence is all a `dyn` policy can honestly print.
             .field(
@@ -249,6 +253,7 @@ impl Default for RuntimeBuilder {
             command_targets: CommandTargets::new(),
             host_tools: Vec::new(),
             delegation_depth: crate::tools::DEFAULT_DELEGATION_DEPTH,
+            delegation_width: crate::tools::DEFAULT_DELEGATION_WIDTH,
             child_policy: None,
             reach_policy: ReachPolicy::default(),
             tool_result_policy: None,
@@ -435,6 +440,25 @@ impl RuntimeBuilder {
         }
     }
 
+    /// Caps how many delegations one agent may run in the background at
+    /// once (ADR-0042).
+    ///
+    /// [`crate::tools::DEFAULT_DELEGATION_WIDTH`] (four) unless a caller says
+    /// otherwise here. Children share their parent's token counter and each
+    /// is checked against the bound only after a round has spent, so N
+    /// running at once can overshoot by N rounds where a blocking child
+    /// overshoots by one; this is the N. Zero refuses every background
+    /// start, which leaves `spawn` as it was before ADR-0042. Checked in the
+    /// preview like the depth floor, so no approver's answer and no
+    /// remembered rule can lift it.
+    #[must_use]
+    pub fn with_delegation_width(self, width: usize) -> Self {
+        Self {
+            delegation_width: width,
+            ..self
+        }
+    }
+
     /// Decides who a delegated child is, per delegation (decision D4).
     ///
     /// `spawn` has always minted a subagent as an exact clone of its parent —
@@ -594,6 +618,7 @@ impl RuntimeBuilder {
         let spawn = spawn_tool(
             target_names,
             self.delegation_depth,
+            self.delegation_width,
             self.child_policy,
             self.reach_policy,
             Arc::clone(&agents),
@@ -753,11 +778,13 @@ impl RuntimeBuilder {
 fn spawn_tool(
     targets: Vec<String>,
     delegation_depth: usize,
+    delegation_width: usize,
     child_policy: Option<ChildPolicy>,
     reach_policy: ReachPolicy,
     agents: Arc<super::agents::AgentRegistry>,
 ) -> SpawnTool {
     let tool = SpawnTool::with_targets_and_depth(targets, delegation_depth)
+        .with_delegation_width(delegation_width)
         // Read for two questions — what is this delegation's parent denied,
         // so a roster override cannot hand a narrowed child a sibling
         // workspace's tools and the child is judged by the same guard its

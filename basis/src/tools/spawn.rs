@@ -23,6 +23,11 @@
 //! The prefix is read by the same parser, in the same pass, and the target it
 //! leaves behind is a typed field like the mode beside it.
 //!
+//! A task may also run *while the model keeps working* (ADR-0042): the
+//! `background` field beside the string starts it and returns its handle, and
+//! a call of `wait` alone — no string — collects one or more handles. Same
+//! door, same gate, two more typed facts; [`background`] has the lifecycle.
+//!
 //! # What the approver sees
 //!
 //! [`ToolExecutor::authorization_preview`] is overridden rather than left at
@@ -30,7 +35,8 @@
 //! [`ToolSideEffectLevel::Process`] and a delegation reports
 //! [`ToolSideEffectLevel::LocalState`]; both are consequential, so
 //! [`is_consequential`](crate::approval::is_consequential) never waves either
-//! through under the reads-are-never-asked rule. The preview's
+//! through under the reads-are-never-asked rule. A wait reports `None`: it
+//! starts nothing and reads back what an approved call started. The preview's
 //! parser owns `{mode, body, target}`; after the tool context resolves the
 //! working directory, `structured_input` carries `{mode, body, cwd, target}` — the thing an
 //! approver renders, and the thing mentra globs a remembered rule's pattern against
@@ -39,7 +45,8 @@
 //! policy ([`ChildSpec`], D4) overrode something adds a `child` key describing
 //! what the child will be — roster, model, whether the system prompt is
 //! replaced — and only then, so the four-key shape every existing rule was
-//! written against is untouched on a runtime with no policy.
+//! written against is untouched on a runtime with no policy. `background`
+//! and `wait` are additive on the same ground.
 //!
 //! Order matters and is mentra's, not basis's: the orchestrator builds this
 //! preview and puts it to the authorizer *before* it calls `execute_mut`
@@ -47,7 +54,8 @@
 //! answer. A preview that returns `Err` is a refusal in its own right, reaching
 //! the model as `Tool execution denied: …` without the approver — or the rule
 //! store — ever being consulted. That is where the depth guard lives, because
-//! a structural floor is not a thing an allow-rule should be able to lift.
+//! a structural floor is not a thing an allow-rule should be able to lift. The
+//! width guard lives there for the same reason.
 //!
 //! # What this is not
 //!
@@ -58,6 +66,7 @@
 //! the same path `spawn` calls — after this tool has been authorized, before
 //! anything executes.
 
+mod background;
 mod child;
 mod depth;
 mod describe;
@@ -87,12 +96,16 @@ use teammate::Teammate;
 // rule: it is read exactly once, here. Exported so a host's interceptor asks
 // this parser rather than writing its own.
 pub use parse::{
+    ANY_FIELD as SPAWN_ANY_FIELD, BACKGROUND_FIELD as SPAWN_BACKGROUND_FIELD,
     INPUT_FIELD as SPAWN_INPUT_FIELD, Mode as SpawnMode, REACH_FIELD as SPAWN_REACH_FIELD,
-    Spawn as SpawnInput, classify_spawn_input, parse as parse_spawn_input,
+    Spawn as SpawnInput, WAIT_FIELD as SPAWN_WAIT_FIELD, classify_spawn_input,
+    parse as parse_spawn_input,
 };
 pub(crate) use parse::{LOCAL_TARGET, is_namespaced, is_target_name};
 pub use reach::{Reach, ReachPolicy};
 
+pub use background::DEFAULT_DELEGATION_WIDTH;
+pub(crate) use background::{Children, JoinAtEnd};
 pub use child::{ChildContext, ChildSpec};
 pub use depth::DEFAULT_DELEGATION_DEPTH;
 
@@ -118,9 +131,13 @@ pub const SPAWN: &str = "spawn";
 /// (ADR-0029 §4, ADR-0031 §3). Cloning shares the ledgers and the policy, so a
 /// copy is the same tool told about different targets, never a second depth
 /// count.
-#[derive(Default, Clone)]
+#[derive(Clone)]
 pub struct SpawnTool {
     depth: depth::Depth,
+    /// How many delegations one agent may run in the background at once
+    /// (ADR-0042): [`DEFAULT_DELEGATION_WIDTH`] unless
+    /// [`with_delegation_width`](Self::with_delegation_width) says otherwise.
+    width: usize,
     /// The command targets this runtime can route to, sorted and deduplicated
     /// so the description a model reads is the same string on every build.
     /// Empty is the ordinary case, and the one in which the model is never
@@ -136,7 +153,8 @@ pub struct SpawnTool {
     /// exposes no reader for an agent's or a template's effective
     /// `ToolProfile`, and `with_tool_profile` replaces it wholesale — and
     /// where to record the child, so that the guard judging the parent judges
-    /// it too.
+    /// it too. And, since ADR-0042, where the agent's background delegations
+    /// are kept.
     ///
     /// `None` for a host that built this tool itself against mentra, which has
     /// no basis workspaces to keep apart.
@@ -169,6 +187,12 @@ pub struct SpawnTool {
     reach: ReachPolicy,
 }
 
+impl Default for SpawnTool {
+    fn default() -> Self {
+        Self::with_targets_and_depth(Vec::<String>::new(), depth::DEFAULT_DELEGATION_DEPTH)
+    }
+}
+
 /// The per-call facts both authorization preview and execution must decide.
 #[derive(Debug)]
 enum SpawnDecision {
@@ -194,6 +218,12 @@ enum SpawnDecision {
         agents: Arc<crate::agents::remote::RemoteAgents>,
         name: String,
     },
+    /// Collect what runs in the background under these handles (ADR-0042),
+    /// resolved to the ids they are kept under.
+    Wait {
+        ids: Vec<String>,
+        any: bool,
+    },
 }
 
 /// What a named delegation adds to the preview (ADR-0037 §4): which kind of
@@ -210,6 +240,7 @@ impl std::fmt::Debug for SpawnTool {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         f.debug_struct("SpawnTool")
             .field("depth", &self.depth)
+            .field("width", &self.width)
             .field("targets", &self.targets)
             .field("policy", &self.policy.as_ref().map(|_| "<child policy>"))
             .field("agents", &self.agents.as_ref().map(|_| "<agent ledger>"))
@@ -262,6 +293,7 @@ impl SpawnTool {
     ) -> Self {
         Self {
             depth: depth::Depth::new(max_depth),
+            width: background::DEFAULT_DELEGATION_WIDTH,
             targets: targets
                 .into_iter()
                 .collect::<BTreeSet<_>>()
@@ -275,6 +307,17 @@ impl SpawnTool {
             refresh: None,
             reach: ReachPolicy::default(),
         }
+    }
+
+    /// Says how many delegations one agent may run in the background at
+    /// once (ADR-0042). basis's own
+    /// [`RuntimeBuilder::with_delegation_width`](crate::RuntimeBuilder::with_delegation_width)
+    /// calls this; a host driving mentra directly calls it itself. Checked
+    /// in the preview like the depth floor, so no approver's answer and no
+    /// remembered rule can lift it. Zero refuses every background start.
+    #[must_use]
+    pub fn with_delegation_width(self, width: usize) -> Self {
+        Self { width, ..self }
     }
 
     /// Says what `@<name>` may reach (ADR-0037 §3). basis's own
@@ -381,6 +424,9 @@ impl SpawnTool {
             } else {
                 Vec::new()
             },
+            // Taught only where there is somewhere to keep the work: a host
+            // driving mentra directly has no ledger and is offered nothing.
+            width: self.agents.as_ref().map(|_| self.width),
         }
     }
 
@@ -426,6 +472,15 @@ impl SpawnTool {
     /// read from its ledger row — `None` for an agent basis did not mint.
     fn remote_agents_of(&self, agent_id: &str) -> Option<Arc<crate::agents::remote::RemoteAgents>> {
         self.agents.as_ref()?.of(agent_id)?.remote.clone()
+    }
+
+    /// The calling agent's background delegations, read from its ledger row
+    /// — `None` for an agent basis did not mint, which keeps none.
+    fn children_of(&self, agent_id: &str) -> Option<Children> {
+        self.agents
+            .as_ref()?
+            .of(agent_id)
+            .map(|tools| tools.background.clone())
     }
 
     /// Where `@<name>` stands with the calling agent's remote agents, without
@@ -596,6 +651,50 @@ impl SpawnTool {
         })
     }
 
+    /// Resolves the handles a wait names to the ids they are kept under
+    /// (ADR-0042), or says which one runs nothing.
+    fn decide_wait(
+        &self,
+        agent_id: &str,
+        keys: &[String],
+        any: bool,
+    ) -> Result<SpawnDecision, String> {
+        let Some(children) = self.children_of(agent_id) else {
+            return Err(
+                "spawn keeps no background work on this runtime, so there is nothing to wait for"
+                    .to_string(),
+            );
+        };
+        let mut ids = Vec::with_capacity(keys.len());
+        for key in keys {
+            let Some(id) = children.find(key) else {
+                return Err(nothing_running(&children, key));
+            };
+            if !ids.contains(&id) {
+                ids.push(id);
+            }
+        }
+        Ok(SpawnDecision::Wait { ids, any })
+    }
+
+    /// `Ok` when the calling agent may start one more delegation in the
+    /// background, and the refusal the model should read instead when it is
+    /// at the width (ADR-0042).
+    fn authorize_background(&self, agent_id: &str) -> Result<(), String> {
+        let Some(children) = self.children_of(agent_id) else {
+            return Err(
+                "spawn keeps no background work on this runtime; leave `background` out and \
+                 wait for the answer"
+                    .to_string(),
+            );
+        };
+        let running = children.running();
+        if running >= self.width {
+            return Err(background::too_wide(running, self.width));
+        }
+        Ok(())
+    }
+
     /// Decides one parsed call. Both consumers invoke this independently:
     /// preview so the approver sees the real decision, execution again so a
     /// missing authorizer cannot remove a floor.
@@ -606,11 +705,29 @@ impl SpawnTool {
         resolve_workspace: impl FnOnce() -> Result<std::path::PathBuf, String>,
     ) -> Result<SpawnDecision, String> {
         self.authorize_target(spawn)?;
+        if spawn.background() {
+            self.authorize_background(agent_id)?;
+        }
         match spawn.mode() {
             Mode::Command => Ok(SpawnDecision::Command),
+            Mode::Wait => self.decide_wait(agent_id, spawn.wait(), spawn.any()),
             // Not an `if let` guard: those are newer than `rust-version`.
             Mode::Agent => {
                 if let Some(name) = spawn.target() {
+                    // `@<handle>` alone collects a background delegation
+                    // under that handle before it means anything else: a
+                    // name that is both a running teammate turn and a
+                    // teammate is the same thing, and a remote agent's own
+                    // outstanding task is what its background slot waits on.
+                    if spawn.body().is_empty()
+                        && let Some(children) = self.children_of(agent_id)
+                        && let Some(id) = children.find(name)
+                    {
+                        return Ok(SpawnDecision::Wait {
+                            ids: vec![id],
+                            any: false,
+                        });
+                    }
                     return self.decide_named(spawn, agent_id, name, resolve_workspace);
                 }
                 let depth = self.depth.authorize_delegation(agent_id)?;
@@ -637,6 +754,28 @@ fn no_remote_agents(name: &str) -> String {
     format!(
         "spawn has no remote agents to hand `@{name}` to; write the task with no `@` to hand it \
          to a subagent here, or `@@` to begin it with a literal `@`"
+    )
+}
+
+/// The refusal for a wait on a handle nothing runs under, naming what does.
+fn nothing_running(children: &Children, key: &str) -> String {
+    let running: Vec<String> = children
+        .listed()
+        .into_iter()
+        .map(|(id, name, _)| match name {
+            Some(name) => format!("{name} (id {id})"),
+            None => id,
+        })
+        .collect();
+    if running.is_empty() {
+        return format!(
+            "nothing is running in the background under `{key}`, or at all; start a task with \
+             `background: true` before waiting for it"
+        );
+    }
+    format!(
+        "nothing is running in the background under `{key}`; what is: {}",
+        listed(&running)
     )
 }
 
@@ -683,7 +822,9 @@ impl ToolExecutor for SpawnTool {
         })?;
         parameters_reach_a_remote_agent(&spawn, &decision)?;
         let (cwd, child, named) = match decision {
-            SpawnDecision::Command => (ctx.resolve_working_directory(None)?, None, None),
+            SpawnDecision::Command | SpawnDecision::Wait { .. } => {
+                (ctx.resolve_working_directory(None)?, None, None)
+            }
             SpawnDecision::Remote { .. } => (
                 ctx.resolve_working_directory(None)?,
                 None,
@@ -735,12 +876,13 @@ impl ToolExecutor for SpawnTool {
         ))
     }
 
-    /// Both modes run in the exclusive lane — a command mutates the workspace
-    /// and a delegation borrows the agent — so this only ever refines *which*
-    /// exclusive category a call is, never whether it can be batched.
+    /// Every mode runs in the exclusive lane — a command mutates the
+    /// workspace, a delegation borrows the agent, a wait blocks on one — so
+    /// this only ever refines *which* exclusive category a call is, never
+    /// whether it can be batched.
     fn execution_category(&self, input: &Value) -> ToolExecutionCategory {
         parse(input).map_or(ToolExecutionCategory::ExclusiveLocalMutation, |spawn| {
-            execution_category(spawn.mode())
+            execution_category(&spawn)
         })
     }
 
@@ -758,16 +900,32 @@ impl ToolExecutor for SpawnTool {
 
         match decision {
             SpawnDecision::Command => execute::command(&ctx, spawn.body(), spawn.target()).await,
+            SpawnDecision::Wait { ids, any } => execute::wait(self, &mut ctx, &ids, any).await,
             SpawnDecision::Remote { agents, name } => {
                 let task = remote::Task {
-                    body: spawn.body(),
-                    metadata: spawn.metadata(),
+                    body: spawn.body().to_string(),
+                    metadata: spawn.metadata().cloned(),
                     files: sent.into_iter().map(|sent| sent.file).collect(),
                 };
+                if spawn.background() {
+                    let children = execute::children_of(self, &ctx.agent_id)?;
+                    return remote::delegate_in_background(
+                        &ctx,
+                        children,
+                        agents,
+                        &name,
+                        task,
+                        self.remembers.clone(),
+                    );
+                }
                 remote::delegate(ctx, &agents, &name, task, &self.remembers).await
             }
             SpawnDecision::Agent { depth, spec, .. } => {
                 let body = files::named(spawn.body(), &sent);
+                if spawn.background() {
+                    return execute::delegate_in_background(self, &mut ctx, &body, depth, *spec)
+                        .await;
+                }
                 execute::delegate(self, &mut ctx, &body, depth, *spec).await
             }
             SpawnDecision::Teammate {
@@ -778,7 +936,19 @@ impl ToolExecutor for SpawnTool {
                 ..
             } => {
                 let body = files::named(spawn.body(), &sent);
-                execute::teammate(self, &mut ctx, &name, &body, depth, existing, *spec).await
+                execute::teammate(
+                    self,
+                    &mut ctx,
+                    &body,
+                    execute::TeammateCall {
+                        name,
+                        depth,
+                        existing,
+                        spec: *spec,
+                        background: spawn.background(),
+                    },
+                )
+                .await
             }
         }
     }
@@ -841,20 +1011,17 @@ fn preview(
         "cwd": cwd,
         "target": spawn.target().unwrap_or(LOCAL_TARGET),
     });
+    let object = structured_input
+        .as_object_mut()
+        .expect("built as an object two lines up");
     if let Some(child) = child {
-        structured_input
-            .as_object_mut()
-            .expect("built as an object two lines up")
-            .insert("child".to_string(), child);
+        object.insert("child".to_string(), child);
     }
     // ADR-0037 §4: a named delegation says which kind of agent the name was
     // decided to reach — never `auto` — and, once it is known, which agent.
     // Additive on the same ground as `child`: absent from every call that
     // names nobody, so a rule written against the four keys still matches.
     if let Some(named) = &named {
-        let object = structured_input
-            .as_object_mut()
-            .expect("built as an object above");
         object.insert("reach".to_string(), json!(named.reach.as_str()));
         if let Some(agent_id) = &named.agent_id {
             object.insert("agent_id".to_string(), json!(agent_id));
@@ -863,18 +1030,23 @@ fn preview(
     // ADR-0040: what goes beside the task is shown to whoever approves it.
     // Additive on the same ground: absent unless the call gave parameters.
     if let Some(metadata) = spawn.metadata() {
-        structured_input
-            .as_object_mut()
-            .expect("built as an object above")
-            .insert("metadata".to_string(), Value::Object(metadata.clone()));
+        object.insert("metadata".to_string(), Value::Object(metadata.clone()));
     }
     // ADR-0041: the files that leave with the task, as written — shown on
     // the same additive ground.
     if !spawn.files().is_empty() {
-        structured_input
-            .as_object_mut()
-            .expect("built as an object above")
-            .insert(parse::FILES_FIELD.to_string(), json!(spawn.files()));
+        object.insert(parse::FILES_FIELD.to_string(), json!(spawn.files()));
+    }
+    // ADR-0042: that the task is left running, and what a wait waits for —
+    // each shown only on the call that said it.
+    if spawn.background() {
+        object.insert(parse::BACKGROUND_FIELD.to_string(), json!(true));
+    }
+    if spawn.mode() == Mode::Wait {
+        object.insert(parse::WAIT_FIELD.to_string(), json!(spawn.wait()));
+        if spawn.any() {
+            object.insert(parse::ANY_FIELD.to_string(), json!(true));
+        }
     }
 
     ToolAuthorizationPreview {
@@ -882,8 +1054,8 @@ fn preview(
         capabilities: capabilities(spawn.mode()),
         side_effect_level: side_effect_level(spawn, named.as_ref()),
         durability: descriptor.durability,
-        execution_category: execution_category(spawn.mode()),
-        approval_category: approval_category(spawn.mode()),
+        execution_category: execution_category(spawn),
+        approval_category: approval_category(spawn),
         raw_input: raw_input.clone(),
         structured_input,
     }
@@ -893,10 +1065,13 @@ fn preview(
 /// `shell` and `task` declared, now decided per call instead of per name — and
 /// `External` for a delegation to a remote agent, which hands work to a system
 /// this process does not control (ADR-0029 §2). A teammate is a delegation
-/// here (ADR-0037 §4). None is `None`, so no call can present as read-only.
+/// here (ADR-0037 §4). A wait is `None`: it starts nothing, and reads back
+/// what an approved call started (ADR-0042) — the one call that can present
+/// as read-only, because it is one.
 fn side_effect_level(spawn: &Spawn, named: Option<&Named>) -> ToolSideEffectLevel {
     match (spawn.mode(), named.map(|named| named.reach)) {
         (Mode::Command, _) => ToolSideEffectLevel::Process,
+        (Mode::Wait, _) => ToolSideEffectLevel::None,
         (Mode::Agent, Some(Reach::Remote | Reach::Auto)) => ToolSideEffectLevel::External,
         (Mode::Agent, Some(Reach::Local) | None) => ToolSideEffectLevel::LocalState,
     }
@@ -905,21 +1080,28 @@ fn side_effect_level(spawn: &Spawn, named: Option<&Named>) -> ToolSideEffectLeve
 fn capabilities(mode: Mode) -> Vec<ToolCapability> {
     match mode {
         Mode::Command => vec![ToolCapability::ProcessExec, ToolCapability::FilesystemWrite],
-        Mode::Agent => vec![ToolCapability::Delegation],
+        Mode::Agent | Mode::Wait => vec![ToolCapability::Delegation],
     }
 }
 
-const fn approval_category(mode: Mode) -> ToolApprovalCategory {
-    match mode {
+/// A background start is mentra's `Background` category, the one its own
+/// `background_run` declared: a rule written for background work matches it.
+const fn approval_category(spawn: &Spawn) -> ToolApprovalCategory {
+    match spawn.mode() {
         Mode::Command => ToolApprovalCategory::Process,
-        Mode::Agent => ToolApprovalCategory::Delegation,
+        Mode::Agent if spawn.background() => ToolApprovalCategory::Background,
+        Mode::Agent | Mode::Wait => ToolApprovalCategory::Delegation,
     }
 }
 
-const fn execution_category(mode: Mode) -> ToolExecutionCategory {
-    match mode {
+/// A background start is a `BackgroundJob` — it returns at once and leaves
+/// work running, the shape mentra's own `background_run` declares — and the
+/// rest are what they always were. All exclusive.
+const fn execution_category(spawn: &Spawn) -> ToolExecutionCategory {
+    match spawn.mode() {
         Mode::Command => ToolExecutionCategory::ExclusiveLocalMutation,
-        Mode::Agent => ToolExecutionCategory::Delegation,
+        Mode::Agent if spawn.background() => ToolExecutionCategory::BackgroundJob,
+        Mode::Agent | Mode::Wait => ToolExecutionCategory::Delegation,
     }
 }
 

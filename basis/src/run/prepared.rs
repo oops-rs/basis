@@ -311,7 +311,20 @@ impl PreparedRun {
     /// turns below cannot drift about what a turn carries — and so a test can
     /// read the same value a turn is about to be driven on.
     pub(crate) fn run_options(&self, options: TurnOptions) -> RunOptions {
-        options.into_run_options(self.retry_policy)
+        let mut run_options = options.into_run_options(self.retry_policy);
+        // basis's own strategy goes in front of the host's (ADR-0042): when
+        // the model ends its turn with delegations still running in the
+        // background, they are joined first, and their results reach it
+        // before its answer is final. Only a session with a ledger row keeps
+        // such delegations, so only one gets the strategy.
+        if let Some(row) = &self.agent_row {
+            run_options.round_strategy = Some(Arc::new(crate::tools::spawn::JoinAtEnd::new(
+                Arc::clone(row.registry()),
+                row.agent_id(),
+                run_options.round_strategy.take(),
+            )));
+        }
+        run_options
     }
 
     /// Sets what every turn on this run may spend.

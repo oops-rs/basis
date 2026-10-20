@@ -10,7 +10,10 @@
 use serde_json::{Value, json};
 
 use super::{
-    parse::{FILES_FIELD, INPUT_FIELD, METADATA_FIELD, REACH_FIELD},
+    parse::{
+        ANY_FIELD, BACKGROUND_FIELD, FILES_FIELD, INPUT_FIELD, METADATA_FIELD, REACH_FIELD,
+        WAIT_FIELD,
+    },
     reach::Reach,
 };
 
@@ -54,7 +57,8 @@ impl Remote {
     }
 }
 
-/// Everything the model is taught about `@<name>` (ADR-0037 §7).
+/// Everything the model is taught about `@<name>` (ADR-0037 §7), and about
+/// running tasks in the background (ADR-0042).
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
 pub(super) struct Names {
     pub(super) remote: Remote,
@@ -65,6 +69,9 @@ pub(super) struct Names {
     /// The `reach` values the model may choose between; empty when the
     /// policy fixes one, so the field is not taught.
     pub(super) reach: Vec<Reach>,
+    /// How many tasks may run in the background at once, or `None` on a
+    /// runtime that keeps none, where the fields are not taught.
+    pub(super) width: Option<usize>,
 }
 
 impl Names {
@@ -123,6 +130,37 @@ pub(super) fn description(targets: &[String], names: &Names) -> String {
         text.push_str("\n\n");
         text.push_str(&reach_paragraph(&names.reach));
     }
+    if let Some(width) = names.width {
+        text.push_str("\n\n");
+        text.push_str(&background_paragraph(width, names.names_anyone()));
+    }
+    text
+}
+
+/// The background paragraph (ADR-0042): how to start a task without waiting,
+/// the three ways its answer comes back, and the width. Taught only where
+/// there is a ledger to keep the work on.
+fn background_paragraph(width: usize, names_anyone: bool) -> String {
+    let handle = if names_anyone {
+        "the subagent's id, or the name the task went to"
+    } else {
+        "the subagent's id"
+    };
+    let mut text = format!(
+        "To run tasks at the same time, add `{BACKGROUND_FIELD}: true`: the task starts and \
+         you get its handle back at once ({handle}) instead of its answer. The answer arrives \
+         on its own when the task is done, as a delegation result in a later message, so you \
+         can keep working meanwhile. To collect one or more answers now, call with \
+         `{WAIT_FIELD}: [handles]` and no `{INPUT_FIELD}` — all of them, or the first to finish \
+         with `{ANY_FIELD}: true` — or write `@<handle>` alone for one. Anything still running \
+         when you finish is waited for before your answer is final, so nothing started is \
+         lost."
+    );
+    text.push_str(&match width {
+        0 => " Nothing may run in the background here.".to_string(),
+        1 => " One task may run in the background at a time.".to_string(),
+        width => format!(" Up to {width} tasks may run in the background at once."),
+    });
     text
 }
 
@@ -219,8 +257,11 @@ fn remote_paragraph(remote: &Remote) -> String {
     text
 }
 
-/// One required string, and no second field to decide about on every call —
-/// which is why the target rides in the same string rather than beside it.
+/// One string, and no second field to decide about on every call — which is
+/// why the target rides in the same string rather than beside it. The string
+/// is required unless the call is a wait, which has none (ADR-0042); the
+/// schema says so by requiring neither and the description by saying which
+/// goes with which.
 pub(super) fn input_schema(targets: &[String], names: &Names) -> Value {
     let remote = &names.remote;
     let mut description = "A shell command when it starts with `!`, otherwise a task to \
@@ -257,6 +298,11 @@ pub(super) fn input_schema(targets: &[String], names: &Names) -> Value {
             " A name no remote agent has is a teammate here, made the first time and continued \
              after."
         });
+    }
+    if names.width.is_some() {
+        description.push_str(&format!(
+            " Leave `{INPUT_FIELD}` out of a call that only waits (`{WAIT_FIELD}`)."
+        ));
     }
 
     let mut properties = serde_json::Map::new();
@@ -305,10 +351,46 @@ pub(super) fn input_schema(targets: &[String], names: &Names) -> Value {
         );
     }
 
+    // ADR-0042: the two fields that make a delegation asynchronous, offered
+    // only where there is a ledger to keep the work on.
+    if names.width.is_some() {
+        properties.insert(
+            BACKGROUND_FIELD.to_string(),
+            json!({
+                "type": "boolean",
+                "description": "`true` to start the task and return its handle at once instead \
+                                of its answer; the answer arrives on its own later, or with \
+                                `wait`. Only with a task, never a command.",
+            }),
+        );
+        properties.insert(
+            WAIT_FIELD.to_string(),
+            json!({
+                "type": "array",
+                "items": { "type": "string" },
+                "description": "Handles of background tasks to wait for, in a call with no \
+                                `input`: their answers are returned together.",
+            }),
+        );
+        properties.insert(
+            ANY_FIELD.to_string(),
+            json!({
+                "type": "boolean",
+                "description": "With `wait`: `true` to return as soon as any of the handles has \
+                                finished, rather than once all have.",
+            }),
+        );
+    }
+
+    let required: Vec<&str> = if names.width.is_some() {
+        Vec::new()
+    } else {
+        vec![INPUT_FIELD]
+    };
     json!({
         "type": "object",
         "properties": properties,
-        "required": [INPUT_FIELD],
+        "required": required,
     })
 }
 

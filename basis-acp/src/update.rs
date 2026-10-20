@@ -300,7 +300,10 @@ const DELEGATION: ToolKind = ToolKind::Other;
 fn spawn_kind(input: &Value) -> ToolKind {
     match classify_spawn_input(input) {
         Some(SpawnMode::Command) => ToolKind::Execute,
-        Some(SpawnMode::Agent) => DELEGATION,
+        Some(SpawnMode::Agent | SpawnMode::Wait) => DELEGATION,
+        // A wait has no string to classify (ADR-0042): it collects what a
+        // delegation started, and reads as one.
+        None if input.get(basis::tools::SPAWN_WAIT_FIELD).is_some() => DELEGATION,
         // Nothing trustworthy to classify from, and spawn's static descriptor
         // is the stronger of the two acts.
         None => ToolKind::Execute,

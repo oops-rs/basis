@@ -114,6 +114,11 @@ pub(crate) struct AgentTools {
     /// dropped. This agent's own — a child's are its own too — and gone with
     /// the row.
     pub(crate) teammates: crate::tools::spawn::teammate::Teammates,
+    /// The delegations this agent has running in the background (ADR-0042):
+    /// what `wait` collects, what the turn joins before it ends, and what the
+    /// width guard counts. This agent's own, and gone with the row — which
+    /// is gone with the run, so nothing outlives the turn that started it.
+    pub(crate) background: crate::tools::spawn::Children,
 }
 
 impl AgentTools {
@@ -127,6 +132,7 @@ impl AgentTools {
             host_tools: self.host_tools.clone(),
             remote: self.remote.clone(),
             teammates: Default::default(),
+            background: Default::default(),
         }
     }
 }
@@ -341,6 +347,21 @@ pub(crate) struct AgentRow {
     agent_id: String,
 }
 
+impl AgentRow {
+    /// The ledger this row is on, for a reader that looks the agent up by id
+    /// at each use rather than holding its tools — basis's own round strategy
+    /// (`tools::spawn::JoinAtEnd`), which runs after a resume may have
+    /// re-recorded the row.
+    pub(crate) fn registry(&self) -> &Arc<AgentRegistry> {
+        &self.registry
+    }
+
+    /// The agent this row is for.
+    pub(crate) fn agent_id(&self) -> &str {
+        &self.agent_id
+    }
+}
+
 impl Drop for AgentRow {
     fn drop(&mut self) {
         self.registry.forget_if_owned(&self.agent_id, self.owner);
@@ -479,6 +500,7 @@ mod tests {
             host_tools: Vec::new(),
             remote: None,
             teammates: Default::default(),
+            background: Default::default(),
         }
     }
 
@@ -497,6 +519,7 @@ mod tests {
                 host_tools: Vec::new(),
                 remote: None,
                 teammates: Default::default(),
+                background: Default::default(),
             },
         );
         let _stranger = registry.record_for_workspace("stranger", tools(&[]));

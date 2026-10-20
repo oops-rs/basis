@@ -9,11 +9,24 @@
 //!
 //! [`Peer`]: crate::agents::Peer
 
-use std::time::SystemTime;
+use std::{
+    path::{Path, PathBuf},
+    sync::Arc,
+    time::SystemTime,
+};
 
-use mentra::tool::{ParallelToolContext, ToolContext, ToolResult};
+use mentra::{
+    agent::DeferredItem,
+    runtime::RunOptions,
+    tool::{ParallelToolContext, ToolContext, ToolResult},
+};
 
-use super::{describe::listed, files, no_remote_agents};
+use super::{
+    background::{Children, Kind, Settled},
+    describe::listed,
+    execute::started,
+    files, no_remote_agents,
+};
 use crate::agents::{
     Attachment, ExchangeBounds, Failure, Message, Outcome, PeerError, Request, Resolved, Route,
     Started, StillWorking, Unresolved,
@@ -105,18 +118,148 @@ fn unresolved(agents: &RemoteAgents, name: &str, why: Unresolved) -> String {
 /// What one call hands a remote agent: the task in words, the parameters
 /// beside it (ADR-0040), and the files with it (ADR-0041). An empty body is a
 /// wait, which carries neither.
-pub(super) struct Task<'a> {
-    pub(super) body: &'a str,
-    pub(super) metadata: Option<&'a serde_json::Map<String, serde_json::Value>>,
+pub(super) struct Task {
+    pub(super) body: String,
+    pub(super) metadata: Option<serde_json::Map<String, serde_json::Value>>,
     pub(super) files: Vec<Attachment>,
 }
 
+/// This side of an exchange: who is asking, under what bounds, where
+/// progress goes, and how files that come back are written. The blocking
+/// path answers all four from the tool context; a background task (ADR-0042)
+/// has no context, so its progress goes nowhere and its files are written
+/// straight into the workspace inbox.
+struct Side<'a> {
+    caller: String,
+    options: RunOptions,
+    progress: &'a (dyn Fn(String) + Sync),
+    root: PathBuf,
+    write: Write<'a>,
+}
+
+/// How a returned file is written: the file tools' policy, or the inbox.
+type Write<'a> = &'a (dyn Fn(&str, &[u8]) -> Result<PathBuf, String> + Sync);
+
+/// Hands `task` to the remote agent `name`, or — with an empty body — waits
+/// again on its outstanding task, and reports what came back.
+///
+/// `remembered` says where the calling agent's record is kept: on disk by
+/// agent for one a workspace minted or resumed, under a host's key for one
+/// bound to it, in memory for a delegated child (`crate::agents::remote`
+/// has the rule).
 pub(super) async fn delegate(
     ctx: ToolContext<'_>,
     agents: &RemoteAgents,
     name: &str,
-    task: Task<'_>,
+    task: Task,
     remembered: &Remembered,
+) -> ToolResult {
+    let caller = ctx.agent_id.clone();
+    // The run's own bounds — cancellation, stop, deadline — taken before the
+    // context is handed over for progress, which is the one thing the
+    // exchange needs from it while it waits. The deadline also travels: the
+    // remote agent is told when this side stops waiting.
+    let options = ctx.child_run_options();
+    let ctx: ParallelToolContext = ctx.into();
+    let root = ctx
+        .resolve_working_directory(None)
+        .unwrap_or_else(|_| ctx.working_directory().to_path_buf());
+    let progress = |text: String| ctx.emit_progress(text);
+    let write = |path: &str, bytes: &[u8]| ctx.write_file_bytes(path, bytes);
+    run(
+        agents,
+        name,
+        task,
+        remembered,
+        Side {
+            caller,
+            options,
+            progress: &progress,
+            root,
+            write: &write,
+        },
+    )
+    .await
+}
+
+/// Hands `task` to the remote agent `name` on a task of its own and returns
+/// at once (ADR-0042). The handle is the agent's name: one task per remote
+/// agent at a time is already the rule (ADR-0029 §5), so the name is the
+/// conversation, and `@<name>` alone collects it as it always did.
+///
+/// What comes back is left for the parent's next round as a plain note, the
+/// same words the blocking call would have returned, since a remote task
+/// writes no delegation entry on either path.
+pub(super) fn delegate_in_background(
+    ctx: &ToolContext<'_>,
+    children: Children,
+    agents: Arc<RemoteAgents>,
+    name: &str,
+    task: Task,
+    remembered: Remembered,
+) -> ToolResult {
+    let caller = ctx.agent_id.clone();
+    let options = ctx.child_run_options();
+    let root = ctx.resolve_working_directory(None)?;
+    let agent = name.to_string();
+    children.start(
+        name.to_string(),
+        Some(name.to_string()),
+        Kind::Remote,
+        ctx.deferred(),
+        async move {
+            let progress = |_: String| {};
+            let inbox = root.clone();
+            let write = move |path: &str, bytes: &[u8]| write_under(&inbox, path, bytes);
+            let outcome = run(
+                &agents,
+                &agent,
+                task,
+                &remembered,
+                Side {
+                    caller,
+                    options,
+                    progress: &progress,
+                    root,
+                    write: &write,
+                },
+            )
+            .await;
+            let (told, text) = match &outcome {
+                Ok(text) => ("finished", text.clone()),
+                Err(text) => ("failed", text.clone()),
+            };
+            Settled {
+                outcome,
+                items: vec![DeferredItem::Context(format!(
+                    "<delegation-result agent=\"{agent}\" status=\"{told}\">\n{text}\n\
+                     </delegation-result>"
+                ))],
+            }
+        },
+    );
+    Ok(started(Kind::Remote, name, Some(name), false))
+}
+
+/// Writes `bytes` at `path` under `root` — the inbox path `files::save`
+/// chose — for a background task that has no file-tool context to write
+/// through. The path is basis's own (`.basis/inbox/…`), inside the
+/// workspace by construction.
+fn write_under(root: &Path, path: &str, bytes: &[u8]) -> Result<PathBuf, String> {
+    let full = root.join(path);
+    if let Some(parent) = full.parent() {
+        std::fs::create_dir_all(parent).map_err(|error| error.to_string())?;
+    }
+    std::fs::write(&full, bytes).map_err(|error| error.to_string())?;
+    Ok(full)
+}
+
+async fn run(
+    agents: &RemoteAgents,
+    name: &str,
+    task: Task,
+    remembered: &Remembered,
+    side: Side<'_>,
 ) -> ToolResult {
     let Task {
         body,
@@ -137,32 +280,25 @@ pub(super) async fn delegate(
     // are one conversation, and a label handed to another agent does not
     // inherit one.
     let id = id.as_str();
-    let caller = ctx.agent_id.clone();
-    // The run's own bounds — cancellation, stop, deadline — taken before the
-    // context is handed over for progress, which is the one thing the
-    // exchange needs from it while it waits. The deadline also travels: the
-    // remote agent is told when this side stops waiting.
-    let options = ctx.child_run_options();
+    let caller = side.caller.as_str();
+    let options = side.options;
     let hop = Hop {
         hop: agents.hop().saturating_add(1),
         deadline: options.deadline,
     };
-    let before = agents.conversation(&caller, id, remembered);
-    let request = request(name, body, &before, hop)?;
+    let before = agents.conversation(caller, id, remembered);
+    let request = request(name, &body, &before, hop)?;
     let request = match request {
-        Request::Send(message) => {
-            Request::Send(message.with_metadata(metadata.cloned()).with_files(files))
-        }
+        Request::Send(message) => Request::Send(message.with_metadata(metadata).with_files(files)),
         wait => wait,
     };
 
-    let ctx: ParallelToolContext = ctx.into();
-    let progress = |text: String| ctx.emit_progress(text);
+    let progress = |text: String| (side.progress)(text);
     let save = |next: Conversation| {
         // Reported, not raised: the exchange it describes happened, and a
         // failed tool call would invite the model to do the work again.
-        if let Err(error) = agents.record(&caller, id, next, remembered) {
-            ctx.emit_progress(format!(
+        if let Err(error) = agents.record(caller, id, next, remembered) {
+            (side.progress)(format!(
                 "the conversation with `{name}` was not saved: {error}"
             ));
         }
@@ -208,11 +344,8 @@ pub(super) async fn delegate(
     let Some((folder, files)) = returned else {
         return result;
     };
-    let root = ctx
-        .resolve_working_directory(None)
-        .unwrap_or_else(|_| ctx.working_directory().to_path_buf());
-    let saved = files::save(&root, &folder, files, |path, bytes| {
-        ctx.write_file_bytes(path, bytes)
+    let saved = files::save(&side.root, &folder, files, |path, bytes| {
+        (side.write)(path, bytes)
     });
     match result {
         Ok(text) => Ok(said(text, saved)),

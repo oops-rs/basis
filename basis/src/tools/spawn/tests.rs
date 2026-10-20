@@ -854,7 +854,17 @@ fn a_copy_that_keeps_teammates_teaches_them_and_the_plain_tool_does_not() {
         schema["properties"][parse::REACH_FIELD]["enum"],
         json!(["auto", "remote", "local"])
     );
-    assert_eq!(schema["required"], json!([INPUT_FIELD]), "still optional");
+    assert_eq!(
+        schema["required"],
+        json!([]),
+        "a copy with a ledger offers `wait`, which has no string (ADR-0042)"
+    );
+    for field in [parse::BACKGROUND_FIELD, parse::WAIT_FIELD, parse::ANY_FIELD] {
+        assert!(
+            schema["properties"].get(field).is_some(),
+            "{field} is offered where there is a ledger to keep the work on"
+        );
+    }
 
     let fixed = owned.with_reach_policy(ReachPolicy::fixed(Reach::Local));
     let descriptor = fixed.descriptor();
