@@ -58,7 +58,7 @@ Add to your application's `Cargo.toml`:
 
 ```toml
 [dependencies]
-basis = "0.19.0"
+basis = "0.20.0"
 tokio = { version = "1", features = ["macros", "rt-multi-thread"] }
 ```
 
