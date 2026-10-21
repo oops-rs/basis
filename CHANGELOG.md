@@ -5,6 +5,23 @@ All six crates — `basis`, `basis-host`, `basis-tasks`, `basis-acp`,
 live in `docs/adr/`; this file says what changed for someone upgrading.
 Releases before 0.15.0 are described by their tags and ADRs only.
 
+## Unreleased
+
+Breaking: `OpenError` gains `ExtensionDeclared` and `ExtensionRequired`, so a
+host matching it exhaustively needs arms.
+
+### A hosted agent speaks an extension of its own
+
+- `AgentIdentity::with_extension(AgentExtension)` declares a host's own
+  extension on the card — uri, description, params — after basis's hops and
+  approval extensions (ADR-0043). `A2aService::open` refuses one marked
+  `required`, which nothing would enforce, and one whose URI basis declares
+  or that is declared twice.
+- `HostedStart` carries `metadata` (the message's), `request_metadata` (the
+  `SendMessage` request's — where `dial --meta` and `spawn`'s `metadata`
+  land) and `extensions` (the URIs the message names), each exactly as sent
+  and empty when absent.
+
 ## 0.20.1 — 2026-10-20
 
 No breaking changes.

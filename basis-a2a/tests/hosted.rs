@@ -12,7 +12,7 @@ use std::{sync::Arc, time::Duration};
 use basis_a2a::{
     A2aService, AgentIdentity, BearerToken, HostedStanding, InboundApproval, OpenError, Principal,
     RunDefaults, ServeConfig,
-    a2a::{Part, error_code},
+    a2a::{AgentExtension, Part, PartContent, error_code},
 };
 use chrono::{Duration as Span, Utc};
 use fake_host::{FakeHost, REFUSED};
@@ -422,6 +422,92 @@ async fn the_host_is_handed_the_hop_and_the_callers_deadline() {
         "clamped to it, not far below"
     );
     assert_eq!(task["metadata"][HOPS]["hop"], 3, "{task}");
+}
+
+#[tokio::test]
+async fn the_host_is_handed_the_messages_metadata_extensions_and_data_parts() {
+    const EXT: &str = "https://example.com/ext/facets-v1";
+    let host = FakeHost::answering(answer());
+    let served = serve(&host, |config| config).await;
+    let mut message = user_message("what is it?", None);
+    message["parts"]
+        .as_array_mut()
+        .unwrap()
+        .push(json!({"data": {"facet": {"question": "q"}}}));
+    message["metadata"] = json!({"project": "lama", HOPS: {"hop": 1}});
+    message["extensions"] = json!([EXT]);
+    served
+        .result(
+            "SendMessage",
+            json!({"message": message, "metadata": {"ref": "main"}}),
+        )
+        .await;
+
+    let start = &host.calls().starts[0];
+    assert_eq!(start.metadata["project"], "lama");
+    assert_eq!(start.metadata[HOPS]["hop"], 1, "left in place");
+    assert_eq!(start.request_metadata["ref"], "main");
+    assert_eq!(start.extensions, vec![EXT.to_string()]);
+    let data = start
+        .parts
+        .iter()
+        .find_map(|part| match &part.content {
+            PartContent::Data(data) => Some(data),
+            _ => None,
+        })
+        .expect("the data part");
+    assert_eq!(data["facet"]["question"], "q");
+}
+
+#[tokio::test]
+async fn a_message_with_no_metadata_hands_the_host_empty_maps() {
+    let host = FakeHost::answering(answer());
+    let served = serve(&host, |config| config).await;
+    served
+        .result("SendMessage", send("plain", None, false))
+        .await;
+    let start = &host.calls().starts[0];
+    assert!(start.metadata.is_empty());
+    assert!(start.request_metadata.is_empty());
+    assert!(start.extensions.is_empty());
+}
+
+#[tokio::test]
+async fn the_card_declares_the_hosts_own_extension() {
+    let host = FakeHost::held();
+    let state = tempfile::tempdir().unwrap();
+    let identity = identity().with_extension(AgentExtension {
+        uri: "https://example.com/ext/facets-v1".into(),
+        description: None,
+        required: Some(false),
+        params: Some([("substrates".to_string(), json!(["ios"]))].into()),
+    });
+    let config = ServeConfig::hosted(identity, state.path(), Arc::clone(&host) as _)
+        .with_token(BearerToken::new(TOKEN).unwrap());
+    let served = Served::start_config(config, state, Some(TOKEN.to_string())).await;
+    let card = served.card().await;
+    let extensions = card["capabilities"]["extensions"].as_array().unwrap();
+    let ours = extensions
+        .iter()
+        .find(|extension| extension["uri"] == "https://example.com/ext/facets-v1")
+        .unwrap_or_else(|| panic!("{card}"));
+    assert_eq!(ours["params"]["substrates"][0], "ios");
+}
+
+#[test]
+fn a_required_host_extension_refuses_the_open() {
+    let state = tempfile::tempdir().unwrap();
+    let identity = identity().with_extension(AgentExtension {
+        uri: "https://example.com/ext/facets-v1".into(),
+        description: None,
+        required: Some(true),
+        params: None,
+    });
+    let config = ServeConfig::hosted(identity, state.path(), FakeHost::held() as _);
+    assert!(matches!(
+        A2aService::open(config),
+        Err(OpenError::ExtensionRequired(_))
+    ));
 }
 
 /// A loopback webhook that accepts every delivery and keeps its body.

@@ -58,6 +58,7 @@ impl A2aService {
         let SendMessageRequest {
             message,
             configuration,
+            metadata: request_metadata,
             ..
         } = request;
         let configuration = configuration.unwrap_or(a2a::SendMessageConfiguration {
@@ -153,6 +154,9 @@ impl A2aService {
                     continues,
                     prompt: rendered.prompt.clone(),
                     parts: message.parts.clone(),
+                    metadata: message.metadata.clone().unwrap_or_default(),
+                    request_metadata: request_metadata.unwrap_or_default(),
+                    extensions: message.extensions.clone().unwrap_or_default(),
                     hop: inbound.hop,
                     deadline_ms: hosted::deadline_ms(
                         self.inner.task_deadline,

@@ -16,8 +16,11 @@
 //! only: the host names its task with an id of its own, the server keeps
 //! that id beside the A2A id it mints, and a caller never sees the host's.
 
+use std::collections::HashMap;
+
 use a2a::Part;
 use futures::{future::BoxFuture, stream::BoxStream};
+use serde_json::Value;
 
 /// What a message asks a host to start: everything the server decided
 /// about it before the host is called.
@@ -38,6 +41,19 @@ pub struct HostedStart {
     pub prompt: String,
     /// The message's parts, exactly as sent.
     pub parts: Vec<Part>,
+    /// The message's `metadata`, exactly as sent; empty when it had none
+    /// (ADR-0043). The server has read the hops extension's entry for
+    /// [`hop`](Self::hop) and [`deadline_ms`](Self::deadline_ms) and leaves
+    /// it in place; every other key is the host's to read.
+    pub metadata: HashMap<String, Value>,
+    /// The `SendMessage` request's own `metadata`, beside the message's;
+    /// empty when it had none.
+    pub request_metadata: HashMap<String, Value>,
+    /// The extension URIs the message says it uses, as sent; empty when it
+    /// named none. Which of them the host honors is its own business — the
+    /// card declares the ones it speaks
+    /// ([`AgentIdentity::with_extension`](crate::AgentIdentity::with_extension)).
+    pub extensions: Vec<String>,
     /// The hop the message arrived at (`docs/a2a/hops-v1.md`); 0 from a
     /// top-level caller.
     pub hop: u32,

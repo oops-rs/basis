@@ -362,10 +362,15 @@ flowchart LR
   restart awaits each unsettled hosted task again through `settled`, never `start`. The settings
   that configure a `basis-tasks` run (shell, run defaults, data dir, asking the caller) are refused
   at `open` rather than ignored, so `INPUT_REQUIRED` stays a `basis-tasks` feature.
+  A hosted agent may speak an extension of its own (ADR-0043): `AgentIdentity::with_extension`
+  puts it on the card after basis's two, refused at `open` when marked required or when it reuses
+  a URI basis declares; and `HostedStart` hands the host the message's `metadata` and
+  `extensions` and the request's `metadata`, exactly as sent, for it to interpret.
 - **A2A is served in full, over two bindings** (ADR-0030). JSON-RPC at the root and HTTP+JSON
   under `/json` are two routers that only parse, over one `A2aService` that answers all eleven
   methods, so they cannot drift apart; the card lists JSON-RPC first, and declares `streaming`,
-  `pushNotifications`, the extended card and the two extensions when, and only when, each is on.
+  `pushNotifications`, the extended card and the two extensions when, and only when, each is on,
+  then a hosted agent's own.
   gRPC stays deferred for its weight (proposal 0005 §6). Every request passes authentication
   before a byte of its body is read. Parts are text, data — handed to the model as JSON — and
   inline files of any type (ADR-0041 §6): a textual one is fenced into the prompt, any other is
