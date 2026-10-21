@@ -156,8 +156,8 @@ pub use run::{
     OutputAttempt, OutputAttemptReport, OutputDecision, OutputFailure, OutputReport,
     OutputReservation, OutputSpec, PreparedRun, PromptPart, ReasoningChange, ReasoningOptions,
     ReasoningSummary, RoundAdjustment, RoundBoundary, RoundContext, RoundDecision, RoundStrategy,
-    RoundToolResult, RunContext, RunFailure, RunFailureCategory, RunReport, RunUsage, TaggedEvent,
-    TaggedSink, TurnOptions, run, run_with_approver,
+    RoundToolResult, RunContext, RunFailure, RunFailureCategory, RunLocals, RunReport, RunUsage,
+    TaggedEvent, TaggedSink, TurnOptions, run, run_with_approver,
 };
 pub use runtime::{Runtime, RuntimeBuilder, ToolResultPolicy};
 pub use shell::ShellAccess;

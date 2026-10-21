@@ -431,6 +431,11 @@ flowchart LR
   basis's own round strategy joins them first and mentra runs one more round. Depth counts;
   width (`RuntimeBuilder::with_delegation_width`, four) bounds how many run at once. A child's
   remote conversations are its own, so two background children may each ask one remote agent.
+- **A turn carries locals its tools read** (ADR-0044). `TurnOptions::locals` (mentra's
+  `RunLocals`, a map keyed by type) reaches every tool the turn calls as
+  `ToolContext::run_local::<T>()`, and every child it delegates to through `RunOptions::child`;
+  the run's configured locals are the floor and the turn's layer on top. One workspace's native
+  tools can so serve many callers, each turn reading its own.
 - **A name is resolved, or it is a teammate** (ADR-0037, ADR-0038). `@<name>` is answered by the
   open's resolvers in order — the host's, installed with `WorkspaceBuilder::with_agent_resolver`,
   then the set its files configure — and the first answer other than *unknown* stands; a resolver

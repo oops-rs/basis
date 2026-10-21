@@ -8,7 +8,7 @@ use std::sync::Arc;
 use std::time::{Duration, SystemTime};
 
 use mentra::RoundStrategy;
-use mentra::runtime::{CancellationToken, ProviderRetry, RunOptions};
+use mentra::runtime::{CancellationToken, ProviderRetry, RunLocals, RunOptions};
 
 use super::{Bounds, RunError};
 use crate::{budget::BudgetPool, runtime::RetryPolicy};
@@ -110,6 +110,16 @@ pub struct TurnOptions {
     /// with the runner, not copied — and a host usually holds its half to read
     /// what the strategy observed after the turn.
     pub round_strategy: Option<Arc<dyn RoundStrategy>>,
+    /// Values this turn's tools read back with
+    /// [`ToolContext::run_local`](crate::tools::ToolContext::run_local)
+    /// (ADR-0044) — who the turn works for, when one workspace's tools serve
+    /// many callers.
+    ///
+    /// Layered rather than replaced: the run's configured locals
+    /// ([`PreparedRun::with_bounds`](crate::PreparedRun::with_bounds)) is
+    /// the floor, and a value of the same type given here wins for this
+    /// turn. A delegation this turn makes carries it to the child's tools.
+    pub locals: RunLocals,
 }
 
 /// By hand because a strategy is opaque: presence is the only honest thing a
@@ -130,6 +140,7 @@ impl std::fmt::Debug for TurnOptions {
                 "round_strategy",
                 &self.round_strategy.as_ref().map(|_| ".."),
             )
+            .field("locals", &self.locals)
             .finish()
     }
 }
@@ -215,6 +226,13 @@ impl TurnOptions {
         }
     }
 
+    /// Attaches values for this turn's tools to read; see
+    /// [`locals`](Self::locals).
+    #[must_use]
+    pub fn with_locals(self, locals: RunLocals) -> Self {
+        Self { locals, ..self }
+    }
+
     /// Caps how many main-model requests this turn may issue.
     pub fn with_model_budget(self, model_budget: usize) -> Self {
         Self {
@@ -296,6 +314,7 @@ impl TurnOptions {
             round_strategy: self.round_strategy,
             provider_retry: self.provider_retry.unwrap_or(retry.schedule),
             retry_budget: self.retry_budget.unwrap_or(retry.budget),
+            locals: self.locals,
             ..RunOptions::default()
         };
 
@@ -342,6 +361,7 @@ pub(super) fn bounded(options: TurnOptions, configured: &TurnOptions) -> TurnOpt
         provider_retry: options.provider_retry.or(configured.provider_retry),
         retry_budget: options.retry_budget.or(configured.retry_budget),
         budget,
+        locals: configured.locals.clone().layered(&options.locals),
         ..options
     }
 }

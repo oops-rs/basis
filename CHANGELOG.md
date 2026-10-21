@@ -7,8 +7,20 @@ Releases before 0.15.0 are described by their tags and ADRs only.
 
 ## Unreleased
 
-Breaking: `OpenError` gains `ExtensionDeclared` and `ExtensionRequired`, so a
-host matching it exhaustively needs arms.
+Breaking: built on mentra 0.33. `OpenError` gains `ExtensionDeclared` and
+`ExtensionRequired`, so a host matching it exhaustively needs arms.
+`TurnOptions` gains a public `locals` field, so a struct literal without
+`..TurnOptions::default()` needs it.
+
+### A turn carries locals its tools read
+
+- `TurnOptions::locals` / `with_locals` attach a `RunLocals` — values keyed
+  by type, re-exported from mentra — that every tool the turn calls reads
+  with `ToolContext::run_local::<T>()` (ADR-0044). The run's own
+  (`PreparedRun::with_bounds`) are the floor; the turn's layer on top. A
+  delegated child, blocking or background, reads its parent's. One
+  workspace's native tools can now serve many callers, each turn seeing its
+  own, instead of opening a workspace per caller.
 
 ### A hosted agent speaks an extension of its own
 

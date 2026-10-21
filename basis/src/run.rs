@@ -81,6 +81,12 @@ pub use mentra::error::RuntimeError as RunFailure;
 /// gracefully.
 pub use mentra::runtime::CancellationToken;
 
+/// What a turn tells its tools about who it works for — set on
+/// [`TurnOptions::locals`], read back with
+/// [`ToolContext::run_local`](crate::tools::ToolContext::run_local)
+/// (ADR-0044). Re-exported under the rule stated on [`CancellationToken`].
+pub use mentra::runtime::RunLocals;
+
 /// How much provider-generated reasoning summary to request.
 ///
 /// Re-exported because [`ReasoningOptions::summary`] makes a caller name it;
