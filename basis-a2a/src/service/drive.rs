@@ -149,7 +149,14 @@ impl A2aService {
                     eprintln!("basis-a2a: task {id} is not a hosted task; not awaiting it");
                     return;
                 };
-                await_hosted(self.clone(), Arc::clone(host), host_id, id.clone()).boxed()
+                await_hosted(
+                    self.clone(),
+                    Arc::clone(host),
+                    host_id,
+                    id.clone(),
+                    record.deadline_ms,
+                )
+                .boxed()
             }
         };
         let (done, receiver) = watch::channel(false);
@@ -225,7 +232,30 @@ async fn drive_task(service: A2aService, tasks: Tasks, handle: TaskHandle, id: S
 
 /// Waits for a host's task to settle, and records that it did. A shutdown
 /// stops the waiting and records nothing; the next start waits again.
-async fn await_hosted(service: A2aService, host: Arc<dyn TaskHost>, host_id: String, id: String) {
+///
+/// A task still unsettled at its deadline is asked to stop, once: the host
+/// was to have settled it by then (ADR-0033 §1), and the server is what
+/// promised the caller the deadline. The waiting goes on, because only the
+/// host can say how the task ended — what it reports is what the caller is
+/// told.
+async fn await_hosted(
+    service: A2aService,
+    host: Arc<dyn TaskHost>,
+    host_id: String,
+    id: String,
+    deadline_ms: Option<u64>,
+) {
+    let overdue = async {
+        let Some(deadline_ms) = deadline_ms else {
+            return std::future::pending().await;
+        };
+        tokio::time::sleep(Duration::from_millis(deadline_ms.saturating_sub(now_ms()))).await;
+        eprintln!("basis-a2a: hosted task {id} is past its deadline; canceling it");
+        if let Err(error) = host.cancel(&host_id).await {
+            eprintln!("basis-a2a: cancel overdue hosted task {id}: {error}");
+        }
+        std::future::pending::<()>().await
+    };
     tokio::select! {
         // A task that has settled is recorded so, even as the server stops.
         biased;
@@ -234,5 +264,6 @@ async fn await_hosted(service: A2aService, host: Arc<dyn TaskHost>, host_id: Str
             Err(error) => eprintln!("basis-a2a: await hosted task {id}: {error}"),
         },
         () = service.inner.stop.stopping() => {}
+        () = overdue => {}
     }
 }

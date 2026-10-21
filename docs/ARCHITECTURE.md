@@ -366,6 +366,9 @@ flowchart LR
   puts it on the card after basis's two, refused at `open` when marked required or when it reuses
   a URI basis declares; and `HostedStart` hands the host the message's `metadata` and
   `extensions` and the request's `metadata`, exactly as sent, for it to interpret.
+  The task deadline the server hands a host (`HostedStart::deadline_ms`, its own clamped to the
+  caller's) is a backstop too: a hosted task still unsettled then is canceled through the host,
+  once, and keeps being awaited for the standing it ends in.
 - **A2A is served in full, over two bindings** (ADR-0030). JSON-RPC at the root and HTTP+JSON
   under `/json` are two routers that only parse, over one `A2aService` that answers all eleven
   methods, so they cannot drift apart; the card lists JSON-RPC first, and declares `streaming`,

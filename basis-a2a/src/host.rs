@@ -59,7 +59,9 @@ pub struct HostedStart {
     pub hop: u32,
     /// When the task must have settled by, in milliseconds since the Unix
     /// epoch: the server's default deadline, already clamped to the
-    /// caller's. The host must not run the task past it.
+    /// caller's. The host must not run the task past it; one still
+    /// unsettled then is asked to stop through [`TaskHost::cancel`], once,
+    /// and the standing the host reports after is what the caller is told.
     pub deadline_ms: u64,
 }
 

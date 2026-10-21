@@ -34,6 +34,14 @@ Breaking: built on mentra 0.33. `OpenError` gains `ExtensionDeclared` and
   land) and `extensions` (the URIs the message names), each exactly as sent
   and empty when absent.
 
+### A hosted task's deadline is kept
+
+- A hosted task still unsettled at its deadline (`HostedStart::deadline_ms`)
+  is now canceled by the server through `TaskHost::cancel`, once — as a
+  `basis-tasks` task's deadline always ended it — including one resumed after
+  a restart with its deadline already past. The server goes on awaiting it,
+  so the standing the host reports is what the caller sees.
+
 ## 0.20.1 — 2026-10-20
 
 No breaking changes.

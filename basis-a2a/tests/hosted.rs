@@ -510,6 +510,43 @@ fn a_required_host_extension_refuses_the_open() {
     ));
 }
 
+#[tokio::test]
+async fn a_hosted_task_past_its_deadline_is_canceled_by_the_server() {
+    let host = FakeHost::held();
+    let served = serve(&host, |config| {
+        config.with_task_deadline(Duration::from_millis(300))
+    })
+    .await;
+    let task = served.result("SendMessage", send("slow", None, true)).await["task"].clone();
+    let id = task["id"].as_str().unwrap().to_string();
+    let host_id = host.started(0).await;
+
+    let give_up = std::time::Instant::now() + Duration::from_secs(10);
+    loop {
+        let now = served.result("GetTask", json!({"id": id})).await;
+        if now["status"]["state"] == "TASK_STATE_CANCELED" {
+            break;
+        }
+        assert!(std::time::Instant::now() < give_up, "never canceled: {now}");
+        tokio::time::sleep(Duration::from_millis(50)).await;
+    }
+    assert_eq!(host.calls().cancels, vec![host_id], "asked once");
+}
+
+#[tokio::test]
+async fn a_hosted_task_that_settles_in_time_is_not_canceled() {
+    let host = FakeHost::answering(answer());
+    let served = serve(&host, |config| {
+        config.with_task_deadline(Duration::from_millis(300))
+    })
+    .await;
+    served
+        .result("SendMessage", send("quick", None, false))
+        .await;
+    tokio::time::sleep(Duration::from_millis(500)).await;
+    assert!(host.calls().cancels.is_empty());
+}
+
 /// A loopback webhook that accepts every delivery and keeps its body.
 fn webhook() -> (String, Arc<std::sync::Mutex<Vec<Value>>>) {
     let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
