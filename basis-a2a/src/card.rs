@@ -17,7 +17,7 @@ use crate::{
     authenticator::Security,
     config::{AgentIdentity, ExtendedCard, Principal},
     rest,
-    service::{A2aService, APPROVAL_EXTENSION, HOPS_EXTENSION, INPUT_MODES},
+    service::{A2aService, APPROVAL_EXTENSION, HOPS_EXTENSION, INPUT_MODES, OpenError},
 };
 
 /// The well-known path the spec puts the card at.
@@ -75,7 +75,7 @@ pub(crate) fn build(identity: &AgentIdentity, endpoint: &str, features: Features
         capabilities: AgentCapabilities {
             streaming: Some(true),
             push_notifications: Some(features.push_notifications),
-            extensions: extensions(&features),
+            extensions: extensions(identity, &features),
             extended_agent_card: Some(features.extended_card),
         },
         default_input_modes: INPUT_MODES.iter().map(|mode| mode.to_string()).collect(),
@@ -92,8 +92,29 @@ pub(crate) fn build(identity: &AgentIdentity, endpoint: &str, features: Features
     }
 }
 
-/// The extensions this server speaks, each declared only when on.
-fn extensions(features: &Features) -> Option<Vec<AgentExtension>> {
+/// The URIs basis declares itself; a host's own extension may not reuse one,
+/// whether or not the feature behind it is on.
+const BASIS_EXTENSIONS: [&str; 2] = [HOPS_EXTENSION, APPROVAL_EXTENSION];
+
+/// Refuses a host extension the card could not truthfully carry: one marked
+/// required, one whose URI basis declares, or one declared twice.
+pub(crate) fn check_extensions(identity: &AgentIdentity) -> Result<(), OpenError> {
+    let mut seen = std::collections::HashSet::new();
+    for extension in &identity.extensions {
+        let uri = extension.uri.as_str();
+        if BASIS_EXTENSIONS.contains(&uri) || !seen.insert(uri) {
+            return Err(OpenError::ExtensionDeclared(uri.to_string()));
+        }
+        if extension.required == Some(true) {
+            return Err(OpenError::ExtensionRequired(uri.to_string()));
+        }
+    }
+    Ok(())
+}
+
+/// The extensions this server speaks: basis's own, each declared only when
+/// on, then the host's.
+fn extensions(identity: &AgentIdentity, features: &Features) -> Option<Vec<AgentExtension>> {
     // Always served: every message is read for it, and a server that reads it
     // is one a caller can tell how deep its chain already is.
     let mut extensions = vec![AgentExtension {
@@ -118,6 +139,7 @@ fn extensions(features: &Features) -> Option<Vec<AgentExtension>> {
             params: None,
         });
     }
+    extensions.extend(identity.extensions.iter().cloned());
     (!extensions.is_empty()).then_some(extensions)
 }
 
@@ -326,5 +348,58 @@ mod tests {
             wire["securityRequirements"],
             json!([{"schemes": {"gateway": {"list": []}}}])
         );
+    }
+
+    fn host_extension(uri: &str) -> AgentExtension {
+        AgentExtension {
+            uri: uri.to_string(),
+            description: Some("A host's own.".to_string()),
+            required: Some(false),
+            params: Some(HashMap::from([("substrates".to_string(), json!(["ios"]))])),
+        }
+    }
+
+    #[test]
+    fn a_host_extension_goes_on_the_card_after_basiss_own_params_and_all() {
+        let identity = AgentIdentity::new("helper", "Answers questions.")
+            .with_extension(host_extension("https://example.com/ext/v1"));
+        let wire = to_wire(&build(
+            &identity,
+            "http://127.0.0.1:1/",
+            Features::default(),
+        ));
+        let extensions = wire["capabilities"]["extensions"].as_array().unwrap();
+        assert_eq!(extensions[0]["uri"], HOPS_EXTENSION);
+        assert_eq!(extensions[1]["uri"], "https://example.com/ext/v1");
+        assert_eq!(extensions[1]["params"], json!({"substrates": ["ios"]}));
+    }
+
+    #[test]
+    fn a_host_extension_the_card_cannot_carry_is_refused() {
+        let check = |identity: AgentIdentity| check_extensions(&identity);
+        let base = || AgentIdentity::new("helper", "Answers questions.");
+        assert!(check(base().with_extension(host_extension("https://example.com/a"))).is_ok());
+        for reserved in BASIS_EXTENSIONS {
+            assert!(matches!(
+                check(base().with_extension(host_extension(reserved))),
+                Err(OpenError::ExtensionDeclared(uri)) if uri == reserved
+            ));
+        }
+        assert!(matches!(
+            check(
+                base()
+                    .with_extension(host_extension("https://example.com/a"))
+                    .with_extension(host_extension("https://example.com/a"))
+            ),
+            Err(OpenError::ExtensionDeclared(_))
+        ));
+        let required = AgentExtension {
+            required: Some(true),
+            ..host_extension("https://example.com/a")
+        };
+        assert!(matches!(
+            check(base().with_extension(required)),
+            Err(OpenError::ExtensionRequired(_))
+        ));
     }
 }

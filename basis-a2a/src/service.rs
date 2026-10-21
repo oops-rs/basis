@@ -136,6 +136,16 @@ pub enum OpenError {
          use it; configure a token, or trust anonymous callers explicitly"
     )]
     NeedsToken(&'static str),
+    /// A host extension whose URI basis already declares — hops or
+    /// approval — or that the identity declares twice.
+    #[error("the card already declares extension {0}; declare each URI once, and none of basis's")]
+    ExtensionDeclared(String),
+    /// A host extension marked required: nothing refuses a message that
+    /// does not use it, so the card would claim what is not served.
+    #[error(
+        "extension {0} is marked required, which this server does not enforce; declare it optional"
+    )]
+    ExtensionRequired(String),
 }
 
 /// One served agent's A2A operations. Cheap to clone; every clone is the
@@ -212,6 +222,7 @@ impl A2aService {
             stream_cap,
             task_deadline,
         } = config;
+        crate::card::check_extensions(&identity)?;
         if let Source::Hosted { .. } = source {
             refuse_for_hosted(shell, run.is_unset(), approval, data_dir.is_some())?;
         }
