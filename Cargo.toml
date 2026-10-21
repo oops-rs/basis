@@ -354,3 +354,8 @@ opt-level = "s"
 lto = true
 codegen-units = 1
 
+
+# Development only: unreleased mentra (`RunContext`, a run's typed context its
+# tools read — ADR-0044). Removed at release.
+[patch.crates-io]
+mentra = { path = "../mentra/mentra" }
