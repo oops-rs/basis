@@ -310,7 +310,7 @@ checksum = "ac07cdecf99051d9a5238b80f35af32cdeba5b336e55d957b318b50137e18da5"
 
 [[package]]
 name = "basis"
-version = "0.20.1"
+version = "0.21.0"
 dependencies = [
  "async-trait",
  "chrono",
@@ -327,7 +327,7 @@ dependencies = [
 
 [[package]]
 name = "basis-a2a"
-version = "0.20.1"
+version = "0.21.0"
 dependencies = [
  "a2a-lf",
  "axum",
@@ -347,7 +347,7 @@ dependencies = [
 
 [[package]]
 name = "basis-acp"
-version = "0.20.1"
+version = "0.21.0"
 dependencies = [
  "agent-client-protocol",
  "async-trait",
@@ -365,7 +365,7 @@ dependencies = [
 
 [[package]]
 name = "basis-cli"
-version = "0.20.1"
+version = "0.21.0"
 dependencies = [
  "agent-client-protocol",
  "async-trait",
@@ -388,7 +388,7 @@ dependencies = [
 
 [[package]]
 name = "basis-host"
-version = "0.20.1"
+version = "0.21.0"
 dependencies = [
  "async-trait",
  "basis",
@@ -401,7 +401,7 @@ dependencies = [
 
 [[package]]
 name = "basis-tasks"
-version = "0.20.1"
+version = "0.21.0"
 dependencies = [
  "basis",
  "basis-host",
@@ -1523,7 +1523,9 @@ checksum = "cf8baf1c55e62ffcace7a9f06f4bd9cd3f0c4beb022d3b367256b91b87513d98"
 
 [[package]]
 name = "mentra"
-version = "0.32.0"
+version = "0.33.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "ee4d75c08e02f4a3c89ca76d12cae6a2dd055392f131aa5e5dc081da985b460b"
 dependencies = [
  "a2a-lf",
  "async-trait",
@@ -1553,6 +1555,8 @@ dependencies = [
 [[package]]
 name = "mentra-provider"
 version = "0.9.4"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "9179b967dccdbcb2be8c034ecfe66e937f896a3cef7135859055743434cea457"
 dependencies = [
  "async-trait",
  "base64 0.22.1",

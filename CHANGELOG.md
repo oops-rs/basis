@@ -5,7 +5,7 @@ All six crates — `basis`, `basis-host`, `basis-tasks`, `basis-acp`,
 live in `docs/adr/`; this file says what changed for someone upgrading.
 Releases before 0.15.0 are described by their tags and ADRs only.
 
-## Unreleased
+## 0.21.0 — 2026-10-21
 
 Breaking: built on mentra 0.33. `OpenError` gains `ExtensionDeclared` and
 `ExtensionRequired`, so a host matching it exhaustively needs arms.
