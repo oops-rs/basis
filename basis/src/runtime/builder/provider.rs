@@ -17,7 +17,8 @@
 use mentra::{BuiltinProvider, ModelSelector, Provider};
 
 use super::{
-    HostProvider, ResponsesStateMode, ResponsesTransport, RetryPolicy, RuntimeBuilder, Wire,
+    GatewayRingSpec, HostProvider, ResponsesStateMode, ResponsesTransport, RetryPolicy,
+    RuntimeBuilder, Wire,
 };
 use crate::runtime::ProviderRetry;
 
@@ -221,6 +222,12 @@ impl RuntimeBuilder {
     /// carry one from a repository at all (see [`crate::config`]), so what
     /// arrives here is always the user's own — this method needs no rule of
     /// its own to keep that true.
+    /// The same holds for `gateways`, the ring said in data: at
+    /// [`build`](Self::build) it becomes this builder's
+    /// [`with_gateway_ring`](Self::with_gateway_ring) if the code stated no
+    /// ring and no base URL, keeping any policy and observer the host did
+    /// state. A host's base URL or ring leaves the file's ring unread, in
+    /// whichever order the two were called.
     ///
     /// [`Workspace::open`](crate::Workspace::open) calls this for the private
     /// runtime it builds, so the one-repository host gets it without asking. A
@@ -239,6 +246,12 @@ impl RuntimeBuilder {
         // See the doc above: with an instance supplied the provider question
         // is not empty, and emptiness is all a file may fill.
         let provider_unanswered = self.host_provider.is_none();
+        // A ring answers the endpoint question in full, so a file's base URL
+        // does not join one the host stated.
+        let ring_stated = self
+            .gateway_ring
+            .as_ref()
+            .is_some_and(GatewayRingSpec::is_stated);
         Self {
             provider: self.provider.or_else(|| {
                 config
@@ -247,12 +260,23 @@ impl RuntimeBuilder {
                     .filter(|_| provider_unanswered)
                     .map(|provider| provider.value)
             }),
-            base_url: self.base_url.or_else(|| {
+            base_url: self.base_url.clone().or_else(|| {
                 config
                     .base_url
                     .as_ref()
-                    .filter(|_| provider_unanswered)
+                    .filter(|_| provider_unanswered && !ring_stated)
                     .map(|url| url.value.clone())
+            }),
+            // Held apart from `gateway_ring` rather than merged into it, so
+            // a host's own `with_base_url` after this call is not refused as
+            // a base URL beside a ring: which endpoint answer a file gets to
+            // give is settled at build, where every host answer is known.
+            config_gateway_ring: self.config_gateway_ring.clone().or_else(|| {
+                config
+                    .gateways
+                    .as_ref()
+                    .filter(|_| provider_unanswered)
+                    .map(|ring| ring.value.clone())
             }),
             model: self.model.or_else(|| config.model_selector()),
             ..self

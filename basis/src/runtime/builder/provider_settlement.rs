@@ -80,14 +80,30 @@ pub(super) enum ProviderSource {
 /// `base_url` and `api_key` are refused beside it — but `provider` is not: a
 /// ring is several base URLs, and a base URL reads `with_provider` for the id
 /// to file its models under. The ring reads it for the same reason.
+///
+/// With neither an instance nor a ring in code, a ring said in data takes
+/// the endpoint question next — the config file's `gateways`, then
+/// `BASIS_GATEWAYS` — unless the code stated a base URL, which outranks both
+/// as an explicit call outranks a file. The ring keeps whatever policy and
+/// observer the code stated. A key from
+/// [`with_api_key`](super::RuntimeBuilder::with_api_key) beside one is refused
+/// as it is beside a ring in code: it would belong to no member.
 pub(super) fn settle(
-    host_provider: Option<HostProvider>,
-    gateway_ring: Option<GatewayRingSpec>,
-    provider: Option<BuiltinProvider>,
-    base_url: Option<String>,
-    api_key: Option<String>,
+    answers: Answers,
+    lookup: &dyn Fn(&str) -> Option<String>,
 ) -> Result<ProviderSource, RunError> {
-    let gateway_ring = gateway_ring.filter(GatewayRingSpec::is_stated);
+    let Answers {
+        host_provider,
+        gateway_ring,
+        config_gateway_ring,
+        provider,
+        base_url,
+        api_key,
+    } = answers;
+    let (gateway_ring, unstated_ring) = match gateway_ring {
+        Some(spec) if spec.is_stated() => (Some(spec), None),
+        other => (None, other),
+    };
     match (host_provider, gateway_ring) {
         (Some(host), gateway_ring) => {
             for (also_set, knob) in [
@@ -116,12 +132,44 @@ pub(super) fn settle(
                 provider: provider.unwrap_or(provider::DEFAULT_COMPATIBLE_PROVIDER),
             })
         }
-        (None, None) => Ok(ProviderSource::Resolved(provider::resolve_with(
-            provider,
-            base_url.as_deref(),
-            api_key.as_deref(),
-        )?)),
+        (None, None) => {
+            let data_ring = match (&base_url, config_gateway_ring) {
+                (Some(_), _) => None,
+                (None, Some(ring)) => Some(ring),
+                (None, None) => provider::env_gateway_ring(lookup)?,
+            };
+            match data_ring {
+                Some(ring) => {
+                    if api_key.is_some() {
+                        return Err(provider::ProviderError::AmbiguousProviderSource {
+                            knob: "with_api_key",
+                        }
+                        .into());
+                    }
+                    Ok(ProviderSource::Ring {
+                        spec: unstated_ring.unwrap_or_default().filled_from(&ring),
+                        provider: provider.unwrap_or(provider::DEFAULT_COMPATIBLE_PROVIDER),
+                    })
+                }
+                None => Ok(ProviderSource::Resolved(provider::resolve_against(
+                    lookup,
+                    provider,
+                    base_url.as_deref(),
+                    api_key.as_deref(),
+                )?)),
+            }
+        }
     }
+}
+
+/// Every answer the builder holds to "which provider, at which endpoint".
+pub(super) struct Answers {
+    pub(super) host_provider: Option<HostProvider>,
+    pub(super) gateway_ring: Option<GatewayRingSpec>,
+    pub(super) config_gateway_ring: Option<crate::GatewayRingConfig>,
+    pub(super) provider: Option<BuiltinProvider>,
+    pub(super) base_url: Option<String>,
+    pub(super) api_key: Option<String>,
 }
 
 /// Builds the mentra runtime on whichever provider `source` names: the host's

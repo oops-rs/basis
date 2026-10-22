@@ -62,8 +62,12 @@
 //! outranks the environment because a variable in a shell describes whoever
 //! started the process, and the file describes the repository the work is in.
 
+mod gateways;
 #[cfg(test)]
 mod tests;
+
+pub use gateways::GatewayRingConfig;
+pub(crate) use gateways::parse_var as parse_gateways_var;
 
 use std::path::{Path, PathBuf};
 
@@ -128,6 +132,10 @@ pub struct Config {
     pub effort: Option<Setting<Effort>>,
     /// An OpenAI-compatible endpoint. Global file only; see the module docs.
     pub base_url: Option<Setting<String>>,
+    /// Several endpoints to one model, in preference order — `base_url` said
+    /// more than once. Global file only, for `base_url`'s reason, and never
+    /// beside it.
+    pub gateways: Option<Setting<GatewayRingConfig>>,
     /// The files that took effect, most specific first — for a caller that
     /// reports which conventions it read.
     pub files: Vec<ContextFile>,
@@ -195,6 +203,7 @@ impl Config {
             && self.model.is_none()
             && self.effort.is_none()
             && self.base_url.is_none()
+            && self.gateways.is_none()
     }
 
     /// The model as a selector, for the two builders that take one.
@@ -256,6 +265,15 @@ pub enum ConfigError {
          model's traffic — and the API key on it — at a host you did not choose"
     )]
     WorkspaceBaseUrl { path: PathBuf },
+
+    /// The same refusal for a ring, which is several base URLs and the keys
+    /// that go with them.
+    #[error(
+        "{path} sets `gateways`, which basis honors only from your own \
+         {DEFAULT_GLOBAL_CONFIG_FILE}: a file a repository ships must not be able to point the \
+         model's traffic — and the API keys on it — at hosts you did not choose"
+    )]
+    WorkspaceGateways { path: PathBuf },
 }
 
 /// The whole file.
@@ -275,6 +293,7 @@ struct ConfigFile {
     model: Option<String>,
     effort: Option<EffortName>,
     base_url: Option<String>,
+    gateways: Option<gateways::GatewaysValue>,
 }
 
 /// The five spellings `--effort` accepts, so the file and the flag cannot come
@@ -307,6 +326,7 @@ struct Read {
     model: Option<String>,
     effort: Option<Effort>,
     base_url: Option<String>,
+    gateways: Option<GatewayRingConfig>,
     scope: ContextScope,
 }
 
@@ -363,6 +383,21 @@ fn parse(
     if file.base_url.is_some() && scope == ContextScope::Workspace {
         return Err(ConfigError::WorkspaceBaseUrl {
             path: path.to_path_buf(),
+        });
+    }
+    if file.gateways.is_some() && scope == ContextScope::Workspace {
+        return Err(ConfigError::WorkspaceGateways {
+            path: path.to_path_buf(),
+        });
+    }
+    // Both are the endpoint answer, and either alone is complete; a file that
+    // says both has not said which it meant.
+    if file.gateways.is_some() && file.base_url.is_some() {
+        return Err(ConfigError::Invalid {
+            path: path.to_path_buf(),
+            key: "gateways",
+            reason: "is set beside `base_url`; a ring already names every endpoint, so keep one"
+                .to_string(),
         });
     }
 
@@ -426,11 +461,25 @@ fn parse(
         })
         .transpose()?;
 
+    let gateways = file
+        .gateways
+        .map(|value| {
+            gateways::parse(value, &|raw| expand(raw, lookup)).map_err(|reason| {
+                ConfigError::Invalid {
+                    path: path.to_path_buf(),
+                    key: "gateways",
+                    reason,
+                }
+            })
+        })
+        .transpose()?;
+
     Ok(Read {
         provider,
         model,
         effort: file.effort.map(Effort::from),
         base_url,
+        gateways,
         scope,
     })
 }
@@ -468,7 +517,12 @@ fn layer(sources: Vec<(PathBuf, Read)>) -> Config {
         if config.base_url.is_none()
             && let Some(base_url) = read.base_url
         {
-            config.base_url = Some(Setting::new(base_url, &path, read.scope));
+            config.base_url = Some(Setting::new(base_url, &path, read.scope.clone()));
+        }
+        if config.gateways.is_none()
+            && let Some(gateways) = read.gateways
+        {
+            config.gateways = Some(Setting::new(gateways, &path, read.scope));
         }
     }
 

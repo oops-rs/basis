@@ -46,6 +46,10 @@ const BASE_URL_VARS: &[&str] = &["BASIS_BASE_URL", "OPENAI_BASE_URL"];
 /// Environment variables holding the key for a custom endpoint.
 const COMPATIBLE_KEY_VARS: &[&str] = &["BASIS_API_KEY", "OPENAI_API_KEY"];
 
+/// The environment variable naming a gateway ring, as JSON in the global
+/// config file's `gateways` schema (`crate::config`'s `gateways` module).
+pub const GATEWAYS_VAR: &str = "BASIS_GATEWAYS";
+
 /// The id a custom endpoint's models are filed under when nothing named one:
 /// a base URL, or a ring of them, is "OpenAI-compatible" and says so.
 pub(crate) const DEFAULT_COMPATIBLE_PROVIDER: BuiltinProvider = BuiltinProvider::OpenAI;
@@ -159,6 +163,37 @@ pub enum ProviderError {
         #[source]
         source: std::io::Error,
     },
+
+    /// `BASIS_GATEWAYS` is not a ring basis can read. The reason names the
+    /// member and the key, never a value.
+    #[error("{GATEWAYS_VAR} {reason}")]
+    InvalidGateways { reason: String },
+
+    /// `BASIS_GATEWAYS` beside a base-URL variable; see
+    /// `env_gateway_ring`.
+    #[error("{GATEWAYS_VAR} is set beside {var}; both name the endpoint, so unset one")]
+    GatewaysBesideBaseUrl { var: &'static str },
+}
+
+/// The ring `BASIS_GATEWAYS` states, if it is set.
+///
+/// Read only when nothing in code or in a config file answered the endpoint
+/// question (`RuntimeBuilder`'s settlement has the order). Beside
+/// `BASIS_BASE_URL` or `OPENAI_BASE_URL` it is refused rather than ranked: two
+/// variables in one environment each naming the endpoint is a shell that has
+/// not decided, and a silent winner would be a gateway nobody chose.
+pub(crate) fn env_gateway_ring(
+    lookup: &dyn Fn(&str) -> Option<String>,
+) -> Result<Option<crate::GatewayRingConfig>, ProviderError> {
+    let Some(raw) = read(lookup, GATEWAYS_VAR) else {
+        return Ok(None);
+    };
+    if let Some(var) = BASE_URL_VARS.iter().find(|var| read(lookup, var).is_some()) {
+        return Err(ProviderError::GatewaysBesideBaseUrl { var });
+    }
+    crate::config::parse_gateways_var(&raw)
+        .map(Some)
+        .map_err(|reason| ProviderError::InvalidGateways { reason })
 }
 
 /// Trims a base URL to what mentra's transports expect.
@@ -257,12 +292,12 @@ pub fn resolve_with(
 /// The same, against an explicit environment, so the rules are testable
 /// without mutating the process's own.
 ///
-/// Private, and meant to stay that way: a host whose credential lives
+/// Crate-private, and meant to stay that way: a host whose credential lives
 /// somewhere basis cannot read passes it to
 /// [`RuntimeBuilder::with_api_key`](crate::RuntimeBuilder::with_api_key),
 /// and a second, wider way to supply one would be a second thing to keep
 /// honest.
-fn resolve_against(
+pub(crate) fn resolve_against(
     lookup: &dyn Fn(&str) -> Option<String>,
     requested: Option<BuiltinProvider>,
     base_url: Option<&str>,

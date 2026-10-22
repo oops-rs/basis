@@ -385,3 +385,165 @@ fn an_empty_config_is_the_off_switch() {
     assert!(config.is_empty());
     assert_eq!(config.model_selector(), None);
 }
+
+#[test]
+fn a_ring_in_the_global_file_names_its_members_in_order_and_where_their_keys_live() {
+    let tmp = tempfile::tempdir().expect("tempdir");
+    let global = tmp.path().join("global");
+    global_file(
+        &global,
+        r#"{"schema": 1, "gateways": [
+            {"base_url": "${GATEWAY_HOST}/v1", "api_key_file": "/run/secrets/local"},
+            {"base_url": "http://relay/v1", "api_key_env": "RELAY_KEY",
+             "strip_model_prefix": "openai/"}
+        ]}"#,
+    );
+
+    let config = Config::discover_with(
+        tmp.path(),
+        Some(&global),
+        &exporting(&[("GATEWAY_HOST", "http://local:2455")]),
+    )
+    .expect("the user's own file may say it");
+
+    assert!(!config.is_empty());
+    let ring = config.gateways.expect("a ring");
+    assert_eq!(ring.scope, ContextScope::Global);
+    assert_eq!(
+        ring.value,
+        GatewayRingConfig {
+            members: vec![
+                crate::runtime::GatewayMember::new("http://local:2455/v1")
+                    .with_api_key_file("/run/secrets/local"),
+                crate::runtime::GatewayMember::new("http://relay/v1")
+                    .with_api_key_env("RELAY_KEY")
+                    .with_model_prefix_stripped("openai/"),
+            ],
+            policy: None,
+        }
+    );
+}
+
+#[test]
+fn a_ring_object_carries_its_policy() {
+    use crate::runtime::GatewayRingPolicy;
+    use std::time::Duration;
+
+    let policy = |body: &str| {
+        let tmp = tempfile::tempdir().expect("tempdir");
+        let global = tmp.path().join("global");
+        global_file(&global, body);
+        discover(tmp.path(), Some(&global))
+            .expect("parses")
+            .gateways
+            .expect("a ring")
+            .value
+            .policy
+    };
+    let members = r#""members": [{"base_url": "http://a/v1"}]"#;
+
+    assert_eq!(
+        policy(&format!(
+            r#"{{"schema": 1, "gateways": {{{members}, "failure_threshold": 2, "cooldown_secs": 30}}}}"#
+        )),
+        Some(GatewayRingPolicy {
+            failure_threshold: 2,
+            cooldown: Some(Duration::from_secs(30)),
+        })
+    );
+    assert_eq!(
+        policy(&format!(
+            r#"{{"schema": 1, "gateways": {{{members}, "sticky": true}}}}"#
+        )),
+        Some(GatewayRingPolicy::sticky())
+    );
+    assert_eq!(
+        policy(&format!(r#"{{"schema": 1, "gateways": {{{members}}}}}"#)),
+        None,
+        "an object that says nothing about policy leaves the host's standing"
+    );
+}
+
+#[test]
+fn a_ring_in_the_workspace_file_is_refused_like_a_base_url() {
+    let tmp = tempfile::tempdir().expect("tempdir");
+    workspace_file(
+        tmp.path(),
+        r#"{"schema": 1, "gateways": [{"base_url": "http://a/v1"}]}"#,
+    );
+
+    let error = discover(tmp.path(), None).expect_err("refused, not ignored");
+
+    assert!(
+        matches!(error, ConfigError::WorkspaceGateways { .. }),
+        "{error}"
+    );
+}
+
+#[test]
+fn a_ring_that_cannot_be_meant_is_refused_by_key() {
+    for (gateways, says) in [
+        (r#"[]"#, "lists no gateways"),
+        (
+            r#"[{"base_url": "http://a/v1", "api_key_env": "A", "api_key_file": "/a"}]"#,
+            "gateway #0 names both",
+        ),
+        (r#"[{"base_url": "not a url"}]"#, "gateway #0"),
+        (
+            r#"{"members": [{"base_url": "http://a/v1"}], "sticky": true, "cooldown_secs": 5}"#,
+            "both `sticky` and `cooldown_secs`",
+        ),
+        (
+            r#"{"members": [{"base_url": "http://a/v1"}], "failure_threshold": 0}"#,
+            "`failure_threshold` to 0",
+        ),
+    ] {
+        let tmp = tempfile::tempdir().expect("tempdir");
+        let global = tmp.path().join("global");
+        global_file(
+            &global,
+            &format!(r#"{{"schema": 1, "gateways": {gateways}}}"#),
+        );
+
+        let error = discover(tmp.path(), Some(&global)).expect_err(gateways);
+
+        let rendered = error.to_string();
+        assert!(
+            matches!(
+                error,
+                ConfigError::Invalid {
+                    key: "gateways",
+                    ..
+                }
+            ),
+            "{rendered}"
+        );
+        assert!(rendered.contains(says), "{rendered}");
+    }
+}
+
+#[test]
+fn a_ring_beside_a_base_url_is_refused() {
+    let tmp = tempfile::tempdir().expect("tempdir");
+    let global = tmp.path().join("global");
+    global_file(
+        &global,
+        r#"{"schema": 1, "base_url": "http://a/v1", "gateways": [{"base_url": "http://b/v1"}]}"#,
+    );
+
+    let error = discover(tmp.path(), Some(&global)).expect_err("refused");
+
+    assert!(error.to_string().contains("beside `base_url`"), "{error}");
+}
+
+#[test]
+fn the_variable_reads_the_files_schema_and_names_no_value_when_it_cannot() {
+    let ring =
+        parse_gateways_var(r#"[{"base_url": "http://a/v1", "api_key_env": "A"}]"#).expect("parses");
+    assert_eq!(ring.members.len(), 1);
+
+    let reason = parse_gateways_var(r#"[{"base_url": "http://a/v1", "api_kee": "sk-secret"}]"#)
+        .expect_err("an unknown key");
+    assert!(!reason.contains("sk-secret"), "{reason}");
+    assert!(parse_gateways_var("not json").is_err());
+}

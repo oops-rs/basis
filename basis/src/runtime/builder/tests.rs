@@ -1381,7 +1381,7 @@ fn the_ring_knobs_compose_in_any_order() {
         .with_gateway_ring([GatewayMember::new("http://127.0.0.1:2/")]);
 
     let spec = builder.gateway_ring.as_ref().expect("a ring is set");
-    assert_eq!(spec.policy, GatewayRingPolicy::sticky());
+    assert_eq!(spec.policy, Some(GatewayRingPolicy::sticky()));
     assert!(spec.observer.is_some());
     let members = spec.members.as_ref().expect("stated");
     assert_eq!(members.len(), 1);
@@ -1407,4 +1407,192 @@ fn a_ring_policy_alone_says_nothing() {
         .expect("a base URL beside an unstated ring resolves as usual");
 
     assert_eq!(runtime.provider(), "openai");
+}
+
+/// Settles `builder` against an environment fixed by the test.
+fn settled(
+    builder: RuntimeBuilder,
+    vars: &'static [(&'static str, &'static str)],
+) -> Result<provider_settlement::ProviderSource, RunError> {
+    provider_settlement::settle(
+        provider_settlement::Answers {
+            host_provider: builder.host_provider,
+            gateway_ring: builder.gateway_ring,
+            config_gateway_ring: builder.config_gateway_ring,
+            provider: builder.provider,
+            base_url: builder.base_url,
+            api_key: builder.api_key,
+        },
+        &move |name| {
+            vars.iter()
+                .find(|(var, _)| *var == name)
+                .map(|(_, value)| (*value).to_string())
+        },
+    )
+}
+
+fn ring_members(source: &provider_settlement::ProviderSource) -> Option<Vec<String>> {
+    match source {
+        provider_settlement::ProviderSource::Ring { spec, .. } => Some(
+            spec.members
+                .iter()
+                .flatten()
+                .map(|member| member.base_url().to_string())
+                .collect(),
+        ),
+        _ => None,
+    }
+}
+
+fn file_ring(urls: &[&str], policy: Option<GatewayRingPolicy>) -> crate::Config {
+    crate::Config {
+        gateways: Some(crate::Setting {
+            value: crate::GatewayRingConfig {
+                members: urls.iter().map(|url| GatewayMember::new(*url)).collect(),
+                policy,
+            },
+            path: "/home/me/.config/basis/config.json".into(),
+            scope: crate::ContextScope::Global,
+        }),
+        ..crate::Config::default()
+    }
+}
+
+#[test]
+fn a_files_ring_answers_when_the_code_named_no_endpoint() {
+    let config = file_ring(&["http://a/v1", "http://b/v1"], None);
+
+    let source = settled(RuntimeBuilder::default().with_config(&config), &[]).expect("settles");
+
+    assert_eq!(
+        ring_members(&source),
+        Some(vec!["http://a/v1".to_string(), "http://b/v1".to_string()])
+    );
+}
+
+#[test]
+fn a_hosts_base_url_leaves_a_files_ring_unread_in_either_order() {
+    let config = file_ring(&["http://a/v1"], None);
+
+    for builder in [
+        RuntimeBuilder::default()
+            .with_config(&config)
+            .with_base_url("http://host/v1"),
+        RuntimeBuilder::default()
+            .with_base_url("http://host/v1")
+            .with_config(&config),
+    ] {
+        let source = settled(builder, &[]).expect("not refused as a base URL beside a ring");
+
+        assert!(matches!(
+            source,
+            provider_settlement::ProviderSource::Resolved(choice)
+                if choice.base_url.as_deref() == Some("http://host/")
+        ));
+    }
+}
+
+#[test]
+fn a_hosts_ring_leaves_a_files_ring_unread() {
+    let config = file_ring(&["http://file/v1"], None);
+
+    let source = settled(
+        RuntimeBuilder::default()
+            .with_config(&config)
+            .with_gateway_ring([GatewayMember::new("http://host/v1")]),
+        &[],
+    )
+    .expect("settles");
+
+    assert_eq!(
+        ring_members(&source),
+        Some(vec!["http://host/v1".to_string()])
+    );
+}
+
+#[test]
+fn a_hosts_policy_outranks_a_files_and_a_files_fills_an_unsaid_one() {
+    let fast = GatewayRingPolicy::default().with_failure_threshold(1);
+    let config = file_ring(&["http://a/v1"], Some(fast));
+    let policy_of = |source: provider_settlement::ProviderSource| match source {
+        provider_settlement::ProviderSource::Ring { spec, .. } => spec.policy,
+        _ => panic!("a ring"),
+    };
+
+    let host_said = settled(
+        RuntimeBuilder::default()
+            .with_gateway_ring_policy(GatewayRingPolicy::sticky())
+            .with_config(&config),
+        &[],
+    )
+    .expect("settles");
+    let host_silent =
+        settled(RuntimeBuilder::default().with_config(&config), &[]).expect("settles");
+
+    assert_eq!(policy_of(host_said), Some(GatewayRingPolicy::sticky()));
+    assert_eq!(policy_of(host_silent), Some(fast));
+}
+
+#[test]
+fn the_environment_states_a_ring_when_nothing_else_did() {
+    const RING: &str = r#"[{"base_url": "http://a/v1"}, {"base_url": "http://b/v1"}]"#;
+
+    let source = settled(RuntimeBuilder::default(), &[("BASIS_GATEWAYS", RING)]).expect("settles");
+    assert_eq!(ring_members(&source).map(|members| members.len()), Some(2));
+
+    // A file outranks the environment, and a base URL in code outranks both.
+    let from_file = settled(
+        RuntimeBuilder::default().with_config(&file_ring(&["http://file/v1"], None)),
+        &[("BASIS_GATEWAYS", RING)],
+    )
+    .expect("settles");
+    assert_eq!(
+        ring_members(&from_file),
+        Some(vec!["http://file/v1".to_string()])
+    );
+    let from_code = settled(
+        RuntimeBuilder::default().with_base_url("http://host/v1"),
+        &[("BASIS_GATEWAYS", RING)],
+    )
+    .expect("settles");
+    assert!(ring_members(&from_code).is_none());
+}
+
+#[test]
+fn an_environment_ring_beside_a_base_url_variable_or_a_key_in_code_is_refused() {
+    const RING: &str = r#"[{"base_url": "http://a/v1"}]"#;
+
+    let beside_url = settled(
+        RuntimeBuilder::default(),
+        &[("BASIS_GATEWAYS", RING), ("OPENAI_BASE_URL", "http://b/v1")],
+    );
+    assert!(matches!(
+        beside_url,
+        Err(RunError::Provider(
+            provider::ProviderError::GatewaysBesideBaseUrl {
+                var: "OPENAI_BASE_URL"
+            }
+        ))
+    ));
+
+    let beside_key = settled(
+        RuntimeBuilder::default().with_api_key("k"),
+        &[("BASIS_GATEWAYS", RING)],
+    );
+    assert!(matches!(
+        beside_key,
+        Err(RunError::Provider(
+            provider::ProviderError::AmbiguousProviderSource {
+                knob: "with_api_key"
+            }
+        ))
+    ));
+
+    let malformed = settled(RuntimeBuilder::default(), &[("BASIS_GATEWAYS", "[")]);
+    assert!(matches!(
+        malformed,
+        Err(RunError::Provider(
+            provider::ProviderError::InvalidGateways { .. }
+        ))
+    ));
 }

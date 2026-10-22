@@ -191,7 +191,9 @@ type Observer = Arc<dyn Fn(GatewayRingEvent) + Send + Sync>;
 #[derive(Clone, Default)]
 pub(in crate::runtime) struct GatewayRingSpec {
     pub(super) members: Option<Vec<GatewayMember>>,
-    pub(super) policy: GatewayRingPolicy,
+    /// `None` until a host or a config states one, so a file's policy fills
+    /// only what the host left unsaid; mentra's default at assembly.
+    pub(super) policy: Option<GatewayRingPolicy>,
     pub(super) observer: Option<Observer>,
 }
 
@@ -199,6 +201,17 @@ impl GatewayRingSpec {
     /// Whether [`RuntimeBuilder::with_gateway_ring`] was ever called.
     pub(in crate::runtime) fn is_stated(&self) -> bool {
         self.members.is_some()
+    }
+
+    /// This spec with `ring`'s members, and its policy where this one had
+    /// none — how a ring from a config file or the environment joins the
+    /// policy and observer a host stated in code.
+    pub(in crate::runtime) fn filled_from(self, ring: &crate::GatewayRingConfig) -> Self {
+        Self {
+            members: Some(ring.members.clone()),
+            policy: self.policy.or(ring.policy),
+            observer: self.observer,
+        }
     }
 }
 
@@ -264,7 +277,7 @@ impl RuntimeBuilder {
     #[must_use]
     pub fn with_gateway_ring_policy(self, policy: GatewayRingPolicy) -> Self {
         let spec = GatewayRingSpec {
-            policy,
+            policy: Some(policy),
             ..self.gateway_ring.clone().unwrap_or_default()
         };
         Self {
@@ -313,7 +326,7 @@ pub(super) fn assemble(
         .enumerate()
         .map(|(index, member)| build_member(index, member, provider, wire, &lookup))
         .collect::<Result<Vec<_>, _>>()?;
-    let ring = GatewayRing::new(members, spec.policy)
+    let ring = GatewayRing::new(members, spec.policy.unwrap_or_default())
         .map_err(|_| provider::ProviderError::EmptyGatewayRing)?;
     Ok(match spec.observer {
         Some(observer) => ring.with_observer(move |event| observer(event)),

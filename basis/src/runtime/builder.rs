@@ -180,6 +180,9 @@ pub struct RuntimeBuilder {
     /// [`with_wire`](Self::with_wire) for the wire, exactly as a lone base
     /// URL does.
     gateway_ring: Option<GatewayRingSpec>,
+    /// The ring a config file stated ([`with_config`](Self::with_config)),
+    /// used at build only if nothing in code answered the endpoint question.
+    config_gateway_ring: Option<crate::GatewayRingConfig>,
 }
 
 /// Hand-written so a supplied credential cannot reach a log through a
@@ -196,6 +199,7 @@ impl std::fmt::Debug for RuntimeBuilder {
                 &self.host_provider.as_ref().map(|host| host.id.as_str()),
             )
             .field("gateway_ring", &self.gateway_ring)
+            .field("config_gateway_ring", &self.config_gateway_ring)
             .field("model", &self.model)
             .field("history", &self.history)
             .field(
@@ -264,6 +268,7 @@ impl Default for RuntimeBuilder {
             tool_result_policy: None,
             host_provider: None,
             gateway_ring: None,
+            config_gateway_ring: None,
         }
     }
 }
@@ -640,11 +645,15 @@ impl RuntimeBuilder {
         // Which provider this runtime runs on, settled before assembly —
         // `provider_settlement::settle`'s own docs have the ambiguity rule.
         let source = provider_settlement::settle(
-            self.host_provider,
-            self.gateway_ring,
-            self.provider,
-            self.base_url,
-            self.api_key,
+            provider_settlement::Answers {
+                host_provider: self.host_provider,
+                gateway_ring: self.gateway_ring,
+                config_gateway_ring: self.config_gateway_ring,
+                provider: self.provider,
+                base_url: self.base_url,
+                api_key: self.api_key,
+            },
+            &|var| std::env::var(var).ok(),
         )?;
 
         // Made before the mentra runtime because `spawn` — which mentra's

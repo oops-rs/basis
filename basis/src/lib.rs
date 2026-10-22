@@ -119,7 +119,7 @@ pub use budget::BudgetPool;
 pub use compaction::Compaction;
 pub use config::{
     CONFIG_SCHEMA_VERSION, Config, ConfigError, DEFAULT_GLOBAL_CONFIG_FILE,
-    DEFAULT_WORKSPACE_CONFIG_FILE, Setting,
+    DEFAULT_WORKSPACE_CONFIG_FILE, GatewayRingConfig, Setting,
 };
 pub use context::{
     ContextConfig, ContextDocument, ContextError, ContextScope, DEFAULT_CONTEXT_FALLBACK_FILE,
