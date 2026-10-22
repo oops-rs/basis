@@ -355,3 +355,9 @@ strip = true
 opt-level = "s"
 lto = true
 codegen-units = 1
+
+# Development only: unreleased mentra (`StripModelPrefix` and one-line
+# `GatewayRingEvent`s, for gateway rings stated in config — ADR-0045).
+# Removed at release.
+[patch.crates-io]
+mentra = { path = "../mentra/mentra" }
