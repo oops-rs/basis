@@ -7,7 +7,16 @@ Releases before 0.15.0 are described by their tags and ADRs only.
 
 ## Unreleased
 
-Breaking: `Config` gains a public `gateways` field; `ConfigError` gains
+**Breaking, silently: the SDK no longer reads `config.json` on its own.**
+`Workspace::open` used to discover `.basis/config.json` and the global
+`config.json`; it now reads one only when the host hands it over
+(ADR-0046). A host that relied on that passes
+`Config::discover(workspace, global_dir)` or
+`ConfigLookup::Discover.load_default(workspace)` to `with_config`. The
+`basis` CLI — `spawn`, `acp`, `serve a2a` — asks for it and behaves as
+before.
+
+Also breaking: `Config` gains a public `gateways` field; `ConfigError` gains
 `WorkspaceGateways`; `ProviderError` gains `GatewayCredentialMissing`,
 `GatewayCredentialUnreadable`, `InvalidGateways` and `GatewaysBesideBaseUrl`.
 A struct literal or an exhaustive match needs updating.
@@ -25,6 +34,18 @@ A struct literal or an exhaustive match needs updating.
   member bare model ids, for a relay that serves the same model under a
   different name (mentra's `StripModelPrefix`).
 - mentra's `GatewayRingEvent` renders as one log line.
+
+### The SDK reads no config file it was not handed
+
+- `WorkspaceBuilder::with_config_file(path)` reads exactly that file at
+  open, as the host's own; `with_config(Config)` as before. Unset is no
+  configuration file.
+- `Config::read_file(path)` reads one named file; `ConfigLookup` (`None`,
+  `File`, `Discover`) states the choice as a value, with `load` /
+  `load_default`.
+- `basis-host`'s `Discovery` gains `config`; `basis-a2a`'s `RunDefaults`
+  and `basis-tasks`'s `RunSpec` gain `with_config`. A task records its
+  lookup; a record from before the field keeps discovering.
 
 ## 0.21.0 — 2026-10-21
 

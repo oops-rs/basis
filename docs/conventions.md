@@ -56,6 +56,11 @@ or the global directory — while workspace path validation still runs.
 
 What this repository says about which model runs in it.
 
+The `basis` CLI reads it (with the global `config.json`) for `spawn`, `acp` and
+`serve a2a`. **The SDK does not** unless the embedding host asks:
+`WorkspaceBuilder::with_config`, `with_config_file`, or
+`ConfigLookup::Discover` for the CLI's lookup.
+
 ```json
 {
   "schema": 1,

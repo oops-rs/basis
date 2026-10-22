@@ -1,5 +1,13 @@
 //! `.basis/config.json` — what a repository says about which model runs in it.
 //!
+//! **The SDK reads it only when asked.** The `basis` CLI and the servers it
+//! starts discover it ([`ConfigLookup::Discover`]); a host embedding basis
+//! gets no file it did not name — a [`Config`] it built, a path
+//! ([`Config::read_file`]), or the CLI's lookup asked for by name
+//! ([`Config::discover`]). An embedder already has a configuration of its
+//! own, and a file it never chose deciding which model its product runs
+//! would be a dependency it never took (ADR-0046).
+//!
 //! Every other knob basis has is a flag or an environment variable, and both
 //! describe an *invocation*. Neither can say the one thing a repository knows
 //! about itself: that its work is done with a particular model. Without

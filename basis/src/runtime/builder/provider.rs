@@ -230,9 +230,11 @@ impl RuntimeBuilder {
     /// whichever order the two were called.
     ///
     /// [`Workspace::open`](crate::Workspace::open) calls this for the private
-    /// runtime it builds, so the one-repository host gets it without asking. A
-    /// host building a shared [`Runtime`](crate::Runtime) states its own process facts and
-    /// calls this itself if it wants a file to speak for them.
+    /// runtime it builds, with whatever [`Config`](crate::Config) the host
+    /// handed the workspace — none unless it handed one: the SDK reads no
+    /// `config.json` it was not given (ADR-0046). A host building a shared
+    /// [`Runtime`](crate::Runtime) states its own process facts and calls this
+    /// itself if it wants a file to speak for them.
     ///
     /// **A host-supplied provider leaves the file's `provider` and `base_url`
     /// unread.** [`with_provider_instance`](Self::with_provider_instance) and

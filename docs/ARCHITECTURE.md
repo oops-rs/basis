@@ -551,7 +551,7 @@ flowchart LR
   parked in [`proposals/0002`](proposals/0002-native-sandbox.md) as an *optional* later
   layer, not a return to denying commands by default.
 - **What a repository is trusted with**: opening a workspace runs what the repository
-  declares. `AGENTS.md`, `.basis/config.json`, `.basis/hooks.json`, `.basis/tools.json`,
+  declares. `AGENTS.md`, `.basis/config.json` (when the host asked for it), `.basis/hooks.json`, `.basis/tools.json`,
   `.mcp.json` and the skills roots are configuration carrying the workspace's authority,
   not inert data. `.mcp.json`'s servers are connected by `Workspace::open` itself, before
   a model has said anything; a `.basis/hooks.json` entry that omits `tools` is asked on
@@ -772,7 +772,18 @@ same model as its neighbours under a bare id; that is mentra's `StripModelPrefix
 A repository can state its own answer instead of relying on the flag or the
 variable. `.basis/config.json` — `provider`, `model`, `effort`, and in the
 global `config.json` only, `base_url` or `gateways` — layers under everything an invocation
-says and over everything the environment does:
+says and over everything the environment does.
+
+That is the **CLI's** convention. The SDK reads no `config.json` unless the host hands it
+one — `WorkspaceBuilder::with_config(Config)`, `with_config_file(path)`, or the CLI's own
+lookup asked for by name (`Config::discover`, `ConfigLookup::Discover`). An embedder has its
+own configuration, and a file it never named deciding which model its product runs is a
+dependency it never took ([ADR-0046](adr/0046-the-sdk-reads-no-config-file-it-was-not-handed.md)).
+A layer that opens workspaces on someone's behalf states the lookup as a value:
+`basis-host`'s `Discovery::config`, `basis-a2a`'s `RunDefaults::with_config`, and
+`basis-tasks`'s `RunSpec::with_config`, which a task records so its attacher reads what the
+spawner would have. `basis spawn`, `basis acp` and `basis serve a2a` all ask for
+`Discover`. Where a file is read:
 
 ```
 CLI flag / explicit builder call

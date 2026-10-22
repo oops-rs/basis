@@ -96,8 +96,9 @@ that embedders can disable.
 ## Configuration
 
 Basis discovers `AGENTS.md` (or `CLAUDE.md`), skills, and other workspace files when
-it opens a repository. To pin a repository's provider and model, create
-`.basis/config.json`:
+it opens a repository. To pin a repository's provider and model for the `basis` CLI,
+create `.basis/config.json` (as an SDK, basis reads it only when you pass a `Config`
+or a path — see [configuration](docs/conventions.md)):
 
 ```json
 {
