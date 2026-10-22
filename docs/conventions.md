@@ -72,6 +72,7 @@ What this repository says about which model runs in it.
 | `model` | a model id | `--model`'s value |
 | `effort` | `low`, `medium`, `high`, `xhigh`, `max` | the default when a run asks for none |
 | `base_url` | an OpenAI-compatible endpoint | **global file only** |
+| `gateways` | several endpoints to one model, in preference order | **global file only**; never beside `base_url` |
 
 `${VAR}` and `${VAR:-default}` expand in every string value. Unknown keys are
 an error. There is no `api_key` key: a credential belongs to the environment.
@@ -80,7 +81,38 @@ an error. There is no `api_key` key: a credential belongs to the environment.
 and `.basis/hooks.json` name programs to run, and a program is bounded by
 whatever confines the process; a `base_url` redirects the traffic carrying the
 credential basis just read out of the environment, and a leaked secret is
-bounded by nothing.
+bounded by nothing. `gateways` is refused there for the same reason.
+
+`gateways` is a list of members, or `{"members": [...]}` with the ring's
+policy beside them:
+
+```json
+"gateways": {
+  "members": [
+    { "base_url": "http://10.0.0.1:2455/v1", "api_key_file": "/run/secrets/local" },
+    { "base_url": "http://relay.example/v1", "api_key_env": "RELAY_KEY",
+      "strip_model_prefix": "openai/" }
+  ],
+  "failure_threshold": 3,
+  "cooldown_secs": 120
+}
+```
+
+| Member key | Value |
+| --- | --- |
+| `base_url` | the endpoint, as published |
+| `api_key_env` | the variable holding this member's key, read at startup |
+| `api_key_file` | the file holding it — a mounted secret — read at startup, whitespace trimmed |
+| `strip_model_prefix` | sent ids lose this prefix: `openai/gpt-5.6-sol` reaches the member as `gpt-5.6-sol` |
+
+A member names where its key lives, never the key; one stated and missing is
+an error at startup naming the member, not a `401` the ring would rotate past.
+`failure_threshold` (default 5) is the streak that rotates; `cooldown_secs`
+(default 60) is how long a member left behind rests before the ring tries it
+again, and `"sticky": true` instead never returns on its own. Every member must
+serve the same model — a rotation replays the conversation, and one vendor's
+transcript is refused by another's endpoint; `strip_model_prefix` covers a
+member that names the same model differently, not a different model.
 
 Precedence, strongest first: **CLI flag or explicit builder call → workspace
 file → global file → environment → basis's default.** An ACP client's
@@ -378,6 +410,7 @@ task directory. Losing it loses the A2A view of past tasks, never a task.
 | `BASIS_DATA_DIR` | Where tasks and conversations are kept. Overrides `$XDG_DATA_HOME` and the platform data home. A relative path is resolved once, against the directory current when the root is opened, and passed on to spawned commands absolute — so a process that changes directory, and a nested `basis` that inherits the variable, read one directory rather than one each |
 | `BASIS_BASE_URL` | An OpenAI-compatible endpoint. `OPENAI_BASE_URL` is read after it, because gateways already tell their users to set that one |
 | `BASIS_API_KEY` | The key for that endpoint. `OPENAI_API_KEY` is read after it |
+| `BASIS_GATEWAYS` | A gateway ring, as the JSON of the global file's `gateways` key, for a host configured only by its environment. Read when no code and no file named an endpoint; refused beside `BASIS_BASE_URL` or `OPENAI_BASE_URL` |
 | `BASIS_TASK_ID` | Set by basis on every process a run spawns: which task this is. Read by a nested `basis` to route its own `spawn` |
 | `BASIS_PARENT_TASK_ID` | Set by basis on the same processes when the task has a parent |
 | `BASIS_HOP` | Set by basis on the same processes when the task's work arrived over A2A: how many agent-to-agent hops it is from its top-level caller ([hops-v1](a2a/hops-v1.md)). What an A2A client run from inside the task adds one to when it hands work on. Absent at hop 0 |

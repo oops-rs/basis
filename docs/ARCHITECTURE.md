@@ -761,16 +761,24 @@ Members must front the same upstream serving the same model — a replayed trans
 carrying one vendor's reasoning items is refused by another's endpoint — and basis
 documents that rather than checking it.
 
+A ring is also data. The global `config.json`'s `gateways` key and the `BASIS_GATEWAYS`
+variable carry the same JSON — members, each naming where its key lives
+(`api_key_env`, `api_key_file`) rather than the key, and optionally the policy — and become
+`with_gateway_ring` at `build` when no code stated an endpoint, keeping any policy or
+observer the code did. A member may strip a model-id prefix, for a relay that serves the
+same model as its neighbours under a bare id; that is mentra's `StripModelPrefix`
+([ADR-0045](adr/0045-a-gateway-ring-is-configuration.md)).
+
 A repository can state its own answer instead of relying on the flag or the
 variable. `.basis/config.json` — `provider`, `model`, `effort`, and in the
-global `config.json` only, `base_url` — layers under everything an invocation
+global `config.json` only, `base_url` or `gateways` — layers under everything an invocation
 says and over everything the environment does:
 
 ```
 CLI flag / explicit builder call
   → <workspace>/.basis/config.json
     → <global config dir>/config.json
-      → environment (BASIS_BASE_URL, ANTHROPIC_API_KEY, …)
+      → environment (BASIS_GATEWAYS, BASIS_BASE_URL, ANTHROPIC_API_KEY, …)
         → basis's default (the provider's newest available model)
 ```
 

@@ -113,6 +113,8 @@ Without a model setting, Basis selects the provider's newest available model.
 
 - Keep credentials in environment variables. Configuration files have no `api_key` field.
 - For a custom endpoint, set `BASIS_BASE_URL` and, if needed, `BASIS_API_KEY`.
+  For several gateways in front of one model, tried in order, set `gateways` in the
+  global `config.json` or `BASIS_GATEWAYS` (see the [configuration reference](docs/conventions.md)).
   Custom URLs use OpenAI's `chat/completions` wire by default; the `openai` provider
   uses Responses. See [endpoint configuration](docs/ARCHITECTURE.md#effort-providers-and-custom-endpoints).
 - `BASIS_CONFIG_DIR` overrides the global configuration directory.

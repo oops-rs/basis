@@ -5,6 +5,27 @@ All six crates — `basis`, `basis-host`, `basis-tasks`, `basis-acp`,
 live in `docs/adr/`; this file says what changed for someone upgrading.
 Releases before 0.15.0 are described by their tags and ADRs only.
 
+## Unreleased
+
+Breaking: `Config` gains a public `gateways` field; `ConfigError` gains
+`WorkspaceGateways`; `ProviderError` gains `GatewayCredentialMissing`,
+`GatewayCredentialUnreadable`, `InvalidGateways` and `GatewaysBesideBaseUrl`.
+A struct literal or an exhaustive match needs updating.
+
+### A gateway ring is configuration
+
+- The global `config.json` takes `gateways` — members in preference order,
+  optionally with `failure_threshold`, `cooldown_secs` or `sticky` — and
+  `BASIS_GATEWAYS` takes the same JSON, for a host configured only by its
+  environment (ADR-0045). Refused in a workspace file and beside `base_url`.
+- A member names where its key lives: `api_key_env` / `api_key_file`, or
+  `GatewayMember::with_api_key_env` / `with_api_key_file`. Read at build; a
+  missing one is a build error naming the member.
+- `strip_model_prefix` / `GatewayMember::with_model_prefix_stripped` sends a
+  member bare model ids, for a relay that serves the same model under a
+  different name (mentra's `StripModelPrefix`).
+- mentra's `GatewayRingEvent` renders as one log line.
+
 ## 0.21.0 — 2026-10-21
 
 Breaking: built on mentra 0.33. `OpenError` gains `ExtensionDeclared` and
