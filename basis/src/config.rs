@@ -72,7 +72,7 @@ pub(crate) use gateways::parse_var as parse_gateways_var;
 use std::path::{Path, PathBuf};
 
 use mentra::{BuiltinProvider, ModelSelector};
-use serde::Deserialize;
+use serde::{Deserialize, Serialize};
 use thiserror::Error;
 
 use crate::{context::ContextScope, event::ContextFile, expand::expand, provider, run::Effort};
@@ -197,6 +197,29 @@ impl Config {
         Ok(layer(sources))
     }
 
+    /// Exactly the file at `path`, read as the host's own.
+    ///
+    /// For an embedder that keeps its basis configuration where it chooses:
+    /// nothing else is probed, and a file that is missing is an error rather
+    /// than silence — a host that named a path meant one. Read with
+    /// [`ContextScope::Global`]'s standing, so `base_url` and `gateways` are
+    /// honored: the host chose this file, which is the trust the global file
+    /// has and a repository's file does not.
+    pub fn read_file(path: impl AsRef<Path>) -> Result<Self, ConfigError> {
+        Self::read_file_with(path.as_ref(), &|name| std::env::var(name).ok())
+    }
+
+    pub(crate) fn read_file_with(
+        path: &Path,
+        lookup: &dyn Fn(&str) -> Option<String>,
+    ) -> Result<Self, ConfigError> {
+        Ok(layer(vec![read(
+            path.to_path_buf(),
+            ContextScope::Global,
+            lookup,
+        )?]))
+    }
+
     /// Whether any file said anything at all.
     pub fn is_empty(&self) -> bool {
         self.provider.is_none()
@@ -211,6 +234,41 @@ impl Config {
         self.model
             .as_ref()
             .map(|model| ModelSelector::Id(model.value.clone()))
+    }
+}
+
+/// Where a host that opens workspaces on someone else's behalf — a server
+/// opening one per session, a task resumed in another process — gets each
+/// one's [`Config`].
+///
+/// basis-the-SDK reads no `config.json` unless told to: a
+/// [`WorkspaceBuilder`](crate::WorkspaceBuilder) takes a [`Config`] or a
+/// path, never a search. This is the same choice held as a value, so a host
+/// can state it once for workspaces it has not opened yet, and a task can
+/// record it. [`Discover`](Self::Discover) is the CLI's convention, asked for
+/// by name.
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum ConfigLookup {
+    /// No file: the host's own calls are the whole configuration.
+    #[default]
+    None,
+    /// Exactly this file, as [`Config::read_file`] reads it.
+    File(PathBuf),
+    /// The workspace's `.basis/config.json` and the global `config.json`,
+    /// layered — what the `basis` CLI does ([`Config::discover`]).
+    Discover,
+}
+
+impl ConfigLookup {
+    /// The [`Config`] this lookup finds for `workspace`. `global_dir` is
+    /// read only by [`Discover`](Self::Discover).
+    pub fn load(&self, workspace: &Path, global_dir: Option<&Path>) -> Result<Config, ConfigError> {
+        match self {
+            Self::None => Ok(Config::default()),
+            Self::File(path) => Config::read_file(path),
+            Self::Discover => Config::discover(workspace, global_dir),
+        }
     }
 }
 

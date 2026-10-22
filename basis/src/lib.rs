@@ -118,7 +118,7 @@ pub use budget::BudgetPool;
 // host already looks for `ShellAccess` and `ContextConfig`.
 pub use compaction::Compaction;
 pub use config::{
-    CONFIG_SCHEMA_VERSION, Config, ConfigError, DEFAULT_GLOBAL_CONFIG_FILE,
+    CONFIG_SCHEMA_VERSION, Config, ConfigError, ConfigLookup, DEFAULT_GLOBAL_CONFIG_FILE,
     DEFAULT_WORKSPACE_CONFIG_FILE, GatewayRingConfig, Setting,
 };
 pub use context::{

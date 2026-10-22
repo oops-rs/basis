@@ -5,6 +5,10 @@
 //! the provider for, and — the point of the whole precedence chain — that a
 //! caller who named either still gets what it named.
 //!
+//! The SDK reads no `config.json` it was not handed, so every test that is
+//! about the file asks for the CLI's lookup by name ([`discovering`]), the
+//! way `basis` itself does.
+//!
 //! Every builder here looks nowhere except where the test put something, the
 //! pinning `tests/workspace.rs` explains: a developer's own
 //! `~/.config/basis/config.json` must not be able to move an assertion.
@@ -21,9 +25,9 @@ use std::{
 };
 
 use basis::{
-    AllowAll, CollectingSink, Config, ContextConfig, Effort, MemoryConfig, Runtime, Workspace,
-    WorkspaceBuilder, hooks::HooksConfig, skills::SkillsConfig, templates::TemplatesConfig,
-    tools::declared::ToolsConfig,
+    AllowAll, CollectingSink, Config, ConfigLookup, ContextConfig, Effort, MemoryConfig, Runtime,
+    Workspace, WorkspaceBuilder, hooks::HooksConfig, skills::SkillsConfig,
+    templates::TemplatesConfig, tools::declared::ToolsConfig,
 };
 use mentra::ModelSelector;
 
@@ -64,6 +68,16 @@ fn pinned(workspace: &Path) -> WorkspaceBuilder {
         .with_memory(MemoryConfig::disabled())
 }
 
+/// [`pinned`], with the workspace's `config.json` read the way the CLI reads
+/// it — asked for by name, with no global directory.
+fn discovering(workspace: &Path) -> WorkspaceBuilder {
+    pinned(workspace).with_config(
+        ConfigLookup::Discover
+            .load(workspace, None)
+            .expect("a well-formed file"),
+    )
+}
+
 /// A runtime that resolves its provider locally and reaches a closed port if
 /// anything tries to use it. Every model below is named by id, which resolves
 /// without asking the provider for a list.
@@ -91,7 +105,7 @@ async fn a_workspace_file_decides_the_model_when_nothing_else_did() {
     let dir = tempfile::tempdir().expect("tempdir");
     write_config(dir.path(), r#"{"schema": 1, "model": "from-the-file"}"#);
 
-    let workspace = pinned(dir.path())
+    let workspace = discovering(dir.path())
         .with_runtime(offline())
         .open()
         .await
@@ -116,7 +130,7 @@ async fn an_explicit_model_outranks_the_file() {
     let dir = tempfile::tempdir().expect("tempdir");
     write_config(dir.path(), r#"{"schema": 1, "model": "from-the-file"}"#);
 
-    let workspace = pinned(dir.path())
+    let workspace = discovering(dir.path())
         .with_runtime(offline())
         .with_model(ModelSelector::Id("from-the-caller".to_string()))
         .open()
@@ -158,7 +172,50 @@ async fn an_empty_config_is_the_off_switch() {
 }
 
 #[tokio::test]
-async fn a_base_url_in_a_committed_file_fails_the_open_by_name() {
+async fn the_sdk_reads_no_config_file_it_was_not_handed() {
+    // The SDK's rule: a file on disk that nobody named does not decide which
+    // model an embedder's product runs.
+    let dir = tempfile::tempdir().expect("tempdir");
+    write_config(dir.path(), r#"{"schema": 1, "model": "from-the-file"}"#);
+
+    let workspace = pinned(dir.path())
+        .with_runtime(offline())
+        .with_model(ModelSelector::Id("from-the-host".to_string()))
+        .open()
+        .await
+        .expect("opens offline");
+
+    assert_eq!(workspace.model(), "from-the-host");
+    assert!(workspace.config_files().is_empty());
+    assert_eq!(workspace.config(), &Config::default());
+}
+
+#[tokio::test]
+async fn a_named_file_is_read_and_a_missing_one_fails_the_open() {
+    let dir = tempfile::tempdir().expect("tempdir");
+    let file = dir.path().join("my-basis.json");
+    std::fs::write(&file, r#"{"schema": 1, "model": "from-the-named-file"}"#).expect("write");
+
+    let workspace = pinned(dir.path())
+        .with_runtime(offline())
+        .with_config_file(&file)
+        .open()
+        .await
+        .expect("opens offline");
+    assert_eq!(workspace.model(), "from-the-named-file");
+    assert_eq!(workspace.config_files().len(), 1);
+
+    let error = pinned(dir.path())
+        .with_runtime(offline())
+        .with_config_file(dir.path().join("absent.json"))
+        .open()
+        .await
+        .expect_err("a host that named a file meant one");
+    assert!(error.to_string().contains("absent.json"), "{error}");
+}
+
+#[tokio::test]
+async fn a_base_url_in_a_committed_file_is_refused_by_name() {
     // The refusal, at the surface that matters: not a warning, not an ignored
     // key — the workspace does not open, and the message names the file.
     let dir = tempfile::tempdir().expect("tempdir");
@@ -167,10 +224,8 @@ async fn a_base_url_in_a_committed_file_fails_the_open_by_name() {
         r#"{"schema": 1, "base_url": "http://127.0.0.1:1/v1"}"#,
     );
 
-    let error = pinned(dir.path())
-        .with_runtime(offline())
-        .open()
-        .await
+    let error = ConfigLookup::Discover
+        .load(dir.path(), None)
         .expect_err("refused");
 
     let rendered = error.to_string();
@@ -179,14 +234,12 @@ async fn a_base_url_in_a_committed_file_fails_the_open_by_name() {
 }
 
 #[tokio::test]
-async fn a_malformed_file_fails_the_open_rather_than_running_another_model() {
+async fn a_malformed_file_is_refused_rather_than_running_another_model() {
     let dir = tempfile::tempdir().expect("tempdir");
     write_config(dir.path(), "{not json");
 
-    let error = pinned(dir.path())
-        .with_runtime(offline())
-        .open()
-        .await
+    let error = ConfigLookup::Discover
+        .load(dir.path(), None)
         .expect_err("refused");
 
     assert!(error.to_string().contains("config.json"), "{error}");
@@ -204,7 +257,7 @@ async fn the_workspace_files_effort_reaches_the_provider() {
         r#"{"schema": 1, "model": "test-model", "effort": "high"}"#,
     );
 
-    let workspace = pinned(dir.path())
+    let workspace = discovering(dir.path())
         .with_runtime(endpoint.runtime())
         .open()
         .await
@@ -233,7 +286,7 @@ async fn a_run_that_asked_for_an_effort_keeps_its_own() {
         r#"{"schema": 1, "model": "test-model", "effort": "high"}"#,
     );
 
-    let workspace = pinned(dir.path())
+    let workspace = discovering(dir.path())
         .with_runtime(endpoint.runtime())
         .open()
         .await
@@ -267,7 +320,7 @@ async fn a_run_reports_the_effort_it_was_opened_at() {
         r#"{"schema": 1, "model": "test-model", "effort": "high"}"#,
     );
 
-    let workspace = pinned(dir.path())
+    let workspace = discovering(dir.path())
         .with_runtime(offline())
         .open()
         .await
@@ -294,7 +347,7 @@ async fn a_run_nobody_asked_an_effort_of_reports_none() {
     let dir = tempfile::tempdir().expect("tempdir");
     write_config(dir.path(), r#"{"schema": 1, "model": "test-model"}"#);
 
-    let workspace = pinned(dir.path())
+    let workspace = discovering(dir.path())
         .with_runtime(offline())
         .open()
         .await

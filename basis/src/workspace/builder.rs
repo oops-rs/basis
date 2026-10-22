@@ -33,7 +33,7 @@ use crate::agents::AgentResolver;
 use crate::mcp::{self, McpConfig, connections::McpConnections};
 use crate::{
     compaction::Compaction,
-    config::{self, Config},
+    config::Config,
     context::{ContextConfig, SystemPrompt, WorkspaceContext},
     error::RunError,
     event::ContextFile,
@@ -74,9 +74,9 @@ pub struct WorkspaceBuilder {
     /// Inherited policy, a selector override, or complete host-resolved metadata.
     model: WorkspaceModel,
     context: ContextConfig,
-    /// What `config.json` said; `None` means discover it at
-    /// [`open`](WorkspaceBuilder::open).
-    config: Option<Config>,
+    /// The `config.json` answers the host supplied, or the one file it named;
+    /// `None` is no configuration file at all — the SDK never searches.
+    config: Option<ConfigInput>,
     /// The host's own say over the system prompt; `None` is discovery alone.
     system_prompt: Option<SystemPrompt>,
     skills: SkillsConfig,
@@ -110,6 +110,14 @@ enum WorkspaceModel {
     Inherited,
     Selector(ModelSelector),
     Resolved(ModelInfo),
+}
+
+/// The configuration a host handed the builder: answers it already holds, or
+/// one file to read at open. A sum so the later call wins exactly.
+#[derive(Debug)]
+enum ConfigInput {
+    Supplied(Box<Config>),
+    File(PathBuf),
 }
 
 /// Where this workspace's runtime comes from: borrowed from the host, or
@@ -297,7 +305,9 @@ impl WorkspaceBuilder {
     /// and provider, model, system prompt, native tools, roster, interceptors,
     /// shell posture, and compaction. What stops is file discovery and the work
     /// caused by it: context, config, hooks, declared tools, memory, skills,
-    /// templates, and MCP files/connections are not probed.
+    /// templates, and MCP files/connections are not probed. A config the host
+    /// supplied or a file it named ([`with_config_file`](Self::with_config_file))
+    /// still applies: naming a file is stating it, not discovering it.
     ///
     /// Sticky by construction: no source-specific `with_*` setter changes this
     /// private flag, so calling one later cannot accidentally reopen a file
@@ -327,17 +337,14 @@ impl WorkspaceBuilder {
     /// place. Each convention answers *probe no files* in its own words, and
     /// the three with a host-supplied half keep it — supplying a hook, a
     /// declared tool or an MCP server is stating one, not discovering one, and
-    /// D9 turns off discovery. An unset [`Config`] becomes the empty one for
-    /// the same reason: `Config::discover` is the probe, and a host that
-    /// supplied a config through [`with_config`](Self::with_config) already
-    /// said what it wanted.
+    /// D9 turns off discovery. `config` is untouched: the SDK never discovers
+    /// one, so whatever is there the host stated.
     ///
     /// Applied at the top of [`open`](Self::open) rather than from
     /// `without_discovery` itself, so builder-setter order stays irrelevant.
     fn probing_no_files(self) -> Self {
         Self {
             context: ContextConfig::none(),
-            config: Some(self.config.unwrap_or_default()),
             skills: SkillsConfig::none(),
             memory: MemoryConfig::disabled(),
             templates: TemplatesConfig::none(),
@@ -351,26 +358,41 @@ impl WorkspaceBuilder {
         }
     }
 
-    /// Supplies the `config.json` answers instead of discovering them.
+    /// Supplies the `config.json` answers this workspace opens with.
     ///
-    /// Unset, [`open`](Self::open) reads `.basis/config.json` and the global
-    /// `config.json` itself, because opening a path is what reads a
-    /// repository's conventions — the same reason it reads `AGENTS.md` and
-    /// `.mcp.json` without being asked to.
+    /// Unset, [`open`](Self::open) reads **no** configuration file. A
+    /// `config.json` is how the `basis` CLI lets a repository and its user
+    /// pin a model or an endpoint; an embedder already has its own
+    /// configuration, and a file it never named silently changing which model
+    /// its product runs would be a dependency it never took. So the SDK reads
+    /// one only when handed it: this, a path through
+    /// [`with_config_file`](Self::with_config_file), or the CLI's own lookup
+    /// asked for by name — [`Config::discover`], or
+    /// [`ConfigLookup::Discover`](crate::ConfigLookup::Discover) — and the
+    /// result passed here.
     ///
-    /// Two callers want to say otherwise. A host that already discovered a
-    /// [`Config`] — to report it, or to apply its process half to a shared
+    /// A host that applies the same value to a shared
     /// [`Runtime`](crate::Runtime) with
-    /// [`RuntimeBuilder::with_config`](crate::RuntimeBuilder::with_config) —
-    /// hands the same value here rather than paying for the read twice. And
-    /// `Config::default()` says *nothing*, which is how a host that wants its
-    /// own configuration to be the only configuration turns the file off.
+    /// [`RuntimeBuilder::with_config`](crate::RuntimeBuilder::with_config)
+    /// hands it here too, so the workspace and the runtime agree.
     ///
     /// Whatever arrives still loses to every explicit call on this builder and
-    /// on the runtime's: this is the layer below them, never above.
+    /// on the runtime's: this is the layer below them, never above. A later
+    /// call replaces an earlier one, `with_config_file`'s included.
     pub fn with_config(self, config: Config) -> Self {
         Self {
-            config: Some(config),
+            config: Some(ConfigInput::Supplied(Box::new(config))),
+            ..self
+        }
+    }
+
+    /// Reads exactly the file at `path` at [`open`](Self::open), as
+    /// [`Config::read_file`] does: nothing else is probed, and a file that
+    /// is missing or does not parse fails the open. A later
+    /// [`with_config`](Self::with_config) replaces it.
+    pub fn with_config_file(self, path: impl Into<PathBuf>) -> Self {
+        Self {
+            config: Some(ConfigInput::File(path.into())),
             ..self
         }
     }
@@ -715,13 +737,12 @@ impl WorkspaceBuilder {
         let context = WorkspaceContext::discover_with(&path, &self.context)?;
 
         // Read before the runtime is acquired, for the reason the hooks file
-        // below is: a config that does not parse must fail the open rather
-        // than let a run reach a model nobody in this repository chose. The
-        // global directory is the context config's, so one process cannot read
-        // two different global directories.
+        // below is: a named config that does not parse must fail the open
+        // rather than let a run reach a model nobody chose.
         let config = match self.config {
-            Some(config) => config,
-            None => config::Config::discover(&path, self.context.global_dir.as_deref())?,
+            None => Config::default(),
+            Some(ConfigInput::Supplied(config)) => *config,
+            Some(ConfigInput::File(file)) => Config::read_file(&file)?,
         };
 
         // Loaded before the runtime is acquired so a hooks file that does not

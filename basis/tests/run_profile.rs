@@ -675,7 +675,14 @@ async fn resume_model_also_refuses_an_effective_workspace_effort_before_lookup()
         r#"{"schema": 1, "effort": "high"}"#,
     )
     .expect("write workspace effort");
+    // The SDK reads no `config.json` unless handed one; the CLI's lookup,
+    // asked for by name, is how this file reaches the workspace.
     let workspace = discovery_builder(dir.path(), provider.clone())
+        .with_config(
+            basis::ConfigLookup::Discover
+                .load(dir.path(), None)
+                .expect("a well-formed file"),
+        )
         .open()
         .await
         .expect("workspace opens with discovered effort");

@@ -547,3 +547,56 @@ fn the_variable_reads_the_files_schema_and_names_no_value_when_it_cannot() {
     assert!(!reason.contains("sk-secret"), "{reason}");
     assert!(parse_gateways_var("not json").is_err());
 }
+
+#[test]
+fn a_named_file_is_read_as_the_hosts_own_and_nothing_else_is_probed() {
+    let tmp = tempfile::tempdir().expect("tempdir");
+    // A workspace file beside it that must not be read.
+    workspace_file(tmp.path(), r#"{"schema": 1, "model": "from-the-repo"}"#);
+    let named = tmp.path().join("host.json");
+    write(
+        &named,
+        r#"{"schema": 1, "base_url": "http://gateway/v1", "model": "from-the-host"}"#,
+    );
+
+    let config = Config::read_file_with(&named, &nothing_exported())
+        .expect("a file the host named may set base_url");
+
+    assert_eq!(
+        config.model.map(|model| model.value).as_deref(),
+        Some("from-the-host")
+    );
+    assert_eq!(
+        config.base_url.map(|url| url.value).as_deref(),
+        Some("http://gateway/")
+    );
+    assert_eq!(config.files.len(), 1);
+}
+
+#[test]
+fn a_lookup_is_recorded_in_three_spellings_and_defaults_to_nothing() {
+    for (lookup, json) in [
+        (ConfigLookup::None, r#""none""#),
+        (ConfigLookup::Discover, r#""discover""#),
+        (
+            ConfigLookup::File(PathBuf::from("/etc/basis.json")),
+            r#"{"file":"/etc/basis.json"}"#,
+        ),
+    ] {
+        assert_eq!(serde_json::to_string(&lookup).expect("serializes"), json);
+        assert_eq!(
+            serde_json::from_str::<ConfigLookup>(json).expect("parses"),
+            lookup
+        );
+    }
+    assert_eq!(ConfigLookup::default(), ConfigLookup::None);
+
+    let tmp = tempfile::tempdir().expect("tempdir");
+    workspace_file(tmp.path(), r#"{"schema": 1, "model": "from-the-repo"}"#);
+    assert!(
+        ConfigLookup::None
+            .load(tmp.path(), None)
+            .expect("reads nothing")
+            .is_empty()
+    );
+}
