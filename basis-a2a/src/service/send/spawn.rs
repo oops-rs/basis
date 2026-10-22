@@ -89,7 +89,8 @@ fn run_spec(backend: &TasksBackend, prompt: String, continuation: Continuation) 
         .with_approve(backend.approval.into())
         .detached()
         .answering()
-        .continuing(continuation);
+        .continuing(continuation)
+        .with_config(run.config.clone());
     if !backend.shell {
         spec = spec.without_shell();
     }

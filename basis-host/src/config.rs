@@ -133,6 +133,12 @@ pub struct Discovery {
     pub tools: ToolsConfig,
     /// Where MCP servers are discovered, before the client's own land on top.
     pub mcp: McpConfig,
+    /// Where each session's workspace gets its `config.json` answers. None by
+    /// default: a host embedding basis reads no configuration file it did not
+    /// name. [`ConfigLookup::Discover`](basis::ConfigLookup::Discover) is the
+    /// CLI's convention — each session's `cwd` and the global directory
+    /// [`context`](Self::context) names.
+    pub config: basis::ConfigLookup,
 }
 
 /// What the operator said and a client cannot say for itself: which provider

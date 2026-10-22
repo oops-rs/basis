@@ -109,7 +109,42 @@ fn offline_discovery() -> Discovery {
             global_dir: None,
             supplied: Vec::new(),
         },
+        config: basis::ConfigLookup::None,
     }
+}
+
+#[tokio::test]
+async fn a_sessions_config_file_is_read_only_when_the_operator_asked_for_the_lookup() {
+    // A file that cannot be read is the witness: if it was opened, the
+    // session fails naming it; if it was not, the session opens.
+    let repository = tempfile::tempdir().expect("tempdir");
+    std::fs::create_dir_all(repository.path().join(".basis")).expect("mkdir");
+    std::fs::write(repository.path().join(".basis/config.json"), "{not json").expect("write");
+
+    let unasked = ConfiguredSource::on_runtime(
+        offline_runtime(),
+        Some(offline_template().with_discovery(offline_discovery())),
+    );
+    unasked
+        .create(repository.path().to_path_buf(), Vec::new())
+        .await
+        .expect("no lookup asked for, so the file is never read");
+
+    let asked = ConfiguredSource::on_runtime(
+        offline_runtime(),
+        Some(offline_template().with_discovery(Discovery {
+            config: basis::ConfigLookup::Discover,
+            ..offline_discovery()
+        })),
+    );
+    let error = match asked
+        .create(repository.path().to_path_buf(), Vec::new())
+        .await
+    {
+        Ok(_) => panic!("the operator asked for the CLI's lookup, so the file is read"),
+        Err(error) => error,
+    };
+    assert!(error.to_string().contains("config.json"), "{error}");
 }
 
 #[tokio::test]

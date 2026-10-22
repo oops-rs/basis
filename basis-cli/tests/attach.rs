@@ -766,6 +766,53 @@ fn an_appended_system_prompt_survives_the_spawn_and_reaches_the_model() {
     );
 }
 
+#[test]
+fn spawn_reads_the_repositorys_config_file_and_the_task_records_that_it_does() {
+    // The SDK reads no `config.json` it is not handed; the CLI hands it the
+    // repository's, and the task records the lookup so its attacher does too.
+    let fixture = Fixture::new();
+    let endpoint = ScriptedEndpoint::start(vec![Reply::Text]);
+    fs::create_dir_all(fixture.workspace.join(".basis")).expect("mkdir");
+    fs::write(
+        fixture.workspace.join(".basis/config.json"),
+        r#"{"schema": 1, "model": "from-the-repo"}"#,
+    )
+    .expect("write config");
+    let no_global = tempfile::tempdir().expect("tempdir");
+
+    let mut command = fixture.basis(&["spawn", "say something", "--resumable", "-C"]);
+    command
+        .env("BASIS_CONFIG_DIR", no_global.path())
+        .arg(&fixture.workspace)
+        .args(["--base-url", &endpoint.base_url, "--deadline", "5m"]);
+    let output = run_bounded(command);
+    assert!(output.status.success(), "{}", stderr(&output));
+    let stdout = String::from_utf8(output.stdout).expect("utf8");
+    let task = stdout
+        .lines()
+        .find_map(|line| line.strip_prefix("task "))
+        .and_then(|line| line.split_once(':').map(|(task, _)| task.to_string()))
+        .unwrap_or_else(|| panic!("no task handle in: {stdout}"));
+
+    let meta: Value = serde_json::from_str(
+        &fs::read_to_string(fixture.agent_dir(&task).join("meta.json")).expect("meta"),
+    )
+    .expect("meta is json");
+    assert_eq!(meta["options"]["config"], "discover");
+
+    let mut wait = fixture.basis(&["wait", &task, "--json"]);
+    wait.env("BASIS_CONFIG_DIR", no_global.path());
+    let waited = run_bounded(wait);
+    assert!(waited.status.success(), "{}", stderr(&waited));
+
+    let requests = endpoint.requests();
+    let turn = requests
+        .iter()
+        .find(|request| request.starts_with("POST "))
+        .expect("the model was asked something");
+    assert!(turn.contains("from-the-repo"), "{turn}");
+}
+
 /// Writes an agent directory in the post-kill-window shape: completion
 /// recorded in `meta.json`, terminal record absent.
 fn write_agent(fixture: &Fixture, task: &str, parent: Option<&str>, result: &str) {

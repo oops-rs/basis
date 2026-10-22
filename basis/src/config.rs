@@ -270,6 +270,12 @@ impl ConfigLookup {
             Self::Discover => Config::discover(workspace, global_dir),
         }
     }
+    /// [`load`](Self::load) against the default global directory —
+    /// `$BASIS_CONFIG_DIR`, else `$XDG_CONFIG_HOME/basis`, else
+    /// `$HOME/.config/basis`.
+    pub fn load_default(&self, workspace: &Path) -> Result<Config, ConfigError> {
+        self.load(workspace, crate::context::default_global_dir().as_deref())
+    }
 }
 
 /// Why a config file could not be used.

@@ -946,6 +946,14 @@ fn run_parts(
     )
     .map_err(|error| error.to_string())?;
     builder = builder.with_runtime_builder(runtime);
+    // The lookup spawn recorded, applied by whichever process attaches: the
+    // SDK reads no `config.json` it is not handed, so the task carries the
+    // choice (ADR-0046).
+    let config = options
+        .config
+        .load_default(Path::new(&meta.workspace))
+        .map_err(|error| error.to_string())?;
+    builder = builder.with_config(config);
     // Recorded as the type it is; `load_meta` has already folded the
     // pre-0.6 two-string spelling into this one field.
     if let Some(system_prompt) = options.system_prompt.clone() {

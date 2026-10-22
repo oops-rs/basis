@@ -109,10 +109,22 @@ impl ConfiguredSource {
     /// consequential call and answers none of them; which of those the client
     /// actually sees is the session's mode, which can still change (see
     /// [`SessionApproval`](crate::SessionApproval)).
-    fn parts_for(&self, cwd: PathBuf, mcp: Vec<McpServer>) -> (WorkspaceBuilder, RunSpec) {
+    fn parts_for(
+        &self,
+        cwd: PathBuf,
+        mcp: Vec<McpServer>,
+    ) -> Result<(WorkspaceBuilder, RunSpec), RunError> {
         let template = &self.template;
+        // Read here rather than left to the open, because the open reads none:
+        // this is the operator's choice of lookup applied to this `cwd`.
+        let discovery = &template.discovery;
+        let config = discovery
+            .config
+            .load(&cwd, discovery.context.global_dir.as_deref())?;
 
-        let mut builder = Workspace::builder(cwd).with_shell(template.shell);
+        let mut builder = Workspace::builder(cwd)
+            .with_shell(template.shell)
+            .with_config(config);
         if let Some(model) = &template.model {
             builder = builder.with_model(model.clone());
         }
@@ -121,7 +133,6 @@ impl ConfiguredSource {
         }
         // Discovery is the template's promise (`SessionTemplate::with_discovery`)
         // — the operator's to point, defaulting to basis's own roots.
-        let discovery = &template.discovery;
         let builder = builder
             .with_context(discovery.context.clone())
             .with_skills(discovery.skills.clone())
@@ -142,7 +153,7 @@ impl ConfiguredSource {
             spec = spec.with_effort(effort);
         }
 
-        (builder, spec)
+        Ok((builder, spec))
     }
 
     /// One session's MCP config: where discovery starts, with the client's
@@ -160,7 +171,7 @@ impl ConfiguredSource {
         mcp: Vec<McpServer>,
     ) -> Result<(Arc<Workspace>, RunSpec), RunError> {
         let key = WorkspaceKey::new(&cwd, &mcp);
-        let (builder, spec) = self.parts_for(cwd, mcp);
+        let (builder, spec) = self.parts_for(cwd, mcp)?;
 
         Ok((self.open(key, builder).await?, spec))
     }

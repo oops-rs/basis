@@ -64,9 +64,19 @@ pub struct RunDefaults {
     pub(crate) tool_budget: Option<usize>,
     pub(crate) token_budget: Option<u64>,
     pub(crate) system_prompt: Option<SystemPrompt>,
+    pub(crate) config: basis::ConfigLookup,
 }
 
 impl RunDefaults {
+    /// Where every task's workspace gets its `config.json` answers. None by
+    /// default — an embedding host reads no configuration file it did not
+    /// name; [`ConfigLookup::Discover`](basis::ConfigLookup::Discover) is
+    /// what `basis serve a2a` asks for.
+    #[must_use]
+    pub fn with_config(self, config: basis::ConfigLookup) -> Self {
+        Self { config, ..self }
+    }
+
     /// Replaces or appends to the workspace's own system prompt, as
     /// `--system-prompt` / `--append-system-prompt` do for `basis spawn`.
     #[must_use]
@@ -147,6 +157,7 @@ impl RunDefaults {
             tool_budget,
             token_budget,
             system_prompt,
+            config,
         } = self;
         provider.is_none()
             && base_url.is_none()
@@ -156,6 +167,7 @@ impl RunDefaults {
             && tool_budget.is_none()
             && token_budget.is_none()
             && system_prompt.is_none()
+            && *config == basis::ConfigLookup::None
     }
 }
 

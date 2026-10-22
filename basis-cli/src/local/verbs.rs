@@ -82,7 +82,11 @@ fn run_spec(
     prompt: String,
     approve: basis_tasks::Approve,
 ) -> Result<RunSpec, ClientError> {
-    let mut spec = RunSpec::new(prompt).with_approve(approve);
+    // Recorded on the task, so whichever process attaches reads the
+    // repository's and the user's `config.json` the way this one would.
+    let mut spec = RunSpec::new(prompt)
+        .with_approve(approve)
+        .with_config(basis::ConfigLookup::Discover);
     if let Some(provider) = &args.provider {
         spec = spec.with_provider(provider.clone());
     }

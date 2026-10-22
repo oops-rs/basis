@@ -140,7 +140,14 @@ pub(crate) async fn serve_bridge(acp: AcpArgs, args: BridgeArgs) -> ExitCode {
 /// No workspace lives in it: every session brings its own `cwd` on
 /// `session/new`, so there is nothing for a placeholder to stand in for.
 fn acp_config(args: AcpArgs) -> Result<basis_acp::ServeConfig, String> {
-    let mut template = basis_acp::SessionTemplate::new().with_session_name("basis acp");
+    // Each session's `cwd` and the user's `config.json` are read, as `basis
+    // spawn` reads them; the SDK underneath reads none unless told to.
+    let mut template = basis_acp::SessionTemplate::new()
+        .with_session_name("basis acp")
+        .with_discovery(basis_acp::Discovery {
+            config: basis::ConfigLookup::Discover,
+            ..basis_acp::Discovery::default()
+        });
 
     if let Some(name) = &args.provider {
         template =

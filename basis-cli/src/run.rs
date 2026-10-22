@@ -63,7 +63,7 @@ pub(crate) async fn execute_run(args: RunArgs) -> Result<ExitCode, String> {
     // The process half seeds the private runtime the workspace builds
     // (ADR-0018): which provider answers, and at which endpoint.
     let runtime = Runtime::builder().with_store_dir(store_dir);
-    let builder = Workspace::builder(workspace);
+    let builder = Workspace::builder(workspace.clone());
     let (runtime, builder) = basis_tasks::configure_builders(
         runtime,
         builder,
@@ -73,7 +73,12 @@ pub(crate) async fn execute_run(args: RunArgs) -> Result<ExitCode, String> {
         ShellAccess::from_flag(!args.no_shell),
     )
     .map_err(|error| error.to_string())?;
-    let builder = builder.with_runtime_builder(runtime);
+    // The CLI's convention, asked for by name: the SDK reads no `config.json`
+    // it is not handed, and `basis` hands it the repository's and the user's.
+    let config = basis::ConfigLookup::Discover
+        .load_default(&workspace)
+        .map_err(|error| error.to_string())?;
+    let builder = builder.with_runtime_builder(runtime).with_config(config);
 
     // Every consequential call is put to this one, and — bar the refusal the
     // gate below states first — nothing else decides: `always` allows, `never`

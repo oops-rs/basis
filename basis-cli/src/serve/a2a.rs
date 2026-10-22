@@ -87,7 +87,9 @@ fn a2a_config(acp: AcpArgs, args: A2aArgs) -> Result<ServeConfig, String> {
         .description
         .unwrap_or_else(|| format!("A basis agent working in {name}."));
 
-    let mut run = RunDefaults::default();
+    // Every task reads its workspace's and the user's `config.json`, as
+    // `basis spawn` does; the SDK underneath reads none unless told to.
+    let mut run = RunDefaults::default().with_config(basis::ConfigLookup::Discover);
     if let Some(provider) = acp.provider {
         run = run.with_provider(provider);
     }

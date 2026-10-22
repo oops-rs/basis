@@ -9,7 +9,7 @@
 
 use std::time::Duration;
 
-use basis::{Effort, SystemPrompt};
+use basis::{ConfigLookup, Effort, SystemPrompt};
 
 use crate::{approve::Approve, handle::TaskHandle};
 
@@ -55,6 +55,7 @@ pub struct RunSpec {
     pub(crate) hop: u32,
     pub(crate) not_after_ms: Option<u64>,
     pub(crate) answering: bool,
+    pub(crate) config: ConfigLookup,
 }
 
 impl RunSpec {
@@ -76,7 +77,17 @@ impl RunSpec {
             hop: 0,
             not_after_ms: None,
             answering: false,
+            config: ConfigLookup::None,
         }
+    }
+
+    /// Where the task's workspace gets its `config.json` answers, every time
+    /// it is attached — which may be in another process, so the choice is
+    /// recorded rather than left to whoever attaches. Unset, none: the SDK
+    /// reads no configuration file it was not handed.
+    /// [`ConfigLookup::Discover`] is what `basis spawn` records.
+    pub fn with_config(self, config: ConfigLookup) -> Self {
+        Self { config, ..self }
     }
 
     /// Marks the task as answering a caller, who can be handed files: the

@@ -81,6 +81,16 @@ pub(crate) struct RunOptions {
     /// record from before it.
     #[serde(default, skip_serializing_if = "std::ops::Not::not")]
     pub answering: bool,
+    /// Where an attach reads the workspace's `config.json` answers from.
+    /// Always written. Absent in a record from before it, which was spawned
+    /// when every open discovered the files — so it keeps discovering.
+    #[serde(default = "legacy_config_lookup")]
+    pub config: basis::ConfigLookup,
+}
+
+/// The lookup a record from before [`RunOptions::config`] was spawned under.
+fn legacy_config_lookup() -> basis::ConfigLookup {
+    basis::ConfigLookup::Discover
 }
 
 impl RunOptions {
@@ -535,6 +545,25 @@ mod tests {
             save_meta(paths, &self).unwrap();
             self
         }
+    }
+
+    #[test]
+    fn a_record_from_before_the_config_lookup_keeps_discovering() {
+        // Spawned when every open read `.basis/config.json`; resuming it must
+        // not quietly run a different model than the one it started with.
+        let mut legacy = serde_json::to_value(RunOptions::default()).unwrap();
+        legacy.as_object_mut().unwrap().remove("config");
+
+        let options: RunOptions = serde_json::from_value(legacy).unwrap();
+
+        assert_eq!(options.config, basis::ConfigLookup::Discover);
+    }
+
+    #[test]
+    fn the_config_lookup_is_always_written() {
+        let written = serde_json::to_value(RunOptions::default()).unwrap();
+
+        assert_eq!(written["config"], serde_json::json!("none"));
     }
 
     #[test]
