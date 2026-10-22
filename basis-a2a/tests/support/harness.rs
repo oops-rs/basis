@@ -308,18 +308,25 @@ impl ScriptedEndpoint {
     }
 
     pub fn scripted(held: bool, script: Vec<Reply>) -> Self {
+        Self::responding(held, move |index| {
+            script.get(index).cloned().unwrap_or(Reply::Numbered)
+        })
+    }
+
+    /// Chooses a reply from fixture state instead of a request's position.
+    pub fn responding(held: bool, script: impl Fn(usize) -> Reply + Send + Sync + 'static) -> Self {
         let listener = TcpListener::bind("127.0.0.1:0").expect("bind test endpoint");
         let address = listener.local_addr().expect("read endpoint address");
         let held = Arc::new(AtomicBool::new(held));
         let requests = Arc::new(Mutex::new(Vec::new()));
         let turns = Arc::new(AtomicUsize::new(0));
-        let script = Arc::new(script);
+        let script: Arc<dyn Fn(usize) -> Reply + Send + Sync> = Arc::new(script);
         let shared = (Arc::clone(&held), Arc::clone(&requests));
         thread::spawn(move || {
             while let Ok((stream, _)) = listener.accept() {
                 let (held, requests) = (Arc::clone(&shared.0), Arc::clone(&shared.1));
                 let (turns, script) = (Arc::clone(&turns), Arc::clone(&script));
-                thread::spawn(move || answer(stream, &held, &requests, &turns, &script));
+                thread::spawn(move || answer(stream, &held, &requests, &turns, script.as_ref()));
             }
         });
         Self {
@@ -352,9 +359,12 @@ fn answer(
     held: &AtomicBool,
     requests: &Mutex<Vec<String>>,
     turns: &AtomicUsize,
-    script: &[Reply],
+    script: &(dyn Fn(usize) -> Reply + Send + Sync),
 ) {
     let request = read_http_request(&mut stream);
+    if request.is_empty() {
+        return;
+    }
     let first_line = request.lines().next().unwrap_or_default();
     if first_line.starts_with("GET ") && first_line.contains("/models") {
         respond(
@@ -369,7 +379,7 @@ fn answer(
         thread::sleep(Duration::from_millis(10));
     }
     let index = turns.fetch_add(1, Ordering::SeqCst);
-    let reply = script.get(index).cloned().unwrap_or(Reply::Numbered);
+    let reply = script(index);
     let id = format!("chatcmpl_{index}");
     let (delta, finish) = match reply {
         Reply::Numbered => (
@@ -408,7 +418,7 @@ fn respond(stream: &mut TcpStream, content_type: &str, body: &str) {
     );
 }
 
-/// Reads a request up to the end of its declared body.
+/// Reads a complete request, or returns empty if the connection closes early.
 pub fn read_http_request(stream: &mut TcpStream) -> String {
     let mut bytes = Vec::new();
     let mut buffer = [0_u8; 4096];
@@ -434,8 +444,8 @@ pub fn read_http_request(stream: &mut TcpStream) -> String {
                 .unwrap_or_default();
         }
         if header_end.is_some_and(|end| bytes.len() >= end + content_length) {
-            break;
+            return String::from_utf8_lossy(&bytes).into_owned();
         }
     }
-    String::from_utf8_lossy(&bytes).into_owned()
+    String::new()
 }

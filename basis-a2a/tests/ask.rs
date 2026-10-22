@@ -23,6 +23,28 @@ fn write_then_finish() -> Vec<Reply> {
     ]
 }
 
+/// A canceled request can consume a reply without making its tool call. The
+/// model therefore finishes only after the fixture observes the approved write,
+/// not after a particular number of model requests.
+fn write_until_approved(workspace: &std::path::Path) -> ScriptedEndpoint {
+    let note = workspace.join("note.txt");
+    ScriptedEndpoint::responding(false, move |_| {
+        let written = match std::fs::read_to_string(&note) {
+            Ok(content) => content == "approved",
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => false,
+            Err(error) => panic!("read fixture output: {error}"),
+        };
+        if written {
+            Reply::Text("finished".to_string())
+        } else {
+            Reply::ToolCall {
+                name: "write".to_string(),
+                arguments: json!({"path": "note.txt", "content": "approved"}),
+            }
+        }
+    })
+}
+
 async fn asking(deadline: Duration, script: Vec<Reply>) -> Served {
     Served::start_with(ScriptedEndpoint::scripted(false, script), |config| {
         config.with_approval(InboundApproval::AskCaller { deadline })
@@ -378,16 +400,9 @@ async fn asked_again(service: &A2aService, caller: &Principal, task_id: &str) ->
 #[tokio::test]
 async fn a_shutdown_while_asking_records_nothing_and_the_next_start_asks_again() {
     harness::isolate_environment();
-    let write = Reply::ToolCall {
-        name: "write".to_string(),
-        arguments: json!({"path": "note.txt", "content": "approved"}),
-    };
-    let model = ScriptedEndpoint::scripted(
-        false,
-        vec![write.clone(), write, Reply::Text("finished".to_string())],
-    );
     let data = tempfile::tempdir().unwrap();
     let workspace = tempfile::tempdir().unwrap();
+    let model = write_until_approved(workspace.path());
     let config = || restart_config(data.path(), workspace.path(), &model.base_url);
     let caller = Principal::anonymous();
 
@@ -458,4 +473,77 @@ async fn a_shutdown_while_asking_records_nothing_and_the_next_start_asks_again()
         "approved"
     );
     service.shutdown().await;
+}
+
+async fn scripted_model_reply(model: &ScriptedEndpoint) -> String {
+    reqwest::Client::new()
+        .post(format!("{}chat/completions", model.base_url))
+        .json(&json!({"messages": []}))
+        .send()
+        .await
+        .unwrap()
+        .text()
+        .await
+        .unwrap()
+}
+
+#[tokio::test]
+async fn incomplete_connections_do_not_consume_model_replies() {
+    use tokio::io::{AsyncReadExt, AsyncWriteExt};
+
+    let model = ScriptedEndpoint::scripted(
+        false,
+        vec![
+            Reply::Text("first".to_string()),
+            Reply::Text("second".to_string()),
+        ],
+    );
+    let endpoint = reqwest::Url::parse(&model.base_url).unwrap();
+    for prefix in [
+        b"".as_slice(),
+        b"POST /chat/completions HTTP/1.1\r\nContent-Length: 2\r\n\r\n{".as_slice(),
+    ] {
+        let mut connection = tokio::net::TcpStream::connect((
+            endpoint.host_str().unwrap(),
+            endpoint.port().unwrap(),
+        ))
+        .await
+        .unwrap();
+        connection.write_all(prefix).await.unwrap();
+        connection.shutdown().await.unwrap();
+        let mut response = Vec::new();
+        tokio::time::timeout(
+            Duration::from_secs(5),
+            connection.read_to_end(&mut response),
+        )
+        .await
+        .expect("the incomplete connection closes")
+        .unwrap();
+        assert!(
+            response.is_empty(),
+            "an incomplete request consumed a reply: {prefix:?}"
+        );
+    }
+    assert!(model.requests().is_empty());
+    let reply = scripted_model_reply(&model).await;
+    assert!(reply.contains("\"content\":\"first\""), "{reply}");
+    assert_eq!(model.requests().len(), 1);
+}
+
+#[tokio::test]
+async fn shutdown_fixture_finishes_only_after_the_approved_write() {
+    let workspace = tempfile::tempdir().unwrap();
+    let note = workspace.path().join("note.txt");
+    let model = write_until_approved(workspace.path());
+    // More replies than the old [write, write, finished] sequence allowed,
+    // with none of their proposed tool calls approved or executed.
+    for _ in 0..3 {
+        let reply = scripted_model_reply(&model).await;
+        assert!(reply.contains("\"name\":\"write\""), "{reply}");
+        assert!(!reply.contains("\"content\":\"finished\""), "{reply}");
+        assert!(!note.exists());
+    }
+    std::fs::write(note, "approved").unwrap();
+    let reply = scripted_model_reply(&model).await;
+    assert!(reply.contains("\"content\":\"finished\""), "{reply}");
 }
