@@ -5,7 +5,7 @@ All six crates — `basis`, `basis-host`, `basis-tasks`, `basis-acp`,
 live in `docs/adr/`; this file says what changed for someone upgrading.
 Releases before 0.15.0 are described by their tags and ADRs only.
 
-## Unreleased
+## 0.22.0 — 2026-10-22
 
 **Breaking, silently: the SDK no longer reads `config.json` on its own.**
 `Workspace::open` used to discover `.basis/config.json` and the global
