@@ -26,7 +26,9 @@
 //! A task may also run *while the model keeps working* (ADR-0042): the
 //! `background` field beside the string starts it and returns its handle, and
 //! a call of `wait` alone — no string — collects one or more handles. Same
-//! door, same gate, two more typed facts; [`background`] has the lifecycle.
+//! door, same gate, two more typed facts. Completed tasks deliver their results
+//! automatically or through `wait`, and the parent turn joins unfinished tasks
+//! before it ends.
 //!
 //! # What the approver sees
 //!
