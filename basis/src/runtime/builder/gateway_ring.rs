@@ -12,12 +12,15 @@
 //! [`with_base_url`]: RuntimeBuilder::with_base_url
 //! [`with_registered_provider`]: RuntimeBuilder::with_registered_provider
 
-use std::sync::Arc;
+#[cfg(test)]
+mod tests;
+
+use std::{path::PathBuf, sync::Arc};
 
 use mentra::{
     BuiltinProvider, ProviderId,
     provider_core::{
-        AuthScheme, Provider, chat_completions,
+        AuthScheme, Provider, StripModelPrefix, chat_completions,
         gateway_ring::{GatewayRing, GatewayRingEvent, GatewayRingPolicy},
     },
 };
@@ -35,10 +38,26 @@ use super::{RuntimeBuilder, Wire, provider_settlement::responses_provider};
 /// a ring that only ever works on one of them.
 ///
 /// Deliberately not `Debug`-transparent: the key is redacted.
-#[derive(Clone)]
+#[derive(Clone, PartialEq, Eq)]
 pub struct GatewayMember {
     base_url: String,
-    api_key: Option<String>,
+    key: MemberKey,
+    strip_model_prefix: Option<String>,
+}
+
+/// Where a member's key comes from.
+///
+/// A key named by where it lives is read at [`build`](RuntimeBuilder::build),
+/// not when the member is stated, for two reasons: a ring stated in a config
+/// file must never hold the value itself (`crate::config`'s rule), and a
+/// missing secret is a build error that names the member, not a `401` from
+/// whichever gateway the ring happens to reach.
+#[derive(Clone, PartialEq, Eq)]
+enum MemberKey {
+    None,
+    Value(String),
+    Env(String),
+    File(PathBuf),
 }
 
 impl GatewayMember {
@@ -49,7 +68,8 @@ impl GatewayMember {
     pub fn new(base_url: impl Into<String>) -> Self {
         Self {
             base_url: base_url.into(),
-            api_key: None,
+            key: MemberKey::None,
+            strip_model_prefix: None,
         }
     }
 
@@ -57,7 +77,45 @@ impl GatewayMember {
     #[must_use]
     pub fn with_api_key(self, api_key: impl Into<String>) -> Self {
         Self {
-            api_key: Some(api_key.into()),
+            key: MemberKey::Value(api_key.into()),
+            ..self
+        }
+    }
+
+    /// The key is the value of the environment variable `var`, read at build.
+    /// Unset or blank there is a build error naming this member and `var`.
+    #[must_use]
+    pub fn with_api_key_env(self, var: impl Into<String>) -> Self {
+        Self {
+            key: MemberKey::Env(var.into()),
+            ..self
+        }
+    }
+
+    /// The key is the contents of the file at `path`, surrounding whitespace
+    /// trimmed, read at build — the shape a mounted container secret has.
+    /// Unreadable or empty is a build error naming this member and `path`.
+    #[must_use]
+    pub fn with_api_key_file(self, path: impl Into<PathBuf>) -> Self {
+        Self {
+            key: MemberKey::File(path.into()),
+            ..self
+        }
+    }
+
+    /// Sends model ids to this member without `prefix`: `openai/gpt-5.6-sol`
+    /// reaches it as `gpt-5.6-sol` when `prefix` is `"openai/"`.
+    ///
+    /// For a member that serves the same model as its neighbours under a
+    /// different name — a relay in front of one vendor beside a unified
+    /// gateway with a namespaced catalog. An id without the prefix is sent
+    /// unchanged, and the member answers for it. This keeps the ring's
+    /// precondition true rather than relaxing it: the members still serve
+    /// the same model, only the spelling differs.
+    #[must_use]
+    pub fn with_model_prefix_stripped(self, prefix: impl Into<String>) -> Self {
+        Self {
+            strip_model_prefix: Some(prefix.into()),
             ..self
         }
     }
@@ -66,13 +124,57 @@ impl GatewayMember {
     pub fn base_url(&self) -> &str {
         &self.base_url
     }
+
+    /// Reads the key from wherever this member said it lives.
+    fn resolve_key(
+        &self,
+        index: usize,
+        lookup: &dyn Fn(&str) -> Option<String>,
+    ) -> Result<Option<String>, provider::ProviderError> {
+        let missing = |origin: String| provider::ProviderError::GatewayCredentialMissing {
+            member: index,
+            origin,
+        };
+        match &self.key {
+            MemberKey::None => Ok(None),
+            MemberKey::Value(key) => Ok(Some(key.clone())),
+            MemberKey::Env(var) => lookup(var)
+                .map(|key| key.trim().to_string())
+                .filter(|key| !key.is_empty())
+                .map(Some)
+                .ok_or_else(|| missing(format!("${var}"))),
+            MemberKey::File(path) => {
+                let key = std::fs::read_to_string(path).map_err(|source| {
+                    provider::ProviderError::GatewayCredentialUnreadable {
+                        member: index,
+                        path: path.clone(),
+                        source,
+                    }
+                })?;
+                let key = key.trim();
+                if key.is_empty() {
+                    return Err(missing(path.display().to_string()));
+                }
+                Ok(Some(key.to_string()))
+            }
+        }
+    }
 }
 
+/// The key's *source* is printed, because naming the variable or file is how
+/// an operator debugs which secret a member reads; a value never is.
 impl std::fmt::Debug for GatewayMember {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        let key = match &self.key {
+            MemberKey::None => "none".to_string(),
+            MemberKey::Value(_) => "<redacted>".to_string(),
+            MemberKey::Env(var) => format!("${var}"),
+            MemberKey::File(path) => path.display().to_string(),
+        };
         f.debug_struct("GatewayMember")
             .field("base_url", &self.base_url)
-            .field("api_key", &self.api_key.as_ref().map(|_| "<redacted>"))
+            .field("api_key", &key)
+            .field("strip_model_prefix", &self.strip_model_prefix)
             .finish()
     }
 }
@@ -203,11 +305,13 @@ pub(super) fn assemble(
     provider: BuiltinProvider,
     wire: Wire,
 ) -> Result<GatewayRing, RunError> {
+    let lookup = |var: &str| std::env::var(var).ok();
     let members = spec
         .members
         .unwrap_or_default()
         .iter()
-        .map(|member| build_member(member, provider, wire))
+        .enumerate()
+        .map(|(index, member)| build_member(index, member, provider, wire, &lookup))
         .collect::<Result<Vec<_>, _>>()?;
     let ring = GatewayRing::new(members, spec.policy)
         .map_err(|_| provider::ProviderError::EmptyGatewayRing)?;
@@ -218,17 +322,24 @@ pub(super) fn assemble(
 }
 
 fn build_member(
+    index: usize,
     member: &GatewayMember,
     provider: BuiltinProvider,
     wire: Wire,
+    lookup: &dyn Fn(&str) -> Option<String>,
 ) -> Result<Arc<dyn Provider>, RunError> {
     let base_url = provider::normalize_base_url(&member.base_url)?;
-    let credential = Credential::new(member.api_key.as_deref());
-    Ok(match wire {
+    let api_key = member.resolve_key(index, lookup)?;
+    let credential = Credential::new(api_key.as_deref());
+    let built: Arc<dyn Provider> = match wire {
         Wire::Responses => Arc::new(responses_provider(provider, &base_url, credential)),
         Wire::ChatCompletions => {
             Arc::new(chat_completions_provider(provider, &base_url, credential))
         }
+    };
+    Ok(match &member.strip_model_prefix {
+        Some(prefix) => Arc::new(StripModelPrefix::new(built, prefix.as_str())),
+        None => built,
     })
 }
 

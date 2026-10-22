@@ -90,6 +90,43 @@ async fn a_run_completes_on_the_next_gateway_when_the_preferred_one_rejects_it()
     assert_eq!(events.len(), 2);
 }
 
+#[tokio::test]
+async fn a_member_reads_its_key_from_a_file_and_hears_the_model_without_its_namespace() {
+    let relay = ScriptedEndpoint::start(Answer::Serve);
+    let dir = tempfile::tempdir().expect("tempdir");
+    let key_file = dir.path().join("relay-key");
+    std::fs::write(&key_file, "relay-key\n").expect("write key");
+
+    let runtime = Runtime::builder()
+        .with_wire(Wire::Responses)
+        .with_gateway_ring([GatewayMember::new(&relay.base_url)
+            .with_api_key_file(&key_file)
+            .with_model_prefix_stripped("vendor/")])
+        .with_ephemeral_history();
+    let workspace = Workspace::builder(dir.path())
+        .with_runtime_builder(runtime)
+        .with_model(ModelSelector::Id("vendor/test-model".to_string()))
+        .without_discovery()
+        .open()
+        .await
+        .expect("opens");
+    let report = workspace
+        .prepare("answer under the relay's own id")
+        .expect("mints")
+        .execute_with_approver(CollectingSink::default(), AllowAll)
+        .await
+        .expect("the run completes");
+
+    assert!(matches!(report.outcome, RunOutcome::Ok));
+    let turn = relay
+        .requests()
+        .into_iter()
+        .find(|request| request.starts_with("POST "))
+        .expect("a turn reached the relay");
+    assert!(turn.contains(r#""model":"test-model""#), "{turn}");
+    assert_eq!(bearer(&turn).as_deref(), Some("relay-key"));
+}
+
 /// The token after `Authorization: Bearer`, or `None` when the request sent
 /// no such header.
 fn bearer(request: &str) -> Option<String> {

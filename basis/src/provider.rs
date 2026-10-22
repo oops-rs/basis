@@ -139,6 +139,26 @@ pub enum ProviderError {
     /// endpoint, rather than resolved from the environment as if unsaid.
     #[error("a gateway ring was supplied with no members")]
     EmptyGatewayRing,
+
+    /// A ring member named where its key lives
+    /// ([`GatewayMember::with_api_key_env`](crate::runtime::GatewayMember::with_api_key_env)
+    /// or [`with_api_key_file`](crate::runtime::GatewayMember::with_api_key_file))
+    /// and found nothing there. Refused at build rather than sent keyless: a
+    /// member that was stated with a key and goes out without one is a `401`
+    /// the ring would rotate past, hiding the mistake behind a working
+    /// fallback.
+    #[error("gateway #{member} takes its key from {origin}, which is unset or empty")]
+    GatewayCredentialMissing { member: usize, origin: String },
+
+    /// A ring member's key file could not be read. Names the path, never what
+    /// was in it.
+    #[error("gateway #{member} takes its key from {path}, which could not be read: {source}")]
+    GatewayCredentialUnreadable {
+        member: usize,
+        path: std::path::PathBuf,
+        #[source]
+        source: std::io::Error,
+    },
 }
 
 /// Trims a base URL to what mentra's transports expect.
