@@ -31,7 +31,7 @@ use crate::{
     events::EventTail,
     handle::TaskHandle,
     inbox,
-    live::{DriveContext, LiveSink},
+    live::{DriveContext, GatewayObserver, LiveSink},
     lock, policy,
     spec::{Continuation, DEFAULT_DEADLINE, RunSpec},
     state::{self, InboxRecord, RunOptions, TaskMeta, TerminalRecord},
@@ -68,6 +68,7 @@ pub struct Tasks {
     data: DataDir,
     workspace: PathBuf,
     prompt_host: Option<Arc<dyn PromptHost>>,
+    gateway_observer: Option<GatewayObserver>,
     stop: Option<Stop>,
 }
 
@@ -85,6 +86,7 @@ impl Tasks {
             data,
             workspace: workspace.into(),
             prompt_host: None,
+            gateway_observer: None,
             stop: None,
         })
     }
@@ -106,6 +108,7 @@ impl Tasks {
             data,
             workspace: workspace.into(),
             prompt_host: None,
+            gateway_observer: None,
             stop: None,
         })
     }
@@ -118,6 +121,21 @@ impl Tasks {
     pub fn with_prompt_host(self, prompt_host: Arc<dyn PromptHost>) -> Self {
         Self {
             prompt_host: Some(prompt_host),
+            ..self
+        }
+    }
+
+    /// Observes the gateway ring of every task this process drives, including
+    /// children driven while settling a parent. The observer belongs to this
+    /// attaching process, is never persisted, and changes no task settings.
+    /// A task with no gateway ring emits nothing.
+    #[must_use]
+    pub fn with_gateway_ring_observer(
+        self,
+        observer: impl Fn(basis::runtime::GatewayRingEvent) + Send + Sync + 'static,
+    ) -> Self {
+        Self {
+            gateway_observer: Some(Arc::new(observer)),
             ..self
         }
     }
@@ -171,7 +189,9 @@ impl Tasks {
     }
 
     fn ctx(&self, live: Option<Arc<dyn LiveSink>>) -> DriveContext {
-        DriveContext::new(live, self.prompt_host.clone()).stopping_on(self.stop.clone())
+        DriveContext::new(live, self.prompt_host.clone())
+            .observing_gateway_ring(self.gateway_observer.clone())
+            .stopping_on(self.stop.clone())
     }
 
     /// Mints a task and returns its handle immediately. Durable and resumable

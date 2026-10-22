@@ -5,7 +5,7 @@ resolver = "3"
 [workspace.package]
 # One version across the six: they are one product split by dependency
 # weight (ADR-0011), not six things that release on their own schedules.
-version = "0.22.0"
+version = "0.22.1"
 edition = "2024"
 # Rust 1.95 stabilizes the `if let` match guards used by spawn and
 # AtomicU64::try_update used by the shared budget counter.
@@ -18,14 +18,14 @@ homepage = "https://github.com/oops-rs/basis"
 [workspace.dependencies]
 # The layers of ADR-0011, named here so each crate states which of them it is
 # built on and cargo resolves one version of each.
-basis = { version = "0.22.0", path = "basis" }
-basis-a2a = { version = "0.22.0", path = "basis-a2a" }
-basis-acp = { version = "0.22.0", path = "basis-acp" }
-basis-host = { version = "0.22.0", path = "basis-host" }
+basis = { version = "0.22.1", path = "basis" }
+basis-a2a = { version = "0.22.1", path = "basis-a2a" }
+basis-acp = { version = "0.22.1", path = "basis-acp" }
+basis-host = { version = "0.22.1", path = "basis-host" }
 # The durable task layer (ADR-0017 over ADR-0019's substrate, D8): one crate
 # so the rules live once and are reachable from Rust, not only from the CLI
 # that is now merely their first client.
-basis-tasks = { version = "0.22.0", path = "basis-tasks" }
+basis-tasks = { version = "0.22.1", path = "basis-tasks" }
 
 # The 0.28 floor's reason is the same shape as 0.27's: one host-observable,
 # source-breaking addition basis's code does not compile against unmodified.

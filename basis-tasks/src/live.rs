@@ -10,9 +10,12 @@
 
 use std::{sync::Arc, time::Instant};
 
+use basis::{RuntimeBuilder, runtime::GatewayRingEvent};
 use serde_json::Value;
 
 use crate::{approve::PromptHost, stop::Stop};
+
+pub(crate) type GatewayObserver = Arc<dyn Fn(GatewayRingEvent) + Send + Sync>;
 
 /// Shown a task's events as they are journaled. `basis-cli`'s own terminal
 /// renderer is the first implementation, but the trait carries no opinion
@@ -35,10 +38,15 @@ pub trait LiveSink: Send + Sync {
 /// flight when it passes runs to its end under the task's deadline, not the
 /// wait's; the next one does not start. A cancel marker, unlike it, cuts the
 /// turn in flight short (ADR-0032).
+///
+/// Gateway observations are also process-local. Unlike live turn progress,
+/// they are kept when a child is driven quietly: a failing gateway is an
+/// operational fact regardless of which task encountered it.
 #[derive(Clone, Default)]
 pub(crate) struct DriveContext {
     pub(crate) live: Option<Arc<dyn LiveSink>>,
     pub(crate) prompt_host: Option<Arc<dyn PromptHost>>,
+    gateway_observer: Option<GatewayObserver>,
     /// When the process driving under this context stops starting turns.
     /// `None` is an attach with no bound of its own — a settle pass driving a
     /// child owes the scope rule a finished subtree, whatever the caller's
@@ -57,8 +65,28 @@ impl DriveContext {
         Self {
             live,
             prompt_host,
+            gateway_observer: None,
             waiter_deadline: None,
             stop: None,
+        }
+    }
+
+    /// The attaching process's observer, never a durable task option.
+    #[must_use]
+    pub(crate) fn observing_gateway_ring(self, observer: Option<GatewayObserver>) -> Self {
+        Self {
+            gateway_observer: observer,
+            ..self
+        }
+    }
+
+    pub(crate) fn observe_gateway_ring(&self, runtime: RuntimeBuilder) -> RuntimeBuilder {
+        match &self.gateway_observer {
+            Some(observer) => {
+                let observer = Arc::clone(observer);
+                runtime.with_gateway_ring_observer(move |event| observer(event))
+            }
+            None => runtime,
         }
     }
 
@@ -104,6 +132,7 @@ impl DriveContext {
         Self {
             live: None,
             prompt_host: self.prompt_host.clone(),
+            gateway_observer: self.gateway_observer.clone(),
             waiter_deadline: None,
             stop: self.stop.clone(),
         }
@@ -161,5 +190,34 @@ mod tests {
         let bounded = DriveContext::default().until(Some(Instant::now()));
         assert!(bounded.waiter_expired());
         assert!(!bounded.hidden().waiter_expired());
+    }
+}
+
+#[cfg(test)]
+mod gateway_tests {
+    use super::*;
+    use basis::runtime::{GatewayMemberRef, GatewayRingEvent};
+    use std::sync::Mutex;
+
+    #[test]
+    fn a_child_driven_quietly_keeps_the_process_gateway_observer() {
+        let events = Arc::new(Mutex::new(Vec::new()));
+        let seen = Arc::clone(&events);
+        let context =
+            DriveContext::default().observing_gateway_ring(Some(Arc::new(move |event| {
+                seen.lock().unwrap().push(event);
+            })));
+        let child = context.hidden();
+        let event = GatewayRingEvent::Recovered {
+            member: GatewayMemberRef {
+                index: 0,
+                label: "preferred".to_string(),
+            },
+        };
+        child
+            .gateway_observer
+            .as_ref()
+            .expect("child keeps gateway observer")(event.clone());
+        assert_eq!(*events.lock().unwrap(), [event]);
     }
 }

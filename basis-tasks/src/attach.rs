@@ -540,6 +540,7 @@ async fn run_model(
         Ok(runtime) => runtime,
         Err(error) => return record_failure(paths, meta, error, None),
     };
+    let runtime = ctx.observe_gateway_ring(runtime);
     let (builder, spec) = match run_parts(meta, runtime, paths) {
         Ok(parts) => parts,
         Err(error) => return record_failure(paths, meta, error, None),

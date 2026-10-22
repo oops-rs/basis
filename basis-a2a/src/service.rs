@@ -209,6 +209,7 @@ impl A2aService {
             approval,
             shell,
             run,
+            gateway_observer,
             tokens,
             authenticator,
             public_url,
@@ -224,7 +225,13 @@ impl A2aService {
         } = config;
         crate::card::check_extensions(&identity)?;
         if let Source::Hosted { .. } = source {
-            refuse_for_hosted(shell, run.is_unset(), approval, data_dir.is_some())?;
+            refuse_for_hosted(
+                shell,
+                run.is_unset(),
+                approval,
+                data_dir.is_some(),
+                gateway_observer.is_some(),
+            )?;
         }
         let authenticator: Arc<dyn Authenticator> = match authenticator {
             Some(_) if !tokens.is_empty() => return Err(OpenError::TokensWithAuthenticator),
@@ -249,6 +256,12 @@ impl A2aService {
                 let tasks = match data_dir {
                     Some(data_dir) => Tasks::open_at(data_dir, workspace.clone())?,
                     None => Tasks::open(workspace.clone())?,
+                };
+                let tasks = match gateway_observer {
+                    Some(observer) => {
+                        tasks.with_gateway_ring_observer(move |event| (observer.0)(event))
+                    }
+                    None => tasks,
                 };
                 // `basis-tasks` spawns a task that will ask only from a
                 // `Tasks` that can; each is then driven through a host of
@@ -596,6 +609,7 @@ fn refuse_for_hosted(
     run_unset: bool,
     approval: InboundApproval,
     data_dir: bool,
+    gateway_observer: bool,
 ) -> Result<(), OpenError> {
     let refused = if shell {
         "with_shell"
@@ -608,6 +622,8 @@ fn refuse_for_hosted(
         "InboundApproval::Always"
     } else if data_dir {
         "with_data_dir"
+    } else if gateway_observer {
+        "with_gateway_ring_observer"
     } else {
         return Ok(());
     };

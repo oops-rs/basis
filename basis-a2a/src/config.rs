@@ -206,6 +206,18 @@ impl fmt::Debug for Custom {
     }
 }
 
+/// A process-local gateway observer; debug output never inspects its captures.
+#[derive(Clone)]
+pub(crate) struct GatewayObserver(
+    pub(crate) Arc<dyn Fn(basis::runtime::GatewayRingEvent) + Send + Sync>,
+);
+
+impl fmt::Debug for GatewayObserver {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.write_str("GatewayObserver(..)")
+    }
+}
+
 /// How many unsettled tasks one principal may have at once when the
 /// operator names no other number. The workspace holds at most
 /// `basis_tasks::MAX_TASKS` (1024), settled ones included; a quota per
@@ -220,6 +232,7 @@ pub struct ServeConfig {
     pub(crate) approval: InboundApproval,
     pub(crate) shell: bool,
     pub(crate) run: RunDefaults,
+    pub(crate) gateway_observer: Option<GatewayObserver>,
     pub(crate) tokens: Vec<(Principal, BearerToken)>,
     pub(crate) authenticator: Option<Custom>,
     pub(crate) public_url: Option<String>,
@@ -250,7 +263,8 @@ impl ServeConfig {
     /// Every option but the ones that configure a `basis-tasks` run applies
     /// unchanged. Those — [`with_shell`](Self::with_shell),
     /// [`with_run_defaults`](Self::with_run_defaults),
-    /// [`with_data_dir`](Self::with_data_dir) and
+    /// [`with_data_dir`](Self::with_data_dir),
+    /// [`with_gateway_ring_observer`](Self::with_gateway_ring_observer) and
     /// [`InboundApproval::AskCaller`] — would mean nothing here, and
     /// [`A2aService::open`](crate::A2aService::open) refuses each by name
     /// rather than ignore it.
@@ -275,6 +289,7 @@ impl ServeConfig {
             approval: InboundApproval::default(),
             shell: false,
             run: RunDefaults::default(),
+            gateway_observer: None,
             tokens: Vec::new(),
             authenticator: None,
             public_url: None,
@@ -309,6 +324,24 @@ impl ServeConfig {
     #[must_use]
     pub fn with_run_defaults(self, run: RunDefaults) -> Self {
         Self { run, ..self }
+    }
+
+    /// Observes gateway events while this server drives workspace tasks.
+    /// The callback is process-local, never saved in a task's durable
+    /// settings, and also hears children driven while settling a task.
+    /// It does not select an endpoint or change approval behavior.
+    ///
+    /// Hosted tasks have their own runtime: [`A2aService::open`](crate::A2aService::open)
+    /// refuses this setting on [`Self::hosted`] rather than ignore it.
+    #[must_use]
+    pub fn with_gateway_ring_observer(
+        self,
+        observer: impl Fn(basis::runtime::GatewayRingEvent) + Send + Sync + 'static,
+    ) -> Self {
+        Self {
+            gateway_observer: Some(GatewayObserver(Arc::new(observer))),
+            ..self
+        }
     }
 
     /// Requires `token` on every call but the public card, and declares the

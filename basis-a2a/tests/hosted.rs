@@ -678,8 +678,11 @@ type Configure = fn(ServeConfig) -> ServeConfig;
 async fn settings_that_configure_a_basis_tasks_run_are_refused_by_name() {
     let host = FakeHost::held();
     let state = tempfile::tempdir().unwrap();
-    let refusals: [(&str, Configure); 5] = [
+    let refusals: [(&str, Configure); 6] = [
         ("with_shell", ServeConfig::with_shell),
+        ("with_gateway_ring_observer", |config| {
+            config.with_gateway_ring_observer(|_| {})
+        }),
         ("with_run_defaults", |config| {
             config.with_run_defaults(RunDefaults::default().with_model("m"))
         }),

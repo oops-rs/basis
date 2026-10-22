@@ -5,6 +5,18 @@ All six crates — `basis`, `basis-host`, `basis-tasks`, `basis-acp`,
 live in `docs/adr/`; this file says what changed for someone upgrading.
 Releases before 0.15.0 are described by their tags and ADRs only.
 
+## 0.22.1 — 2026-10-22
+
+- `basis-tasks::Tasks::with_gateway_ring_observer` observes the ring of
+  every task the process drives, including children settled with a parent.
+  `basis-a2a::ServeConfig::with_gateway_ring_observer` forwards the same
+  observer to its workspace tasks and refuses it for hosted tasks, whose
+  runtime the host owns. The callback is process-local and is never written
+  into durable task settings; gateway selection and approval are unchanged.
+- The release lockfile updates `rustls-webpki` to 0.103.16 and `webpki-roots`
+  to 1.0.10, fixing RUSTSEC-2026-0382 and RUSTSEC-2026-0381. Applications
+  embedding Basis must resolve these patched versions in their own lockfiles.
+
 ## 0.22.0 — 2026-10-22
 
 **Breaking, silently: the SDK no longer reads `config.json` on its own.**
