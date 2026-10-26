@@ -5,6 +5,16 @@ All six crates — `basis`, `basis-host`, `basis-tasks`, `basis-acp`,
 live in `docs/adr/`; this file says what changed for someone upgrading.
 Releases before 0.15.0 are described by their tags and ADRs only.
 
+## 0.22.2 — 2026-10-27
+
+- `cargo install basis-cli` now uses the same size-oriented release profile as
+  workspace builds: symbol stripping, `opt-level = "s"`, LTO, and one codegen
+  unit. The profile is retained in the published CLI manifest; CI inspects the
+  generated crate archive to reject missing or drifting settings.
+- Runtime behavior, public APIs, features, and panic unwinding are unchanged.
+  Applications embedding the Basis SDK still use their own root release
+  profiles; upgrading the dependency does not change their build settings.
+
 ## 0.22.1 — 2026-10-22
 
 - `basis-tasks::Tasks::with_gateway_ring_observer` observes the ring of

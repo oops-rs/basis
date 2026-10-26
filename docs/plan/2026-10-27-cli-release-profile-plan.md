@@ -42,3 +42,16 @@ The profile's tradeoffs remain longer release builds, stripped symbol informatio
 and potentially different throughput. This change makes install behavior agree
 with the workspace; it does not establish a performance benchmark or adopt
 `panic = "abort"`.
+
+## Release follow-up
+
+The packaging fix and CI guard are implemented and locally verified. A standalone
+archive install with no profile overrides produced an 11.35 MiB binary on Apple
+Silicon; task persistence and ACP initialization passed. Removing the member
+profile or changing its settings made the guard fail, and offline checks passed
+with an empty Cargo cache and unpublished sibling versions.
+
+The user requested merging to `main`, pushing, and releasing. Prepare all six
+crates as 0.22.2, then run the full release preflight before publishing. The
+downstream-project audit is read-only: embedding applications retain their own
+root profiles, so the Basis version bump alone cannot change their optimization.
