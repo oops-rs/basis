@@ -338,21 +338,14 @@ axum = { version = "0.8", default-features = false, features = ["http1", "json",
 # tree via `a2a-lf`; named for the one conversion `basis-a2a` makes.
 chrono = { version = "0.4", default-features = false, features = ["clock", "std"] }
 
-# A release binary that is mostly debug symbols and duplicated codegen is
-# nobody's intent; it is just cargo's default. These four settings take basis
-# from 24MB to 8.9MB with no behavioral change.
+# Size-oriented release settings for workspace builds. Keep this profile in
+# sync with basis-cli/Cargo.toml: Cargo does not copy workspace-root profiles
+# into the published member manifest used by `cargo install`.
 #
-# Deliberately absent, and worth saying why so nobody adds it for the 1.3MB:
-# `panic = "abort"`. The ACP server outlives a failed turn, and a host embedding
-# the crate outlives a failed run — aborting converts any panic, including one
-# inside a dependency, into killing the whole process. That is exactly the
-# property those surfaces exist to provide.
+# Keep panic unwinding: `panic = "abort"` would turn a panic in a run or a
+# dependency into unconditional termination of the host process.
 [profile.release]
-# ~5MB of the original 24MB was symbols nobody reads in a shipped binary.
 strip = true
-# "s" rather than 3 (12MB) or "z" (6.9MB): basis spends its life waiting on a
-# model, so a little code-layout speed is a cheap trade, while "z" starts
-# costing throughput in the JSON and streaming paths that do run hot.
 opt-level = "s"
 lto = true
 codegen-units = 1

@@ -47,3 +47,13 @@ fs2.workspace = true
 [[bin]]
 name = "basis"
 path = "src/main.rs"
+
+# Keep in sync with the workspace release profile. Cargo retains this copy
+# in the published standalone package, where `cargo install` reads it.
+# Workspace builds use the root copy and warn that this one is ignored;
+# that warning is expected. Leave panic unwinding enabled in both profiles.
+[profile.release]
+strip = true
+opt-level = "s"
+lto = true
+codegen-units = 1
