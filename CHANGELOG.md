@@ -11,9 +11,19 @@ Releases before 0.15.0 are described by their tags and ADRs only.
   workspace builds: symbol stripping, `opt-level = "s"`, LTO, and one codegen
   unit. The profile is retained in the published CLI manifest; CI inspects the
   generated crate archive to reject missing or drifting settings.
-- Runtime behavior, public APIs, features, and panic unwinding are unchanged.
-  Applications embedding the Basis SDK still use their own root release
-  profiles; upgrading the dependency does not change their build settings.
+- Require Mentra 0.34.1: shell scheduling reads its fixed execution category
+  without rebuilding the tool's JSON schema. Scheduling classification,
+  approval previews, and command execution are unchanged. This upstream patch
+  also includes additive owned `ToolProgress` handles for work that outlives a
+  tool call.
+- Adopt mentra-provider 0.9.6 and resolve Tokio 1.53.3, zstd 0.14.3,
+  zstd-safe 8.2.0, and zstd-sys 2.1.2 in the release lockfile, addressing
+  RUSTSEC-2026-0386, RUSTSEC-2026-0391, RUSTSEC-2026-0398,
+  RUSTSEC-2026-0403, and RUSTSEC-2026-0410.
+- Retain the existing feature selection and panic unwinding. Applications
+  embedding the Basis SDK still use their own root release profiles and must
+  resolve the patched dependencies in their own lockfiles; upgrading Basis
+  does not change their build settings.
 
 ## 0.22.1 — 2026-10-22
 

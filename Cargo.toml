@@ -268,7 +268,10 @@ basis-tasks = { version = "0.22.2", path = "basis-tasks" }
 # `RunLocals` on `RunOptions`, read by `ToolContext::run_local` and carried by
 # `RunOptions::child` (ADR-0044). 0.34.0 adds `StripModelPrefix` and
 # one-line `GatewayRingEvent`s, for gateway rings stated in config (ADR-0045).
-mentra = { version = "0.34.0", default-features = false }
+# 0.34.1 avoids rebuilding ShellTool's schema when scheduling a command and
+# requires the patched mentra-provider 0.9.6 / Tokio 1.53.3 / zstd 0.14.3
+# dependency chain. Hosts must also update their own resolved lockfiles.
+mentra = { version = "0.34.1", default-features = false }
 
 async-trait = "0.1"
 # ACP carries an image in a prompt as base64; basis's `PromptPart` carries the
