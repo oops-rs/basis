@@ -21,6 +21,23 @@ env:
   RUST_BACKTRACE: 1
 
 jobs:
+  packaged-profile:
+    name: Published CLI release profile
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: dtolnay/rust-toolchain@stable
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+
+      # Inspect the normalized archive that cargo install consumes. A workspace
+      # release build alone cannot catch a missing profile in the published CLI.
+      - name: Check the packaged release profile
+        run: python3 scripts/check-packaged-profile.py
+
   msrv:
     name: Minimum supported Rust (1.95)
     runs-on: ubuntu-latest
