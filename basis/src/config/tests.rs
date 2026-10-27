@@ -425,6 +425,30 @@ fn a_ring_in_the_global_file_names_its_members_in_order_and_where_their_keys_liv
 }
 
 #[test]
+fn a_member_in_basis_gateways_carries_its_request_fields() {
+    let ring = super::gateways::parse_var(
+        r#"[{"base_url": "http://litellm/", "api_key_file": "/run/secrets/litellm",
+             "request_fields": {"extra_body": {"thinking": {"type": "disabled"}}}}]"#,
+    )
+    .expect("a ring");
+
+    let fields = serde_json::json!({"extra_body": {"thinking": {"type": "disabled"}}});
+    assert_eq!(
+        ring.members,
+        vec![
+            crate::runtime::GatewayMember::new("http://litellm/")
+                .with_api_key_file("/run/secrets/litellm")
+                .with_request_fields(fields.as_object().cloned().expect("an object")),
+        ]
+    );
+
+    let empty =
+        super::gateways::parse_var(r#"[{"base_url": "http://litellm/", "request_fields": {}}]"#)
+            .expect_err("an empty object says nothing");
+    assert!(empty.contains("empty `request_fields`"), "{empty}");
+}
+
+#[test]
 fn a_ring_object_carries_its_policy() {
     use crate::runtime::GatewayRingPolicy;
     use std::time::Duration;

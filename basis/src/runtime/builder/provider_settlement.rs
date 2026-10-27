@@ -25,7 +25,7 @@ use mentra::{
 
 use crate::{error::RunError, provider, runtime::credential::Credential};
 
-use super::{GatewayRingSpec, Wire, gateway_ring};
+use super::{GatewayRingSpec, Wire, gateway_ring, gateway_ring::chat_completions_provider};
 
 /// A provider instance the host built, held until [`assemble`] hands it to the
 /// matching mentra registration seam.
@@ -180,37 +180,62 @@ pub(super) struct Answers {
 /// `build`, not `build_async`: no MCP server is ever registered at the
 /// runtime level, so there is nothing for the async constructor to connect.
 /// Workspace-owned connections arrive post-build (ADR-0018).
+///
+/// `request_fields` reach only providers basis builds itself: refused beside
+/// a host's instance, and for a preset with no base URL, rather than dropped.
 pub(super) fn assemble(
     source: ProviderSource,
     builder: mentra::RuntimeBuilder,
     wire: Wire,
+    request_fields: serde_json::Map<String, serde_json::Value>,
 ) -> Result<(mentra::Runtime, ProviderId), RunError> {
     match source {
+        ProviderSource::Host(_) if !request_fields.is_empty() => {
+            Err(provider::ProviderError::AmbiguousProviderSource {
+                knob: "with_request_fields",
+            }
+            .into())
+        }
         ProviderSource::Host(host) => Ok(((host.install)(builder).build()?, host.id)),
         // Members built here in the wire named, then registered through the
         // same provider-core seam a host's own instance takes. What the ring
         // does after this point is mentra's (ADR-0027).
         ProviderSource::Ring { spec, provider } => {
-            let ring = gateway_ring::assemble(spec, provider, wire)?;
+            let ring = gateway_ring::assemble(spec, provider, wire, &request_fields)?;
             let id = ProviderId::from(provider);
             Ok((builder.with_registered_provider(ring).build()?, id))
         }
         ProviderSource::Resolved(choice) => {
             let assembled = match (&choice.base_url, wire) {
+                (None, _) if !request_fields.is_empty() => {
+                    return Err(provider::ProviderError::RequestFieldsWithoutBaseUrl.into());
+                }
                 // mentra's own door for a compatible endpoint, keyed or not;
                 // filed under the resolved id so the model lookup finds it.
-                (Some(base_url), Wire::ChatCompletions) => builder.with_openai_compatible(
-                    ProviderId::from(choice.provider),
-                    base_url,
-                    choice.api_key.clone(),
-                ),
-                (Some(base_url), Wire::Responses) => {
-                    builder.with_registered_provider(responses_provider(
+                (Some(base_url), Wire::ChatCompletions) if request_fields.is_empty() => builder
+                    .with_openai_compatible(
+                        ProviderId::from(choice.provider),
+                        base_url,
+                        choice.api_key.clone(),
+                    ),
+                // Request fields are a provider-core setting, so with some
+                // the member-shaped instance is built here instead.
+                (Some(base_url), Wire::ChatCompletions) => builder.with_registered_provider(
+                    chat_completions_provider(
                         choice.provider,
                         base_url,
                         Credential::new(choice.api_key.as_deref()),
-                    ))
-                }
+                    )
+                    .with_request_fields(request_fields),
+                ),
+                (Some(base_url), Wire::Responses) => builder.with_registered_provider(
+                    responses_provider(
+                        choice.provider,
+                        base_url,
+                        Credential::new(choice.api_key.as_deref()),
+                    )
+                    .with_request_fields(request_fields),
+                ),
                 // A preset takes a `String`; resolution hands one back for
                 // every keyed preset, and the two local ones ignore what they
                 // are given.

@@ -12,9 +12,13 @@
 //! [
 //!   { "base_url": "http://10.0.0.1:2455/v1", "api_key_file": "/run/secrets/local" },
 //!   { "base_url": "http://relay.example/v1", "api_key_env": "RELAY_KEY",
-//!     "strip_model_prefix": "openai/" }
+//!     "strip_model_prefix": "openai/",
+//!     "request_fields": { "extra_body": { "thinking": { "type": "disabled" } } } }
 //! ]
 //! ```
+//!
+//! `request_fields` is [`GatewayMember::with_request_fields`]: top-level
+//! fields added to every request body sent to that member.
 //!
 //! or, to tune the ring too, `{ "members": [ … ], "failure_threshold": 3,
 //! "cooldown_secs": 120 }` — `"sticky": true` in place of `cooldown_secs` for
@@ -75,6 +79,7 @@ pub(crate) struct MemberValue {
     api_key_env: Option<String>,
     api_key_file: Option<String>,
     strip_model_prefix: Option<String>,
+    request_fields: Option<serde_json::Map<String, serde_json::Value>>,
 }
 
 /// Turns the parsed JSON into a ring, refusing what cannot be meant.
@@ -171,6 +176,12 @@ fn member(
             return Err("has an empty `strip_model_prefix`".into());
         }
         member = member.with_model_prefix_stripped(prefix);
+    }
+    if let Some(fields) = value.request_fields {
+        if fields.is_empty() {
+            return Err("has an empty `request_fields`".into());
+        }
+        member = member.with_request_fields(fields);
     }
     Ok(member)
 }

@@ -769,6 +769,13 @@ observer the code did. A member may strip a model-id prefix, for a relay that se
 same model as its neighbours under a bare id; that is mentra's `StripModelPrefix`
 ([ADR-0045](adr/0045-a-gateway-ring-is-configuration.md)).
 
+A request may carry fields basis does not model — a gateway's `extra_body`, a vendor's
+switch. `RuntimeBuilder::with_request_fields` adds them to every request to a base URL or
+ring member basis builds, and a member's own `request_fields` (`GatewayMember::with_request_fields`)
+adds that gateway's half. They only add: a field mentra already set on a request fails it,
+naming the field, and a field the runtime and a member both name is refused at `build`
+([ADR-0047](adr/0047-a-request-may-carry-fields-basis-does-not-model.md)).
+
 A repository can state its own answer instead of relying on the flag or the
 variable. `.basis/config.json` — `provider`, `model`, `effort`, and in the
 global `config.json` only, `base_url` or `gateways` — layers under everything an invocation

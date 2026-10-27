@@ -274,8 +274,9 @@ basis-tasks = { version = "0.22.2", path = "basis-tasks" }
 # 0.34.2 keeps the coding tools' parameter schemas plain objects at the root
 # (Gemini and xAI refuse a request with a root `anyOf`/`oneOf`) and, through
 # mentra-provider 0.9.7, accepts LiteLLM's Responses reasoning events that omit
-# `summary_index`.
-mentra = { version = "0.34.2", default-features = false }
+# `summary_index`. 0.34.3 / mentra-provider 0.9.8 add request fields on the
+# OpenAI-wire providers, which `with_request_fields` states (ADR-0047).
+mentra = { version = "0.34.3", default-features = false }
 
 async-trait = "0.1"
 # ACP carries an image in a prompt as base64; basis's `PromptPart` carries the

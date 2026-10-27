@@ -183,6 +183,9 @@ pub struct RuntimeBuilder {
     /// The ring a config file stated ([`with_config`](Self::with_config)),
     /// used at build only if nothing in code answered the endpoint question.
     config_gateway_ring: Option<crate::GatewayRingConfig>,
+    /// Top-level fields added to every request body basis's own OpenAI-wire
+    /// providers send ([`with_request_fields`](Self::with_request_fields)).
+    request_fields: serde_json::Map<String, serde_json::Value>,
 }
 
 /// Hand-written so a supplied credential cannot reach a log through a
@@ -200,6 +203,12 @@ impl std::fmt::Debug for RuntimeBuilder {
             )
             .field("gateway_ring", &self.gateway_ring)
             .field("config_gateway_ring", &self.config_gateway_ring)
+            // Names only: a field's value may be anything a gateway takes,
+            // a token included.
+            .field(
+                "request_fields",
+                &self.request_fields.keys().collect::<Vec<_>>(),
+            )
             .field("model", &self.model)
             .field("history", &self.history)
             .field(
@@ -269,6 +278,7 @@ impl Default for RuntimeBuilder {
             host_provider: None,
             gateway_ring: None,
             config_gateway_ring: None,
+            request_fields: serde_json::Map::new(),
         }
     }
 }
@@ -765,7 +775,8 @@ impl RuntimeBuilder {
         // A base URL is the only place the wire is a question: a preset
         // carries the one its vendor speaks, and an instance *is* its wire —
         // `provider_settlement::assemble`'s own docs have the rest.
-        let (mentra, provider) = provider_settlement::assemble(source, builder, self.wire)?;
+        let (mentra, provider) =
+            provider_settlement::assemble(source, builder, self.wire, self.request_fields)?;
 
         // Claimed one at a time, now that the runtime exists and already
         // carries every registration basis makes unconditionally — `spawn`,

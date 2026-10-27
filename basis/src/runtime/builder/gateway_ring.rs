@@ -43,6 +43,7 @@ pub struct GatewayMember {
     base_url: String,
     key: MemberKey,
     strip_model_prefix: Option<String>,
+    request_fields: serde_json::Map<String, serde_json::Value>,
 }
 
 /// Where a member's key comes from.
@@ -70,6 +71,7 @@ impl GatewayMember {
             base_url: base_url.into(),
             key: MemberKey::None,
             strip_model_prefix: None,
+            request_fields: serde_json::Map::new(),
         }
     }
 
@@ -116,6 +118,23 @@ impl GatewayMember {
     pub fn with_model_prefix_stripped(self, prefix: impl Into<String>) -> Self {
         Self {
             strip_model_prefix: Some(prefix.into()),
+            ..self
+        }
+    }
+
+    /// Adds `fields` at the top level of every request body sent to this
+    /// member, beside the runtime's own
+    /// [`RuntimeBuilder::with_request_fields`]: the gateway-specific half,
+    /// such as the `extra_body` only a LiteLLM member understands.
+    ///
+    /// A field this member and the runtime both name is refused at
+    /// [`build`](RuntimeBuilder::build), naming the member and the field,
+    /// rather than one silently winning. Fields only add to what mentra sets
+    /// on a request; see [`RuntimeBuilder::with_request_fields`].
+    #[must_use]
+    pub fn with_request_fields(self, fields: serde_json::Map<String, serde_json::Value>) -> Self {
+        Self {
+            request_fields: fields,
             ..self
         }
     }
@@ -175,6 +194,11 @@ impl std::fmt::Debug for GatewayMember {
             .field("base_url", &self.base_url)
             .field("api_key", &key)
             .field("strip_model_prefix", &self.strip_model_prefix)
+            // Names only, like the key: a field's value may be a secret.
+            .field(
+                "request_fields",
+                &self.request_fields.keys().collect::<Vec<_>>(),
+            )
             .finish()
     }
 }
@@ -317,6 +341,7 @@ pub(super) fn assemble(
     spec: GatewayRingSpec,
     provider: BuiltinProvider,
     wire: Wire,
+    request_fields: &serde_json::Map<String, serde_json::Value>,
 ) -> Result<GatewayRing, RunError> {
     let lookup = |var: &str| std::env::var(var).ok();
     let members = spec
@@ -324,7 +349,7 @@ pub(super) fn assemble(
         .unwrap_or_default()
         .iter()
         .enumerate()
-        .map(|(index, member)| build_member(index, member, provider, wire, &lookup))
+        .map(|(index, member)| build_member(index, member, provider, wire, &lookup, request_fields))
         .collect::<Result<Vec<_>, _>>()?;
     let ring = GatewayRing::new(members, spec.policy.unwrap_or_default())
         .map_err(|_| provider::ProviderError::EmptyGatewayRing)?;
@@ -340,15 +365,29 @@ fn build_member(
     provider: BuiltinProvider,
     wire: Wire,
     lookup: &dyn Fn(&str) -> Option<String>,
+    runtime_fields: &serde_json::Map<String, serde_json::Value>,
 ) -> Result<Arc<dyn Provider>, RunError> {
     let base_url = provider::normalize_base_url(&member.base_url)?;
     let api_key = member.resolve_key(index, lookup)?;
     let credential = Credential::new(api_key.as_deref());
-    let built: Arc<dyn Provider> = match wire {
-        Wire::Responses => Arc::new(responses_provider(provider, &base_url, credential)),
-        Wire::ChatCompletions => {
-            Arc::new(chat_completions_provider(provider, &base_url, credential))
+    let mut fields = runtime_fields.clone();
+    for (name, value) in &member.request_fields {
+        if fields.contains_key(name) {
+            return Err(provider::ProviderError::GatewayRequestFieldConflict {
+                member: index,
+                field: name.clone(),
+            }
+            .into());
         }
+        fields.insert(name.clone(), value.clone());
+    }
+    let built: Arc<dyn Provider> = match wire {
+        Wire::Responses => Arc::new(
+            responses_provider(provider, &base_url, credential).with_request_fields(fields),
+        ),
+        Wire::ChatCompletions => Arc::new(
+            chat_completions_provider(provider, &base_url, credential).with_request_fields(fields),
+        ),
     };
     Ok(match &member.strip_model_prefix {
         Some(prefix) => Arc::new(StripModelPrefix::new(built, prefix.as_str())),
@@ -365,8 +404,10 @@ fn build_member(
 /// A lone base URL on this wire goes through mentra's own
 /// `with_openai_compatible` door, which builds the same definition behind
 /// mentra's runtime-level `Provider`; a ring member has to be a provider-core
-/// instance, so the definition is built here at that level instead.
-fn chat_completions_provider(
+/// instance, so the definition is built here at that level instead. So does
+/// a lone base URL with request fields, which only the provider-core
+/// instance takes.
+pub(super) fn chat_completions_provider(
     provider: BuiltinProvider,
     base_url: &str,
     credential: Credential,

@@ -127,6 +127,114 @@ async fn a_member_reads_its_key_from_a_file_and_hears_the_model_without_its_name
     assert_eq!(bearer(&turn).as_deref(), Some("relay-key"));
 }
 
+#[tokio::test]
+async fn request_fields_from_the_runtime_and_the_member_both_reach_the_turn() {
+    let gateway = ScriptedEndpoint::start(Answer::Serve);
+    let runtime = Runtime::builder()
+        .with_wire(Wire::Responses)
+        .with_request_fields(fields(r#"{"metadata_tag": "runtime"}"#))
+        .with_gateway_ring([GatewayMember::new(&gateway.base_url)
+            .with_api_key("key")
+            .with_request_fields(fields(
+                r#"{"extra_body": {"thinking": {"type": "disabled"}}}"#,
+            ))])
+        .with_ephemeral_history();
+
+    let body = one_turn(runtime).await;
+    let turn = turn_body(&gateway);
+
+    assert_eq!(body, "reply-1");
+    assert_eq!(turn["metadata_tag"], "runtime");
+    assert_eq!(turn["extra_body"]["thinking"]["type"], "disabled");
+}
+
+#[tokio::test]
+async fn request_fields_reach_a_lone_base_url() {
+    let gateway = ScriptedEndpoint::start(Answer::Serve);
+    let runtime = Runtime::builder()
+        .with_wire(Wire::Responses)
+        .with_base_url(&gateway.base_url)
+        .with_api_key("key")
+        .with_request_fields(fields(
+            r#"{"extra_body": {"thinking": {"type": "disabled"}}}"#,
+        ))
+        .with_ephemeral_history();
+
+    one_turn(runtime).await;
+
+    assert_eq!(
+        turn_body(&gateway)["extra_body"]["thinking"]["type"],
+        "disabled"
+    );
+}
+
+#[test]
+fn a_request_field_named_by_the_runtime_and_a_member_is_refused_at_build() {
+    let error = Runtime::builder()
+        .with_wire(Wire::Responses)
+        .with_request_fields(fields(r#"{"extra_body": {}}"#))
+        .with_gateway_ring([
+            GatewayMember::new("http://127.0.0.1:1/v1"),
+            GatewayMember::new("http://127.0.0.1:2/v1")
+                .with_request_fields(fields(r#"{"extra_body": {"x": 1}}"#)),
+        ])
+        .with_ephemeral_history()
+        .build()
+        .expect_err("neither value may silently win");
+
+    let message = error.to_string();
+    assert!(message.contains("gateway #1"), "{message}");
+    assert!(message.contains("`extra_body`"), "{message}");
+}
+
+#[test]
+fn request_fields_for_a_preset_with_no_base_url_are_refused_rather_than_dropped() {
+    let error = Runtime::builder()
+        .with_provider(basis::BuiltinProvider::OpenAI)
+        .with_api_key("key")
+        .with_request_fields(fields(r#"{"extra_body": {}}"#))
+        .with_ephemeral_history()
+        .build()
+        .expect_err("basis does not build a preset's requests");
+
+    assert!(error.to_string().contains("no base URL"), "{error}");
+}
+
+fn fields(json: &str) -> serde_json::Map<String, serde_json::Value> {
+    serde_json::from_str(json).expect("an object")
+}
+
+/// Runs one plain turn on `runtime` and returns its final message.
+async fn one_turn(runtime: basis::RuntimeBuilder) -> String {
+    let dir = tempfile::tempdir().expect("tempdir");
+    let workspace = Workspace::builder(dir.path())
+        .with_runtime_builder(runtime)
+        .with_model(ModelSelector::Id("test-model".to_string()))
+        .without_discovery()
+        .open()
+        .await
+        .expect("opens");
+    let report = workspace
+        .prepare("say anything")
+        .expect("mints")
+        .execute_with_approver(CollectingSink::default(), AllowAll)
+        .await
+        .expect("the run completes");
+    assert!(matches!(report.outcome, RunOutcome::Ok));
+    report.final_message.expect("a reply")
+}
+
+/// The JSON body of the first turn `endpoint` was sent.
+fn turn_body(endpoint: &ScriptedEndpoint) -> serde_json::Value {
+    let turn = endpoint
+        .requests()
+        .into_iter()
+        .find(|request| request.starts_with("POST "))
+        .expect("a turn reached the endpoint");
+    let body = turn.split("\r\n\r\n").nth(1).expect("a body");
+    serde_json::from_str(body).expect("a JSON body")
+}
+
 /// The token after `Authorization: Bearer`, or `None` when the request sent
 /// no such header.
 fn bearer(request: &str) -> Option<String> {

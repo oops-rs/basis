@@ -467,4 +467,34 @@ impl RuntimeBuilder {
     pub fn with_wire(self, wire: Wire) -> Self {
         Self { wire, ..self }
     }
+
+    /// Adds `fields` at the top level of every request body sent to the
+    /// endpoint behind [`with_base_url`](Self::with_base_url), or to every
+    /// member of a [gateway ring](Self::with_gateway_ring), on either
+    /// [`Wire`].
+    ///
+    /// For a parameter a gateway or a vendor takes that basis does not model.
+    /// LiteLLM forwards an `extra_body` object to the upstream model, so
+    /// `{"extra_body": {"thinking": {"type": "disabled"}}}` reaches DeepSeek
+    /// as `thinking`.
+    ///
+    /// **Fields only add.** A field basis or mentra already set on a request
+    /// — `model`, `tools`, `tool_choice`, `reasoning_effort` on a turn that
+    /// asked for effort — is never replaced: that request fails, naming the
+    /// field. A ring member's own
+    /// [`GatewayMember::with_request_fields`](super::GatewayMember::with_request_fields)
+    /// is added beside these, and a
+    /// field both name is refused at [`build`](Self::build).
+    ///
+    /// Refused at [`build`](Self::build) beside a host-supplied provider,
+    /// which builds its own requests, and for a provider preset with no base
+    /// URL, whose requests basis does not build either. A later call replaces
+    /// the earlier fields.
+    #[must_use]
+    pub fn with_request_fields(self, fields: serde_json::Map<String, serde_json::Value>) -> Self {
+        Self {
+            request_fields: fields,
+            ..self
+        }
+    }
 }

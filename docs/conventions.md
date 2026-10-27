@@ -109,6 +109,7 @@ policy beside them:
 | `api_key_env` | the variable holding this member's key, read at startup |
 | `api_key_file` | the file holding it — a mounted secret — read at startup, whitespace trimmed |
 | `strip_model_prefix` | sent ids lose this prefix: `openai/gpt-5.6-sol` reaches the member as `gpt-5.6-sol` |
+| `request_fields` | a JSON object added at the top level of every request body sent to this member, such as LiteLLM's `extra_body`; a field mentra already set on a request fails that request rather than replacing it |
 
 A member names where its key lives, never the key; one stated and missing is
 an error at startup naming the member, not a `401` the ring would rotate past.

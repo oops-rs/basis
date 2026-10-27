@@ -7,6 +7,27 @@ Releases before 0.15.0 are described by their tags and ADRs only.
 
 ## Unreleased
 
+Breaking: `ProviderError` gains `RequestFieldsWithoutBaseUrl` and
+`GatewayRequestFieldConflict`. An exhaustive match needs updating.
+
+### A request may carry fields basis does not model
+
+- `RuntimeBuilder::with_request_fields` adds top-level JSON fields to every
+  request body sent to a base URL or to every gateway ring member, on either
+  wire: a gateway's or vendor's parameter basis does not model, such as
+  LiteLLM's `extra_body` (ADR-0047).
+- `GatewayMember::with_request_fields`, and `request_fields` on a member in
+  `gateways` / `BASIS_GATEWAYS`, add a single gateway's own fields. A field
+  the runtime and a member both name is refused at `build`.
+- Fields only add: a request on which mentra already set one of them (such
+  as `reasoning` beside an `Effort`) fails, naming the field. Request fields
+  beside a host's own provider instance, or for a preset with no base URL,
+  are refused at `build` rather than dropped.
+- Require Mentra 0.34.3 and mentra-provider 0.9.8, which carry the
+  provider-level request fields.
+
+### Gemini and xAI
+
 - Require Mentra 0.34.2 and mentra-provider 0.9.7. The coding tools'
   parameter schemas are plain objects at the root, so Gemini and xAI no
   longer refuse every run that offers them ("`edit` functionDeclaration

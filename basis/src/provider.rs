@@ -173,6 +173,24 @@ pub enum ProviderError {
     /// `env_gateway_ring`.
     #[error("{GATEWAYS_VAR} is set beside {var}; both name the endpoint, so unset one")]
     GatewaysBesideBaseUrl { var: &'static str },
+
+    /// [`RuntimeBuilder::with_request_fields`](crate::RuntimeBuilder::with_request_fields)
+    /// for a provider preset with no base URL. mentra builds that provider's
+    /// requests, so the fields would go nowhere; refused rather than dropped.
+    #[error(
+        "request fields were supplied for a provider preset with no base URL; \
+         they reach only a base URL or a gateway ring"
+    )]
+    RequestFieldsWithoutBaseUrl,
+
+    /// A ring member names a request field the runtime's own
+    /// [`with_request_fields`](crate::RuntimeBuilder::with_request_fields)
+    /// also names. Refused rather than ranked, so neither value silently wins.
+    #[error(
+        "gateway #{member} sets request field `{field}`, which the runtime's request \
+         fields also set; state it in one place"
+    )]
+    GatewayRequestFieldConflict { member: usize, field: String },
 }
 
 /// The ring `BASIS_GATEWAYS` states, if it is set.
