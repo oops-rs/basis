@@ -821,7 +821,7 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "39cab71617ae0d63f51a36d69f866391735b51691dbda63cf6f96d042b63efeb"
 dependencies = [
  "libc",
- "windows-sys 0.52.0",
+ "windows-sys 0.61.2",
 ]
 
 [[package]]
@@ -1523,9 +1523,9 @@ checksum = "cf8baf1c55e62ffcace7a9f06f4bd9cd3f0c4beb022d3b367256b91b87513d98"
 
 [[package]]
 name = "mentra"
-version = "0.34.1"
+version = "0.34.2"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "c7a302ee403205169b22be2868c216f6e7567e023c3ecd1c6669b75ef67746b8"
+checksum = "e5ca258395a750c1cfec8e7f1e8aa7c24e790ea9f7502547b2d3ee29863d3654"
 dependencies = [
  "a2a-lf",
  "async-trait",
@@ -1554,9 +1554,9 @@ dependencies = [
 
 [[package]]
 name = "mentra-provider"
-version = "0.9.6"
+version = "0.9.7"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "1647a5a8629c9456dbfc08cb214bc980733ec5a365ad7290bfac4382c66ab962"
+checksum = "ef670d6b392aed72d853ad4888b140de3ac4aaf0139cdfe466a4ded8214b4959"
 dependencies = [
  "async-trait",
  "base64 0.22.1",
@@ -1817,7 +1817,7 @@ dependencies = [
  "once_cell",
  "socket2",
  "tracing",
- "windows-sys 0.52.0",
+ "windows-sys 0.61.2",
 ]
 
 [[package]]
@@ -2045,7 +2045,7 @@ dependencies = [
  "errno",
  "libc",
  "linux-raw-sys",
- "windows-sys 0.52.0",
+ "windows-sys 0.61.2",
 ]
 
 [[package]]
@@ -2437,7 +2437,7 @@ dependencies = [
  "getrandom 0.4.3",
  "once_cell",
  "rustix",
- "windows-sys 0.52.0",
+ "windows-sys 0.61.2",
 ]
 
 [[package]]
@@ -2917,7 +2917,7 @@ version = "0.1.11"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "c2a7b1c03c876122aa43f3020e6c3c3ee5c05081c9a00739faf7503aeba10d22"
 dependencies = [
- "windows-sys 0.52.0",
+ "windows-sys 0.61.2",
 ]
 
 [[package]]

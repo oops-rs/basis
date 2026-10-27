@@ -5,6 +5,16 @@ All six crates — `basis`, `basis-host`, `basis-tasks`, `basis-acp`,
 live in `docs/adr/`; this file says what changed for someone upgrading.
 Releases before 0.15.0 are described by their tags and ADRs only.
 
+## Unreleased
+
+- Require Mentra 0.34.2 and mentra-provider 0.9.7. The coding tools'
+  parameter schemas are plain objects at the root, so Gemini and xAI no
+  longer refuse every run that offers them ("`edit` functionDeclaration
+  parameters schema should be of type OBJECT"; "tool parameter root must be an
+  object type"). The Responses wire accepts reasoning events without
+  `summary_index`, which LiteLLM omits for Gemini. Hosts on 0.22.2 can pick
+  both fixes up with `cargo update -p mentra -p mentra-provider`.
+
 ## 0.22.2 — 2026-10-27
 
 - `cargo install basis-cli` now uses the same size-oriented release profile as
