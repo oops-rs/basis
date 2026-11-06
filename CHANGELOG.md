@@ -5,7 +5,7 @@ All six crates — `basis`, `basis-host`, `basis-tasks`, `basis-acp`,
 live in `docs/adr/`; this file says what changed for someone upgrading.
 Releases before 0.15.0 are described by their tags and ADRs only.
 
-## Unreleased
+## 0.24.0 — 2026-11-06
 
 ### A hosted task knows its id, its caller's attributes and its own files
 
