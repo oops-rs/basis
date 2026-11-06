@@ -19,7 +19,7 @@ homepage = "https://github.com/oops-rs/basis"
 # The layers of ADR-0011, named here so each crate states which of them it is
 # built on and cargo resolves one version of each.
 basis = { version = "0.24.0", path = "basis" }
-basis-a2a = { version = "0.24.0", path = "basis-a2a" }
+basis-a2a = { version = "0.24.1", path = "basis-a2a" }
 basis-acp = { version = "0.24.0", path = "basis-acp" }
 basis-host = { version = "0.24.0", path = "basis-host" }
 # The durable task layer (ADR-0017 over ADR-0019's substrate, D8): one crate

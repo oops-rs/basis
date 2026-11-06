@@ -327,7 +327,7 @@ dependencies = [
 
 [[package]]
 name = "basis-a2a"
-version = "0.24.0"
+version = "0.24.1"
 dependencies = [
  "a2a-lf",
  "axum",

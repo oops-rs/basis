@@ -1,7 +1,7 @@
 [package]
 name = "basis-a2a"
 description = "The A2A (Agent2Agent) server over basis: any basis agent, reachable by any A2A client, with tasks as durable as basis-tasks makes them."
-version.workspace = true
+version = "0.24.1"
 edition.workspace = true
 rust-version.workspace = true
 license.workspace = true
