@@ -5,6 +5,18 @@ All six crates — `basis`, `basis-host`, `basis-tasks`, `basis-acp`,
 live in `docs/adr/`; this file says what changed for someone upgrading.
 Releases before 0.15.0 are described by their tags and ADRs only.
 
+## Unreleased
+
+### A hosted task knows its id, its caller's attributes and its own files
+
+- `HostedStart::task_id` is the A2A id callers see, minted before
+  `TaskHost::start` (ADR-0048).
+- `Principal::with_attribute` lets an authenticator vouch for more than a
+  name, such as a gateway-signed call chain; a hosted task reads it in
+  `HostedStart::attributes`. Ownership stays by name.
+- `TaskHost::artifacts` (default: none) serves a host's own named artifacts
+  after `result`, in any state. The id `result` is reserved.
+
 ## 0.23.0 — 2026-10-28
 
 Breaking: `ProviderError` gains `RequestFieldsWithoutBaseUrl` and

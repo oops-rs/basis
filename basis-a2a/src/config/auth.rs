@@ -7,7 +7,7 @@
 //! [`Principals`] is the [`Authenticator`] a server uses unless the operator
 //! gives it another (ADR-0036).
 
-use std::fmt;
+use std::{collections::BTreeMap, fmt};
 
 use a2a::{HttpAuthSecurityScheme, SecurityScheme};
 use axum::http::header;
@@ -77,6 +77,7 @@ impl fmt::Debug for BearerToken {
 pub struct Principal {
     name: String,
     authenticated: bool,
+    attributes: BTreeMap<String, String>,
 }
 
 impl Principal {
@@ -95,6 +96,7 @@ impl Principal {
         plain.then_some(Self {
             name,
             authenticated: true,
+            attributes: BTreeMap::new(),
         })
     }
 
@@ -104,7 +106,25 @@ impl Principal {
         Self {
             name: DEFAULT_PRINCIPAL.to_string(),
             authenticated: false,
+            attributes: BTreeMap::new(),
         }
+    }
+
+    /// This principal, carrying `value` under `key`: something its
+    /// authenticator verified about this one request (ADR-0048) — a
+    /// gateway-signed call chain, say. Ownership stays by name alone; a
+    /// hosted task's host reads the attributes in
+    /// [`HostedStart::attributes`](crate::HostedStart::attributes), and
+    /// nothing else in this crate does.
+    #[must_use]
+    pub fn with_attribute(mut self, key: impl Into<String>, value: impl Into<String>) -> Self {
+        self.attributes.insert(key.into(), value.into());
+        self
+    }
+
+    /// What this principal's authenticator vouched for, beside its name.
+    pub fn attributes(&self) -> &BTreeMap<String, String> {
+        &self.attributes
     }
 
     pub fn name(&self) -> &str {

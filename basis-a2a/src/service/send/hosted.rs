@@ -22,14 +22,15 @@ pub(super) fn deadline_ms(
     Ok(after(accepted_ms, deadline))
 }
 
-/// Asks `host` to start the task, and mints the A2A id it is served under:
+/// Asks `host` to start the task, under the A2A id `start` already carries:
 /// 32 lowercase hex digits, the shape of a `basis-tasks` one, never the
 /// host's own.
 pub(super) async fn start(host: &dyn TaskHost, start: HostedStart) -> Result<Started, A2AError> {
     let deadline_ms = start.deadline_ms;
+    let id = start.task_id.clone();
     let host_id = host.start(start).await.map_err(from_host)?;
     Ok(Started {
-        id: uuid::Uuid::new_v4().simple().to_string(),
+        id,
         key: Key::Hosted(host_id),
         deadline_ms,
     })

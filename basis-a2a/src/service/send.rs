@@ -149,7 +149,9 @@ impl A2aService {
                     .map(|latest| host_id_of(latest).map(str::to_string))
                     .transpose()?;
                 let start = HostedStart {
+                    task_id: uuid::Uuid::new_v4().simple().to_string(),
                     principal: caller.name().to_string(),
+                    attributes: caller.attributes().clone(),
                     context_id: context_id.clone(),
                     continues,
                     prompt: rendered.prompt.clone(),

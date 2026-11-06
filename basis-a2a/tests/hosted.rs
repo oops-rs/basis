@@ -10,12 +10,16 @@ mod harness;
 use std::{sync::Arc, time::Duration};
 
 use basis_a2a::{
-    A2aService, AgentIdentity, BearerToken, HostedStanding, InboundApproval, OpenError, Principal,
-    RunDefaults, ServeConfig,
-    a2a::{AgentExtension, Part, PartContent, error_code},
+    A2aService, AgentIdentity, Authenticator, BearerToken, HostedStanding, InboundApproval,
+    OpenError, Principal, Refusal, RequestHead, RunDefaults, Security, ServeConfig,
+    a2a::{
+        AgentExtension, Artifact, HttpAuthSecurityScheme, Part, PartContent, SecurityScheme,
+        error_code,
+    },
 };
 use chrono::{Duration as Span, Utc};
 use fake_host::{FakeHost, REFUSED};
+use futures::future::BoxFuture;
 use harness::{Served, TOKEN, sse_events, user_message};
 use serde_json::{Value, json};
 
@@ -1018,4 +1022,184 @@ async fn a_webhook_hears_a_hosted_task_ask_and_resume() {
     host.ask("run-0", vec![Part::text("And which region?")]);
     heard("TASK_STATE_WORKING", working_before + 1).await;
     heard("TASK_STATE_INPUT_REQUIRED", 2).await;
+}
+
+fn report(id: &str) -> Artifact {
+    Artifact {
+        artifact_id: id.to_string(),
+        name: Some(format!("{id}.md")),
+        description: None,
+        parts: vec![Part::text("# Findings").with_media_type("text/markdown")],
+        metadata: None,
+        extensions: None,
+    }
+}
+
+fn artifact_ids(task: &Value) -> Vec<&str> {
+    task["artifacts"]
+        .as_array()
+        .map(|artifacts| {
+            artifacts
+                .iter()
+                .map(|artifact| artifact["artifactId"].as_str().unwrap())
+                .collect()
+        })
+        .unwrap_or_default()
+}
+
+#[tokio::test]
+async fn the_host_is_handed_the_id_its_callers_see() {
+    let host = FakeHost::answering(answer());
+    let served = serve(&host, |config| config).await;
+    let task = served
+        .result("SendMessage", send("who am I?", None, false))
+        .await["task"]
+        .clone();
+    assert_eq!(host.calls().starts[0].task_id, task["id"].as_str().unwrap());
+}
+
+#[tokio::test]
+async fn a_hosts_own_artifacts_are_served_in_any_state_after_the_result() {
+    let host = FakeHost::held();
+    let served = serve(&host, |config| config).await;
+    let task = served
+        .result("SendMessage", send("report", None, true))
+        .await["task"]
+        .clone();
+    let id = task["id"].as_str().unwrap().to_string();
+    let run = host.started(0).await;
+    host.produce(&run, vec![report("draft")]);
+
+    let working = served.result("GetTask", json!({"id": id})).await;
+    assert_eq!(
+        working["status"]["state"], "TASK_STATE_WORKING",
+        "{working}"
+    );
+    assert_eq!(artifact_ids(&working), ["draft"], "{working}");
+    assert_eq!(working["artifacts"][0]["name"], "draft.md");
+    let listed = served.result("ListTasks", json!({})).await;
+    assert!(listed["tasks"][0].get("artifacts").is_none(), "{listed}");
+    let included = served
+        .result("ListTasks", json!({"includeArtifacts": true}))
+        .await;
+    assert_eq!(artifact_ids(&included["tasks"][0]), ["draft"], "{included}");
+
+    host.complete(&run, answer());
+    let done = served.wait_for(&id, "TASK_STATE_COMPLETED").await;
+    assert_eq!(artifact_ids(&done), ["result", "draft"], "{done}");
+}
+
+#[tokio::test]
+async fn a_stream_ends_with_the_result_then_the_hosts_artifacts_then_the_state() {
+    let host = FakeHost::held();
+    let served = serve(&host, |config| config).await;
+    let driver = Arc::clone(&host);
+    let events = stream_while(
+        &served,
+        "SendStreamingMessage",
+        json!({"message": user_message("stream a report", None)}),
+        async move {
+            let id = driver.started(0).await;
+            driver.followed(&id, 1).await;
+            driver.produce(&id, vec![report("final")]);
+            driver.complete(&id, answer());
+        },
+    )
+    .await;
+    let streamed: Vec<&str> = events
+        .iter()
+        .filter_map(|event| event["result"]["artifactUpdate"]["artifact"]["artifactId"].as_str())
+        .collect();
+    assert_eq!(streamed, ["result", "final"], "{events:?}");
+    assert_eq!(*final_state(&events), "TASK_STATE_COMPLETED");
+}
+
+#[tokio::test]
+async fn a_host_artifact_that_breaks_the_contract_is_the_hosts_failure() {
+    let host = FakeHost::held();
+    let served = serve(&host, |config| config).await;
+    let task = served
+        .result("SendMessage", send("report", None, true))
+        .await["task"]
+        .clone();
+    let id = task["id"].as_str().unwrap().to_string();
+    let run = host.started(0).await;
+    host.produce(&run, vec![report("result")]);
+    assert_eq!(
+        served.error_code("GetTask", json!({"id": id})).await,
+        error_code::INTERNAL_ERROR
+    );
+    let mut empty = report("empty");
+    empty.parts.clear();
+    host.produce(&run, vec![empty]);
+    assert_eq!(
+        served.error_code("GetTask", json!({"id": id})).await,
+        error_code::INTERNAL_ERROR
+    );
+}
+
+/// A gateway that names its caller from the bearer token and vouches for the
+/// call chain it signed, in `x-chain`.
+struct ChainGateway;
+
+impl Authenticator for ChainGateway {
+    fn authenticate<'a>(
+        &'a self,
+        head: &'a RequestHead,
+    ) -> BoxFuture<'a, Result<Principal, Refusal>> {
+        Box::pin(async move {
+            let header = |name: &str| head.headers.get(name).and_then(|value| value.to_str().ok());
+            let name = header("authorization")
+                .and_then(|value| value.strip_prefix("Bearer as:"))
+                .ok_or(Refusal::Unauthenticated)?;
+            let principal = Principal::new(name).ok_or(Refusal::Unauthenticated)?;
+            Ok(match header("x-chain") {
+                Some(chain) => principal.with_attribute("chain", chain),
+                None => principal,
+            })
+        })
+    }
+
+    fn security(&self) -> Option<Security> {
+        Some(Security::required(
+            "gateway",
+            SecurityScheme::HttpAuth(HttpAuthSecurityScheme {
+                scheme: "Bearer".to_string(),
+                description: None,
+                bearer_format: None,
+            }),
+        ))
+    }
+}
+
+#[tokio::test]
+async fn the_host_is_handed_what_the_authenticator_vouched_for_and_not_what_the_caller_wrote() {
+    let host = FakeHost::answering(answer());
+    let state = tempfile::tempdir().unwrap();
+    let config = hosted(&state, &host).with_authenticator(Arc::new(ChainGateway));
+    let served = Served::start_config(config, state, None).await;
+    let mut message = user_message("chained", None);
+    message["metadata"] = json!({"chain": "forged"});
+    let response = served
+        .as_token("as:alice")
+        .request(reqwest::Method::POST, served.endpoint.as_str())
+        .header("x-chain", "gateway>alice")
+        .json(&json!({
+            "jsonrpc": "2.0", "id": 1, "method": "SendMessage",
+            "params": {"message": message},
+        }))
+        .send()
+        .await
+        .unwrap();
+    assert!(response.status().is_success());
+    let start = &host.calls().starts[0];
+    assert_eq!(start.principal, "alice");
+    assert_eq!(
+        start.attributes.get("chain").map(String::as_str),
+        Some("gateway>alice")
+    );
+    assert_eq!(
+        start.metadata["chain"], "forged",
+        "metadata stays the caller's"
+    );
 }

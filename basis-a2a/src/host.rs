@@ -16,9 +16,9 @@
 //! only: the host names its task with an id of its own, the server keeps
 //! that id beside the A2A id it mints, and a caller never sees the host's.
 
-use std::collections::HashMap;
+use std::collections::{BTreeMap, HashMap};
 
-use a2a::Part;
+use a2a::{Artifact, Part};
 use futures::{future::BoxFuture, stream::BoxStream};
 use serde_json::Value;
 
@@ -27,8 +27,17 @@ use serde_json::Value;
 #[derive(Debug, Clone)]
 #[non_exhaustive]
 pub struct HostedStart {
+    /// The A2A id the task is served under, minted before the host is
+    /// called (ADR-0048), so a host can name its task by it. Callers see
+    /// this id; the host's own, which `start` returns, stays private.
+    pub task_id: String,
     /// The name of the principal whose message this is (ADR-0030 §8).
     pub principal: String,
+    /// What the principal's authenticator verified about this request
+    /// ([`Principal::with_attribute`](crate::Principal::with_attribute)),
+    /// for this message only; empty for the server's own tokens. Unlike
+    /// [`metadata`](Self::metadata), the caller cannot write it.
+    pub attributes: BTreeMap<String, String>,
     /// The A2A `contextId` the task belongs to: the one the message named,
     /// or one the server minted for a new conversation.
     pub context_id: String,
@@ -202,5 +211,17 @@ pub trait TaskHost: Send + Sync + 'static {
     fn reply(&self, id: &str, reply: HostedReply) -> BoxFuture<'_, Result<(), HostError>> {
         let _ = (id, reply);
         Box::pin(async { Err(HostError::Refused("this agent takes no replies".into())) })
+    }
+
+    /// The artifacts the task `id` has produced so far, in whatever state it
+    /// stands (ADR-0048). They are served after a completion's `result`
+    /// artifact, exactly as given, wherever the task's artifacts are. None
+    /// may use the id `result`, and each needs at least one part; a host
+    /// that breaks either has failed, not its caller.
+    ///
+    /// The default has none, for a host whose answer is its completion.
+    fn artifacts(&self, id: &str) -> BoxFuture<'_, Result<Vec<Artifact>, HostError>> {
+        let _ = id;
+        Box::pin(async { Ok(Vec::new()) })
     }
 }

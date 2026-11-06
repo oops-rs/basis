@@ -358,7 +358,9 @@ flowchart LR
   state directory that holds the index and push configs. Everything above that seam is shared:
   both bindings, the card, principals, the quota, stream caps, hops, push and the extended card.
   The server mints the A2A id and keeps the host's beside it; a follow-up passes the latest task's
-  host id as `continues`; a completion's parts, text or data, are the one `result` artifact; and a
+  host id as `continues`; a completion's parts, text or data, are the one `result` artifact, with
+  any artifacts the host gives of its own after it, in any state; the host is handed the A2A id
+  and what the authenticator vouched for beside the name (ADR-0048); and a
   restart awaits each unsettled hosted task again through `settled`, never `start`. The settings
   that configure a `basis-tasks` run (shell, run defaults, data dir, asking the caller) are refused
   at `open` rather than ignored, so `INPUT_REQUIRED` stays a `basis-tasks` feature.

@@ -206,13 +206,24 @@ impl Standing {
 }
 
 /// The task as A2A sees it.
-pub(crate) fn task(record: &Record, standing: &Standing, view: View) -> Task {
+/// `hosted` are the artifacts a host gave of its own (ADR-0048), served
+/// after the result.
+pub(crate) fn task(
+    record: &Record,
+    standing: &Standing,
+    hosted: Vec<Artifact>,
+    view: View,
+) -> Task {
     let status = status(record, standing);
     let artifacts = view
         .include_artifacts
-        .then(|| result_artifact(standing))
-        .flatten()
-        .map(|artifact| vec![artifact]);
+        .then(|| {
+            result_artifact(standing)
+                .into_iter()
+                .chain(hosted)
+                .collect::<Vec<_>>()
+        })
+        .filter(|artifacts| !artifacts.is_empty());
     Task {
         id: record.id.clone(),
         context_id: record.context_id.clone(),
@@ -401,7 +412,7 @@ mod tests {
     #[test]
     fn a_succeeded_task_is_completed_with_its_result_as_the_artifact() {
         let standing = settled(json!({"state": "succeeded", "result": "42"}));
-        let task = task(&record(), &standing, View::full(None));
+        let task = task(&record(), &standing, Vec::new(), View::full(None));
         assert_eq!(task.status.state, TaskState::Completed);
         let artifacts = task.artifacts.expect("a completed task carries its result");
         assert_eq!(artifacts[0].parts[0].as_text(), Some("42"));
@@ -411,7 +422,7 @@ mod tests {
     #[test]
     fn a_failed_task_says_why_in_its_status() {
         let standing = settled(json!({"state": "failed", "error": "boom"}));
-        let task = task(&record(), &standing, View::full(None));
+        let task = task(&record(), &standing, Vec::new(), View::full(None));
         assert_eq!(task.status.state, TaskState::Failed);
         assert_eq!(task.status.message.unwrap().text(), Some("boom"));
         assert!(task.artifacts.is_none());
@@ -430,7 +441,7 @@ mod tests {
             parts: parts.clone(),
             truncated: false,
         });
-        let task = task(&record(), &standing, View::full(None));
+        let task = task(&record(), &standing, Vec::new(), View::full(None));
         assert_eq!(task.status.state, TaskState::Completed);
         let artifacts = task.artifacts.unwrap();
         assert_eq!(artifacts.len(), 1);
@@ -457,9 +468,14 @@ mod tests {
 
     #[test]
     fn history_length_zero_omits_the_history() {
-        let task = task(&record(), &Standing::Working, View::full(Some(0)));
+        let task = task(
+            &record(),
+            &Standing::Working,
+            Vec::new(),
+            View::full(Some(0)),
+        );
         assert!(task.history.is_none());
-        let task = super::task(&record(), &Standing::Working, View::full(None));
+        let task = super::task(&record(), &Standing::Working, Vec::new(), View::full(None));
         assert_eq!(task.history.unwrap()[0].message_id, "m1");
     }
 
@@ -476,7 +492,7 @@ mod tests {
             history_length: None,
             include_artifacts: false,
         };
-        let task = task(&record(), &standing, view);
+        let task = task(&record(), &standing, Vec::new(), view);
         assert!(task.artifacts.is_none());
         assert!(
             serde_json::to_value(&task)

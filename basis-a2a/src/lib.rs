@@ -25,8 +25,10 @@
 //! progress — and opens the service with [`ServeConfig::hosted`]. Everything
 //! else on this page is the same for its tasks. The server mints each A2A id
 //! and keeps the host's beside it; a follow-up hands the host the id of the
-//! latest task in its context as [`HostedStart::continues`]; a completed
-//! task's parts, text or data, are its one `result` artifact; and a restart
+//! latest task in its context as [`HostedStart::continues`] and the A2A id
+//! itself as [`HostedStart::task_id`]; a completed task's parts, text or
+//! data, are its one `result` artifact, after which come any artifacts the
+//! host gives of its own through [`TaskHost::artifacts`]; and a restart
 //! awaits every unsettled task again through [`TaskHost::settled`], never
 //! [`TaskHost::start`]. A host may also ask its caller (ADR-0034): a task
 //! that stands [`HostedStanding::InputRequired`] is `INPUT_REQUIRED` with

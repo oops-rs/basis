@@ -23,7 +23,9 @@ mod hosted;
 
 use std::sync::Arc;
 
-use a2a::{A2AError, StreamResponse, TaskArtifactUpdateEvent, TaskState, TaskStatusUpdateEvent};
+use a2a::{
+    A2AError, Artifact, StreamResponse, TaskArtifactUpdateEvent, TaskState, TaskStatusUpdateEvent,
+};
 use basis::Event;
 use basis_tasks::{EventCursor, POLL};
 use futures::stream::{self, BoxStream, StreamExt};
@@ -89,11 +91,9 @@ pub(crate) async fn follow(
         }
     };
     let standing = service.standing(&record).await?;
-    let snapshot = StreamResponse::Task(project::task(
-        &record,
-        &standing,
-        View::full(history_length),
-    ));
+    let view = View::full(history_length);
+    let hosted = service.hosted_artifacts(&record, view).await?;
+    let snapshot = StreamResponse::Task(project::task(&record, &standing, hosted, view));
 
     let (sender, receiver) = mpsc::channel(BUFFER);
     if !standing.is_interrupted_or_terminal() {
@@ -163,7 +163,7 @@ async fn produce(
         };
         match standing {
             Standing::Settled(_) => {
-                for update in settle(&record, &standing) {
+                for update in settle(&record, &standing, Vec::new()) {
                     if sender.send(update).await.is_err() {
                         return;
                     }
@@ -215,11 +215,12 @@ fn working(record: &Record, note: Option<String>) -> StreamResponse {
     })
 }
 
-/// The last updates of a settled task: its result, when it has one, then its
-/// terminal status — in that order, so the stream closes on the state.
-fn settle(record: &Record, standing: &Standing) -> Vec<StreamResponse> {
-    let mut updates = Vec::with_capacity(2);
-    if let Some(artifact) = project::result_artifact(standing) {
+/// The last updates of a settled task: its result, when it has one, and the
+/// artifacts its host gave of its own (ADR-0048), then its terminal status —
+/// in that order, so the stream closes on the state.
+fn settle(record: &Record, standing: &Standing, hosted: Vec<Artifact>) -> Vec<StreamResponse> {
+    let mut updates = Vec::with_capacity(2 + hosted.len());
+    for artifact in project::result_artifact(standing).into_iter().chain(hosted) {
         updates.push(StreamResponse::ArtifactUpdate(TaskArtifactUpdateEvent {
             task_id: record.id.clone(),
             context_id: record.context_id.clone(),
@@ -282,7 +283,7 @@ mod tests {
             }
             .into(),
         );
-        let updates = settle(&record(), &standing);
+        let updates = settle(&record(), &standing, Vec::new());
         assert!(matches!(updates[0], StreamResponse::ArtifactUpdate(_)));
         let StreamResponse::StatusUpdate(last) = &updates[1] else {
             panic!("the stream closes on the state");

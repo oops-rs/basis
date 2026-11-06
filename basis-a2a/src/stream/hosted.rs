@@ -97,7 +97,18 @@ pub(super) async fn produce(
         return;
     };
     let updates = if standing.is_terminal() {
-        settle(&record, &standing)
+        let view = project::View::full(None);
+        let hosted = match service.hosted_artifacts(&record, view).await {
+            Ok(hosted) => hosted,
+            Err(error) => {
+                eprintln!(
+                    "basis-a2a: read hosted task {}'s artifacts: {error:?}",
+                    record.id
+                );
+                Vec::new()
+            }
+        };
+        settle(&record, &standing, hosted)
     } else {
         vec![StreamResponse::StatusUpdate(project::status_update(
             &record, &standing,

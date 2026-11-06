@@ -20,7 +20,8 @@ use std::{
 };
 
 use basis_a2a::{
-    HostError, HostedProgress, HostedReply, HostedStanding, HostedStart, TaskHost, a2a::Part,
+    HostError, HostedProgress, HostedReply, HostedStanding, HostedStart, TaskHost,
+    a2a::{Artifact, Part},
 };
 use futures::{
     FutureExt, StreamExt,
@@ -52,6 +53,8 @@ struct Run {
 #[derive(Default)]
 struct State {
     runs: HashMap<String, Run>,
+    /// What [`TaskHost::artifacts`] gives for each task, when the test set any.
+    artifacts: HashMap<String, Vec<Artifact>>,
     calls: Calls,
 }
 
@@ -187,6 +190,11 @@ impl FakeHost {
         }
     }
 
+    /// What the host gives as `id`'s own artifacts from now on.
+    pub fn produce(&self, id: &str, artifacts: Vec<Artifact>) {
+        self.state().artifacts.insert(id.to_string(), artifacts);
+    }
+
     pub fn complete(&self, id: &str, parts: Vec<Part>) {
         self.set(id, HostedStanding::Completed { parts });
     }
@@ -287,6 +295,11 @@ impl TaskHost for FakeHost {
             Ok(())
         }
         .boxed()
+    }
+
+    fn artifacts(&self, id: &str) -> BoxFuture<'_, Result<Vec<Artifact>, HostError>> {
+        let artifacts = self.state().artifacts.get(id).cloned().unwrap_or_default();
+        async move { Ok(artifacts) }.boxed()
     }
 
     fn progress(&self, id: &str) -> BoxStream<'static, HostedProgress> {

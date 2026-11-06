@@ -366,10 +366,13 @@ impl A2aService {
             self.settled_or_asking(&accepted.record).await;
         }
         let standing = self.standing(&accepted.record).await?;
+        let view = View::full(accepted.history_length);
+        let hosted = self.hosted_artifacts(&accepted.record, view).await?;
         Ok(SendMessageResponse::Task(project::task(
             &accepted.record,
             &standing,
-            View::full(accepted.history_length),
+            hosted,
+            view,
         )))
     }
 
@@ -395,11 +398,9 @@ impl A2aService {
         let history_length = project::history_length(request.history_length)?;
         let record = self.record(caller, &request.id)?;
         let standing = self.standing(&record).await?;
-        Ok(project::task(
-            &record,
-            &standing,
-            View::full(history_length),
-        ))
+        let view = View::full(history_length);
+        let hosted = self.hosted_artifacts(&record, view).await?;
+        Ok(project::task(&record, &standing, hosted, view))
     }
 
     /// `ListTasks`: the caller's tasks, most recently changed first.
@@ -464,12 +465,11 @@ impl A2aService {
         });
 
         let total = matching.len();
-        let tasks: Vec<Task> = matching
-            .iter()
-            .skip(offset)
-            .take(page_size)
-            .map(|(record, standing)| project::task(record, standing, view))
-            .collect();
+        let mut tasks: Vec<Task> = Vec::new();
+        for (record, standing) in matching.iter().skip(offset).take(page_size) {
+            let hosted = self.hosted_artifacts(record, view).await?;
+            tasks.push(project::task(record, standing, hosted, view));
+        }
         let next = offset.saturating_add(page_size);
         Ok(ListTasksResponse {
             page_size: i32::try_from(tasks.len()).unwrap_or(i32::MAX),
@@ -514,7 +514,9 @@ impl A2aService {
         }
         let _ = tokio::time::timeout(CANCEL_GRACE, self.settled(&record.id)).await;
         let standing = self.standing(&record).await?;
-        Ok(project::task(&record, &standing, View::full(None)))
+        let view = View::full(None);
+        let hosted = self.hosted_artifacts(&record, view).await?;
+        Ok(project::task(&record, &standing, hosted, view))
     }
 
     /// `SubscribeToTask`: the task now, then its progress to its terminal
@@ -576,6 +578,36 @@ impl A2aService {
                 .map_err(from_host)?
                 .into()),
         }
+    }
+
+    /// The artifacts `record`'s host gave of its own (ADR-0048), when `view`
+    /// shows artifacts; none for a `basis-tasks` task. A host that breaks
+    /// the contract — the reserved `result` id, or an artifact of no parts —
+    /// has failed, and its caller is told only that.
+    pub(crate) async fn hosted_artifacts(
+        &self,
+        record: &Record,
+        view: View,
+    ) -> Result<Vec<a2a::Artifact>, A2AError> {
+        let Backend::Hosted(host) = self.backend() else {
+            return Ok(Vec::new());
+        };
+        if !view.include_artifacts {
+            return Ok(Vec::new());
+        }
+        let artifacts = host
+            .artifacts(host_id_of(record)?)
+            .await
+            .map_err(from_host)?;
+        if let Some(artifact) = artifacts.iter().find(|artifact| {
+            artifact.artifact_id == project::RESULT_ARTIFACT || artifact.parts.is_empty()
+        }) {
+            return Err(internal(format!(
+                "the task host gave task {} artifact `{}`, which is reserved or has no parts",
+                record.id, artifact.artifact_id
+            )));
+        }
+        Ok(artifacts)
     }
 
     /// The task `id` names, when `caller` owns it; another principal's task
