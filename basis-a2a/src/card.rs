@@ -183,7 +183,7 @@ fn wrap_requirements(holder: &mut Value) {
     }
 }
 
-/// Both cards one server serves, built once from its service and endpoint.
+/// A consistent snapshot of both cards for one request.
 #[derive(Debug, Clone)]
 pub(crate) struct Cards {
     pub(crate) public: AgentCard,
@@ -192,7 +192,7 @@ pub(crate) struct Cards {
 
 impl Cards {
     pub(crate) fn of(service: &A2aService, endpoint: &str) -> Self {
-        let public = build(service.identity(), endpoint, service.features());
+        let public = build(&service.identity(), endpoint, service.features());
         let extended = service
             .extended_card()
             .map(|extended| extend(&public, extended));

@@ -58,7 +58,7 @@ use std::{
     collections::HashMap,
     fs, io,
     path::Path,
-    sync::{Arc, Mutex},
+    sync::{Arc, Mutex, RwLock},
     time::Duration,
 };
 
@@ -158,7 +158,7 @@ pub struct A2aService {
 struct Inner {
     backend: Backend,
     index: Index,
-    identity: AgentIdentity,
+    identity: RwLock<AgentIdentity>,
     authenticator: Arc<dyn Authenticator>,
     /// What `authenticator` declared when the service opened.
     security: Option<Security>,
@@ -298,7 +298,7 @@ impl A2aService {
             inner: Arc::new(Inner {
                 backend,
                 index,
-                identity,
+                identity: RwLock::new(identity),
                 authenticator,
                 security,
                 public_url,
@@ -318,8 +318,26 @@ impl A2aService {
         Ok(service)
     }
 
-    pub(crate) fn identity(&self) -> &AgentIdentity {
-        &self.inner.identity
+    pub(crate) fn identity(&self) -> AgentIdentity {
+        self.inner
+            .identity
+            .read()
+            .unwrap_or_else(|error| error.into_inner())
+            .clone()
+    }
+
+    /// Atomically replace the descriptive identity used by subsequent card reads.
+    /// Endpoints, authentication and protocol capabilities still come from this
+    /// running service. Persistence and authorization of this host operation are
+    /// the embedding application's responsibility; no remote operation is added.
+    pub fn update_identity(&self, identity: AgentIdentity) -> Result<(), OpenError> {
+        crate::card::check_extensions(&identity)?;
+        *self
+            .inner
+            .identity
+            .write()
+            .unwrap_or_else(|error| error.into_inner()) = identity;
+        Ok(())
     }
 
     pub(crate) fn authenticator(&self) -> &dyn Authenticator {

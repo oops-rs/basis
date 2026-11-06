@@ -60,8 +60,14 @@ pub enum BindError {
 #[derive(Clone)]
 pub(crate) struct AppState {
     pub(crate) service: A2aService,
-    pub(crate) cards: Arc<Cards>,
+    endpoint: Arc<str>,
     pub(crate) gate: Gate,
+}
+
+impl AppState {
+    pub(crate) fn cards(&self) -> Cards {
+        Cards::of(&self.service, &self.endpoint)
+    }
 }
 
 /// A bound, not yet serving, A2A server.
@@ -165,7 +171,6 @@ pub fn router(service: A2aService, endpoint: &str) -> Router {
 }
 
 fn routes(service: A2aService, endpoint: &str, loopback: bool) -> Router {
-    let cards = Arc::new(Cards::of(&service, endpoint));
     let advertised: Vec<&str> = [Some(endpoint), service.public_url()]
         .into_iter()
         .flatten()
@@ -173,7 +178,7 @@ fn routes(service: A2aService, endpoint: &str, loopback: bool) -> Router {
     let gate = Gate::new(loopback, &advertised);
     let state = AppState {
         service,
-        cards,
+        endpoint: Arc::from(endpoint),
         gate,
     };
     Router::new()
@@ -186,7 +191,7 @@ fn routes(service: A2aService, endpoint: &str, loopback: bool) -> Router {
 }
 
 async fn agent_card(State(state): State<AppState>) -> Json<Value> {
-    Json(card::to_wire(&state.cards.public))
+    Json(card::to_wire(&state.cards().public))
 }
 
 async fn json_rpc(
@@ -199,7 +204,7 @@ async fn json_rpc(
     let version = version(&headers, Some(&query));
     let reply = rpc::dispatch(
         &state.service,
-        &state.cards,
+        &state.cards(),
         &caller,
         version.as_deref(),
         &body,
