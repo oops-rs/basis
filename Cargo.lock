@@ -310,7 +310,7 @@ checksum = "ac07cdecf99051d9a5238b80f35af32cdeba5b336e55d957b318b50137e18da5"
 
 [[package]]
 name = "basis"
-version = "0.24.0"
+version = "0.24.2"
 dependencies = [
  "async-trait",
  "chrono",
@@ -327,7 +327,7 @@ dependencies = [
 
 [[package]]
 name = "basis-a2a"
-version = "0.24.1"
+version = "0.24.2"
 dependencies = [
  "a2a-lf",
  "axum",
@@ -347,7 +347,7 @@ dependencies = [
 
 [[package]]
 name = "basis-acp"
-version = "0.24.0"
+version = "0.24.2"
 dependencies = [
  "agent-client-protocol",
  "async-trait",
@@ -365,7 +365,7 @@ dependencies = [
 
 [[package]]
 name = "basis-cli"
-version = "0.24.0"
+version = "0.24.2"
 dependencies = [
  "agent-client-protocol",
  "async-trait",
@@ -388,7 +388,7 @@ dependencies = [
 
 [[package]]
 name = "basis-host"
-version = "0.24.0"
+version = "0.24.2"
 dependencies = [
  "async-trait",
  "basis",
@@ -401,7 +401,7 @@ dependencies = [
 
 [[package]]
 name = "basis-tasks"
-version = "0.24.0"
+version = "0.24.2"
 dependencies = [
  "basis",
  "basis-host",
@@ -1172,7 +1172,7 @@ dependencies = [
  "tokio",
  "tokio-rustls",
  "tower-service",
- "webpki-roots",
+ "webpki-roots 1.0.10",
 ]
 
 [[package]]
@@ -1523,9 +1523,9 @@ checksum = "cf8baf1c55e62ffcace7a9f06f4bd9cd3f0c4beb022d3b367256b91b87513d98"
 
 [[package]]
 name = "mentra"
-version = "0.34.3"
+version = "0.34.6"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "e039826236e999f5bb4635356177197341c62dfe6fe58c7e929f1666b48fd3e2"
+checksum = "5af2144dc4287e4906124e819f8337fb8820b1299972b419447e41dd8212be25"
 dependencies = [
  "a2a-lf",
  "async-trait",
@@ -1554,23 +1554,24 @@ dependencies = [
 
 [[package]]
 name = "mentra-provider"
-version = "0.9.8"
+version = "0.9.11"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "82e60124d41a7dad9238d230ac015c721a72c8e15cccd4dd3c898ca8f1ea1f71"
+checksum = "2cffc1ffb597551e5b085bfa9ee32aebf3fa9054bed2f18669847890428b5e98"
 dependencies = [
  "async-trait",
  "base64 0.22.1",
  "futures-util",
  "http",
  "reqwest",
+ "rustls",
  "serde",
  "serde_json",
- "strum 0.27.2",
  "thiserror",
  "time",
  "tokio",
  "tokio-tungstenite",
  "url",
+ "webpki-roots 1.0.10",
  "zstd",
 ]
 
@@ -2003,7 +2004,7 @@ dependencies = [
  "wasm-bindgen-futures",
  "wasm-streams",
  "web-sys",
- "webpki-roots",
+ "webpki-roots 1.0.10",
 ]
 
 [[package]]
@@ -2561,8 +2562,12 @@ checksum = "d25a406cddcc431a75d3d9afc6a7c0f7428d4891dd973e4d54c56b46127bf857"
 dependencies = [
  "futures-util",
  "log",
+ "rustls",
+ "rustls-pki-types",
  "tokio",
+ "tokio-rustls",
  "tungstenite",
+ "webpki-roots 0.26.11",
 ]
 
 [[package]]
@@ -2672,6 +2677,8 @@ dependencies = [
  "httparse",
  "log",
  "rand 0.9.5",
+ "rustls",
+ "rustls-pki-types",
  "sha1",
  "thiserror",
  "utf-8",
@@ -2884,6 +2891,15 @@ checksum = "5a6580f308b1fad9207618087a65c04e7a10bc77e02c8e84e9b00dd4b12fa0bb"
 dependencies = [
  "js-sys",
  "wasm-bindgen",
+]
+
+[[package]]
+name = "webpki-roots"
+version = "0.26.11"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "521bc38abb08001b01866da9f51eb7c5d647a19260e00054a8c7fd5f9e57f7a9"
+dependencies = [
+ "webpki-roots 1.0.10",
 ]
 
 [[package]]

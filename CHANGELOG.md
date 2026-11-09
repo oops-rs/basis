@@ -5,6 +5,14 @@ All six crates — `basis`, `basis-host`, `basis-tasks`, `basis-acp`,
 live in `docs/adr/`; this file says what changed for someone upgrading.
 Releases before 0.15.0 are described by their tags and ADRs only.
 
+## 0.24.2 — 2026-11-09
+
+- Require Mentra 0.34.6 and mentra-provider 0.9.11. MCP stdio write deadlines
+  cover sending requests, and concurrent Streamable HTTP calls share a
+  session renewal. Background tasks get fresh IDs after restart.
+- Includes the live Agent Card description update from basis-a2a 0.24.1
+  (ADR-0049). All six crates share a version again.
+
 ## 0.24.0 — 2026-11-06
 
 ### A hosted task knows its id, its caller's attributes and its own files
