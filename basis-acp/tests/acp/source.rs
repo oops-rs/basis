@@ -129,6 +129,10 @@ impl SessionSource for MockSource {
                         base_dir: self.workspace.clone(),
                         ..Default::default()
                     },
+                    compaction: mentra::agent::CompactionConfig {
+                        transcript_dir: self.workspace.join(".transcripts"),
+                        ..Default::default()
+                    },
                     ..Default::default()
                 },
             )
