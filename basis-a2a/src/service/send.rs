@@ -149,8 +149,14 @@ impl A2aService {
                 // and not into the history a caller reads.
                 let roster = self.workflows().zip(allowed.as_deref());
                 let prompt = match roster.and_then(|(workflows, allowed)| workflows.note(allowed)) {
-                    Some(note) => format!("{note}\n\n{}", rendered.prompt),
-                    None => rendered.prompt.clone(),
+                    // Never at the cost of the message: a prompt the note
+                    // would push past what a task takes goes without it.
+                    Some(note)
+                        if note.len() + rendered.prompt.len() + 2 <= basis_tasks::MAX_PROMPT =>
+                    {
+                        format!("{note}\n\n{}", rendered.prompt)
+                    }
+                    _ => rendered.prompt.clone(),
                 };
                 spawn::spawn(
                     backend,
