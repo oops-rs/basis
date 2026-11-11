@@ -5,6 +5,54 @@ All six crates — `basis`, `basis-host`, `basis-tasks`, `basis-acp`,
 live in `docs/adr/`; this file says what changed for someone upgrading.
 Releases before 0.15.0 are described by their tags and ADRs only.
 
+## 0.25.0 — unreleased
+
+Breaking: requires Mentra 0.35.0. `OpenError` gains `NoWorkflows`,
+`WorkflowId` and `SkillsBesideWorkflows`, so an exhaustive match needs
+updating. A child-policy roster override no longer reaches past an
+allow-listed parent's list.
+
+### A run's tools and skills may be restated when its conversation resumes
+
+- `RunProfile::with_skill_roster` (`SkillRoster::All`, `SkillRoster::only`)
+  limits which of the workspace's skills the model is told about and may
+  load. An empty list also takes `load_skill` off the model's tools.
+- `Workspace::resume` no longer refuses a profile that states a tool roster.
+  The rosters a resumed run states replace the ones the conversation's first
+  run stored, in one persisted write made before anything else. A run that
+  states none keeps the conversation's own, as before.
+- `basis_tasks::RunSpec::with_tool_roster` and `with_skill_roster` record a
+  task's rosters in its run options. Any process that attaches builds the
+  run with them, and a task that continues a conversation replaces the
+  rosters that conversation last ran with.
+- `ToolRoster` and `SkillRoster` serialize as the constructor that made them
+  (`{"hide": [...]}`, `{"only": [...]}`, `"all"`).
+- A `ChildSpec` roster override under an allow-listed parent keeps only the
+  names both lists hold; a `hide` override narrows the parent's list. It
+  used to restore the parent's hidden names only.
+
+### A served agent may be held to workflows (ADR-0050)
+
+- `ServeConfig::with_workflows(Workflows)` maps each card skill to the tools
+  and skills behind it. The card's `skills[]` and one declared extension
+  (`Workflows::declaring(uri)`) come from it.
+- `Principal::with_workflows` carries the workflows an authenticator verified
+  for one request. A server with workflows refuses a principal that carries
+  none, and one allowed none of the card's.
+- Each `basis-tasks` run is built with only the allowed workflows' tools and
+  skills, on a conversation's first message and on every later one. When
+  some are closed, the model is told which and whom to ask
+  (`Workflows::with_contact`).
+- `HostedStart::workflows` hands a host the allowed set;
+  `TaskHost::workflows` (default: none) lets a host with fixed dispatch name
+  the fewer it runs.
+- A task is bound to the workflows it was built with. `GetTask`,
+  `CancelTask`, `SubscribeToTask`, `ListTasks`, a reply, the push-config
+  methods and a follow-up into its conversation stop it once one of them is
+  no longer allowed its caller: the run is cancelled and the task is
+  `FAILED` with a reason naming the workflow. A settled task is unchanged.
+- A server without workflows is unchanged.
+
 ## 0.24.2 — 2026-11-09
 
 - Require Mentra 0.34.6 and mentra-provider 0.9.11. MCP stdio write deadlines

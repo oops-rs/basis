@@ -55,6 +55,9 @@ struct State {
     runs: HashMap<String, Run>,
     /// What [`TaskHost::artifacts`] gives for each task, when the test set any.
     artifacts: HashMap<String, Vec<Artifact>>,
+    /// What [`TaskHost::workflows`] names for every task, when the test set
+    /// it: a host whose dispatch is fixed.
+    runs_only: Option<Vec<String>>,
     calls: Calls,
 }
 
@@ -87,6 +90,12 @@ impl FakeHost {
 
     pub fn calls(&self) -> Calls {
         self.state().calls.clone()
+    }
+
+    /// Makes every task this host starts run only `workflows`, as a host
+    /// with fixed dispatch reports.
+    pub fn runs_only(&self, workflows: &[&str]) {
+        self.state().runs_only = Some(workflows.iter().map(|id| (*id).to_string()).collect());
     }
 
     /// The host id of the `n`th task started (from 0), once it has been.
@@ -250,6 +259,11 @@ impl TaskHost for FakeHost {
     fn standing(&self, id: &str) -> BoxFuture<'_, Result<HostedStanding, HostError>> {
         let id = id.to_string();
         async move { Ok(self.watch(&id)?.borrow().clone()) }.boxed()
+    }
+
+    fn workflows(&self, _id: &str) -> BoxFuture<'_, Option<Vec<String>>> {
+        let runs_only = self.state().runs_only.clone();
+        async move { runs_only }.boxed()
     }
 
     fn cancel(&self, id: &str) -> BoxFuture<'_, Result<(), HostError>> {

@@ -78,6 +78,24 @@ pub(crate) struct Record {
     pub(crate) deadline_ms: Option<u64>,
     /// When this server saw the task settle. Absent while it runs.
     pub(crate) finished_ms: Option<u64>,
+    /// The workflows the task was built with, in card order, on a server
+    /// configured with them: what a later request about it must still be
+    /// allowed. Absent on a server with none, and on a record from before
+    /// they existed.
+    pub(crate) workflows: Option<Vec<String>>,
+    /// Set when the task was stopped because a workflow it was built with
+    /// was no longer allowed its caller. From then on the task is reported
+    /// failed with this reason, whatever its backend says of it.
+    pub(crate) withdrawn: Option<Withdrawn>,
+}
+
+/// Why, and when, a task was stopped for a workflow withdrawn from its
+/// caller.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub(crate) struct Withdrawn {
+    /// What the caller is told: which workflow, and whom to ask.
+    pub(crate) reason: String,
+    pub(crate) at_ms: u64,
 }
 
 /// A record as it is written: [`Key`] spread over two optional fields, so a
@@ -104,6 +122,10 @@ struct Stored {
     deadline_ms: Option<u64>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     finished_ms: Option<u64>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    workflows: Option<Vec<String>>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    withdrawn: Option<Withdrawn>,
 }
 
 impl TryFrom<Stored> for Record {
@@ -127,6 +149,8 @@ impl TryFrom<Stored> for Record {
             hop: stored.hop,
             deadline_ms: stored.deadline_ms,
             finished_ms: stored.finished_ms,
+            workflows: stored.workflows,
+            withdrawn: stored.withdrawn,
         })
     }
 }
@@ -150,6 +174,8 @@ impl From<Record> for Stored {
             hop: record.hop,
             deadline_ms: record.deadline_ms,
             finished_ms: record.finished_ms,
+            workflows: record.workflows,
+            withdrawn: record.withdrawn,
         }
     }
 }
@@ -198,7 +224,14 @@ impl Record {
             deadline_ms: None,
             created_ms,
             finished_ms: None,
+            workflows: None,
+            withdrawn: None,
         }
+    }
+
+    /// This record, bound to the workflows its task was built with.
+    pub(crate) fn with_workflows(self, workflows: Option<Vec<String>>) -> Self {
+        Self { workflows, ..self }
     }
 
     pub(crate) fn with_parts(self, parts: Option<Vec<Part>>) -> Self {
@@ -362,6 +395,20 @@ impl Index {
         self.insert(record)
     }
 
+    /// Records that `id` was stopped for `withdrawn`, and returns the record
+    /// as it then stands. A record already marked keeps its first reason;
+    /// `None` when there is no such record.
+    pub(crate) fn withdraw(&self, id: &str, withdrawn: Withdrawn) -> io::Result<Option<Record>> {
+        let Some(mut record) = self.get(id) else {
+            return Ok(None);
+        };
+        if record.withdrawn.is_none() {
+            record.withdrawn = Some(withdrawn);
+            self.insert(record.clone())?;
+        }
+        Ok(Some(record))
+    }
+
     fn persist(&self, record: &Record) -> io::Result<()> {
         let bytes = serde_json::to_vec(record).map_err(io::Error::other)?;
         let mut temporary = NamedTempFile::new_in(&self.dir)?;
@@ -490,6 +537,53 @@ mod tests {
         let loaded = Index::open(dir.path()).unwrap().get(&id).unwrap();
         assert_eq!(loaded.host_id(), Some("run-7"));
         assert!(loaded.handle().is_none());
+    }
+
+    #[test]
+    fn a_withdrawal_and_the_bound_workflows_survive_reopening_and_the_first_reason_stands() {
+        let dir = tempfile::tempdir().unwrap();
+        let index = Index::open(dir.path()).unwrap();
+        let id = "9".repeat(32);
+        index
+            .insert(record(&id, "ctx", 1).with_workflows(Some(vec!["build".into()])))
+            .unwrap();
+        let first = Withdrawn {
+            reason: "build is closed".into(),
+            at_ms: 5,
+        };
+        index.withdraw(&id, first.clone()).unwrap();
+        index
+            .withdraw(
+                &id,
+                Withdrawn {
+                    reason: "again".into(),
+                    at_ms: 9,
+                },
+            )
+            .unwrap();
+
+        let loaded = Index::open(dir.path()).unwrap().get(&id).unwrap();
+        assert_eq!(
+            loaded.workflows.as_deref(),
+            Some(&["build".to_string()][..])
+        );
+        assert_eq!(loaded.withdrawn, Some(first));
+        assert!(
+            index
+                .withdraw("missing", loaded.withdrawn.unwrap())
+                .unwrap()
+                .is_none()
+        );
+    }
+
+    #[test]
+    fn a_record_from_before_workflows_has_none_and_writes_none() {
+        let written = serde_json::to_value(record(&"8".repeat(32), "ctx", 1)).unwrap();
+        assert!(written.get("workflows").is_none());
+        assert!(written.get("withdrawn").is_none());
+        let read: Record = serde_json::from_value(written).unwrap();
+        assert_eq!(read.workflows, None);
+        assert_eq!(read.withdrawn, None);
     }
 
     #[test]

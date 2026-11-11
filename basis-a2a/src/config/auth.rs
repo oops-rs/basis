@@ -78,6 +78,7 @@ pub struct Principal {
     name: String,
     authenticated: bool,
     attributes: BTreeMap<String, String>,
+    workflows: Option<Vec<String>>,
 }
 
 impl Principal {
@@ -97,6 +98,7 @@ impl Principal {
             name,
             authenticated: true,
             attributes: BTreeMap::new(),
+            workflows: None,
         })
     }
 
@@ -107,6 +109,7 @@ impl Principal {
             name: DEFAULT_PRINCIPAL.to_string(),
             authenticated: false,
             attributes: BTreeMap::new(),
+            workflows: None,
         }
     }
 
@@ -125,6 +128,29 @@ impl Principal {
     /// What this principal's authenticator vouched for, beside its name.
     pub fn attributes(&self) -> &BTreeMap<String, String> {
         &self.attributes
+    }
+
+    /// This principal, allowed `workflows` for this one request: the ids its
+    /// authenticator verified — read from a token a gateway signed, never
+    /// from anything the caller wrote. A server configured with
+    /// [`Workflows`](crate::Workflows) builds the request's run from these
+    /// and nothing else, and refuses a principal that carries none.
+    ///
+    /// A list, not an attribute, because the server itself reads it. An
+    /// empty list allows nothing.
+    #[must_use]
+    pub fn with_workflows(
+        mut self,
+        workflows: impl IntoIterator<Item = impl Into<String>>,
+    ) -> Self {
+        self.workflows = Some(workflows.into_iter().map(Into::into).collect());
+        self
+    }
+
+    /// The workflows this request may use, when its authenticator said;
+    /// `None` when it said nothing about them.
+    pub fn workflows(&self) -> Option<&[String]> {
+        self.workflows.as_deref()
     }
 
     pub fn name(&self) -> &str {

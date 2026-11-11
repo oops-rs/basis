@@ -98,6 +98,9 @@ impl A2aService {
                 return_immediately,
             });
         }
+        // Decided before anything is read or saved for the message: a caller
+        // allowed none of this agent's workflows starts nothing here.
+        let allowed = self.allowed(caller)?;
         // A served workspace saves what is not text under a folder of this
         // message's own; a host is handed the parts (ADR-0041 §6).
         let inbox = match self.backend() {
@@ -108,6 +111,10 @@ impl A2aService {
         let inbound = hops::inbound(&message)?;
         hops::check_cap(inbound, self.inner.hop_cap)?;
         let (context_id, latest) = self.conversation(caller, &message)?;
+        // The conversation's last task may still be running on a workflow
+        // this caller has since lost: stopped here, as any request naming it
+        // would stop it.
+        let latest = latest.map(|latest| self.held(caller, latest)).transpose()?;
 
         // Checked before anything is spawned, so a refused webhook leaves no
         // task behind it.
@@ -128,18 +135,31 @@ impl A2aService {
             )));
         }
         let accepted_ms = now_ms();
+        // What the task is bound to: everything the message was allowed,
+        // unless its host names fewer.
+        let mut bound = allowed.clone();
         let started = match self.backend() {
             Backend::Tasks(backend) => {
                 // Saved last, once nothing is left to refuse the message, so
                 // a refused one leaves no files behind it.
                 save(&backend.workspace, &rendered.files).await?;
+                // The run is built with the allowed workflows' tools and
+                // skills and no others, and told which are closed so that it
+                // says so. The note is the host's, so it goes to the model
+                // and not into the history a caller reads.
+                let roster = self.workflows().zip(allowed.as_deref());
+                let prompt = match roster.and_then(|(workflows, allowed)| workflows.note(allowed)) {
+                    Some(note) => format!("{note}\n\n{}", rendered.prompt),
+                    None => rendered.prompt.clone(),
+                };
                 spawn::spawn(
                     backend,
-                    &rendered.prompt,
+                    &prompt,
                     latest.as_ref(),
                     inbound,
                     accepted_ms,
                     self.inner.task_deadline,
+                    roster.map(|(workflows, allowed)| workflows.roster(allowed)),
                 )
                 .await?
             }
@@ -152,6 +172,7 @@ impl A2aService {
                     task_id: uuid::Uuid::new_v4().simple().to_string(),
                     principal: caller.name().to_string(),
                     attributes: caller.attributes().clone(),
+                    workflows: allowed.clone(),
                     context_id: context_id.clone(),
                     continues,
                     prompt: rendered.prompt.clone(),
@@ -166,7 +187,22 @@ impl A2aService {
                         accepted_ms,
                     )?,
                 };
-                hosted::start(host.as_ref(), start).await?
+                let started = hosted::start(host.as_ref(), start).await?;
+                if let (Some(allowed), Key::Hosted(host_id)) = (&allowed, &started.key)
+                    && let Some(runs) = host.workflows(host_id).await
+                {
+                    let runs: Vec<String> = allowed
+                        .iter()
+                        .filter(|id| runs.contains(id))
+                        .cloned()
+                        .collect();
+                    // A host that names nothing it was allowed has named
+                    // nothing: the task stays bound to all of it.
+                    if !runs.is_empty() {
+                        bound = Some(runs);
+                    }
+                }
+                started
             }
         };
         let record = Record::keyed(
@@ -179,7 +215,8 @@ impl A2aService {
             accepted_ms,
         )
         .with_parts((!rendered.only_text).then_some(message.parts))
-        .with_hops(inbound.hop, started.deadline_ms);
+        .with_hops(inbound.hop, started.deadline_ms)
+        .with_workflows(bound);
         self.inner.index.insert(record.clone()).map_err(internal)?;
         // Stored before the task is driven, so its first change of status is
         // already one the webhook hears about. A store that fails still
@@ -210,6 +247,11 @@ impl A2aService {
         message: &Message,
     ) -> Result<Record, A2AError> {
         let record = self.replied_to(caller, task_id, message)?;
+        if record.withdrawn.is_some() {
+            // Stopped for a workflow withdrawn from its caller: the answer
+            // is not taken, and the task it comes back with says why.
+            return Ok(record);
+        }
         let not_waiting = || not_waiting(task_id);
         let questions = self
             .questions(&record.id)
@@ -242,6 +284,9 @@ impl A2aService {
         message: Message,
     ) -> Result<Record, A2AError> {
         let record = self.replied_to(caller, task_id, &message)?;
+        if record.withdrawn.is_some() {
+            return Ok(record);
+        }
         if !matches!(self.standing(&record).await?, Standing::HostAsking(_)) {
             return Err(not_waiting(task_id));
         }

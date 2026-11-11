@@ -38,6 +38,18 @@ pub struct HostedStart {
     /// for this message only; empty for the server's own tokens. Unlike
     /// [`metadata`](Self::metadata), the caller cannot write it.
     pub attributes: BTreeMap<String, String>,
+    /// The workflows this message may use, in card order, when the server
+    /// is configured with [`Workflows`](crate::Workflows): what the
+    /// principal's authenticator verified, kept to the ones the card lists.
+    /// Never empty — a message allowed none is refused before the host is
+    /// called. `None` on a server with no workflows.
+    ///
+    /// The host must run nothing outside the set: where its dispatch is
+    /// fixed it refuses a workflow that is not here, in words the caller
+    /// can act on. The server records the set against the task — or the
+    /// narrower one [`TaskHost::workflows`] names — and stops the task
+    /// once one of them is no longer allowed.
+    pub workflows: Option<Vec<String>>,
     /// The A2A `contextId` the task belongs to: the one the message named,
     /// or one the server minted for a new conversation.
     pub context_id: String,
@@ -211,6 +223,21 @@ pub trait TaskHost: Send + Sync + 'static {
     fn reply(&self, id: &str, reply: HostedReply) -> BoxFuture<'_, Result<(), HostError>> {
         let _ = (id, reply);
         Box::pin(async { Err(HostError::Refused("this agent takes no replies".into())) })
+    }
+
+    /// The workflows the task `id` actually runs, when that is fewer than
+    /// [`HostedStart::workflows`] allowed it: asked once, right after
+    /// [`start`](Self::start), on a server configured with
+    /// [`Workflows`](crate::Workflows). A host whose dispatch is fixed names
+    /// the one workflow it chose, so the task is stopped only when *that*
+    /// one is withdrawn from its caller. Ids outside what the message was
+    /// allowed are ignored.
+    ///
+    /// The default, `None`, binds the task to everything it was allowed —
+    /// right for a host that lets a model choose among them.
+    fn workflows(&self, id: &str) -> BoxFuture<'_, Option<Vec<String>>> {
+        let _ = id;
+        Box::pin(async { None })
     }
 
     /// The artifacts the task `id` has produced so far, in whatever state it

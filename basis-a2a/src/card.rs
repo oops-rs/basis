@@ -15,7 +15,7 @@ use a2a::{
 
 use crate::{
     authenticator::Security,
-    config::{AgentIdentity, ExtendedCard, Principal},
+    config::{AgentIdentity, ExtendedCard, Principal, Workflows},
     rest,
     service::{A2aService, APPROVAL_EXTENSION, HOPS_EXTENSION, INPUT_MODES, OpenError},
 };
@@ -37,11 +37,18 @@ pub(crate) struct Features {
     pub(crate) push_notifications: bool,
     /// Consequential calls are put to the caller (the approval extension).
     pub(crate) ask_caller: bool,
+    /// The workflows the server holds every request to, when configured:
+    /// the card's skills and one more declared extension.
+    pub(crate) workflows: Option<Workflows>,
 }
 
 /// The public card, at the well-known path.
 pub(crate) fn build(identity: &AgentIdentity, endpoint: &str, features: Features) -> AgentCard {
-    let skills = if identity.skills.is_empty() {
+    let skills = if let Some(workflows) = &features.workflows {
+        // Each skill is a workflow and nothing else is one: what a gateway
+        // grants by id is exactly what this server enforces by id.
+        workflows.card_skills()
+    } else if identity.skills.is_empty() {
         vec![AgentSkill {
             id: "general".to_string(),
             name: identity.name.clone(),
@@ -97,9 +104,24 @@ pub(crate) fn build(identity: &AgentIdentity, endpoint: &str, features: Features
 const BASIS_EXTENSIONS: [&str; 2] = [HOPS_EXTENSION, APPROVAL_EXTENSION];
 
 /// Refuses a host extension the card could not truthfully carry: one marked
-/// required, one whose URI basis declares, or one declared twice.
-pub(crate) fn check_extensions(identity: &AgentIdentity) -> Result<(), OpenError> {
+/// required, one whose URI basis declares, or one declared twice. With
+/// `workflows`, their extension is one of the card's own, and the identity
+/// may add no skill beside them.
+pub(crate) fn check_extensions(
+    identity: &AgentIdentity,
+    workflows: Option<&Workflows>,
+) -> Result<(), OpenError> {
     let mut seen = std::collections::HashSet::new();
+    if let Some(workflows) = workflows {
+        let uri = workflows.extension_uri();
+        if BASIS_EXTENSIONS.contains(&uri) {
+            return Err(OpenError::ExtensionDeclared(uri.to_string()));
+        }
+        seen.insert(uri);
+        if !identity.skills.is_empty() {
+            return Err(OpenError::SkillsBesideWorkflows("the agent's identity"));
+        }
+    }
     for extension in &identity.extensions {
         let uri = extension.uri.as_str();
         if BASIS_EXTENSIONS.contains(&uri) || !seen.insert(uri) {
@@ -138,6 +160,9 @@ fn extensions(identity: &AgentIdentity, features: &Features) -> Option<Vec<Agent
             required: Some(false),
             params: None,
         });
+    }
+    if let Some(workflows) = &features.workflows {
+        extensions.push(workflows.extension.clone());
     }
     extensions.extend(identity.extensions.iter().cloned());
     (!extensions.is_empty()).then_some(extensions)
@@ -350,6 +375,57 @@ mod tests {
         );
     }
 
+    #[test]
+    fn workflows_are_the_cards_skills_and_one_more_declared_extension() {
+        use crate::config::Workflow;
+
+        let workflows = Workflows::declaring("urn:example:workflows:v1")
+            .with_workflow(Workflow::new("build", "Build", "Runs builds.").with_tag("ci"))
+            .with_workflow(Workflow::new("ask", "Ask", "Answers questions."));
+        let identity = AgentIdentity::new("helper", "Answers questions.");
+        let features = Features {
+            workflows: Some(workflows.clone()),
+            ..Features::default()
+        };
+        let wire = to_wire(&build(&identity, "http://127.0.0.1:1/", features));
+
+        let skills = wire["skills"].as_array().unwrap();
+        assert_eq!(skills.len(), 2, "no general skill beside the workflows");
+        assert_eq!(skills[0]["id"], "build");
+        assert_eq!(skills[0]["tags"], json!(["ci"]));
+        assert_eq!(skills[1]["id"], "ask");
+        let declared = wire["capabilities"]["extensions"].as_array().unwrap();
+        let extension = declared
+            .iter()
+            .find(|extension| extension["uri"] == "urn:example:workflows:v1")
+            .expect("the workflows extension is declared");
+        assert_eq!(extension["required"], false);
+
+        // The card's skills are the workflows and nothing else.
+        let skill = AgentSkill {
+            id: "extra".into(),
+            name: "Extra".into(),
+            description: "Not a workflow.".into(),
+            tags: vec![],
+            examples: None,
+            input_modes: None,
+            output_modes: None,
+            security_requirements: None,
+        };
+        assert!(matches!(
+            check_extensions(&identity.clone().with_skill(skill), Some(&workflows)),
+            Err(OpenError::SkillsBesideWorkflows(_))
+        ));
+        // And their extension is declared once.
+        assert!(matches!(
+            check_extensions(
+                &identity.with_extension(host_extension("urn:example:workflows:v1")),
+                Some(&workflows)
+            ),
+            Err(OpenError::ExtensionDeclared(_))
+        ));
+    }
+
     fn host_extension(uri: &str) -> AgentExtension {
         AgentExtension {
             uri: uri.to_string(),
@@ -376,7 +452,7 @@ mod tests {
 
     #[test]
     fn a_host_extension_the_card_cannot_carry_is_refused() {
-        let check = |identity: AgentIdentity| check_extensions(&identity);
+        let check = |identity: AgentIdentity| check_extensions(&identity, None);
         let base = || AgentIdentity::new("helper", "Answers questions.");
         assert!(check(base().with_extension(host_extension("https://example.com/a"))).is_ok());
         for reserved in BASIS_EXTENSIONS {

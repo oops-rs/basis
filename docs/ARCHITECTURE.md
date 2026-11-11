@@ -411,6 +411,16 @@ flowchart LR
   caller's; the task's hop reaches its runtime through `RuntimeBuilder::with_hop` and its
   commands as `BASIS_HOP`, and its own `@agent` messages send the next hop and the earlier
   deadline. Absent metadata is hop 0, so agents that are not basis interoperate.
+- **A served agent may be held to workflows** (ADR-0050). `ServeConfig::with_workflows` maps
+  each card skill to the tools and skills behind it, and is the one source for the card's
+  `skills[]`, the extension it declares and each run's roster. A request may use only the
+  workflows its authenticator verified (`Principal::with_workflows`); one with none is refused.
+  A `basis-tasks` run is built with `ToolRoster::only` and `SkillRoster::only` of the allowed
+  workflows — recorded in the task's run options and restated when a conversation resumes, so a
+  continued conversation is not held to what its first run was given. A hosted task's host is
+  handed the set. The index record keeps the workflows a task was built with, and any later
+  request naming the task stops it and reports it `FAILED`, with the reason, once one of them is
+  no longer allowed its caller.
 - **The client is mentra's, behind `spawn`** (ADR-0029). Each agent in `.basis/a2a.json` is a
   target, `@<name> <task>`, routed per calling agent through the agent ledger and declared
   `External`, so the approval gate sees every call. mentra's client picks the first interface on

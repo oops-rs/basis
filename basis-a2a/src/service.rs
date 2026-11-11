@@ -43,6 +43,7 @@ mod parts;
 mod push;
 mod send;
 mod streams;
+mod workflows;
 
 pub(crate) use ask::{APPROVAL_EXTENSION, Asked};
 pub(crate) use backend::{Backend, TasksBackend, from_host, host_id_of, still_working};
@@ -75,10 +76,10 @@ use crate::{
     card::Features,
     config::{
         AgentIdentity, Custom, ExtendedCard, InboundApproval, Principal, PrincipalError,
-        Principals, ServeConfig, Source,
+        Principals, ServeConfig, Source, Workflows,
     },
     index::{Index, Record},
-    project::{self, Standing, View, internal},
+    project::{self, Outcome, Standing, View, internal},
     push::PushStore,
     stream,
 };
@@ -146,6 +147,19 @@ pub enum OpenError {
         "extension {0} is marked required, which this server does not enforce; declare it optional"
     )]
     ExtensionRequired(String),
+    /// Workflows configured with none in them: every caller would be
+    /// allowed nothing, and refused.
+    #[error("the server's workflows name none; add one, or serve without them")]
+    NoWorkflows,
+    /// A workflow with no id, or two with the same one: an id is what a
+    /// caller is granted, so each names exactly one workflow.
+    #[error("workflow id `{0}` is empty or given twice; each workflow needs an id of its own")]
+    WorkflowId(String),
+    /// Skills added beside the workflows. With workflows the card's skills
+    /// are the workflows and nothing else: a skill that is not one could be
+    /// granted and would be enforced by nothing.
+    #[error("{0} adds skills beside the server's workflows; make each a workflow instead")]
+    SkillsBesideWorkflows(&'static str),
 }
 
 /// One served agent's A2A operations. Cheap to clone; every clone is the
@@ -178,6 +192,8 @@ struct Inner {
     drivers: Mutex<HashMap<String, Driver>>,
     /// What every driver drives under; flipped once, at shutdown.
     stop: Stop,
+    /// The workflows every request is held to, when configured.
+    workflows: Option<Workflows>,
 }
 
 impl Drop for Inner {
@@ -222,8 +238,16 @@ impl A2aService {
             live_task_quota,
             stream_cap,
             task_deadline,
+            workflows,
         } = config;
-        crate::card::check_extensions(&identity)?;
+        crate::card::check_extensions(&identity, workflows.as_ref())?;
+        if let Some(workflows) = &workflows {
+            check_workflows(
+                workflows,
+                extended_card.as_ref(),
+                matches!(source, Source::Hosted { .. }),
+            )?;
+        }
         if let Source::Hosted { .. } = source {
             refuse_for_hosted(
                 shell,
@@ -311,6 +335,7 @@ impl A2aService {
                 admission: tokio::sync::Mutex::new(()),
                 drivers: Mutex::new(HashMap::new()),
                 stop,
+                workflows,
             }),
         };
         service.resume_unsettled();
@@ -331,7 +356,7 @@ impl A2aService {
     /// running service. Persistence and authorization of this host operation are
     /// the embedding application's responsibility; no remote operation is added.
     pub fn update_identity(&self, identity: AgentIdentity) -> Result<(), OpenError> {
-        crate::card::check_extensions(&identity)?;
+        crate::card::check_extensions(&identity, self.inner.workflows.as_ref())?;
         *self
             .inner
             .identity
@@ -361,6 +386,7 @@ impl A2aService {
             extended_card: self.inner.extended_card.is_some(),
             push_notifications: self.inner.push.is_some(),
             ask_caller: self.inner.backend.asks_caller(),
+            workflows: self.inner.workflows.clone(),
         }
     }
 
@@ -443,6 +469,9 @@ impl A2aService {
                 .map_err(|_| A2AError::invalid_params("pageToken is not one this server issued"))?,
         };
         let history_length = project::history_length(request.history_length)?;
+        // Before the caller's tasks are read: one with none is refused as
+        // one with some is.
+        self.require_workflows(caller)?;
         let view = View {
             history_length,
             include_artifacts: request.include_artifacts.unwrap_or(false),
@@ -453,6 +482,7 @@ impl A2aService {
 
         let mut matching = Vec::new();
         for record in self.inner.index.all_owned(caller) {
+            let record = self.held(caller, record)?;
             if request
                 .context_id
                 .as_ref()
@@ -510,7 +540,17 @@ impl A2aService {
         request: CancelTaskRequest,
     ) -> Result<Task, A2AError> {
         let record = self.record(caller, &request.id)?;
-        if self.standing(&record).await?.is_terminal() {
+        let standing = self.standing(&record).await?;
+        if record.withdrawn.is_some() {
+            // Stopped for a workflow withdrawn from its caller, on this
+            // request or an earlier one: answered with the task as it
+            // stands, which says why, rather than as merely "not
+            // cancelable".
+            let view = View::full(None);
+            let hosted = self.hosted_artifacts(&record, view).await?;
+            return Ok(project::task(&record, &standing, hosted, view));
+        }
+        if standing.is_terminal() {
             return Err(A2AError::task_not_cancelable(&request.id));
         }
         match self.backend() {
@@ -583,6 +623,22 @@ impl A2aService {
     /// question this process holds open for it, if any — or what its host
     /// says.
     pub(crate) async fn standing(&self, record: &Record) -> Result<Standing, A2AError> {
+        // Read off the index rather than `record`, which a stream holds from
+        // before the task was stopped: a task stopped for a withdrawn
+        // workflow has failed for everyone watching it, at once.
+        let withdrawn = match &record.withdrawn {
+            Some(withdrawn) => Some(withdrawn.clone()),
+            None => self
+                .inner
+                .index
+                .get(&record.id)
+                .and_then(|record| record.withdrawn),
+        };
+        if let Some(withdrawn) = withdrawn {
+            return Ok(Standing::Settled(Outcome::Failed {
+                error: withdrawn.reason,
+            }));
+        }
         match self.backend() {
             Backend::Tasks(backend) => {
                 let asked = self
@@ -629,12 +685,17 @@ impl A2aService {
     }
 
     /// The task `id` names, when `caller` owns it; another principal's task
-    /// is refused with the very error a missing one is.
+    /// is refused with the very error a missing one is. On a server
+    /// configured with workflows the task is first held to what `caller` is
+    /// allowed now, so every operation that names a task stops one whose
+    /// workflow was withdrawn.
     fn record(&self, caller: &Principal, id: &str) -> Result<Record, A2AError> {
-        self.inner
+        let record = self
+            .inner
             .index
             .owned(caller, id)
-            .ok_or_else(|| A2AError::task_not_found(id))
+            .ok_or_else(|| A2AError::task_not_found(id))?;
+        self.held(caller, record)
     }
 }
 
@@ -678,6 +739,41 @@ fn refuse_for_hosted(
         return Ok(());
     };
     Err(OpenError::NotForHostedTasks(refused))
+}
+
+/// Refuses workflows that could not be enforced as configured: none at all,
+/// an id that is empty or repeated, skills an extended card adds beside
+/// them, and — for a server whose tasks a host runs — tools and skills,
+/// which configure a `basis-tasks` run.
+fn check_workflows(
+    workflows: &Workflows,
+    extended_card: Option<&ExtendedCard>,
+    hosted: bool,
+) -> Result<(), OpenError> {
+    if workflows.workflows.is_empty() {
+        return Err(OpenError::NoWorkflows);
+    }
+    let mut seen = std::collections::HashSet::new();
+    for id in workflows.ids() {
+        if id.trim().is_empty() || !seen.insert(id) {
+            return Err(OpenError::WorkflowId(id.to_string()));
+        }
+    }
+    if extended_card.is_some_and(|extended| !extended.skills.is_empty()) {
+        return Err(OpenError::SkillsBesideWorkflows("the extended card"));
+    }
+    let names_tools = !workflows.shared_tools.is_empty()
+        || !workflows.shared_skills.is_empty()
+        || workflows
+            .workflows
+            .iter()
+            .any(|workflow| !workflow.tools.is_empty() || !workflow.skills.is_empty());
+    if hosted && names_tools {
+        return Err(OpenError::NotForHostedTasks(
+            "a workflow's tools and skills",
+        ));
+    }
+    Ok(())
 }
 
 /// Creates `dir` and any parent it lacks, each readable by its owner alone

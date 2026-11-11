@@ -10,6 +10,7 @@
 
 mod auth;
 mod identity;
+mod workflows;
 
 use std::{fmt, path::PathBuf, sync::Arc, time::Duration};
 
@@ -21,6 +22,7 @@ use crate::{authenticator::Authenticator, host::TaskHost};
 pub(crate) use auth::Principals;
 pub use auth::{BearerToken, DEFAULT_PRINCIPAL, Principal, PrincipalError};
 pub use identity::{AgentIdentity, ExtendedCard};
+pub use workflows::{Workflow, Workflows};
 
 /// How a served task's consequential calls are answered.
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
@@ -245,6 +247,7 @@ pub struct ServeConfig {
     pub(crate) live_task_quota: usize,
     pub(crate) stream_cap: usize,
     pub(crate) task_deadline: Option<Duration>,
+    pub(crate) workflows: Option<Workflows>,
 }
 
 impl ServeConfig {
@@ -302,6 +305,28 @@ impl ServeConfig {
             live_task_quota: DEFAULT_LIVE_TASK_QUOTA,
             stream_cap: crate::DEFAULT_STREAM_CAP,
             task_deadline: None,
+            workflows: None,
+        }
+    }
+
+    /// Holds every request to the workflows it is allowed (see
+    /// [`Workflows`]): the card's skills and its declared extension come
+    /// from `workflows`, each run is built with only the allowed workflows'
+    /// tools and skills, and a task is stopped once a workflow it was built
+    /// with is no longer allowed its caller.
+    ///
+    /// The allowed set comes from the [`Authenticator`]
+    /// ([`Principal::with_workflows`]); a server whose authenticator never
+    /// states one refuses every task-scoped request. The card's skills are
+    /// the workflows and nothing else, so
+    /// [`A2aService::open`](crate::A2aService::open) refuses this beside an
+    /// identity or an extended card that adds skills of its own, an empty
+    /// set, and an id given twice.
+    #[must_use]
+    pub fn with_workflows(self, workflows: Workflows) -> Self {
+        Self {
+            workflows: Some(workflows),
+            ..self
         }
     }
 

@@ -1,8 +1,9 @@
 //! Starting a `basis-tasks` task: one detached spawn in the workspace.
 
-use std::time::Duration;
+use std::{collections::BTreeSet, time::Duration};
 
 use a2a::A2AError;
+use basis::{SkillRoster, ToolRoster};
 use basis_tasks::{Continuation, Hint, MAX_TASKS, RunSpec};
 
 use super::Started;
@@ -12,8 +13,14 @@ use crate::{
     service::{TasksBackend, hops::Inbound, hops::effective_deadline, still_working},
 };
 
+/// The tools and the skills one run is built with, when the server holds its
+/// caller to workflows.
+pub(super) type Roster = (BTreeSet<String>, BTreeSet<String>);
+
 /// Spawns the task that answers `prompt`, continuing `latest`'s
-/// conversation when there is one.
+/// conversation when there is one, and offering its model exactly `roster`
+/// when there is one — on a continued conversation too, whatever its
+/// earlier tasks were offered.
 pub(super) async fn spawn(
     backend: &TasksBackend,
     prompt: &str,
@@ -21,6 +28,7 @@ pub(super) async fn spawn(
     inbound: Inbound,
     accepted_ms: u64,
     task_deadline: Duration,
+    roster: Option<Roster>,
 ) -> Result<Started, A2AError> {
     let continuation = match latest {
         Some(latest) => Continuation::Named(handle_of(latest)?.clone()),
@@ -36,6 +44,11 @@ pub(super) async fn spawn(
     let mut spec = run_spec(backend, prompt.to_string(), continuation)
         .with_deadline(deadline)
         .with_hop(inbound.hop);
+    if let Some((tools, skills)) = roster {
+        spec = spec
+            .with_tool_roster(ToolRoster::only(tools))
+            .with_skill_roster(SkillRoster::only(skills));
+    }
     // The caller's instant as well as the duration it implies, so the task
     // is never given the few milliseconds spawning takes on top.
     if let Some(caller_ms) = inbound.deadline_ms {

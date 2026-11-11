@@ -85,6 +85,13 @@
 //!   that asks a person at this server: there is none.
 //! - **Hops.** A message's hop and deadline (`docs/a2a/hops-v1.md`) are read,
 //!   past the hop cap refused, and the caller's deadline clamps the task's.
+//! - **Workflows**, when the operator configures them
+//!   ([`ServeConfig::with_workflows`]): each card skill is a workflow with
+//!   tools and skills behind it, a request may use only the workflows its
+//!   authenticator verified for it ([`Principal::with_workflows`]), each run
+//!   is built with those workflows' tools and skills and no others, and a
+//!   task is stopped once a workflow it was built with is withdrawn from its
+//!   caller.
 //!
 //! The card declares each optional feature when, and only when, it is on. A
 //! served agent has no shell unless the operator grants one.
@@ -123,7 +130,7 @@ pub use authenticator::{Authenticator, Refusal, RequestHead, Security};
 pub use card::AGENT_CARD_PATH;
 pub use config::{
     AgentIdentity, BearerToken, DEFAULT_LIVE_TASK_QUOTA, DEFAULT_PRINCIPAL, ExtendedCard,
-    InboundApproval, Principal, PrincipalError, RunDefaults, ServeConfig,
+    InboundApproval, Principal, PrincipalError, RunDefaults, ServeConfig, Workflow, Workflows,
 };
 pub use host::{HostError, HostedProgress, HostedReply, HostedStanding, HostedStart, TaskHost};
 pub use http::{A2aServer, BindError, router};
