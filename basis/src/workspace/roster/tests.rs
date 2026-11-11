@@ -114,3 +114,60 @@ fn only_does_not_imply_spawn_or_load_skill() {
         "what was actually named still works"
     );
 }
+
+/// A roster is written as how it was built, so a record read by a later
+/// binary follows that binary's default hidden set.
+#[test]
+fn a_roster_round_trips_as_the_constructor_that_made_it() {
+    let only = ToolRoster::only(["read", "grep"]);
+    let written = serde_json::to_value(&only).expect("serializes");
+    assert_eq!(written, serde_json::json!({"only": ["grep", "read"]}));
+    assert_eq!(
+        serde_json::from_value::<ToolRoster>(written).expect("deserializes"),
+        only
+    );
+
+    let hide = ToolRoster::hide(["my_extra_tool"]);
+    let written = serde_json::to_value(&hide).expect("serializes");
+    assert_eq!(
+        written,
+        serde_json::json!({"hide": ["my_extra_tool"]}),
+        "basis's own hidden names are not written: the reader supplies its own"
+    );
+    assert_eq!(
+        serde_json::from_value::<ToolRoster>(written).expect("deserializes"),
+        hide
+    );
+
+    assert_eq!(
+        serde_json::to_value(ToolRoster::default()).expect("serializes"),
+        serde_json::json!({"hide": []})
+    );
+}
+
+#[test]
+fn a_skill_roster_is_all_or_exactly_the_names_given() {
+    use super::SkillRoster;
+
+    assert_eq!(
+        serde_json::to_value(SkillRoster::All).expect("serializes"),
+        serde_json::json!("all")
+    );
+    let only = SkillRoster::only(["review"]);
+    let written = serde_json::to_value(&only).expect("serializes");
+    assert_eq!(written, serde_json::json!({"only": ["review"]}));
+    assert_eq!(
+        serde_json::from_value::<SkillRoster>(written).expect("deserializes"),
+        only
+    );
+
+    let profile = only.into_profile();
+    assert!(profile.allows("review"));
+    assert!(!profile.allows("deploy"));
+    assert!(SkillRoster::All.into_profile().allows("deploy"));
+    assert!(
+        SkillRoster::only(Vec::<String>::new())
+            .into_profile()
+            .allows_none()
+    );
+}

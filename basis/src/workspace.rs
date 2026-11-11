@@ -57,12 +57,16 @@ mod spec;
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
 
-use mentra::{ModelInfo, Session, agent::AgentConfig, provider::ReasoningOptions};
+use mentra::{
+    ModelInfo, Session,
+    agent::{AgentConfig, ToolProfile},
+    provider::ReasoningOptions,
+};
 
 pub use builder::WorkspaceBuilder;
 pub use profile::RunProfile;
 pub use remote::RemoteConversationState;
-pub use roster::ToolRoster;
+pub use roster::{SkillRoster, ToolRoster};
 pub(crate) use spec::DEFAULT_SESSION_NAME;
 pub use spec::RunSpec;
 
@@ -385,16 +389,21 @@ impl Workspace {
         let mut session = self
             .runtime
             .resume_minted(agent_id, &self.root, &self.scope)?;
+        // Before anything else is written, and before the ledger reads the
+        // session: the rosters this run states replace the ones the
+        // conversation's first mint stored. If a later write of this resume
+        // fails, what is stored is still the roster this run asked for.
+        self.restate_rosters(&mut session, &spec.profile)?;
         // Restated here for the reason the policy and the audience above are:
         // mentra persists none of it. What *is* persisted is the tool profile,
-        // and `SessionResumeOptions` carries no replacement — so this
-        // conversation's own roster is still the one its first mint froze,
-        // possibly in another process, before this workspace's siblings
-        // existed. The ledger is the half basis can bring up to date, and both
-        // readers of it are the better for it: a child delegated from a
-        // resumed session inherits a hidden set computed now rather than then,
-        // and the MCP ownership guard judges this session against the servers
-        // *this* open configured rather than the ones its first mint saw.
+        // and a run that states no roster keeps it — so such a conversation's
+        // roster is still the one its first mint froze, possibly in another
+        // process, before this workspace's siblings existed. The ledger is
+        // the half basis brings up to date either way, and both readers of it
+        // are the better for it: a child delegated from a resumed session
+        // inherits a hidden set computed now rather than then, and the MCP
+        // ownership guard judges this session against the servers *this* open
+        // configured rather than the ones its first mint saw.
         let row = self
             .runtime
             .agents()
@@ -670,10 +679,17 @@ impl Workspace {
     /// slips into a roster is still a name that cannot be called.
     fn minted_agent(&self, profile: &RunProfile) -> AgentConfig {
         let mut agent = profile.apply_to(self.agent.clone());
-
-        #[cfg(feature = "mcp")]
+        agent.tool_profile = self.offered(agent.tool_profile);
         agent
-            .tool_profile
+    }
+
+    /// `profile` with every name this workspace must not offer hidden: the
+    /// two `mcp__*` cases and the sibling's native tools
+    /// [`minted_agent`](Self::minted_agent) describes. What a mint offers,
+    /// and what a resume that restates a roster offers.
+    fn offered(&self, mut profile: ToolProfile) -> ToolProfile {
+        #[cfg(feature = "mcp")]
+        profile
             .hidden_tools
             .extend(self.runtime.foreign_mcp_tools(&self.mcp_servers));
 
@@ -681,12 +697,37 @@ impl Workspace {
         // `mcp__`-shaped: a native tool a *sibling open of this directory*
         // supplied. It is registered for the audience both opens share, so
         // mentra resolves it here as readily as for the open that supplied it.
-        agent.tool_profile.hidden_tools.extend(
+        profile.hidden_tools.extend(
             self.runtime
                 .foreign_native_tools(&self.root, &self.host_tools),
         );
 
-        agent
+        profile
+    }
+
+    /// Restates onto a resumed `session` the rosters `profile` states, in one
+    /// persisted write; a roster it does not state stays as the conversation
+    /// has it.
+    ///
+    /// A conversation outlives the run that opened it, and who a run is for
+    /// can change between two of them: a served agent's caller may be allowed
+    /// less today than when the conversation began. A stated roster is this
+    /// run's whole answer, so it replaces what the first mint stored rather
+    /// than being intersected with it.
+    fn restate_rosters(&self, session: &mut Session, profile: &RunProfile) -> Result<(), RunError> {
+        if profile.tool_roster().is_none() && profile.skill_roster().is_none() {
+            return Ok(());
+        }
+        let tools = match profile.tool_roster() {
+            Some(roster) => self.offered(roster.clone().into_profile()),
+            None => session.config().tool_profile.clone(),
+        };
+        let skills = match profile.skill_roster() {
+            Some(roster) => roster.clone().into_profile(),
+            None => session.config().skill_profile.clone(),
+        };
+        session.set_profiles(tools, skills)?;
+        Ok(())
     }
 
     /// What a freshly minted agent may see and use, for the ledger every
@@ -700,6 +741,7 @@ impl Workspace {
     fn agent_tools(&self, agent: &AgentConfig) -> AgentTools {
         AgentTools {
             hidden: agent.tool_profile.hidden_tools.clone(),
+            allowed: agent.tool_profile.allowed_tools.clone(),
             #[cfg(feature = "mcp")]
             mcp_servers: self.mcp_servers.clone(),
             host_tools: self.host_tools.clone(),
@@ -731,6 +773,7 @@ impl Workspace {
 
         AgentTools {
             hidden,
+            allowed: session.config().tool_profile.allowed_tools.clone(),
             #[cfg(feature = "mcp")]
             mcp_servers: self.mcp_servers.clone(),
             host_tools: self.host_tools.clone(),

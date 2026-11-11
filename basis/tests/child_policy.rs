@@ -1012,9 +1012,9 @@ async fn a_child_of_a_resumed_parent_inherits_the_hides_the_resume_computed() {
     );
     assert!(
         rosters[1].contains(&PROD_DB_QUERY.to_string()),
-        "a resume restates no tool profile onto the agent, so the parent keeps the roster \
-         its first mint froze — which is why the child's answer has to come from the \
-         ledger: {:?}",
+        "a resume that states no roster restates none onto the agent, so the parent keeps \
+         the one its first mint froze — which is why the child's answer has to come from \
+         the ledger: {:?}",
         rosters[1]
     );
     assert!(
@@ -1027,6 +1027,76 @@ async fn a_child_of_a_resumed_parent_inherits_the_hides_the_resume_computed() {
         rosters[2].contains(&SPAWN.to_string()) && !rosters[2].contains(&"write".to_string()),
         "and it still keeps everything its parent had except what the policy hid: {:?}",
         rosters[2]
+    );
+}
+
+/// A run held to an allow-list — a served run built with one caller's tools
+/// and no others — delegates to children that stay inside it, whatever the
+/// child policy's roster names: `only` keeps the names both lists hold, and
+/// `hide` becomes the parent's list less what it hides.
+#[tokio::test]
+async fn a_child_of_an_allow_listed_parent_stays_inside_the_list() {
+    let root = tempfile::tempdir().expect("tempdir");
+    let (provider, asked) = ScriptedProvider::new(
+        BuiltinProvider::OpenAI,
+        vec![parent_model()],
+        vec![
+            Turn::calling("call-0", "wider: do more than I can"),
+            Turn::saying("first child done"),
+            Turn::calling("call-1", "hide: do less than I can"),
+            Turn::saying("second child done"),
+            Turn::saying("parent done"),
+        ],
+    );
+    let shared = Arc::new(
+        basis::Runtime::builder()
+            .with_provider_instance(provider)
+            .with_ephemeral_history()
+            .with_child_policy(|child: &ChildContext<'_>| {
+                if child.prompt().starts_with("wider:") {
+                    ChildSpec::inherit().with_roster(ToolRoster::only(["read", "write"]))
+                } else {
+                    ChildSpec::inherit().with_roster(ToolRoster::hide(["read"]))
+                }
+            })
+            .build()
+            .expect("builds offline"),
+    );
+    let workspace = offline_workspace(root.path(), shared)
+        .open()
+        .await
+        .expect("opens");
+
+    workspace
+        .prepare(basis::RunSpec::new("do the thing").with_profile(
+            basis::RunProfile::new().with_tool_roster(ToolRoster::only([SPAWN, "read"])),
+        ))
+        .expect("mints")
+        .execute_with_approver(CollectingSink::new(), AllowAll)
+        .await
+        .expect("the run completes");
+
+    let rosters: Vec<Vec<String>> = asked
+        .lock()
+        .expect("not poisoned")
+        .iter()
+        .map(|request| {
+            let mut tools = request.tools.clone();
+            tools.sort();
+            tools
+        })
+        .collect();
+    assert_eq!(rosters.len(), 5, "parent, child, parent, child, parent");
+    assert_eq!(rosters[0], ["read", SPAWN], "the parent's own allow-list");
+    assert_eq!(
+        rosters[1],
+        ["read"],
+        "`write` is outside the parent's list, so naming it gives the child nothing"
+    );
+    assert_eq!(
+        rosters[3],
+        [SPAWN],
+        "a `hide` override narrows the parent's list; it does not replace it with everything"
     );
 }
 

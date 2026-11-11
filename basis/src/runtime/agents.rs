@@ -76,6 +76,14 @@ pub(crate) struct AgentTools {
     /// replaces the child's profile, so that a narrowed child is narrowed
     /// rather than widened.
     pub(crate) hidden: BTreeSet<String>,
+    /// The allow-list this agent's config carries, when its roster is one
+    /// ([`ToolRoster::only`](crate::ToolRoster::only)); `None` for a roster
+    /// that only hides.
+    ///
+    /// Read by `spawn` beside [`hidden`](Self::hidden), for the same reason:
+    /// a child's roster override replaces the cloned profile, and a child of
+    /// an agent held to an allow-list must stay inside it.
+    pub(crate) allowed: Option<BTreeSet<String>>,
     /// The effective MCP server names this agent's workspace claimed — what
     /// [`Workspace::mcp_servers`](crate::Workspace::mcp_servers) reports.
     ///
@@ -127,6 +135,7 @@ impl AgentTools {
     pub(crate) fn for_child(&self) -> Self {
         Self {
             hidden: self.hidden.clone(),
+            allowed: self.allowed.clone(),
             #[cfg(feature = "mcp")]
             mcp_servers: self.mcp_servers.clone(),
             host_tools: self.host_tools.clone(),
@@ -495,6 +504,7 @@ mod tests {
     fn tools(hidden: &[&str]) -> AgentTools {
         AgentTools {
             hidden: hidden.iter().map(|name| (*name).to_string()).collect(),
+            allowed: None,
             #[cfg(feature = "mcp")]
             mcp_servers: Vec::new(),
             host_tools: Vec::new(),
@@ -515,6 +525,7 @@ mod tests {
             "owner",
             AgentTools {
                 hidden: BTreeSet::new(),
+                allowed: None,
                 mcp_servers: vec!["prod-db".to_string()],
                 host_tools: Vec::new(),
                 remote: None,

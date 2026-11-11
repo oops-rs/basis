@@ -498,11 +498,25 @@ async fn spawn_child(
         // silently, is the rule `ToolRoster::only` already documents for the
         // same collision on a workspace's own roster — one composition, one
         // rule, stated in both places.
+        //
+        // The parent's allow-list is the other half of the same rule. A
+        // parent whose roster is `only` — a served run built with one
+        // caller's tools and no others — has nothing in `hidden` that says
+        // so, and a replacement that named a tool outside that list would
+        // hand it to the child. So an `only` override keeps the names both
+        // lists hold, and a `hide` override becomes the parent's list with
+        // its hidden names taken out.
         let mut profile = roster.into_profile();
         if let Some(inherited) = inherited {
             profile
                 .hidden_tools
                 .extend(inherited.hidden.iter().cloned());
+            if let Some(allowed) = &inherited.allowed {
+                profile.allowed_tools = Some(match profile.allowed_tools.take() {
+                    Some(named) => named.intersection(allowed).cloned().collect(),
+                    None => allowed.clone(),
+                });
+            }
         }
         template = template.with_tool_profile(profile);
     }

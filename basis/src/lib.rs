@@ -210,4 +210,4 @@ pub use tools::declared::{
     TOOLS_SCHEMA_VERSION, ToolsConfig, ToolsSource,
 };
 pub use workspace::RemoteConversationState;
-pub use workspace::{RunProfile, RunSpec, ToolRoster, Workspace, WorkspaceBuilder};
+pub use workspace::{RunProfile, RunSpec, SkillRoster, ToolRoster, Workspace, WorkspaceBuilder};

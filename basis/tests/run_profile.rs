@@ -17,8 +17,8 @@ use basis::McpConfig;
 use basis::{
     AllowAll, CollectingSink, Compaction, ContextConfig, Effort, Event, MemoryConfig, ModelInfo,
     Provider, ProviderRequestOptions, ReasoningOptions, RunError, RunProfile, RunSpec, Runtime,
-    RuntimeBuilder, SystemPrompt, ToolResultPagingConfig, ToolRoster, Workspace, WorkspaceBuilder,
-    async_trait,
+    RuntimeBuilder, SkillRoster, SystemPrompt, ToolResultPagingConfig, ToolRoster, Workspace,
+    WorkspaceBuilder, async_trait,
     hooks::HooksConfig,
     runtime::{
         ContentBlock, ProviderCapabilities, ProviderDescriptor, ProviderError, ProviderEventStream,
@@ -640,6 +640,118 @@ async fn reasoning_only_resume_performs_one_mutation_and_leaves_the_window_unkno
     let request = provider.requests().pop().expect("one resumed request");
     assert_eq!(request.model, WORKSPACE_MODEL);
     assert_eq!(request.options.reasoning, Some(high_reasoning()));
+}
+
+/// A conversation outlives the run that opened it, and who a run is for can
+/// change in between: what a resumed run states is what it is offered, and
+/// neither the tools nor the skills of the run before it.
+#[tokio::test]
+async fn a_resume_restates_the_rosters_its_run_states_and_otherwise_keeps_them() {
+    let provider = CapturingProvider::default();
+    let dir = tempfile::tempdir().expect("workspace");
+    for (name, description) in [("build", "Runs builds"), ("ask", "Answers questions")] {
+        let skill = dir.path().join(".basis/skills").join(name);
+        std::fs::create_dir_all(&skill).expect("create skill directory");
+        std::fs::write(
+            skill.join("SKILL.md"),
+            format!("---\nname: {name}\ndescription: {description}\n---\nSteps.\n"),
+        )
+        .expect("write skill");
+    }
+    let workspace = discovery_builder(dir.path(), provider.clone())
+        .open()
+        .await
+        .expect("workspace opens");
+    let stated = |tool: &str, skill: &str| {
+        RunProfile::new()
+            .with_tool_roster(ToolRoster::only([tool, "load_skill"]))
+            .with_skill_roster(SkillRoster::only([skill]))
+    };
+    let asked = |provider: &CapturingProvider| {
+        let request = provider.requests().pop().expect("a request");
+        let mut tools = request.tools;
+        tools.sort();
+        (tools, request.system.unwrap_or_default())
+    };
+
+    let mut first = workspace
+        .prepare(RunSpec::new("one").with_profile(stated("read", "build")))
+        .expect("first run mints");
+    let agent_id = first.agent_id().to_string();
+    first
+        .execute_with_approver(CollectingSink::default(), AllowAll)
+        .await
+        .expect("first run completes");
+    drop(first);
+    let (tools, system) = asked(&provider);
+    assert_eq!(tools, ["load_skill", "read"]);
+    assert!(system.contains("- build: Runs builds"), "{system}");
+    assert!(!system.contains("- ask:"), "{system}");
+
+    workspace
+        .resume(
+            &agent_id,
+            RunSpec::new("two").with_profile(stated("grep", "ask")),
+        )
+        .expect("a resume may state its rosters")
+        .execute_with_approver(CollectingSink::default(), AllowAll)
+        .await
+        .expect("second run completes");
+    let (tools, system) = asked(&provider);
+    assert_eq!(
+        tools,
+        ["grep", "load_skill"],
+        "the first run's `read` is gone and this run's `grep` is offered"
+    );
+    assert!(system.contains("- ask: Answers questions"), "{system}");
+    assert!(!system.contains("- build:"), "{system}");
+
+    workspace
+        .resume(&agent_id, RunSpec::new("three"))
+        .expect("a resume may state none")
+        .execute_with_approver(CollectingSink::default(), AllowAll)
+        .await
+        .expect("third run completes");
+    let (tools, system) = asked(&provider);
+    assert_eq!(
+        tools,
+        ["grep", "load_skill"],
+        "a run that states no roster keeps the conversation's own"
+    );
+    assert!(system.contains("- ask: Answers questions"), "{system}");
+}
+
+#[tokio::test]
+async fn a_run_allowed_no_skill_is_offered_neither_a_list_nor_load_skill() {
+    let provider = CapturingProvider::default();
+    let dir = tempfile::tempdir().expect("workspace");
+    let skill = dir.path().join(".basis/skills/build");
+    std::fs::create_dir_all(&skill).expect("create skill directory");
+    std::fs::write(
+        skill.join("SKILL.md"),
+        "---\nname: build\ndescription: Runs builds\n---\nSteps.\n",
+    )
+    .expect("write skill");
+    let workspace = discovery_builder(dir.path(), provider.clone())
+        .open()
+        .await
+        .expect("workspace opens");
+
+    workspace
+        .prepare(RunSpec::new("go").with_profile(
+            RunProfile::new().with_skill_roster(SkillRoster::only(Vec::<String>::new())),
+        ))
+        .expect("run mints")
+        .execute_with_approver(CollectingSink::default(), AllowAll)
+        .await
+        .expect("run completes");
+
+    let request = provider.requests().pop().expect("one request");
+    assert!(!request.tools.contains(&"load_skill".to_string()));
+    assert!(
+        !request.system.unwrap_or_default().contains("build"),
+        "no skill is named to a model that may load none"
+    );
 }
 
 #[tokio::test]

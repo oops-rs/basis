@@ -10,7 +10,7 @@ use mentra::{ModelInfo, ProviderRequestOptions, ToolResultPagingConfig};
 
 use crate::{compaction::Compaction, context::SystemPrompt};
 
-use super::ToolRoster;
+use super::{SkillRoster, ToolRoster};
 
 /// Immutable overrides for one run minted from a [`Workspace`](super::Workspace).
 ///
@@ -29,6 +29,7 @@ use super::ToolRoster;
 pub struct RunProfile {
     resolved_model: Option<ModelInfo>,
     tool_roster: Option<ToolRoster>,
+    skill_roster: Option<SkillRoster>,
     provider_request_options: Option<ProviderRequestOptions>,
     /// Outer `None` inherits; `Some(None)` explicitly clears.
     max_output_tokens: Option<Option<u32>>,
@@ -53,6 +54,7 @@ impl std::fmt::Debug for RunProfile {
                     .map(|model| (model.id.as_str(), model.provider.as_str())),
             )
             .field("tool_roster", &set_if(self.tool_roster.as_ref()))
+            .field("skill_roster", &set_if(self.skill_roster.as_ref()))
             .field(
                 "provider_request_options",
                 &redacted_if(self.provider_request_options.as_ref()),
@@ -104,6 +106,17 @@ impl RunProfile {
     pub fn with_tool_roster(self, tool_roster: ToolRoster) -> Self {
         Self {
             tool_roster: Some(tool_roster),
+            ..self
+        }
+    }
+
+    /// Offers the model exactly this roster of the workspace's skills for the
+    /// run. Unset, a fresh run is offered every skill the workspace
+    /// discovered.
+    #[must_use]
+    pub fn with_skill_roster(self, skill_roster: SkillRoster) -> Self {
+        Self {
+            skill_roster: Some(skill_roster),
             ..self
         }
     }
@@ -189,16 +202,24 @@ impl RunProfile {
             .is_some_and(|options| !options.session.extra_headers.is_empty())
     }
 
-    /// The first field Mentra 0.23 cannot change on an already resumed agent.
+    /// The tool roster this profile states, if it states one.
+    pub(crate) fn tool_roster(&self) -> Option<&ToolRoster> {
+        self.tool_roster.as_ref()
+    }
+
+    /// The skill roster this profile states, if it states one.
+    pub(crate) fn skill_roster(&self) -> Option<&SkillRoster> {
+        self.skill_roster.as_ref()
+    }
+
+    /// The first field Mentra cannot change on an already resumed agent.
     ///
-    /// The model is deliberately absent: `Session` exposes an exact setter for
-    /// it. Full provider options are present even if only their reasoning field
-    /// differs, because accepting a partial projection would silently drop the
-    /// rest of the caller's contract.
+    /// The model and the two rosters are deliberately absent: `Session`
+    /// exposes an exact setter for each. Full provider options are present
+    /// even if only their reasoning field differs, because accepting a partial
+    /// projection would silently drop the rest of the caller's contract.
     pub(crate) fn unsupported_on_resume(&self) -> Option<&'static str> {
-        if self.tool_roster.is_some() {
-            Some("tool_roster")
-        } else if self.provider_request_options.is_some() {
+        if self.provider_request_options.is_some() {
             Some("provider_request_options")
         } else if self.max_output_tokens.is_some() {
             Some("max_output_tokens")
@@ -220,6 +241,9 @@ impl RunProfile {
     ) -> mentra::agent::AgentConfig {
         if let Some(roster) = &self.tool_roster {
             agent.tool_profile = roster.clone().into_profile();
+        }
+        if let Some(roster) = &self.skill_roster {
+            agent.skill_profile = roster.clone().into_profile();
         }
         if let Some(options) = &self.provider_request_options {
             agent.provider_request_options = options.clone();

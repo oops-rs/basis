@@ -41,7 +41,8 @@
 
 use std::collections::BTreeSet;
 
-use mentra::agent::ToolProfile;
+use mentra::agent::{SkillProfile, ToolProfile};
+use serde::{Deserialize, Serialize};
 
 /// Which tools the model is offered, for
 /// [`WorkspaceBuilder::with_tool_roster`](super::WorkspaceBuilder::with_tool_roster).
@@ -51,8 +52,53 @@ use mentra::agent::ToolProfile;
 /// about (today's exact hidden set), and wrapping it is what lets that default
 /// live beside the constant it is built from instead of at every call site
 /// that wants "basis's usual roster, plus...".
-#[derive(Debug, Clone, PartialEq, Eq)]
+///
+/// # As data
+///
+/// A roster serializes as how it was built — `{"hide": [...]}` with the names
+/// added to basis's own hidden set, or `{"only": [...]}` — so a record that
+/// outlives the binary which wrote it (a durable task's run options, say)
+/// follows the reading binary's default hidden set rather than freezing the
+/// writer's.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(into = "StoredRoster", from = "StoredRoster")]
 pub struct ToolRoster(ToolProfile);
+
+/// [`ToolRoster`] as it is written: the constructor that made it, and the
+/// names it was given.
+#[derive(Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+enum StoredRoster {
+    Hide(BTreeSet<String>),
+    Only(BTreeSet<String>),
+}
+
+impl From<ToolRoster> for StoredRoster {
+    fn from(roster: ToolRoster) -> Self {
+        let ToolProfile {
+            allowed_tools,
+            hidden_tools: mut hidden,
+        } = roster.0;
+        match allowed_tools {
+            Some(allowed) => Self::Only(allowed),
+            None => {
+                for name in hidden_tools() {
+                    hidden.remove(name);
+                }
+                Self::Hide(hidden)
+            }
+        }
+    }
+}
+
+impl From<StoredRoster> for ToolRoster {
+    fn from(stored: StoredRoster) -> Self {
+        match stored {
+            StoredRoster::Hide(names) => Self::hide(names),
+            StoredRoster::Only(names) => Self::only(names),
+        }
+    }
+}
 
 impl Default for ToolRoster {
     /// What every workspace has offered before this type existed: `spawn`'s
@@ -135,6 +181,45 @@ impl ToolRoster {
     /// it (`crate::tools::spawn::child`).
     pub(crate) fn as_profile(&self) -> &ToolProfile {
         &self.0
+    }
+}
+
+/// Which of a workspace's skills the model is told about and may load, for
+/// [`RunProfile::with_skill_roster`](super::RunProfile::with_skill_roster).
+///
+/// The counterpart of [`ToolRoster`], and thinner: basis has no default
+/// opinion about skills, so the default is every skill the workspace
+/// discovered. [`only`](Self::only) maps straight onto mentra's
+/// `SkillProfile::only`: a skill it leaves out is absent from the list in the
+/// system prompt and refused by `load_skill` as an unknown one is, and an
+/// empty list also takes `load_skill` off the model's tools.
+///
+/// It narrows what the *model* reaches. A host running a skill itself — a
+/// slash command — is not the model, and is not narrowed.
+///
+/// Serializes as `"all"` or `{"only": [...]}`.
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum SkillRoster {
+    /// Every skill the workspace discovered.
+    #[default]
+    All,
+    /// Exactly these, by name. A name no skill has allows nothing.
+    Only(BTreeSet<String>),
+}
+
+impl SkillRoster {
+    /// Offers exactly `names`.
+    pub fn only(names: impl IntoIterator<Item = impl Into<String>>) -> Self {
+        Self::Only(names.into_iter().map(Into::into).collect())
+    }
+
+    /// The mentra profile this roster resolves to.
+    pub(crate) fn into_profile(self) -> SkillProfile {
+        match self {
+            Self::All => SkillProfile::all(),
+            Self::Only(names) => SkillProfile::only(names),
+        }
     }
 }
 
