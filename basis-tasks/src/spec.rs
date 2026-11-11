@@ -9,7 +9,7 @@
 
 use std::time::Duration;
 
-use basis::{ConfigLookup, Effort, SystemPrompt};
+use basis::{ConfigLookup, Effort, SkillRoster, SystemPrompt, ToolRoster};
 
 use crate::{approve::Approve, handle::TaskHandle};
 
@@ -56,6 +56,8 @@ pub struct RunSpec {
     pub(crate) not_after_ms: Option<u64>,
     pub(crate) answering: bool,
     pub(crate) config: ConfigLookup,
+    pub(crate) tool_roster: Option<ToolRoster>,
+    pub(crate) skill_roster: Option<SkillRoster>,
 }
 
 impl RunSpec {
@@ -78,6 +80,38 @@ impl RunSpec {
             not_after_ms: None,
             answering: false,
             config: ConfigLookup::None,
+            tool_roster: None,
+            skill_roster: None,
+        }
+    }
+
+    /// Offers the task's model exactly this roster of tools, on every turn
+    /// it runs — recorded with the task, so whichever process attaches
+    /// builds the run with it.
+    ///
+    /// For a task that [continues](Self::continuing) a conversation this
+    /// replaces the roster the conversation was last run with: the roster is
+    /// this task's, and a conversation is not held to the one its first task
+    /// was given. Unset, a new conversation gets the workspace's roster and a
+    /// continued one keeps its own.
+    ///
+    /// A roster built with [`ToolRoster::only`] offers nothing it does not
+    /// name — including [`ATTACH_FILE`](crate::ATTACH_FILE), which an
+    /// [`answering`](Self::answering) task needs named to hand back a file.
+    pub fn with_tool_roster(self, tool_roster: ToolRoster) -> Self {
+        Self {
+            tool_roster: Some(tool_roster),
+            ..self
+        }
+    }
+
+    /// Lets the task's model list and load exactly this roster of the
+    /// workspace's skills, recorded and restated as
+    /// [`with_tool_roster`](Self::with_tool_roster) is.
+    pub fn with_skill_roster(self, skill_roster: SkillRoster) -> Self {
+        Self {
+            skill_roster: Some(skill_roster),
+            ..self
         }
     }
 

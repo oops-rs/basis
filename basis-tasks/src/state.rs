@@ -13,7 +13,7 @@ use std::{
     time::{SystemTime, UNIX_EPOCH},
 };
 
-use basis::{Bound, Effort, RunUsage, SystemPrompt};
+use basis::{Bound, Effort, RunUsage, SkillRoster, SystemPrompt, ToolRoster};
 
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
@@ -86,6 +86,16 @@ pub(crate) struct RunOptions {
     /// when every open discovered the files — so it keeps discovering.
     #[serde(default = "legacy_config_lookup")]
     pub config: basis::ConfigLookup,
+    /// The tools the task's model is offered, when the spawn stated them:
+    /// applied to a new conversation at its mint and restated onto a
+    /// continued one. Absent in a record that stated none, and in every
+    /// record from before it.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub tool_roster: Option<ToolRoster>,
+    /// The skills the task's model may list and load, when the spawn stated
+    /// them. Absent as [`tool_roster`](Self::tool_roster) is.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub skill_roster: Option<SkillRoster>,
 }
 
 /// The lookup a record from before [`RunOptions::config`] was spawned under.
@@ -557,6 +567,35 @@ mod tests {
         let options: RunOptions = serde_json::from_value(legacy).unwrap();
 
         assert_eq!(options.config, basis::ConfigLookup::Discover);
+    }
+
+    #[test]
+    fn rosters_are_written_only_when_stated_and_read_back_as_stated() {
+        let unstated = serde_json::to_value(RunOptions::default()).unwrap();
+        assert!(unstated.get("tool_roster").is_none());
+        assert!(unstated.get("skill_roster").is_none());
+        let read: RunOptions = serde_json::from_value(unstated).unwrap();
+        assert_eq!(read.tool_roster, None);
+        assert_eq!(read.skill_roster, None);
+
+        let stated = RunOptions {
+            tool_roster: Some(ToolRoster::only(["read"])),
+            skill_roster: Some(SkillRoster::only(["review"])),
+            ..RunOptions::default()
+        };
+        let written = serde_json::to_value(&stated).unwrap();
+        assert_eq!(
+            written["tool_roster"],
+            serde_json::json!({"only": ["read"]})
+        );
+        assert_eq!(
+            written["skill_roster"],
+            serde_json::json!({"only": ["review"]})
+        );
+        assert_eq!(
+            serde_json::from_value::<RunOptions>(written).unwrap(),
+            stated
+        );
     }
 
     #[test]

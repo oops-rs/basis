@@ -216,6 +216,8 @@ impl Tasks {
             not_after_ms,
             answering,
             config,
+            tool_roster,
+            skill_roster,
         } = spec;
         if prompt.trim().is_empty() {
             return Err(Error::new("prompt is empty"));
@@ -248,6 +250,8 @@ impl Tasks {
             token_budget,
             answering,
             config,
+            tool_roster,
+            skill_roster,
         };
 
         let canonical = canonical_workspace(&self.workspace).map_err(|error| {

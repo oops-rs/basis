@@ -66,8 +66,8 @@ use std::{
 
 use basis::{
     AllowAll, Approver, Bound, CancellationToken, DenyAll, DenyAllGate, Event, EventSink,
-    PreparedRun, RunOutcome, RunSpec, Runtime, RuntimeBuilder, ShellAccess, TurnOptions, Workspace,
-    WorkspaceBuilder,
+    PreparedRun, RunOutcome, RunProfile, RunSpec, Runtime, RuntimeBuilder, ShellAccess,
+    TurnOptions, Workspace, WorkspaceBuilder,
 };
 use serde_json::Value;
 use tokio::time::{self, Instant};
@@ -979,6 +979,17 @@ fn run_parts(
     if let Some(token_budget) = options.token_budget {
         spec = spec.with_token_budget(token_budget);
     }
+    // Stated on the run rather than on the workspace, so they hold whether
+    // this attach mints the conversation or resumes one another task began:
+    // a resume restates what its run states (`Workspace::resume`).
+    let mut profile = RunProfile::new();
+    if let Some(tool_roster) = options.tool_roster.clone() {
+        profile = profile.with_tool_roster(tool_roster);
+    }
+    if let Some(skill_roster) = options.skill_roster.clone() {
+        profile = profile.with_skill_roster(skill_roster);
+    }
+    spec = spec.with_profile(profile);
     Ok((builder, spec))
 }
 
