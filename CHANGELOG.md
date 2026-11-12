@@ -5,7 +5,7 @@ All six crates — `basis`, `basis-host`, `basis-tasks`, `basis-acp`,
 live in `docs/adr/`; this file says what changed for someone upgrading.
 Releases before 0.15.0 are described by their tags and ADRs only.
 
-## 0.25.0 — unreleased
+## 0.25.0 — 2026-11-12
 
 Breaking: requires Mentra 0.36.0. `OpenError` gains `NoWorkflows`,
 `WorkflowId` and `SkillsBesideWorkflows`, so an exhaustive match needs
