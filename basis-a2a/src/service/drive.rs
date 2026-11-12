@@ -187,6 +187,11 @@ impl A2aService {
             if record.finished_ms.is_some() {
                 continue;
             }
+            // A task accepted before this server held anyone to workflows
+            // is stopped before it is driven again.
+            let Some(record) = self.stop_unbound(record) else {
+                continue;
+            };
             let backend = match self.backend() {
                 Backend::Tasks(backend) => backend,
                 // A host's task is awaited again, never started again

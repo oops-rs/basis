@@ -93,22 +93,17 @@ impl A2aService {
             return Ok(record);
         }
         let contact = capitalized(workflows.contact());
-        let reason = match &record.workflows {
-            Some(bound) => bound.iter().find(|id| !allowed.contains(id)).map(|id| {
+        // A task with no recorded workflows is not judged here: one accepted
+        // before this server held anyone to them is stopped when the server
+        // opens (`stop_unbound`), never by a request.
+        let reason = record.workflows.as_ref().and_then(|bound| {
+            bound.iter().find(|id| !allowed.contains(id)).map(|id| {
                 format!(
                     "The workflow `{id}` is no longer open to this caller, so this task was \
-                         stopped. {contact} can open it."
+                     stopped. {contact} can open it."
                 )
-            }),
-            // Built before this server held anyone to workflows, so with
-            // every tool the workspace has: nothing says it stayed inside
-            // what this caller is allowed.
-            None => Some(
-                "This task was started before this agent held its callers to workflows, so it \
-                 was stopped. Send the request again."
-                    .to_string(),
-            ),
-        };
+            })
+        });
         let Some(reason) = reason else {
             return Ok(record);
         };
@@ -122,8 +117,48 @@ impl A2aService {
             .withdraw(&record.id, withdrawn)
             .map_err(internal)?
             .unwrap_or(record);
-        self.stop(&stopped);
+        self.stop(&stopped, false);
         Ok(stopped)
+    }
+
+    /// Stops a task this server accepted before it held anyone to
+    /// workflows, as the server opens: its run was built with every tool
+    /// the workspace has, and nothing says it stayed inside what its caller
+    /// is allowed. Returns the record to go on with — marked, and its run
+    /// asked to stop before anything drives it again — or `None` when the
+    /// stop could not be recorded, in which case the task is not driven.
+    ///
+    /// Done here and not on a request, so that no request from a task's own
+    /// caller is ever what stops it.
+    pub(super) fn stop_unbound(&self, record: Record) -> Option<Record> {
+        if self.workflows().is_none()
+            || record.workflows.is_some()
+            || record.withdrawn.is_some()
+            || record.finished_ms.is_some()
+        {
+            return Some(record);
+        }
+        let withdrawn = Withdrawn {
+            reason: "This task was started before this agent held its callers to workflows, so \
+                     it was stopped. Send the request again."
+                .to_string(),
+            at_ms: now_ms(),
+        };
+        match self.inner.index.withdraw(&record.id, withdrawn) {
+            Ok(Some(stopped)) => {
+                self.stop(&stopped, true);
+                Some(stopped)
+            }
+            Ok(None) => Some(record),
+            Err(error) => {
+                eprintln!(
+                    "basis-a2a: task {} predates this server's workflows and could not be \
+                     marked stopped, so it is not driven: {error}",
+                    record.id
+                );
+                None
+            }
+        }
     }
 
     /// Whether `record`'s task has settled, as far as can be read without
@@ -143,7 +178,10 @@ impl A2aService {
 
     /// Asks `record`'s run to stop, without waiting for it to: the task is
     /// already reported failed, and the run ends at its next boundary.
-    fn stop(&self, record: &Record) {
+    /// `before_driving` asks a `basis-tasks` run on this thread, for a task
+    /// about to be driven again: the request must be on disk before its
+    /// driver attaches.
+    fn stop(&self, record: &Record, before_driving: bool) {
         let id = record.id.clone();
         match self.backend() {
             Backend::Tasks(backend) => {
@@ -155,8 +193,8 @@ impl A2aService {
                         }
                     };
                     match tokio::runtime::Handle::try_current() {
-                        Ok(runtime) => drop(runtime.spawn_blocking(cancel)),
-                        Err(_) => cancel(),
+                        Ok(runtime) if !before_driving => drop(runtime.spawn_blocking(cancel)),
+                        _ => cancel(),
                     }
                 }
                 // A turn parked on a question would never reach the boundary

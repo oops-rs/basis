@@ -106,7 +106,8 @@ that a workflow it was built with has been withdrawn.**
   carries no workflows at all.
 - A task that had settled is left as it settled. An unsettled task with no
   recorded workflows was built before the server held anyone to them, with
-  every tool the workspace has, and is stopped.
+  every tool the workspace has. It is stopped when the server opens, before
+  anything drives it again, and never by a request.
 - The card's skills are the workflows and nothing else. `A2aService::open`
   refuses skills added by the identity or the extended card, an empty set, an
   id given twice, and the workflows' extension declared a second time.

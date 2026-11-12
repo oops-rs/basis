@@ -696,6 +696,66 @@ async fn workflows_that_could_not_be_enforced_as_configured_are_refused() {
     ));
 }
 
+/// A server that starts holding its callers to workflows stops the tasks it
+/// accepted before: each was built with every tool the workspace has. It
+/// does so as it opens, so no request of the task's own caller is ever what
+/// stops a task.
+#[test]
+fn a_task_from_before_the_server_had_workflows_is_stopped_when_it_opens() {
+    isolate_environment();
+    let model = ScriptedEndpoint::start(true);
+    let data = tempfile::tempdir().unwrap();
+    let workspace = tempfile::tempdir().unwrap();
+    let config = || {
+        base_config(workspace.path(), data.path(), &model)
+            .with_authenticator(Arc::new(Gateway))
+            .with_approval(InboundApproval::Always)
+    };
+    let alice = Principal::new("alice").unwrap();
+
+    // First life, without workflows: a task is accepted and its turn is in
+    // flight when the server stops.
+    let first_life = tokio::runtime::Runtime::new().unwrap();
+    let id = first_life.block_on(async {
+        let service = A2aService::open(config()).unwrap();
+        let request = serde_json::from_value(send("build it", None, true)).unwrap();
+        let basis_a2a::a2a::SendMessageResponse::Task(task) =
+            service.send_message(&alice, request).await.unwrap()
+        else {
+            panic!("a send answers with a task");
+        };
+        model.reached(1).await;
+        service.shutdown().await;
+        task.id
+    });
+    model.release();
+    std::thread::sleep(std::time::Duration::from_millis(300));
+    drop(first_life);
+
+    // Second life, with workflows. The task's own caller reads it, with a
+    // token that allows every workflow there is: it was stopped already.
+    let second_life = tokio::runtime::Runtime::new().unwrap();
+    second_life.block_on(async {
+        let service = A2aService::open(config().with_workflows(workflows())).unwrap();
+        let caller = alice.clone().with_workflows(["build", "ask"]);
+        let task = service
+            .get_task(&caller, serde_json::from_value(json!({"id": id})).unwrap())
+            .await
+            .unwrap();
+        assert_eq!(task.status.state, basis_a2a::a2a::TaskState::Failed);
+        let reason = serde_json::to_string(&task.status.message).unwrap();
+        assert!(
+            reason.contains("before this agent held its callers to workflows"),
+            "{reason}"
+        );
+        // The run it would have resumed, with every tool, never asks the
+        // model again.
+        tokio::time::sleep(std::time::Duration::from_secs(1)).await;
+        assert_eq!(model.requests().len(), 1, "the unbound run was driven on");
+        service.shutdown().await;
+    });
+}
+
 #[tokio::test]
 async fn a_server_with_no_workflows_holds_nobody_to_any() {
     let served = Served::start_anonymous(ScriptedEndpoint::start(false), |config| {
