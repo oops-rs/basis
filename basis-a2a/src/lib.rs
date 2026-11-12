@@ -90,8 +90,8 @@
 //!   tools and skills behind it, a request may use only the workflows its
 //!   authenticator verified for it ([`Principal::with_workflows`]), each run
 //!   is built with those workflows' tools and skills and no others, and a
-//!   task is stopped once a workflow it was built with is withdrawn from its
-//!   caller.
+//!   task is stopped once a `GetTask` or a reply shows that a workflow it
+//!   was built with has been withdrawn.
 //!
 //! The card declares each optional feature when, and only when, it is on. A
 //! served agent has no shell unless the operator grants one.

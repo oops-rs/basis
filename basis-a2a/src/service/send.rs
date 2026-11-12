@@ -110,11 +110,10 @@ impl A2aService {
         let rendered = parts::render(&message, inbox.as_deref())?;
         let inbound = hops::inbound(&message)?;
         hops::check_cap(inbound, self.inner.hop_cap)?;
+        // The conversation's last task is not judged by this message's
+        // workflows: a caller may narrow one message to a single workflow,
+        // which withdraws nothing from the task before it.
         let (context_id, latest) = self.conversation(caller, &message)?;
-        // The conversation's last task may still be running on a workflow
-        // this caller has since lost: stopped here, as any request naming it
-        // would stop it.
-        let latest = latest.map(|latest| self.held(caller, latest)).transpose()?;
 
         // Checked before anything is spawned, so a refused webhook leaves no
         // task behind it.
@@ -324,7 +323,10 @@ impl A2aService {
                 "a message to an agent has role ROLE_USER and a messageId",
             ));
         }
+        // A reply continues the task's work, so it is the other request that
+        // can show a workflow was withdrawn from it.
         let record = self.record(caller, task_id)?;
+        let record = self.held(caller, record)?;
         if message
             .context_id
             .as_ref()

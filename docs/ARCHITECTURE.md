@@ -418,9 +418,10 @@ flowchart LR
   A `basis-tasks` run is built with `ToolRoster::only` and `SkillRoster::only` of the allowed
   workflows — recorded in the task's run options and restated when a conversation resumes, so a
   continued conversation is not held to what its first run was given. A hosted task's host is
-  handed the set. The index record keeps the workflows a task was built with, and any later
-  request naming the task stops it and reports it `FAILED`, with the reason, once one of them is
-  no longer allowed its caller.
+  handed the set. The index record keeps the workflows a task was built with. A `GetTask` or a
+  reply whose token lacks one of them stops the task and reports it `FAILED`, with the reason;
+  a token carrying the set the task started with always passes, a cancel is never judged
+  against workflows, and a narrower set on any other request withdraws nothing.
 - **The client is mentra's, behind `spawn`** (ADR-0029). Each agent in `.basis/a2a.json` is a
   target, `@<name> <task>`, routed per calling agent through the agent ledger and declared
   `External`, so the approval gate sees every call. mentra's client picks the first interface on

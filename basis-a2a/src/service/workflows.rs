@@ -6,12 +6,24 @@
 //! three things: whether the request is served at all, what a run started
 //! for it is built with, and whether a task started earlier may go on.
 //!
-//! A task is bound to the workflows it was built with. Every later request
-//! about it arrives with the set as it stands *then*, so a workflow withdrawn
-//! from a caller reaches their running task on their next request: the task
-//! is marked as stopped with the reason, its run is cancelled, and from that
-//! moment it is reported failed, whatever its backend later says of it. A
-//! task that had already settled is left as it settled.
+//! A task is bound to the workflows it was built with, and two requests can
+//! show that one of them has been withdrawn: a `GetTask`, and a reply to the
+//! task. When the token of either no longer names a workflow the task is
+//! bound to, the task is marked as stopped with the reason, its run is
+//! cancelled, and from that moment it is reported failed, whatever its
+//! backend later says of it. A task that had already settled is left as it
+//! settled.
+//!
+//! Which token a request carries is the gateway's to decide, and the split
+//! follows what a gateway that lets a task keep its workflows sends (dial's
+//! ADR-0054). The task's own caller reads, watches and cancels it with the
+//! set it started with, so those pass; the gateway's own look at a task
+//! whose workflows were withdrawn is a `GetTask` carrying only what is still
+//! allowed, and a reply carries the same. Nothing else is taken for a
+//! withdrawal. `CancelTask` is never judged: it can only stop work.
+//! `ListTasks`, a stream and a new message in the task's conversation carry
+//! sets decided for themselves — a message may be narrowed to one workflow
+//! by its caller — and a narrower set there says nothing about the task.
 
 use std::sync::Arc;
 
@@ -62,15 +74,21 @@ impl A2aService {
         Ok(())
     }
 
-    /// `record`, held to what `caller` is allowed now: stopped, and marked
-    /// so, when a workflow its task was built with is no longer in the
-    /// caller's set. A task that has settled, or was already stopped, is
-    /// returned as it is.
+    /// `record`, held to what this request's token allows: stopped, and
+    /// marked so, when a workflow its task was built with is not in the
+    /// token's set. A task that has settled, or was already stopped, is
+    /// returned as it is. Called for a `GetTask` and for a reply, and for
+    /// nothing else (see the module's account).
+    ///
+    /// The task's workflows are looked for in the token's set as it was
+    /// signed, not in what this server offers of it: a token carrying the
+    /// set a task started with always passes, whatever has changed here
+    /// since.
     pub(crate) fn held(&self, caller: &Principal, record: Record) -> Result<Record, A2AError> {
         let Some(workflows) = self.workflows() else {
             return Ok(record);
         };
-        let allowed = workflows.offered(granted(caller)?);
+        let allowed = granted(caller)?;
         if record.withdrawn.is_some() || self.has_settled(&record) {
             return Ok(record);
         }

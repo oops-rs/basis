@@ -119,9 +119,10 @@ impl Workflow {
 ///   skills, plus the [shared](Self::with_shared_tools) ones — on a
 ///   conversation's first message and on every later one, whatever its
 ///   earlier runs were given;
-/// - records which workflows each task was built with, and on any later
-///   request about the task stops it and reports it failed, with the reason,
-///   once one of them is no longer allowed.
+/// - records which workflows each task was built with, and stops the task
+///   and reports it failed, with the reason, once a `GetTask` or a reply
+///   arrives whose principal is not allowed one of them. A cancel is never
+///   judged, and a narrower set on any other request withdraws nothing.
 ///
 /// For a server whose tasks a host runs, the tools and skills mean nothing
 /// and are refused; the host is handed the allowed set in

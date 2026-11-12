@@ -440,7 +440,11 @@ impl A2aService {
         request: GetTaskRequest,
     ) -> Result<Task, A2AError> {
         let history_length = project::history_length(request.history_length)?;
+        // One of the two requests that can show a workflow was withdrawn
+        // from a task: the gateway's own look at it carries only what is
+        // still allowed.
         let record = self.record(caller, &request.id)?;
+        let record = self.held(caller, record)?;
         let standing = self.standing(&record).await?;
         let view = View::full(history_length);
         let hosted = self.hosted_artifacts(&record, view).await?;
@@ -482,7 +486,6 @@ impl A2aService {
 
         let mut matching = Vec::new();
         for record in self.inner.index.all_owned(caller) {
-            let record = self.held(caller, record)?;
             if request
                 .context_id
                 .as_ref()
@@ -539,13 +542,14 @@ impl A2aService {
         caller: &Principal,
         request: CancelTaskRequest,
     ) -> Result<Task, A2AError> {
+        // Never judged against the token's workflows: a cancel can only stop
+        // work, and whoever started a task may always stop it.
         let record = self.record(caller, &request.id)?;
         let standing = self.standing(&record).await?;
         if record.withdrawn.is_some() {
-            // Stopped for a workflow withdrawn from its caller, on this
-            // request or an earlier one: answered with the task as it
-            // stands, which says why, rather than as merely "not
-            // cancelable".
+            // Already stopped for a workflow withdrawn from its caller:
+            // answered with the task as it stands, which says why, rather
+            // than as merely "not cancelable".
             let view = View::full(None);
             let hosted = self.hosted_artifacts(&record, view).await?;
             return Ok(project::task(&record, &standing, hosted, view));
@@ -686,16 +690,16 @@ impl A2aService {
 
     /// The task `id` names, when `caller` owns it; another principal's task
     /// is refused with the very error a missing one is. On a server
-    /// configured with workflows the task is first held to what `caller` is
-    /// allowed now, so every operation that names a task stops one whose
-    /// workflow was withdrawn.
+    /// configured with workflows a request that says nothing of them is
+    /// refused first, whatever it names. Whether the task may go on is a
+    /// separate question, asked only where a withdrawal can show
+    /// ([`held`](Self::held)).
     fn record(&self, caller: &Principal, id: &str) -> Result<Record, A2AError> {
-        let record = self
-            .inner
+        self.require_workflows(caller)?;
+        self.inner
             .index
             .owned(caller, id)
-            .ok_or_else(|| A2AError::task_not_found(id))?;
-        self.held(caller, record)
+            .ok_or_else(|| A2AError::task_not_found(id))
     }
 }
 

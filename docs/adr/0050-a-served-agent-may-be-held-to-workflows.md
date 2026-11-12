@@ -23,17 +23,20 @@ Four facts shape how.
   they are registered on the runtime for every agent.
 - `basis-tasks` builds a run in whichever process attaches, so what a run is
   offered must be recorded with the task.
-- A task outlives the request that started it. A caller's rights can change
-  while it runs, and each later request arrives with the rights as they then
-  stand.
+- A task outlives the request that started it, and a caller's rights can
+  change while it runs. Which set each later request carries is the
+  gateway's to decide. dial's lets a task keep the workflows it started
+  with (its ADR-0054): the task's own caller reads, watches and cancels it
+  with that set, and only the gateway's own look at the task, and a reply
+  to it, carry what is still allowed.
 
 ## Decision
 
 **A server may be configured with workflows. Each is a skill on its card with
 the tools and skills behind it. A request may use only the workflows its
 authenticator verified for it; a run is built with those workflows' tools and
-skills and no others; and a task is stopped once a workflow it was built with
-is no longer allowed its caller.**
+skills and no others; and a task is stopped once a `GetTask` or a reply shows
+that a workflow it was built with has been withdrawn.**
 
 ### What a run is offered
 
@@ -84,13 +87,23 @@ is no longer allowed its caller.**
 - The index record keeps the workflows a task was built with: everything the
   message was allowed, or the fewer a host names through
   `TaskHost::workflows` when its dispatch is fixed.
-- Every operation that names a task — `GetTask`, `CancelTask`,
-  `SubscribeToTask`, a reply, the push-config methods — and `ListTasks`, and a
-  follow-up into the task's conversation, first holds the task to what the
-  caller is allowed now. If a bound workflow is missing, the record is marked
-  withdrawn with a reason naming the workflow and whom to ask, the run is
-  cancelled, and from then on the task is `FAILED` with that reason whatever
-  its backend later reports. A stream already open reports it too.
+- Two requests can show a withdrawal: `GetTask`, and a reply (a message
+  carrying the task's `taskId`). Each holds the task to its token's set, as
+  signed. If a bound workflow is missing, the record is marked withdrawn
+  with a reason naming the workflow and whom to ask, the run is cancelled,
+  and from then on the task is `FAILED` with that reason whatever its
+  backend later reports. A stream already open reports it too.
+- A token carrying the set a task started with always passes, so the task's
+  own caller can read it whatever was withdrawn since.
+- `CancelTask` is never judged against the token's workflows. A cancel can
+  only stop work, and whoever started a task may always stop it; a gateway
+  that stops a task for them sends the same request.
+- Nothing else is taken for a withdrawal. `ListTasks`, `SubscribeToTask`, the
+  push-config methods and a new message in the task's conversation carry
+  sets decided for themselves, and a caller may narrow a message to one
+  workflow: a narrower set there says nothing about the task.
+- Every request, whatever it names, is still refused when its principal
+  carries no workflows at all.
 - A task that had settled is left as it settled. An unsettled task with no
   recorded workflows was built before the server held anyone to them, with
   every tool the workspace has, and is stopped.
@@ -111,9 +124,14 @@ is no longer allowed its caller.**
 - What an earlier run of a conversation read or wrote stays in its
   transcript, including a skill body it loaded. The roster decides what a run
   may do from now on.
-- A caller whose set changes mid-task loses the task, not just the workflow:
-  the run was built with tools it may no longer use, and nothing narrower
-  than stopping it is sound.
+- A task whose workflow is withdrawn is lost, not narrowed: the run was built
+  with tools its caller may no longer use, and nothing narrower than stopping
+  it is sound. It is stopped when a `GetTask` or a reply says so, which is
+  when the gateway next looks, not the instant the mapping changes.
+- The server cannot tell the caller's own `GetTask` from the gateway's look
+  at the task: both are a `GetTask`, and the token is all that differs.
+  That only the second ever carries a narrower set is the gateway's
+  guarantee, not something checked here.
 - `Workflows` is opt-in. A server without it is unchanged, and ignores what a
   principal says of workflows.
 - mentra's `AgentConfig` gains a field and basis requires mentra 0.35.
@@ -124,6 +142,8 @@ is no longer allowed its caller.**
 scripted model and an authenticator that reads the allowed set off each
 request's token: a model that calls a closed workflow's tool by name does not
 run it, a conversation continued for a caller who lost a workflow is rebuilt
-without its tools and skills, and a running task fails with the reason on the
-next request of each kind. `basis-tasks/tests/rosters.rs` and
+without its tools and skills, a running task fails with the reason on a
+`GetTask` or a reply whose token lacks its workflow, a narrower set on any
+other request withdraws nothing, and a cancel cancels whatever its token
+says. `basis-tasks/tests/rosters.rs` and
 `basis/tests/run_profile.rs` cover the layers beneath.

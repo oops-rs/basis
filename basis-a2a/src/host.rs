@@ -48,7 +48,7 @@ pub struct HostedStart {
     /// fixed it refuses a workflow that is not here, in words the caller
     /// can act on. The server records the set against the task — or the
     /// narrower one [`TaskHost::workflows`] names — and stops the task
-    /// once one of them is no longer allowed.
+    /// once a `GetTask` or a reply shows one of them was withdrawn.
     pub workflows: Option<Vec<String>>,
     /// The A2A `contextId` the task belongs to: the one the message named,
     /// or one the server minted for a new conversation.

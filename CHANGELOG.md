@@ -46,11 +46,12 @@ allow-listed parent's list.
 - `HostedStart::workflows` hands a host the allowed set;
   `TaskHost::workflows` (default: none) lets a host with fixed dispatch name
   the fewer it runs.
-- A task is bound to the workflows it was built with. `GetTask`,
-  `CancelTask`, `SubscribeToTask`, `ListTasks`, a reply, the push-config
-  methods and a follow-up into its conversation stop it once one of them is
-  no longer allowed its caller: the run is cancelled and the task is
-  `FAILED` with a reason naming the workflow. A settled task is unchanged.
+- A task is bound to the workflows it was built with. A `GetTask` or a
+  reply whose token lacks one of them stops it: the run is cancelled and the
+  task is `FAILED` with a reason naming the workflow. A token carrying the
+  set the task started with always passes, `CancelTask` is never judged
+  against workflows, and a narrower set on any other request withdraws
+  nothing. A settled task is unchanged.
 - A server without workflows is unchanged.
 
 ## 0.24.2 — 2026-11-09

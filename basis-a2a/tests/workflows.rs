@@ -1,8 +1,8 @@
 //! A served agent held to workflows: its card lists them, a request may use
 //! only the ones its authenticator verified, a run is built with those
 //! workflows' tools and skills and no others — on a conversation's first
-//! message and on every later one — and a task is stopped once a workflow
-//! it was built with is withdrawn from its caller.
+//! message and on every later one — and a task is stopped once a `GetTask`
+//! or a reply shows that a workflow it was built with has been withdrawn.
 //!
 //! The gateway is stood in for by an authenticator that reads the allowed
 //! set off the bearer token, so each request can carry a different one, as
@@ -338,14 +338,18 @@ async fn a_task_is_stopped_and_fails_once_its_workflow_is_withdrawn() {
         .to_string();
     served.model.reached(1).await;
 
-    // While her set still holds `build`, the task is hers to watch.
-    let working = served
-        .as_token("alice|build,ask")
-        .result("GetTask", json!({"id": id}))
-        .await;
-    assert_ne!(working["status"]["state"], "TASK_STATE_FAILED", "{working}");
+    // A token carrying the set the task started with reads it, however
+    // often: that is what its own caller's requests carry.
+    for kept in ["alice|build", "alice|build,ask"] {
+        let working = served
+            .as_token(kept)
+            .result("GetTask", json!({"id": id}))
+            .await;
+        assert_ne!(working["status"]["state"], "TASK_STATE_FAILED", "{working}");
+    }
 
-    // The next request about it arrives without `build`.
+    // The gateway's own look at the task, once `build` is withdrawn, carries
+    // only what is still allowed.
     let stopped = served
         .as_token("alice|ask")
         .result("GetTask", json!({"id": id}))
@@ -395,32 +399,62 @@ async fn a_task_is_stopped_and_fails_once_its_workflow_is_withdrawn() {
     );
 }
 
+/// A task started with `build`, still running at a held model.
+async fn building(served: &Served) -> Value {
+    let task = served
+        .as_token("alice|build")
+        .result("SendMessage", send("build it", None, true))
+        .await["task"]
+        .clone();
+    served.model.reached(1).await;
+    task
+}
+
+/// Where the task stands, read as its own caller reads it: with the set it
+/// started with.
+async fn state(served: &Served, id: &str) -> String {
+    served
+        .as_token("alice|build")
+        .result("GetTask", json!({"id": id}))
+        .await["status"]["state"]
+        .as_str()
+        .unwrap()
+        .to_string()
+}
+
 #[tokio::test]
-async fn each_operation_that_names_a_task_stops_one_whose_workflow_is_withdrawn() {
-    for operation in ["CancelTask", "SubscribeToTask", "ListTasks", "SendMessage"] {
+async fn a_narrower_set_on_any_other_request_withdraws_nothing() {
+    // `ListTasks`, a stream and a new message in the conversation carry sets
+    // decided for themselves — a message may be narrowed to one workflow by
+    // its caller — so a set without `build` there says nothing about a task
+    // that was started with it.
+    for operation in ["ListTasks", "SubscribeToTask", "SendMessage"] {
         let served = serve(ScriptedEndpoint::start(true)).await;
-        let task = served
-            .as_token("alice|build")
-            .result("SendMessage", send("build it", None, true))
-            .await["task"]
-            .clone();
+        let task = building(&served).await;
         let id = task["id"].as_str().unwrap();
-        served.model.reached(1).await;
 
         let alice = served.as_token("alice|ask");
         match operation {
-            "CancelTask" => {
-                let stopped = alice.result("CancelTask", json!({"id": id})).await;
-                assert_eq!(stopped["status"]["state"], "TASK_STATE_FAILED", "{stopped}");
+            "ListTasks" => {
+                let listed = alice.result("ListTasks", json!({})).await;
+                assert_ne!(
+                    listed["tasks"][0]["status"]["state"], "TASK_STATE_FAILED",
+                    "{listed}"
+                );
             }
             "SubscribeToTask" => {
-                alice.call("SubscribeToTask", json!({"id": id})).await;
+                // The stream opens; it is left unread, and closes with the
+                // response.
+                let stream = alice
+                    .post(
+                        json!({"jsonrpc": "2.0", "id": 1, "method": "SubscribeToTask",
+                        "params": {"id": id}}),
+                    )
+                    .await;
+                assert_eq!(stream.status(), 200);
             }
-            "ListTasks" => {
-                alice.result("ListTasks", json!({})).await;
-            }
-            // A follow-up into the conversation whose last task is running
-            // on the withdrawn workflow.
+            // A second message into the conversation, kept to `ask`: refused
+            // because the first is still working, and nothing more.
             _ => {
                 let context = task["contextId"].as_str().unwrap();
                 alice
@@ -429,15 +463,67 @@ async fn each_operation_that_names_a_task_stops_one_whose_workflow_is_withdrawn(
             }
         }
 
-        let stopped = served
-            .as_token("alice|build,ask")
-            .result("GetTask", json!({"id": id}))
-            .await;
-        assert_eq!(
-            stopped["status"]["state"], "TASK_STATE_FAILED",
-            "{operation} left the task running: {stopped}"
+        assert_ne!(
+            state(&served, id).await,
+            "TASK_STATE_FAILED",
+            "{operation} with a narrower set stopped the task"
         );
         served.model.release();
+    }
+}
+
+#[tokio::test]
+async fn a_reply_without_the_tasks_workflow_stops_it() {
+    let served = serve(ScriptedEndpoint::start(true)).await;
+    let task = building(&served).await;
+    let id = task["id"].as_str().unwrap();
+
+    // A reply continues the work, so it carries only what is still allowed.
+    let mut reply = user_message("go on", None);
+    reply["taskId"] = json!(id);
+    let answered = served
+        .as_token("alice|ask")
+        .result("SendMessage", json!({"message": reply}))
+        .await["task"]
+        .clone();
+    assert_eq!(
+        answered["status"]["state"], "TASK_STATE_FAILED",
+        "{answered}"
+    );
+    assert!(
+        answered["status"]["message"]["parts"][0]["text"]
+            .as_str()
+            .unwrap()
+            .contains("`build`"),
+        "{answered}"
+    );
+    assert_eq!(state(&served, id).await, "TASK_STATE_FAILED");
+    served.model.release();
+}
+
+#[tokio::test]
+async fn a_cancel_stops_the_run_whatever_its_token_says_of_workflows() {
+    // Whoever started a task may always stop it, and a gateway that stops
+    // one for them sends the same request: a cancel is never judged against
+    // the token's workflows, and is never taken for a withdrawal.
+    for token in ["alice|build", "alice|ask"] {
+        let served = serve(ScriptedEndpoint::start(true)).await;
+        let task = building(&served).await;
+        let id = task["id"].as_str().unwrap();
+
+        let canceled = served
+            .as_token(token)
+            .result("CancelTask", json!({"id": id}))
+            .await;
+        served.model.release();
+        assert_ne!(
+            canceled["status"]["state"], "TASK_STATE_FAILED",
+            "a cancel carrying `{token}` was taken for a withdrawal: {canceled}"
+        );
+        served
+            .as_token("alice|build")
+            .wait_for(id, "TASK_STATE_CANCELED")
+            .await;
     }
 }
 

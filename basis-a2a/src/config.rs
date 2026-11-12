@@ -312,8 +312,8 @@ impl ServeConfig {
     /// Holds every request to the workflows it is allowed (see
     /// [`Workflows`]): the card's skills and its declared extension come
     /// from `workflows`, each run is built with only the allowed workflows'
-    /// tools and skills, and a task is stopped once a workflow it was built
-    /// with is no longer allowed its caller.
+    /// tools and skills, and a task is stopped once a `GetTask` or a reply
+    /// shows that a workflow it was built with has been withdrawn.
     ///
     /// The allowed set comes from the [`Authenticator`]
     /// ([`Principal::with_workflows`]); a server whose authenticator never
