@@ -7,7 +7,7 @@ Releases before 0.15.0 are described by their tags and ADRs only.
 
 ## 0.25.0 — unreleased
 
-Breaking: requires Mentra 0.35.0. `OpenError` gains `NoWorkflows`,
+Breaking: requires Mentra 0.36.0. `OpenError` gains `NoWorkflows`,
 `WorkflowId` and `SkillsBesideWorkflows`, so an exhaustive match needs
 updating. A child-policy roster override no longer reaches past an
 allow-listed parent's list.

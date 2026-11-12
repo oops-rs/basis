@@ -41,7 +41,7 @@ that a workflow it was built with has been withdrawn.**
 ### What a run is offered
 
 - mentra gains `AgentConfig::skill_profile` beside `tool_profile`, and
-  `Session::set_profiles` to replace both on a resumed session (mentra 0.35).
+  `Session::set_profiles` to replace both on a resumed session (mentra 0.36).
 - `RunProfile` gains `with_skill_roster` (`SkillRoster::All` or `only`).
   `Workspace::resume` no longer refuses a stated roster: the rosters a resumed
   run states replace the stored ones, in one persisted write made before
@@ -135,7 +135,7 @@ that a workflow it was built with has been withdrawn.**
   guarantee, not something checked here.
 - `Workflows` is opt-in. A server without it is unchanged, and ignores what a
   principal says of workflows.
-- mentra's `AgentConfig` gains a field and basis requires mentra 0.35.
+- mentra's `AgentConfig` gains a field and basis requires mentra 0.36.
 
 ## Verification
 

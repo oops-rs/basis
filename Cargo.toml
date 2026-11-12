@@ -278,10 +278,11 @@ basis-tasks = { version = "0.25.0", path = "basis-tasks" }
 # OpenAI-wire providers, which `with_request_fields` states (ADR-0047).
 # 0.34.6 fixes MCP write deadlines, Streamable HTTP session renewal, and
 # background task IDs across restarts. Its provider floor is 0.9.11.
-# 0.35.0 adds `AgentConfig::skill_profile` and `Session::set_profiles`, which
+# 0.36.0 adds `AgentConfig::skill_profile` and `Session::set_profiles`, which
 # `RunProfile::with_skill_roster` and a resume that restates its rosters are
-# built on, and `A2aError::HttpStatus::reply`.
-mentra = { version = "0.35.0", default-features = false }
+# built on, and `A2aError::HttpStatus::reply`. Its provider floor is 0.10.0,
+# as 0.35.0's is.
+mentra = { version = "0.36.0", default-features = false }
 
 async-trait = "0.1"
 # ACP carries an image in a prompt as base64; basis's `PromptPart` carries the
