@@ -5,6 +5,19 @@ All six crates — `basis`, `basis-host`, `basis-tasks`, `basis-acp`,
 live in `docs/adr/`; this file says what changed for someone upgrading.
 Releases before 0.15.0 are described by their tags and ADRs only.
 
+## 0.25.1 — 2026-11-16
+
+Additive. Requires Mentra 0.36.1.
+
+### A child policy can give a child more rounds
+
+- `ChildSpec::with_max_rounds` replaces the thirty model rounds mentra lets
+  a delegated child take. A child that reaches its limit fails and hands its
+  parent nothing, so a host whose children read a lot — a code reviewer
+  going through a large change file by file — raises it for those children.
+  The parent's deadline, cancellation and shared token budget still bind
+  the child. The approver's preview shows it as `child.max_rounds`.
+
 ## 0.25.0 — 2026-11-12
 
 Breaking: requires Mentra 0.36.0. `OpenError` gains `NoWorkflows`,
