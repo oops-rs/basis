@@ -462,6 +462,7 @@ async fn spawn_child(
         roster,
         model,
         system,
+        max_rounds,
     } = spec;
     let mut template = ctx.disposable_subagent_template();
     if let Some(roster) = roster {
@@ -525,6 +526,9 @@ async fn spawn_child(
     }
     if let Some(system) = system {
         template = template.with_system(system);
+    }
+    if let Some(max_rounds) = max_rounds {
+        template = template.with_max_rounds(max_rounds);
     }
 
     ctx.spawn_subagent_from(template).await

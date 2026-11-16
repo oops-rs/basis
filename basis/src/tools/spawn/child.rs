@@ -23,10 +23,13 @@
 //!
 //! # What a spec deliberately does not carry
 //!
-//! - **Bounds.** Deadline, budgets, cancellation and the provider-retry
-//!   schedule already ride `child_run_options`, which is what makes a child's
-//!   spend land on its parent's counter. A second spelling here would be a
-//!   second bounds system for one child.
+//! - **Shared bounds.** Deadline, budgets, cancellation and the
+//!   provider-retry schedule already ride `child_run_options`, which is what
+//!   makes a child's spend land on its parent's counter. A second spelling
+//!   here would be a second bounds system for one child. The one bound a
+//!   spec does carry, [`ChildSpec::with_max_rounds`], is not one of these:
+//!   it is fixed on the child agent itself when mentra mints it, counts only
+//!   that child's rounds, and nothing in `child_run_options` reaches it.
 //! - **An `Append` for the system prompt.** [`ChildSpec::with_system`]
 //!   replaces wholesale — the mapping onto mentra's
 //!   `DisposableSubagentTemplate::with_system`, which is itself
@@ -116,7 +119,8 @@ impl<'a> ChildContext<'a> {
     }
 }
 
-/// Which of a child's three inherited facts a policy overrides.
+/// Which of a child's inherited facts a policy overrides: its roster, model
+/// and voice, and how many rounds it may take.
 ///
 /// [`inherit`](Self::inherit) — every field unset — is today's behavior
 /// byte for byte: the child is spawned as a plain clone of its parent, on the
@@ -129,6 +133,7 @@ pub struct ChildSpec {
     pub(crate) roster: Option<ToolRoster>,
     pub(crate) model: Option<ModelInfo>,
     pub(crate) system: Option<String>,
+    pub(crate) max_rounds: Option<usize>,
 }
 
 impl ChildSpec {
@@ -231,10 +236,31 @@ impl ChildSpec {
         }
     }
 
+    /// Lets the child take `max_rounds` model rounds instead of mentra's
+    /// thirty.
+    ///
+    /// A child that reaches its limit fails with `max rounds exceeded` and
+    /// hands its parent nothing — whatever it had read is lost. Thirty suits
+    /// an errand; a child that reads a large change file by file needs more,
+    /// and this is how a policy says so for exactly those children. It
+    /// bounds the child's own rounds only: the parent's deadline,
+    /// cancellation and shared token budget still end it, whatever this
+    /// says. Zero is read as one, as mentra reads it.
+    #[must_use]
+    pub fn with_max_rounds(self, max_rounds: usize) -> Self {
+        Self {
+            max_rounds: Some(max_rounds.max(1)),
+            ..self
+        }
+    }
+
     /// Whether this spec changes nothing — the answer that keeps the
     /// delegation on the plain, template-free spawn path.
     pub(crate) fn is_inherit(&self) -> bool {
-        self.roster.is_none() && self.model.is_none() && self.system.is_none()
+        self.roster.is_none()
+            && self.model.is_none()
+            && self.system.is_none()
+            && self.max_rounds.is_none()
     }
 
     /// The `child` key of the approver's preview, or `None` when there is
@@ -246,8 +272,8 @@ impl ChildSpec {
     /// rule was written against. When present, it describes what the child
     /// *will be*, which is what a rule about delegation wants to match:
     /// `roster` as `{"offered": [..]}` for an allow-list or `{"hidden": [..]}`
-    /// for a denylist, `model` as `{"id": .., "provider": ..}`, `system` as
-    /// the word `"replaced"` — never the text, because a preview travels
+    /// for a denylist, `model` as `{"id": .., "provider": ..}`, `max_rounds`
+    /// as the number, `system` as the word `"replaced"` — never the text, because a preview travels
     /// further than a glance and a system prompt can carry anything the host
     /// knows.
     ///
@@ -286,6 +312,9 @@ impl ChildSpec {
         if self.system.is_some() {
             child.insert("system".to_string(), json!("replaced"));
         }
+        if let Some(max_rounds) = self.max_rounds {
+            child.insert("max_rounds".to_string(), json!(max_rounds));
+        }
 
         Some(Value::Object(child))
     }
@@ -299,6 +328,14 @@ pub(crate) type ChildPolicy = Arc<dyn Fn(&ChildContext<'_>) -> ChildSpec + Send 
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn max_rounds_alone_is_an_override_and_is_described() {
+        let spec = ChildSpec::inherit().with_max_rounds(120);
+        assert!(!spec.is_inherit());
+        assert_eq!(spec.preview_value(), Some(json!({ "max_rounds": 120 })));
+        assert_eq!(ChildSpec::inherit().with_max_rounds(0).max_rounds, Some(1));
+    }
 
     #[test]
     fn inherit_says_nothing_to_the_approver() {

@@ -1176,3 +1176,46 @@ async fn a_child_of_a_child_still_sees_one_door() {
         );
     }
 }
+
+/// A child the policy gave more rounds takes them, and one it gave fewer
+/// stops at them: the override reaches the agent mentra mints, not only the
+/// preview. mentra's own default is thirty, which a scripted child cannot
+/// usefully exhaust, so both directions are shown against small numbers.
+#[tokio::test]
+async fn a_childs_rounds_are_what_the_policy_said() {
+    fn reading_child() -> Vec<Turn> {
+        let read = |id: &str| Turn::calling_tool(id, "read", json!({ "path": "missing.txt" }));
+        vec![
+            read("r-0"),
+            read("r-1"),
+            read("r-2"),
+            Turn::saying("read it all"),
+        ]
+    }
+    for (rounds, asked) in [(2, 2), (4, 4)] {
+        let workspace = tempfile::tempdir().expect("tempdir");
+        let (runtime, parent, cheap) = runtime(
+            workspace.path(),
+            vec![
+                Turn::calling("call-0", "triage: read the change"),
+                Turn::saying("parent done"),
+            ],
+            reading_child(),
+            move |child: &ChildContext<'_>| triage_policy(child).with_max_rounds(rounds),
+        );
+        let run = drive(workspace.path(), &runtime, TurnOptions::default()).await;
+
+        assert_eq!(
+            cheap.all().len(),
+            asked,
+            "a child given {rounds} rounds asks {asked} times"
+        );
+        assert_eq!(parent.all().len(), 2, "the parent finishes either way");
+        assert_eq!(run.stopped_by, None, "a child's limit is not the parent's");
+        assert_eq!(
+            run.asked[0].input["child"]["max_rounds"],
+            json!(rounds),
+            "the approver is told how many rounds the child gets"
+        );
+    }
+}
