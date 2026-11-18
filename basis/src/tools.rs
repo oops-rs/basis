@@ -53,6 +53,10 @@
 //! it is complete enough to write a real tool against, not a guess at what
 //! one might need.
 
+// Exercised privately until mentra#72 makes nested dispatch available to
+// the active turn. A build alone must never grant access to the registry.
+#[cfg(all(feature = "code-mode", test))]
+mod code_mode;
 pub mod declared;
 pub(crate) mod host;
 pub mod spawn;

@@ -25,6 +25,7 @@ categories = ["development-tools"]
 [features]
 default = ["mcp", "a2a"]
 mcp = []
+code-mode = ["dep:rquickjs"]
 # A2A is the agent-to-agent binding (ADR-0028) and sits beside `mcp` for the
 # same reason: one convention (`.basis/a2a.json`, the global `a2a.json`), one
 # adapter, droppable at compile time. Default-on so the file means the same
@@ -54,6 +55,7 @@ a2a = ["mentra/a2a", "dep:chrono"]
 responses-websocket = ["mentra/responses-websocket"]
 
 [dependencies]
+rquickjs = { version = "0.14", features = ["futures"], optional = true }
 mentra.workspace = true
 # The hops extension's deadline is RFC 3339 on the wire (ADR-0030 §9); chrono
 # is already in the tree through `a2a-lf`'s own types.
