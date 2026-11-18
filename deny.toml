@@ -41,3 +41,5 @@ deny = []
 unknown-registry = "deny"
 unknown-git = "deny"
 allow-registry = ["https://github.com/rust-lang/crates.io-index"]
+# ADR-0051 uses the pinned nested-dispatch revision until the registry release.
+allow-git = ["https://github.com/oops-rs/mentra"]

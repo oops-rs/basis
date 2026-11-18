@@ -3,7 +3,7 @@
 //! it can borrow the live turn across an await. No tool executor lives here.
 
 use std::{
-    ops::ControlFlow,
+    future::Future,
     sync::Arc,
     time::{Duration, Instant},
 };
@@ -17,6 +17,9 @@ use serde_json::Value;
 use tokio::sync::{Semaphore, mpsc, oneshot, watch};
 
 type Result<T> = std::result::Result<T, String>;
+
+mod binding;
+pub(crate) use binding::CodeTool;
 
 const HEAP_BYTES: usize = 32 * 1024 * 1024;
 const SOURCE_BYTES: usize = 256 * 1024;
@@ -34,61 +37,41 @@ struct Call {
 /// Runs on a blocking worker because pure JS can spin without yielding.
 /// Only the owning async task drives tool calls. Dropping that task drops its
 /// dispatch future and closes the stop channel for both busy and idle JS.
-async fn evaluate<Stop>(
+async fn evaluate<F: Future<Output = ()>>(
     source: String,
     names: Vec<String>,
-    dispatch: impl AsyncFnMut(String, Value) -> ControlFlow<Stop, Result<ToolResultContent>>,
-) -> ControlFlow<Stop, Result<Value>> {
-    evaluate_with_timeout(source, names, dispatch, WALL_TIME).await
+    drive: impl FnOnce(mpsc::Receiver<Call>) -> F,
+) -> Result<Value> {
+    evaluate_with_timeout(source, names, drive, WALL_TIME).await
 }
 
-async fn evaluate_with_timeout<Stop>(
+async fn evaluate_with_timeout<F: Future<Output = ()>>(
     source: String,
     names: Vec<String>,
-    mut dispatch: impl AsyncFnMut(String, Value) -> ControlFlow<Stop, Result<ToolResultContent>>,
+    drive: impl FnOnce(mpsc::Receiver<Call>) -> F,
     timeout: Duration,
-) -> ControlFlow<Stop, Result<Value>> {
+) -> Result<Value> {
     if source.len() > SOURCE_BYTES {
-        return ControlFlow::Continue(Err(format!("code source exceeds {SOURCE_BYTES} bytes")));
+        return Err(format!("code source exceeds {SOURCE_BYTES} bytes"));
     }
 
     let deadline = Instant::now() + timeout;
     let (keep_running, stop) = watch::channel(());
-    let (sender, mut calls) = mpsc::channel::<Call>(1);
+    let (sender, calls) = mpsc::channel::<Call>(1);
     let handle = tokio::runtime::Handle::current();
     let mut worker = tokio::task::spawn_blocking(move || {
         handle.block_on(run(source, names, sender, stop, deadline))
     });
     let execution = async {
-        let drive = async {
-            while let Some(call) = calls.recv().await {
-                match dispatch(call.name, call.arguments).await {
-                    ControlFlow::Continue(result) => {
-                        let _ = call.reply.send(result);
-                    }
-                    ControlFlow::Break(stop) => return Some(stop),
-                }
-            }
-            None
-        };
-        let outcome = tokio::select! {
-            biased;
-            // A terminal child outcome wins even if JS finished in the meantime.
-            stop = drive => match stop {
-                Some(stop) => return ControlFlow::Break(stop),
-                None => (&mut worker).await,
-            },
+        tokio::select! {
             result = &mut worker => result,
-        };
-        ControlFlow::Continue(
-            outcome.unwrap_or_else(|error| Err(format!("JavaScript worker: {error}"))),
-        )
+            () = drive(calls) => (&mut worker).await,
+        }
+        .map_err(|error| format!("JavaScript worker: {error}"))?
     };
     let result = tokio::time::timeout_at(deadline.into(), execution).await;
     drop(keep_running);
-    result.unwrap_or_else(|_| {
-        ControlFlow::Continue(Err("JavaScript evaluation timed out".to_string()))
-    })
+    result.map_err(|_| "JavaScript evaluation timed out".to_owned())?
 }
 
 async fn run(

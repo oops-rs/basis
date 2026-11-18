@@ -19,6 +19,8 @@
 //! second, third and fourth `tests/*.rs` would each compile and link their own
 //! copy of the scripted-provider harness below.
 
+#[cfg(feature = "code-mode")]
+mod code_mode;
 mod interrupted;
 mod scoped_rules;
 mod side_effect_classification;

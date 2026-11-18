@@ -1,23 +1,21 @@
-use std::{convert::Infallible, ops::ControlFlow, time::Duration};
+use std::time::Duration;
 
 use mentra::tool::ToolResultContent;
 use serde_json::{Value, json};
 
-use super::{Result, evaluate_with_timeout};
+use super::Result;
 
 async fn evaluate(
     source: String,
     names: Vec<String>,
     mut dispatch: impl AsyncFnMut(String, Value) -> Result<ToolResultContent>,
 ) -> Result<Value> {
-    match super::evaluate::<Infallible>(source, names, async |name, args| {
-        ControlFlow::Continue(dispatch(name, args).await)
+    super::evaluate(source, names, |mut calls| async move {
+        while let Some(call) = calls.recv().await {
+            let _ = call.reply.send(dispatch(call.name, call.arguments).await);
+        }
     })
     .await
-    {
-        ControlFlow::Continue(result) => result,
-        ControlFlow::Break(never) => match never {},
-    }
 }
 
 #[tokio::test]
@@ -133,45 +131,28 @@ async fn returning_with_an_unfinished_call_cannot_report_success() {
 }
 
 #[tokio::test]
-async fn a_turn_stop_never_becomes_a_catchable_js_error() {
-    let mut calls = Vec::new();
-    let outcome = super::evaluate(
-        "try { await tools.first({}) } catch (_) {} return await tools.later({})".into(),
-        vec!["first".into(), "later".into()],
-        async |name, _| {
-            calls.push(name);
-            ControlFlow::Break("terminal")
-        },
-    )
-    .await;
-    assert_eq!(outcome, ControlFlow::Break("terminal"));
-    assert_eq!(calls, ["first"]);
-}
-
-#[tokio::test]
 async fn timeouts_stop_busy_idle_and_waiting_scripts() {
     for source in [
         "while (true) {}",
         "await new Promise(() => {})",
         "await tools.wait({})",
     ] {
-        let result = evaluate_with_timeout(
+        let result = super::evaluate_with_timeout(
             source.into(),
             vec!["wait".into()],
-            async |_, _| std::future::pending::<ControlFlow<(), Result<ToolResultContent>>>().await,
+            |_calls| std::future::pending(),
             Duration::from_millis(40),
         )
         .await;
-        assert!(matches!(result, ControlFlow::Continue(Err(_))), "{source}");
+        assert!(result.is_err(), "{source}");
     }
 }
 
 #[tokio::test]
 async fn a_script_must_return_bounded_json() {
     for source in ["return 1n", "return 'x'.repeat(1024 * 1024)"] {
-        let result =
-            super::evaluate::<()>(source.into(), vec![], async |_, _| unreachable!()).await;
-        assert!(matches!(result, ControlFlow::Continue(Err(_))), "{source}");
+        let result = evaluate(source.into(), vec![], async |_, _| unreachable!()).await;
+        assert!(result.is_err(), "{source}");
     }
 }
 
@@ -188,7 +169,7 @@ async fn dropping_the_evaluation_drops_a_pending_tool_and_skips_its_continuation
     let task = tokio::spawn(async move {
         let mut started = Some(started);
         let mut held_by_call = Some(held_by_call);
-        super::evaluate::<()>(
+        evaluate(
             "await tools.wait({}); await tools.later({})".into(),
             vec!["wait".into(), "later".into()],
             async move |_, _| {

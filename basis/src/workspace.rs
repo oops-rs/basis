@@ -307,7 +307,7 @@ impl Workspace {
             .runtime
             .agents()
             .record_for_workspace(session.agent_id(), tools);
-        let remote_spawn = self.teach(&mut session);
+        let remote_spawn = self.teach(&mut session, &spec.profile);
         if !spec.profile.decides_reasoning() {
             apply_effort(&mut session, spec.effort.or(self.effort))?;
         }
@@ -408,7 +408,7 @@ impl Workspace {
             .runtime
             .agents()
             .record_for_workspace(agent_id, self.resumed_tools(&session));
-        let remote_spawn = self.teach(&mut session);
+        let remote_spawn = self.teach(&mut session, &spec.profile);
         let model = if let Some(model) = spec.profile.resolved_model() {
             session.set_model(model.clone())?;
             model.id.clone()
@@ -795,7 +795,11 @@ impl Workspace {
     ///
     /// Returns the copy, for `PreparedRun::with_remote_conversations` to
     /// register again bound to a host's key.
-    fn teach(&self, session: &mut Session) -> SpawnTool {
+    fn teach(&self, session: &mut Session, _profile: &RunProfile) -> SpawnTool {
+        #[cfg(feature = "code-mode")]
+        if _profile.code_mode {
+            session.register_tool(crate::tools::code_mode::CodeTool);
+        }
         let copy = self
             .runtime
             .spawn_tool()

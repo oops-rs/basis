@@ -27,6 +27,8 @@ use super::{SkillRoster, ToolRoster};
 /// complete contract, while `effort` is its compatibility fallback.
 #[derive(Clone, Default, PartialEq, Eq)]
 pub struct RunProfile {
+    #[cfg(feature = "code-mode")]
+    pub(super) code_mode: bool,
     resolved_model: Option<ModelInfo>,
     tool_roster: Option<ToolRoster>,
     skill_roster: Option<SkillRoster>,
@@ -45,7 +47,10 @@ pub struct RunProfile {
 /// neither payload belongs in logs.
 impl std::fmt::Debug for RunProfile {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        f.debug_struct("RunProfile")
+        let mut profile = f.debug_struct("RunProfile");
+        #[cfg(feature = "code-mode")]
+        profile.field("code_mode", &self.code_mode);
+        profile
             .field(
                 "resolved_model",
                 &self
@@ -92,6 +97,19 @@ impl RunProfile {
     pub fn with_resolved_model(self, model: ModelInfo) -> Self {
         Self {
             resolved_model: Some(model),
+            ..self
+        }
+    }
+
+    /// Offers the JavaScript `code` tool to this live run, subject to its
+    /// tool roster. An exact allow-list must include `code`. Each child call
+    /// uses the same turn's tool permissions, hooks and limits. Opt in again
+    /// on resume if the new run should offer it.
+    #[cfg(feature = "code-mode")]
+    #[must_use]
+    pub fn with_code_mode(self) -> Self {
+        Self {
+            code_mode: true,
             ..self
         }
     }

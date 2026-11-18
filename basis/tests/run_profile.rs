@@ -861,3 +861,45 @@ async fn resume_validates_profile_provider_before_session_lookup() {
     assert_eq!(provider.listings(), 0);
     assert_eq!(provider.streams(), 0);
 }
+
+#[cfg(feature = "code-mode")]
+#[tokio::test]
+async fn code_mode_is_local_to_each_mint_or_resume_and_respects_the_roster() {
+    let root = tempfile::tempdir().unwrap();
+    let provider = CapturingProvider::default();
+    let workspace = builder(root.path(), provider.clone()).open().await.unwrap();
+    let enabled = || RunSpec::new("probe").with_profile(RunProfile::new().with_code_mode());
+    let mut run = workspace.prepare(enabled()).unwrap();
+    let id = run.agent_id().to_owned();
+    let mut sibling = workspace.prepare("probe").unwrap();
+    run.execute_with_approver(CollectingSink::default(), AllowAll)
+        .await
+        .unwrap();
+    sibling
+        .execute_with_approver(CollectingSink::default(), AllowAll)
+        .await
+        .unwrap();
+    drop(run);
+    for spec in [
+        RunSpec::new("probe"),
+        enabled(),
+        RunSpec::new("probe").with_profile(
+            RunProfile::new()
+                .with_code_mode()
+                .with_tool_roster(ToolRoster::only(["read"])),
+        ),
+    ] {
+        workspace
+            .resume(&id, spec)
+            .unwrap()
+            .execute_with_approver(CollectingSink::default(), AllowAll)
+            .await
+            .unwrap();
+    }
+    let offered: Vec<_> = provider
+        .requests()
+        .iter()
+        .map(|request| request.tools.iter().any(|name| name == "code"))
+        .collect();
+    assert_eq!(offered, [true, false, false, true, false]);
+}
