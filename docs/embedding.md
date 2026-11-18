@@ -248,6 +248,52 @@ wrappers. When a turn fails, `RunReport::failure` retains the original typed Men
 recoverability category before `RunOutcome` projects it to display/wire text; callers do not
 parse that text to decide whether to retry.
 
+### Code Mode for one run
+
+Enable the `code-mode` Cargo feature on the `basis` dependency. QuickJS-NG is
+embedded in the host binary. The host opts in when preparing a run.
+
+```rust
+use basis::{RunProfile, RunSpec, ToolRoster};
+
+let profile = RunProfile::new()
+    .with_code_mode()
+    .with_tool_roster(ToolRoster::only(["code", "read"]));
+let run = workspace.prepare(RunSpec::new("Find the documented test command").with_profile(profile))?;
+```
+
+The roster override in this example is optional. An explicit allow-list must
+include `code` and the tools the script needs. The registration belongs to the
+live agent. Pass the option again to `Workspace::resume` to offer it there.
+
+The model calls `code` with one string field, `source`, containing the body of
+an async function. This script reads the contribution guide only when the README links to it.
+
+```js
+const readme = await tools.read({path: "README.md"});
+if (!readme.includes("CONTRIBUTING.md")) return [];
+
+const guide = await tools.read({path: "CONTRIBUTING.md"});
+return guide.split("\n").filter(line => line.includes("cargo test"));
+```
+
+Use the advertised names and input schemas for native tools, declared programs
+and connected MCP servers, including `tools["mcp__<server>__<tool>"](args)`.
+Text results are strings. Use `JSON.parse` when a tool documents JSON text.
+Structured results arrive as JavaScript values. Return a JSON-serializable
+value to the model. An omitted return yields `null`.
+
+Every invocation starts fresh. Await each call before returning. The dispatcher
+runs child calls one at a time and applies the same hooks, approvals and tool
+budget as direct calls. The outer call also spends one tool call. A refused
+child rejects its promise. A terminal child result or turn stop ends the
+evaluation. The model receives the selected result and the journal records
+the child calls.
+
+One evaluation allows 120 seconds including tool waits, a 32 MiB JavaScript
+heap, 256 KiB of source, up to 16 pending calls, and 1 MiB of serialized JSON
+per argument object or returned value. The run can impose tighter bounds.
+
 ### Lossless in-process observation
 
 The summary-oriented `basis::Event` and JSONL surfaces intentionally omit complete tool bodies. A

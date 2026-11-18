@@ -226,6 +226,7 @@ println!("{}", second_turn.final_message.unwrap_or_default());
 
 ### Feature Flags
 
+- **`code-mode`** (opt-in) lets an SDK host offer JavaScript tool calls to an individual run with `RunProfile::with_code_mode()`. See [Code Mode in the SDK](docs/embedding.md#code-mode-for-one-run).
 - **`mcp`** (*default*): Model Context Protocol support (`.mcp.json` discovery and client connections). Disable via `default-features = false` for environments requiring no MCP footprint.
 - **`a2a`** (*default*): Agent-to-Agent client support (`.basis/a2a.json` discovery and remote delegation).
 

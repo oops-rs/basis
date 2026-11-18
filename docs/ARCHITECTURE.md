@@ -536,6 +536,11 @@ flowchart LR
   call reads and then answers, and what it trades away is the forcing, since nothing makes
   a working turn stop and answer. Neither is right for the other's job, so the choice sits
   on the spec rather than in a default.
+- **A run may compose its tools in JavaScript** ([ADR-0051](adr/0051-a-run-may-compose-its-tools-in-javascript.md)).
+  The optional `code-mode` feature supplies the evaluator. `RunProfile::with_code_mode()`
+  registers `code` on that live agent at mint or resume. The evaluator yields computed
+  arguments to mentra's active turn dispatcher. Child calls keep their own approvals,
+  events and budget charges. Their reviewed values are local to the script until it returns.
 - **Sessions**: an ACP session *is* a mentra agent — basis uses the persisted agent id as the
   protocol's session id, so `session/load` is mentra's `Runtime::resume_session` and basis
   stores no mapping of its own (ADR-0007). A session outlives a turn, which is what makes

@@ -52,6 +52,9 @@
 //!
 //! # Features
 //!
+//! - **`code-mode`** (opt-in) lets a host offer `code` to an individual run
+//!   with `RunProfile::with_code_mode()`. Scripts compose that run's tools
+//!   through Mentra's dispatcher (ADR-0051).
 //! - **`mcp`** (default) — `.mcp.json` discovery and the MCP binding of the
 //!   tool contract. Built without it, the crate has no MCP concept at all: no
 //!   `McpConfig` on a run, no servers registered, and a run header that names
