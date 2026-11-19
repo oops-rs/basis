@@ -5,8 +5,18 @@ All six crates — `basis`, `basis-host`, `basis-tasks`, `basis-acp`,
 live in `docs/adr/`; this file says what changed for someone upgrading.
 Releases before 0.15.0 are described by their tags and ADRs only.
 
-## Unreleased
+## 0.27.0 — 2026-11-19
 
+Requires Mentra 0.38.0 and mentra-provider 0.11.0.
+
+- **Breaking Rust API change.** The re-exported `ModelInfo::created_at` field
+  now uses `Option<jiff::Timestamp>`. Existing model metadata and OAuth token
+  timestamps remain readable within Jiff's supported range. Instants outside
+  that range return a decode error.
+- Automatic compaction estimates images at 1,600 tokens each. When the
+  retained turn alone exceeds the threshold, the runtime waits for more
+  history to accumulate before compacting again. This release includes the
+  fixes from mentra 0.36.2 and 0.36.3.
 - The A2A server accepts request bodies up to 32 MiB, matching the dial
   gateway ([ADR-0052](docs/adr/0052-a-served-agent-accepts-32-mib.md)).
 
