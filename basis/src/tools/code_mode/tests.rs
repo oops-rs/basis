@@ -10,9 +10,11 @@ async fn evaluate(
     names: Vec<String>,
     mut dispatch: impl AsyncFnMut(String, Value) -> Result<ToolResultContent>,
 ) -> Result<Value> {
-    let drive = |mut calls: tokio::sync::mpsc::Receiver<super::Call>| async move {
-        while let Some(call) = calls.recv().await {
-            let _ = call.reply.send(dispatch(call.name, call.arguments).await);
+    let drive = |mut calls: tokio::sync::mpsc::Receiver<super::Batch>| async move {
+        while let Some(batch) = calls.recv().await {
+            for call in batch {
+                let _ = call.reply.send(dispatch(call.name, call.arguments).await);
+            }
         }
     };
     super::evaluate(source, names, drive, super::SCRIPT_TIME).await
@@ -137,9 +139,11 @@ async fn evaluate_with_slow_tool(source: &str, script_time: Duration) -> Result<
         source.into(),
         vec!["slow".into()],
         |mut calls| async move {
-            while let Some(call) = calls.recv().await {
-                tokio::time::sleep(SLOW_TOOL).await;
-                let _ = call.reply.send(Ok(ToolResultContent::text("done")));
+            while let Some(batch) = calls.recv().await {
+                for call in batch {
+                    tokio::time::sleep(SLOW_TOOL).await;
+                    let _ = call.reply.send(Ok(ToolResultContent::text("done")));
+                }
             }
         },
         script_time,
@@ -215,4 +219,39 @@ async fn dropping_the_evaluation_drops_a_pending_tool_and_skips_its_continuation
     // A pending call owns this sender; cancellation must drop it.
     assert!(dropped.await.is_err());
     assert_eq!(calls.load(Ordering::SeqCst), 1);
+}
+
+#[tokio::test]
+async fn calls_started_together_reach_the_owner_as_one_batch() {
+    let sizes = std::sync::Arc::new(std::sync::Mutex::new(Vec::new()));
+    let seen = sizes.clone();
+    let drive = |mut calls: tokio::sync::mpsc::Receiver<super::Batch>| async move {
+        while let Some(batch) = calls.recv().await {
+            seen.lock().unwrap().push(batch.len());
+            for call in batch {
+                let _ = call
+                    .reply
+                    .send(Ok(ToolResultContent::Structured(call.arguments)));
+            }
+        }
+    };
+    let output = super::evaluate(
+        r#"
+        const first = await tools.echo({n: 0});
+        const ids = [1, 2, 3];
+        const second = await Promise.all(ids.map(async n => {
+            const once = await tools.echo({n});
+            return tools.echo({n: once.n * 10});
+        }));
+        return [first.n, ...second.map(value => value.n)];
+        "#
+        .into(),
+        vec!["echo".into()],
+        drive,
+        super::SCRIPT_TIME,
+    )
+    .await
+    .unwrap();
+    assert_eq!(output, json!([0, 10, 20, 30]));
+    assert_eq!(*sizes.lock().unwrap(), [1, 3, 3]);
 }

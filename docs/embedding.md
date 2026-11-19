@@ -284,8 +284,12 @@ Structured results arrive as JavaScript values. Return a JSON-serializable
 value to the model. An omitted return yields `null`.
 
 Every invocation starts fresh. Await each call before returning. The dispatcher
-runs child calls one at a time and applies the same hooks, approvals and tool
-budget as direct calls. The outer call also spends one tool call. A refused
+applies the same hooks, approvals and tool budget as direct calls. Calls a
+script starts together, as `Promise.all` over a `map` does, are dispatched as
+the calls of one model response are: adjacent read-only tools run in parallel,
+and every other tool runs alone, in order. A blocking `spawn` is such a tool,
+so a script that wants delegations to overlap starts them with
+`background: true` and collects them with `wait`, as a direct caller does. The outer call also spends one tool call. A refused
 child rejects its promise. A terminal child result or turn stop ends the
 evaluation. The model receives the selected result and the journal records
 the child calls.

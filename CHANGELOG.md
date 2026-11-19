@@ -13,6 +13,10 @@ Releases before 0.15.0 are described by their tags and ADRs only.
   a call in progress
   ([ADR-0051](docs/adr/0051-a-run-may-compose-its-tools-in-javascript.md)).
 - `RunProfile::with_code_script_time` sets that limit for one run.
+- Calls a Code Mode script starts together, as with `Promise.all`, run as the
+  calls of one model response do. Read-only tools run in parallel. Other
+  tools, blocking `spawn` included, still run one at a time. Needs mentra's
+  `ToolContext::invoke_children`, not yet released.
 
 ## 0.27.0 — 2026-11-19
 

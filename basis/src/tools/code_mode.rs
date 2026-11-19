@@ -137,13 +137,17 @@ struct Call {
     reply: oneshot::Sender<Result<ToolResultContent>>,
 }
 
+/// Calls a script starts in one synchronous stretch, as `Promise.all` over a
+/// `map` does, reach the owner as one batch so it can run them together.
+type Batch = Vec<Call>;
+
 /// Runs on a blocking worker because pure JS can spin without yielding.
 /// Only the owning async task drives tool calls. Dropping that task drops its
 /// dispatch future and closes the stop channel for both busy and idle JS.
 async fn evaluate<F: Future<Output = ()>>(
     source: String,
     names: Vec<String>,
-    drive: impl FnOnce(mpsc::Receiver<Call>) -> F,
+    drive: impl FnOnce(mpsc::Receiver<Batch>) -> F,
     script_time: Duration,
 ) -> Result<Value> {
     if source.len() > SOURCE_BYTES {
@@ -152,7 +156,7 @@ async fn evaluate<F: Future<Output = ()>>(
 
     // Dropped with this future, which is how a stopped turn stops the worker.
     let (_keep_running, stop) = watch::channel(());
-    let (sender, calls) = mpsc::channel::<Call>(1);
+    let (sender, calls) = mpsc::channel::<Batch>(1);
     let handle = tokio::runtime::Handle::current();
     let mut worker = tokio::task::spawn_blocking(move || {
         handle.block_on(run(source, names, sender, stop, Clock::new(script_time)))
@@ -167,7 +171,7 @@ async fn evaluate<F: Future<Output = ()>>(
 async fn run(
     source: String,
     names: Vec<String>,
-    sender: mpsc::Sender<Call>,
+    sender: mpsc::Sender<Batch>,
     mut stop: watch::Receiver<()>,
     clock: Arc<Clock>,
 ) -> Result<Value> {
@@ -188,6 +192,7 @@ async fn run(
         async {
             let tools = Object::new_proto(ctx.clone(), None)?;
             let slots = Arc::new(Semaphore::new(MAX_PENDING_CALLS));
+            let started = Arc::new(Mutex::new(Batch::new()));
             for name in names {
                 if name != "code" {
                     tools.set(
@@ -196,6 +201,7 @@ async fn run(
                             &ctx,
                             name.clone(),
                             sender.clone(),
+                            started.clone(),
                             slots.clone(),
                             calls.clone(),
                         )?,
@@ -250,7 +256,8 @@ async fn run(
 fn tool<'js>(
     ctx: &Ctx<'js>,
     name: String,
-    sender: mpsc::Sender<Call>,
+    sender: mpsc::Sender<Batch>,
+    started: Arc<Mutex<Batch>>,
     slots: Arc<Semaphore>,
     clock: Arc<Clock>,
 ) -> rquickjs::Result<Function<'js>> {
@@ -267,20 +274,26 @@ fn tool<'js>(
                 "tool arguments must be a JSON object",
             ));
         }
-        let name = name.clone();
+        let (reply, result) = oneshot::channel();
+        started.lock().expect("started calls poisoned").push(Call {
+            name: name.clone(),
+            arguments,
+            reply,
+        });
         let sender = sender.clone();
+        let started = started.clone();
         let outstanding = Outstanding::new(clock.clone(), slot);
+        // The engine polls this only after the script yields, so the first
+        // call to be polled sends every call started in the same stretch.
         Promise::wrap_future(&ctx.clone(), async move {
             let _outstanding = outstanding;
-            let (reply, result) = oneshot::channel();
-            sender
-                .send(Call {
-                    name,
-                    arguments,
-                    reply,
-                })
-                .await
-                .map_err(|_| Exception::throw_message(&ctx, "turn stopped"))?;
+            let batch = std::mem::take(&mut *started.lock().expect("started calls poisoned"));
+            if !batch.is_empty() {
+                sender
+                    .send(batch)
+                    .await
+                    .map_err(|_| Exception::throw_message(&ctx, "turn stopped"))?;
+            }
             let value = result
                 .await
                 .map_err(|_| Exception::throw_message(&ctx, "turn stopped"))?

@@ -48,3 +48,10 @@ calls, so one slow delegation expired the script and the expiry cancelled the
 remote task in flight. A child call already has the bounds of a direct call.
 The clock now counts only time with no child call outstanding, and expiry can
 no longer drop a call in progress.
+
+Amended 2026-11-19: child calls ran one at a time, so `Promise.all` over
+read-only tools was slower than the same calls written directly in one
+response. Calls a script starts in one synchronous stretch now reach mentra as
+one batch (`ToolContext::invoke_children`), which gives them the lanes of a
+response's calls. Exclusive tools, blocking delegation among them, still run
+one at a time. A run may also set its own script time.

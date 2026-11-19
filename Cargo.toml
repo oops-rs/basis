@@ -366,3 +366,9 @@ strip = true
 opt-level = "s"
 lto = true
 codegen-units = 1
+
+# Development only, dropped at release: Code Mode dispatches a script's
+# concurrent calls through `ToolContext::invoke_children`, which is on
+# mentra's `feat/invoke-children` branch and not yet published.
+[patch.crates-io]
+mentra = { path = "../mentra/mentra" }
