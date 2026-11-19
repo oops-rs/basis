@@ -5,6 +5,25 @@ All six crates — `basis`, `basis-host`, `basis-tasks`, `basis-acp`,
 live in `docs/adr/`; this file says what changed for someone upgrading.
 Releases before 0.15.0 are described by their tags and ADRs only.
 
+## 0.26.0 — 2026-11-19
+
+Adds opt-in Code Mode to the Rust SDK. Requires Mentra 0.37.0.
+
+- Enable the `code-mode` Cargo feature and call `RunProfile::with_code_mode()`
+  on a new or resumed run to offer the `code` tool. Default builds omit the
+  JavaScript engine.
+- A script can call the run's built-in, native, declared subprocess and MCP
+  tools with `await tools[name](args)`. Each child uses the active turn's
+  approvals, hooks, budget and cancellation. Intermediate results stay in the
+  script, which returns a value for the model to read.
+
+See [Code Mode for one run](docs/embedding.md#code-mode-for-one-run) for an example.
+
+The A2A dependency graph still includes `chrono`, which RustSec classifies as
+unmaintained. This release carries the existing advisory. The protocol-crate
+migration is tracked in [a2a-rs#562](https://github.com/a2aproject/a2a-rs/pull/562).
+See [RUSTSEC-2026-0543](https://rustsec.org/advisories/RUSTSEC-2026-0543.html).
+
 ## 0.25.1 — 2026-11-16
 
 Additive. Requires Mentra 0.36.1.
