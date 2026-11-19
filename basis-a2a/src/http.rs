@@ -38,10 +38,11 @@ use crate::{
     service::A2aService,
 };
 
-/// The largest request body accepted: 16 MiB, room for the files a caller
-/// sends (ADR-0041 §6) — 6 MiB from a basis caller, 8 once base64 — with the
-/// prompt, which `basis-tasks` bounds at 256 KiB, and the envelope.
-pub(crate) const MAX_BODY: usize = 16 * 1024 * 1024;
+/// The largest request body accepted: 32 MiB (ADR-0052), the bound of the
+/// dial gateway in front of served agents, so what a gateway passes on is not
+/// refused here. It holds the files a caller sends (ADR-0041 §6) once base64,
+/// with the prompt, which `basis-tasks` bounds at 256 KiB, and the envelope.
+pub(crate) const MAX_BODY: usize = 32 * 1024 * 1024;
 
 /// Why a server could not be bound.
 #[derive(Debug, thiserror::Error)]

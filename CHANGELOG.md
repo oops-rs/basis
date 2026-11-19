@@ -5,6 +5,11 @@ All six crates — `basis`, `basis-host`, `basis-tasks`, `basis-acp`,
 live in `docs/adr/`; this file says what changed for someone upgrading.
 Releases before 0.15.0 are described by their tags and ADRs only.
 
+## Unreleased
+
+- The A2A server accepts request bodies up to 32 MiB, matching the dial
+  gateway ([ADR-0052](docs/adr/0052-a-served-agent-accepts-32-mib.md)).
+
 ## 0.26.0 — 2026-11-19
 
 Adds opt-in Code Mode to the Rust SDK. Requires Mentra 0.37.0.
