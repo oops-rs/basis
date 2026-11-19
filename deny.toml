@@ -11,7 +11,11 @@ db-urls = ["https://github.com/rustsec/advisory-db"]
 # heads-up worth seeing but not a reason to fail a build on its own.
 version = 2
 yanked = "deny"
-ignore = []
+ignore = [
+    # Accepted for 0.26.0. Revisit before the next release or when a2a-lf
+    # publishes the timestamp migration in a2aproject/a2a-rs#562.
+    { id = "RUSTSEC-2026-0543", reason = "A2A timestamps require chrono directly and through a2a-lf. This is an unmaintained notice with no patched release." },
+]
 
 [licenses]
 version = 2
