@@ -130,22 +130,50 @@ async fn returning_with_an_unfinished_call_cannot_report_success() {
     assert!(result.unwrap_err().contains("await pending tool calls"));
 }
 
+const SLOW_TOOL: Duration = Duration::from_millis(300);
+
+async fn evaluate_with_slow_tool(source: &str, script_time: Duration) -> Result<Value> {
+    super::evaluate_within(
+        source.into(),
+        vec!["slow".into()],
+        |mut calls| async move {
+            while let Some(call) = calls.recv().await {
+                tokio::time::sleep(SLOW_TOOL).await;
+                let _ = call.reply.send(Ok(ToolResultContent::text("done")));
+            }
+        },
+        script_time,
+    )
+    .await
+}
+
 #[tokio::test]
-async fn timeouts_stop_busy_idle_and_waiting_scripts() {
+async fn script_time_stops_busy_and_idle_scripts() {
     for source in [
         "while (true) {}",
         "await new Promise(() => {})",
-        "await tools.wait({})",
+        "await tools.slow({}); while (true) {}",
+        "await tools.slow({}); await new Promise(() => {})",
     ] {
-        let result = super::evaluate_with_timeout(
-            source.into(),
-            vec!["wait".into()],
-            |_calls| std::future::pending(),
-            Duration::from_millis(40),
-        )
-        .await;
-        assert!(result.is_err(), "{source}");
+        let error = evaluate_with_slow_tool(source, Duration::from_millis(40))
+            .await
+            .unwrap_err();
+        assert!(error.contains("timed out"), "{source}: {error}");
     }
+}
+
+#[tokio::test]
+async fn time_inside_tool_calls_is_not_script_time() {
+    // Three calls in sequence, queued ones included, outlast the script's
+    // own allowance several times over.
+    let script_time = SLOW_TOOL / 2;
+    let output = evaluate_with_slow_tool(
+        "return await Promise.all([tools.slow({}), tools.slow({}), tools.slow({})])",
+        script_time,
+    )
+    .await
+    .unwrap();
+    assert_eq!(output, json!(["done", "done", "done"]));
 }
 
 #[tokio::test]

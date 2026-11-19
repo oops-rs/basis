@@ -5,6 +5,14 @@ All six crates — `basis`, `basis-host`, `basis-tasks`, `basis-acp`,
 live in `docs/adr/`; this file says what changed for someone upgrading.
 Releases before 0.15.0 are described by their tags and ADRs only.
 
+## Unreleased
+
+- Code Mode's 120-second limit counts only the script's own time. Time inside
+  a child tool call no longer counts, so a script can await a slow tool or a
+  delegation for as long as the run allows, and the limit can no longer cancel
+  a call in progress
+  ([ADR-0051](docs/adr/0051-a-run-may-compose-its-tools-in-javascript.md)).
+
 ## 0.27.0 — 2026-11-19
 
 Requires Mentra 0.38.0 and mentra-provider 0.11.0.

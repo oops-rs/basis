@@ -42,3 +42,9 @@ for QuickJS-NG, 0.31 MiB for Lua and 2.04 MiB for Rhai. These are standalone
 embedding measurements. Production acceptance compares direct and scripted calls
 on the same workload for effects, model rounds and model-visible results. The
 feature-off build should carry zero JavaScript engine dependencies.
+
+Amended 2026-11-19: the evaluator's 120-second clock counted time inside child
+calls, so one slow delegation expired the script and the expiry cancelled the
+remote task in flight. A child call already has the bounds of a direct call.
+The clock now counts only time with no child call outstanding, and expiry can
+no longer drop a call in progress.

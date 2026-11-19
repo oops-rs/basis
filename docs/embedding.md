@@ -290,9 +290,12 @@ child rejects its promise. A terminal child result or turn stop ends the
 evaluation. The model receives the selected result and the journal records
 the child calls.
 
-One evaluation allows 120 seconds including tool waits, a 32 MiB JavaScript
-heap, 256 KiB of source, up to 16 pending calls, and 1 MiB of serialized JSON
-per argument object or returned value. The run can impose tighter bounds.
+One evaluation allows 120 seconds of script time, a 32 MiB JavaScript heap,
+256 KiB of source, up to 16 pending calls, and 1 MiB of serialized JSON per
+argument object or returned value. Script time is the time with no tool call
+outstanding. A child call is bounded as a direct call is, by its own timeout
+and the run's deadline, budget and cancellation, so a script can wait on a
+delegation for as long as the run allows. The run can impose tighter bounds.
 
 ### Lossless in-process observation
 

@@ -4,7 +4,7 @@
 
 use std::{
     future::Future,
-    sync::Arc,
+    sync::{Arc, Mutex},
     time::{Duration, Instant},
 };
 
@@ -14,7 +14,7 @@ use rquickjs::{
     Value as JsValue,
 };
 use serde_json::Value;
-use tokio::sync::{Semaphore, mpsc, oneshot, watch};
+use tokio::sync::{Notify, OwnedSemaphorePermit, Semaphore, mpsc, oneshot, watch};
 
 type Result<T> = std::result::Result<T, String>;
 
@@ -26,7 +26,109 @@ const SOURCE_BYTES: usize = 256 * 1024;
 const JSON_BYTES: usize = 1024 * 1024;
 // Pending promises hold argument copies in Rust, outside the JS heap limit.
 const MAX_PENDING_CALLS: usize = 16;
-const WALL_TIME: Duration = Duration::from_secs(120);
+// The script's own time: running JavaScript, or idle with no tool call
+// outstanding. A tool call is bounded by what bounds it when called directly.
+const SCRIPT_TIME: Duration = Duration::from_secs(120);
+
+/// Counts the time a script spends with no tool call outstanding. Time inside
+/// a call belongs to that call and to the run's limits, so a slow tool cannot
+/// expire the script and expiry never drops a call in flight.
+struct Clock {
+    budget: Duration,
+    state: Mutex<ClockState>,
+    changed: Notify,
+}
+
+struct ClockState {
+    left: Duration,
+    outstanding: usize,
+    resumed: Instant,
+}
+
+impl Clock {
+    fn new(budget: Duration) -> Arc<Self> {
+        Arc::new(Self {
+            budget,
+            state: Mutex::new(ClockState {
+                left: budget,
+                outstanding: 0,
+                resumed: Instant::now(),
+            }),
+            changed: Notify::new(),
+        })
+    }
+
+    fn pause(&self) {
+        let mut state = self.state.lock().expect("script clock poisoned");
+        if state.outstanding == 0 {
+            state.left = state.left.saturating_sub(state.resumed.elapsed());
+        }
+        state.outstanding += 1;
+        drop(state);
+        self.changed.notify_one();
+    }
+
+    fn resume(&self) {
+        let mut state = self.state.lock().expect("script clock poisoned");
+        state.outstanding -= 1;
+        if state.outstanding == 0 {
+            state.resumed = Instant::now();
+        }
+        drop(state);
+        self.changed.notify_one();
+    }
+
+    /// When the running script expires, or `None` while a call is outstanding.
+    fn expiry(&self) -> Option<Instant> {
+        let state = self.state.lock().expect("script clock poisoned");
+        (state.outstanding == 0).then(|| state.resumed + state.left)
+    }
+
+    fn expired(&self) -> bool {
+        self.expiry().is_some_and(|at| Instant::now() >= at)
+    }
+
+    async fn wait_expired(&self) {
+        loop {
+            match self.expiry() {
+                Some(at) => tokio::select! {
+                    () = tokio::time::sleep_until(at.into()) => {}
+                    () = self.changed.notified() => {}
+                },
+                None => self.changed.notified().await,
+            }
+            if self.expired() {
+                return;
+            }
+        }
+    }
+
+    fn timed_out(&self) -> String {
+        format!(
+            "JavaScript evaluation timed out after {:?} outside tool calls",
+            self.budget
+        )
+    }
+}
+
+/// One outstanding tool call: a pending slot, and the script clock held still.
+struct Outstanding {
+    clock: Arc<Clock>,
+    _slot: OwnedSemaphorePermit,
+}
+
+impl Outstanding {
+    fn new(clock: Arc<Clock>, slot: OwnedSemaphorePermit) -> Self {
+        clock.pause();
+        Self { clock, _slot: slot }
+    }
+}
+
+impl Drop for Outstanding {
+    fn drop(&mut self) {
+        self.clock.resume();
+    }
+}
 
 struct Call {
     name: String,
@@ -42,36 +144,31 @@ async fn evaluate<F: Future<Output = ()>>(
     names: Vec<String>,
     drive: impl FnOnce(mpsc::Receiver<Call>) -> F,
 ) -> Result<Value> {
-    evaluate_with_timeout(source, names, drive, WALL_TIME).await
+    evaluate_within(source, names, drive, SCRIPT_TIME).await
 }
 
-async fn evaluate_with_timeout<F: Future<Output = ()>>(
+async fn evaluate_within<F: Future<Output = ()>>(
     source: String,
     names: Vec<String>,
     drive: impl FnOnce(mpsc::Receiver<Call>) -> F,
-    timeout: Duration,
+    script_time: Duration,
 ) -> Result<Value> {
     if source.len() > SOURCE_BYTES {
         return Err(format!("code source exceeds {SOURCE_BYTES} bytes"));
     }
 
-    let deadline = Instant::now() + timeout;
-    let (keep_running, stop) = watch::channel(());
+    // Dropped with this future, which is how a stopped turn stops the worker.
+    let (_keep_running, stop) = watch::channel(());
     let (sender, calls) = mpsc::channel::<Call>(1);
     let handle = tokio::runtime::Handle::current();
     let mut worker = tokio::task::spawn_blocking(move || {
-        handle.block_on(run(source, names, sender, stop, deadline))
+        handle.block_on(run(source, names, sender, stop, Clock::new(script_time)))
     });
-    let execution = async {
-        tokio::select! {
-            result = &mut worker => result,
-            () = drive(calls) => (&mut worker).await,
-        }
-        .map_err(|error| format!("JavaScript worker: {error}"))?
-    };
-    let result = tokio::time::timeout_at(deadline.into(), execution).await;
-    drop(keep_running);
-    result.map_err(|_| "JavaScript evaluation timed out".to_owned())?
+    tokio::select! {
+        result = &mut worker => result,
+        () = drive(calls) => (&mut worker).await,
+    }
+    .map_err(|error| format!("JavaScript worker: {error}"))?
 }
 
 async fn run(
@@ -79,16 +176,18 @@ async fn run(
     names: Vec<String>,
     sender: mpsc::Sender<Call>,
     mut stop: watch::Receiver<()>,
-    deadline: Instant,
+    clock: Arc<Clock>,
 ) -> Result<Value> {
     let runtime = AsyncRuntime::new().map_err(|error| error.to_string())?;
     runtime.set_memory_limit(HEAP_BYTES).await;
     let interrupt = stop.clone();
+    let running = clock.clone();
     runtime
         .set_interrupt_handler(Some(Box::new(move || {
-            interrupt.has_changed().is_err() || Instant::now() >= deadline
+            interrupt.has_changed().is_err() || running.expired()
         })))
         .await;
+    let calls = clock.clone();
     let context = AsyncContext::full(&runtime)
         .await
         .map_err(|error| error.to_string())?;
@@ -100,7 +199,13 @@ async fn run(
                 if name != "code" {
                     tools.set(
                         name.as_str(),
-                        tool(&ctx, name.clone(), sender.clone(), slots.clone())?,
+                        tool(
+                            &ctx,
+                            name.clone(),
+                            sender.clone(),
+                            slots.clone(),
+                            calls.clone(),
+                        )?,
                     )?;
                 }
             }
@@ -140,7 +245,11 @@ async fn run(
     });
 
     tokio::select! {
-        result = evaluation => result,
+        // An interrupted busy script fails here with the engine's own error.
+        result = evaluation => result.map_err(|error| {
+            if clock.expired() { clock.timed_out() } else { error }
+        }),
+        () = clock.wait_expired() => Err(clock.timed_out()),
         _ = stop.changed() => Err("JavaScript evaluation stopped".into()),
     }
 }
@@ -150,9 +259,10 @@ fn tool<'js>(
     name: String,
     sender: mpsc::Sender<Call>,
     slots: Arc<Semaphore>,
+    clock: Arc<Clock>,
 ) -> rquickjs::Result<Function<'js>> {
     Function::new(ctx.clone(), move |ctx: Ctx<'js>, args: JsValue<'js>| {
-        let permit = slots.clone().try_acquire_owned().map_err(|_| {
+        let slot = slots.clone().try_acquire_owned().map_err(|_| {
             Exception::throw_range(&ctx, "too many pending tool calls; await earlier calls")
         })?;
         // Snapshot at the point of invocation. JS can mutate the same object
@@ -166,8 +276,9 @@ fn tool<'js>(
         }
         let name = name.clone();
         let sender = sender.clone();
+        let outstanding = Outstanding::new(clock.clone(), slot);
         Promise::wrap_future(&ctx.clone(), async move {
-            let _permit = permit;
+            let _outstanding = outstanding;
             let (reply, result) = oneshot::channel();
             sender
                 .send(Call {
