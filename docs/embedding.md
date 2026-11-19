@@ -296,6 +296,7 @@ argument object or returned value. Script time is the time with no tool call
 outstanding. A child call is bounded as a direct call is, by its own timeout
 and the run's deadline, budget and cancellation, so a script can wait on a
 delegation for as long as the run allows. The run can impose tighter bounds.
+`RunProfile::with_code_script_time(duration)` replaces the 120 seconds.
 
 ### Lossless in-process observation
 

@@ -347,3 +347,25 @@ async fn the_outer_call_and_each_child_spend_the_same_tool_budget() {
     assert!(!dir.path().join("second").exists());
     assert!(!dir.path().join("third").exists());
 }
+
+#[tokio::test]
+async fn a_run_sets_its_own_script_time() {
+    let dir = tempfile::tempdir().unwrap();
+    let workspace = builder(dir.path(), "while (true) {}").open().await.unwrap();
+    let spec = RunSpec::new("run the script").with_profile(
+        RunProfile::new()
+            .with_code_mode()
+            .with_code_script_time(std::time::Duration::from_millis(50))
+            .with_tool_roster(ToolRoster::only(["code"])),
+    );
+    let mut prepared = workspace.prepare(spec).unwrap();
+    tokio::time::timeout(
+        NOT_STUCK,
+        prepared.execute_with_approver(CollectingSink::new(), AllowAll),
+    )
+    .await
+    .expect("the run's 50 ms ends the script, not the default 120 s")
+    .unwrap();
+    let history = serde_json::to_string(prepared.session().history()).unwrap();
+    assert!(history.contains("timed out after 50ms"), "{history}");
+}

@@ -12,6 +12,7 @@ Releases before 0.15.0 are described by their tags and ADRs only.
   delegation for as long as the run allows, and the limit can no longer cancel
   a call in progress
   ([ADR-0051](docs/adr/0051-a-run-may-compose-its-tools-in-javascript.md)).
+- `RunProfile::with_code_script_time` sets that limit for one run.
 
 ## 0.27.0 — 2026-11-19
 

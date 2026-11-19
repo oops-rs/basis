@@ -1,14 +1,27 @@
 //! A model-authored function runs inside one exclusive Mentra tool call.
 //! Only the turn dispatcher can resolve and execute the names it sees.
 
+use std::time::Duration;
+
 use async_trait::async_trait;
 use mentra::tool::{
     RuntimeToolDescriptor, ToolContext, ToolDefinition, ToolExecutionCategory, ToolExecutor,
     ToolOutput,
 };
 use serde_json::{Value, json};
+use tokio::sync::mpsc;
 
-pub(crate) struct CodeTool;
+pub(crate) struct CodeTool {
+    script_time: Duration,
+}
+
+impl CodeTool {
+    pub(crate) fn new(script_time: Option<Duration>) -> Self {
+        Self {
+            script_time: script_time.unwrap_or(super::SCRIPT_TIME),
+        }
+    }
+}
 
 impl ToolDefinition for CodeTool {
     fn descriptor(&self) -> RuntimeToolDescriptor {
@@ -45,7 +58,7 @@ impl ToolExecutor for CodeTool {
             .iter()
             .map(|spec| spec.name.clone())
             .collect();
-        let result = super::evaluate(source.to_owned(), names, |mut calls| async move {
+        let drive = |mut calls: mpsc::Receiver<super::Call>| async move {
             while let Some(call) = calls.recv().await {
                 let child = ctx.invoke_child(&call.name, call.arguments).await;
                 let answer = if child.is_error {
@@ -59,8 +72,8 @@ impl ToolExecutor for CodeTool {
                 };
                 let _ = call.reply.send(answer);
             }
-        })
-        .await?;
+        };
+        let result = super::evaluate(source.to_owned(), names, drive, self.script_time).await?;
         Ok(ToolOutput::structured(result))
     }
 }

@@ -29,6 +29,8 @@ use super::{SkillRoster, ToolRoster};
 pub struct RunProfile {
     #[cfg(feature = "code-mode")]
     pub(super) code_mode: bool,
+    #[cfg(feature = "code-mode")]
+    pub(super) code_script_time: Option<std::time::Duration>,
     resolved_model: Option<ModelInfo>,
     tool_roster: Option<ToolRoster>,
     skill_roster: Option<SkillRoster>,
@@ -49,7 +51,9 @@ impl std::fmt::Debug for RunProfile {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         let mut profile = f.debug_struct("RunProfile");
         #[cfg(feature = "code-mode")]
-        profile.field("code_mode", &self.code_mode);
+        profile
+            .field("code_mode", &self.code_mode)
+            .field("code_script_time", &self.code_script_time);
         profile
             .field(
                 "resolved_model",
@@ -110,6 +114,20 @@ impl RunProfile {
     pub fn with_code_mode(self) -> Self {
         Self {
             code_mode: true,
+            ..self
+        }
+    }
+
+    /// Replaces the 120 seconds of script time one `code` evaluation may
+    /// use. Script time is the time a script spends with no tool call
+    /// outstanding: running JavaScript, or waiting on something that is not a
+    /// tool. Time inside a child call is never counted. Has no effect unless
+    /// [`with_code_mode`](Self::with_code_mode) is also set.
+    #[cfg(feature = "code-mode")]
+    #[must_use]
+    pub fn with_code_script_time(self, script_time: std::time::Duration) -> Self {
+        Self {
+            code_script_time: Some(script_time),
             ..self
         }
     }

@@ -798,7 +798,9 @@ impl Workspace {
     fn teach(&self, session: &mut Session, _profile: &RunProfile) -> SpawnTool {
         #[cfg(feature = "code-mode")]
         if _profile.code_mode {
-            session.register_tool(crate::tools::code_mode::CodeTool);
+            session.register_tool(crate::tools::code_mode::CodeTool::new(
+                _profile.code_script_time,
+            ));
         }
         let copy = self
             .runtime

@@ -10,12 +10,12 @@ async fn evaluate(
     names: Vec<String>,
     mut dispatch: impl AsyncFnMut(String, Value) -> Result<ToolResultContent>,
 ) -> Result<Value> {
-    super::evaluate(source, names, |mut calls| async move {
+    let drive = |mut calls: tokio::sync::mpsc::Receiver<super::Call>| async move {
         while let Some(call) = calls.recv().await {
             let _ = call.reply.send(dispatch(call.name, call.arguments).await);
         }
-    })
-    .await
+    };
+    super::evaluate(source, names, drive, super::SCRIPT_TIME).await
 }
 
 #[tokio::test]
@@ -133,7 +133,7 @@ async fn returning_with_an_unfinished_call_cannot_report_success() {
 const SLOW_TOOL: Duration = Duration::from_millis(300);
 
 async fn evaluate_with_slow_tool(source: &str, script_time: Duration) -> Result<Value> {
-    super::evaluate_within(
+    super::evaluate(
         source.into(),
         vec!["slow".into()],
         |mut calls| async move {

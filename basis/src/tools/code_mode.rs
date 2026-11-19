@@ -26,8 +26,9 @@ const SOURCE_BYTES: usize = 256 * 1024;
 const JSON_BYTES: usize = 1024 * 1024;
 // Pending promises hold argument copies in Rust, outside the JS heap limit.
 const MAX_PENDING_CALLS: usize = 16;
-// The script's own time: running JavaScript, or idle with no tool call
-// outstanding. A tool call is bounded by what bounds it when called directly.
+// The script's own time unless the run sets another: running JavaScript, or
+// idle with no tool call outstanding. A tool call is bounded by what bounds
+// it when called directly.
 const SCRIPT_TIME: Duration = Duration::from_secs(120);
 
 /// Counts the time a script spends with no tool call outstanding. Time inside
@@ -140,14 +141,6 @@ struct Call {
 /// Only the owning async task drives tool calls. Dropping that task drops its
 /// dispatch future and closes the stop channel for both busy and idle JS.
 async fn evaluate<F: Future<Output = ()>>(
-    source: String,
-    names: Vec<String>,
-    drive: impl FnOnce(mpsc::Receiver<Call>) -> F,
-) -> Result<Value> {
-    evaluate_within(source, names, drive, SCRIPT_TIME).await
-}
-
-async fn evaluate_within<F: Future<Output = ()>>(
     source: String,
     names: Vec<String>,
     drive: impl FnOnce(mpsc::Receiver<Call>) -> F,
