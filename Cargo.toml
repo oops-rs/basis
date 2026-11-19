@@ -282,9 +282,8 @@ basis-tasks = { version = "0.25.1", path = "basis-tasks" }
 # `RunProfile::with_skill_roster` and a resume that restates its rosters are
 # built on, and `A2aError::HttpStatus::reply`. Its provider floor is 0.10.0,
 # as 0.35.0's is.
-# Code Mode uses the live-turn dispatcher introduced by mentra#72. The Git
-# revision pins the merge of PR #73 until a registry release contains that API.
-mentra = { version = "0.36.1", git = "https://github.com/oops-rs/mentra.git", rev = "4c73d7a12715a31292d270a8f12c16fd7c92c5e7", default-features = false }
+# 0.37 exposes the live-turn dispatcher used by Code Mode (ADR-0051).
+mentra = { version = "0.37.0", default-features = false }
 
 async-trait = "0.1"
 # ACP carries an image in a prompt as base64; basis's `PromptPart` carries the
