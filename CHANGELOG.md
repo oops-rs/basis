@@ -5,7 +5,9 @@ All six crates — `basis`, `basis-host`, `basis-tasks`, `basis-acp`,
 live in `docs/adr/`; this file says what changed for someone upgrading.
 Releases before 0.15.0 are described by their tags and ADRs only.
 
-## Unreleased
+## 0.27.1 — 2026-11-19
+
+Additive. Requires Mentra 0.38.1.
 
 - Code Mode's 120-second limit counts only the script's own time. Time inside
   a child tool call no longer counts, so a script can await a slow tool or a
@@ -15,8 +17,10 @@ Releases before 0.15.0 are described by their tags and ADRs only.
 - `RunProfile::with_code_script_time` sets that limit for one run.
 - Calls a Code Mode script starts together, as with `Promise.all`, run as the
   calls of one model response do. Read-only tools run in parallel. Other
-  tools, blocking `spawn` included, still run one at a time. Needs mentra's
-  `ToolContext::invoke_children`, not yet released.
+  tools, blocking `spawn` included, still run one at a time.
+- A `SKILL.md` whose frontmatter nests a block such as `metadata:`, or writes
+  a field as a block scalar such as `description: >`, loads. One such file
+  used to fail every run that reached its directory.
 
 ## 0.27.0 — 2026-11-19
 
