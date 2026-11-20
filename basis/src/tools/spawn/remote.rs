@@ -239,7 +239,7 @@ pub(super) fn delegate_in_background(
                 ))],
             }
         },
-    );
+    )?;
     Ok(started(Kind::Remote, name, Some(name), false))
 }
 
@@ -393,6 +393,15 @@ struct Hop {
     deadline: Option<SystemTime>,
 }
 
+/// The refusal for a new task to an agent still working on the last one
+/// this conversation handed it (ADR-0029 §5).
+pub(super) fn busy(name: &str) -> String {
+    format!(
+        "`{name}` is still working on the last task you handed it, and takes one task at a \
+         time; write `@{name}` alone to keep waiting for that one first"
+    )
+}
+
 /// What this call sends, given where the conversation stands — or why it
 /// sends nothing.
 fn request(
@@ -412,10 +421,7 @@ fn request(
                 ..
             }),
             false,
-        ) => Err(format!(
-            "`{name}` is still working on the last task you handed it, and takes one task at a \
-             time; write `@{name}` alone to keep waiting for that one first"
-        )),
+        ) => Err(busy(name)),
         (Some(outstanding), false) => Ok(Request::Send(
             Message::new(body)
                 .in_context(conversation.context_id.clone())

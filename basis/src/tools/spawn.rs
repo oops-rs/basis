@@ -759,6 +759,17 @@ impl SpawnTool {
                             any: false,
                         });
                     }
+                    // A remote agent working in the background for this
+                    // agent takes no second task until that one is
+                    // collected (ADR-0029 §5): the conversation record learns
+                    // of a task only once the agent names it, so asks made
+                    // in quick succession would otherwise all be sent.
+                    if !spawn.body().is_empty()
+                        && let Some(children) = self.children_of(agent_id)
+                        && children.remote_running(name)
+                    {
+                        return Err(remote::busy(name));
+                    }
                     return self.decide_named(spawn, agent_id, name, resolve_workspace);
                 }
                 let depth = self.depth.authorize_delegation(agent_id)?;

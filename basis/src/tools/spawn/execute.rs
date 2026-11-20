@@ -392,7 +392,7 @@ pub(super) async fn delegate_in_background(
             let answer = Box::pin(child.run(vec![ContentBlock::text(prompt)], options)).await;
             delegation.settle(answer)
         },
-    );
+    )?;
     Ok(started(Kind::Subagent, &id, None, false))
 }
 
@@ -645,7 +645,7 @@ pub(super) async fn teammate(
                 drop(child);
                 delegation.settle(answer)
             },
-        );
+        )?;
         return Ok(started(Kind::Teammate, &child_id, Some(&name), made));
     }
 

@@ -179,6 +179,14 @@ impl Children {
             .map(|(id, _)| id.clone())
     }
 
+    /// Whether a remote agent is working in the background under `name`: a
+    /// new task to it would land in the conversation that task is in.
+    pub(super) fn remote_running(&self, name: &str) -> bool {
+        self.lock()
+            .get(name)
+            .is_some_and(|slot| slot.kind == Kind::Remote)
+    }
+
     /// Starts `work` under `id`: reserves the slot, spawns the task, and
     /// settles the slot when the task finishes.
     ///
@@ -187,6 +195,10 @@ impl Children {
     /// finishes before the handle is in place still finds its slot. `scope`
     /// is the host's [`TaskScope`], applied here — on the spawning task,
     /// before the spawn — to the future that runs `work`.
+    ///
+    /// A handle names one delegation: when `id` is already running, nothing
+    /// starts and the refusal says so, because replacing its slot would
+    /// leave that delegation's answer nowhere to arrive.
     pub(super) fn start(
         &self,
         scope: Option<&TaskScope>,
@@ -195,16 +207,25 @@ impl Children {
         kind: Kind,
         deferred: Deferred,
         work: impl Future<Output = Settled> + Send + 'static,
-    ) {
-        self.lock().insert(
-            id.clone(),
-            Slot {
-                name,
-                kind,
-                task: None,
-                claimed: false,
-            },
-        );
+    ) -> Result<(), String> {
+        {
+            let mut slots = self.lock();
+            if slots.contains_key(&id) {
+                return Err(format!(
+                    "`{id}` is already working in the background; write `@{id}` alone to wait \
+                     for it first"
+                ));
+            }
+            slots.insert(
+                id.clone(),
+                Slot {
+                    name,
+                    kind,
+                    task: None,
+                    claimed: false,
+                },
+            );
+        }
         let children = self.clone();
         let settled_id = id.clone();
         // The host wraps a future that yields nothing, so the result comes
@@ -236,6 +257,7 @@ impl Children {
         }
         // Else the task already settled and removed the slot; the handle is
         // dropped, which detaches a task that is finished anyway.
+        Ok(())
     }
 
     /// The task's own last act: deliver the result unless a wait has claimed
@@ -447,17 +469,19 @@ mod tests {
     async fn a_claimed_task_is_left_to_its_waiter() {
         let children = Children::default();
         let (tx, rx) = tokio::sync::oneshot::channel::<()>();
-        children.start(
-            None,
-            "child".to_string(),
-            None,
-            Kind::Subagent,
-            deferred(),
-            async move {
-                let _ = rx.await;
-                settled("the answer")
-            },
-        );
+        children
+            .start(
+                None,
+                "child".to_string(),
+                None,
+                Kind::Subagent,
+                deferred(),
+                async move {
+                    let _ = rx.await;
+                    settled("the answer")
+                },
+            )
+            .expect("starts");
         assert_eq!(children.running(), 1);
         assert_eq!(children.find("child").as_deref(), Some("child"));
 
@@ -480,16 +504,53 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn a_running_handle_is_never_replaced() {
+        let children = Children::default();
+        let (tx, rx) = tokio::sync::oneshot::channel::<()>();
+        children
+            .start(
+                None,
+                "nous".to_string(),
+                Some("nous".to_string()),
+                Kind::Remote,
+                deferred(),
+                async move {
+                    let _ = rx.await;
+                    settled("the first answer")
+                },
+            )
+            .expect("starts");
+        assert!(children.remote_running("nous"));
+
+        let refused = children.start(
+            None,
+            "nous".to_string(),
+            Some("nous".to_string()),
+            Kind::Remote,
+            deferred(),
+            async { panic!("a refused start runs nothing") },
+        );
+        assert!(refused.is_err(), "the second start is refused");
+
+        tx.send(()).expect("the first task is still waiting");
+        let claimed = children.claim("nous").expect("the first slot is intact");
+        let (_, _, _, settled) = claimed.settled().await;
+        assert_eq!(settled.outcome.as_deref(), Ok("the first answer"));
+    }
+
+    #[tokio::test]
     async fn a_released_handle_that_finished_meanwhile_is_handed_back() {
         let children = Children::default();
-        children.start(
-            None,
-            "quick".to_string(),
-            Some("q".to_string()),
-            Kind::Teammate,
-            deferred(),
-            async { settled("done") },
-        );
+        children
+            .start(
+                None,
+                "quick".to_string(),
+                Some("q".to_string()),
+                Kind::Teammate,
+                deferred(),
+                async { settled("done") },
+            )
+            .expect("starts");
         let claimed = children.claim("quick").expect("claims");
         // Let the task finish while it is claimed.
         tokio::task::yield_now().await;
@@ -506,17 +567,19 @@ mod tests {
     #[tokio::test]
     async fn join_all_waits_for_what_nobody_claimed() {
         let children = Children::default();
-        children.start(
-            None,
-            "a".to_string(),
-            None,
-            Kind::Subagent,
-            deferred(),
-            async {
-                tokio::time::sleep(std::time::Duration::from_millis(30)).await;
-                settled("a done")
-            },
-        );
+        children
+            .start(
+                None,
+                "a".to_string(),
+                None,
+                Kind::Subagent,
+                deferred(),
+                async {
+                    tokio::time::sleep(std::time::Duration::from_millis(30)).await;
+                    settled("a done")
+                },
+            )
+            .expect("starts");
         children.join_all().await;
         assert_eq!(
             children.running(),
@@ -550,21 +613,23 @@ mod tests {
         let report = Arc::clone(&seen);
         WHERE
             .scope("the parent's turn".to_string(), async {
-                children.start(
-                    Some(&scope),
-                    "child".to_string(),
-                    None,
-                    Kind::Subagent,
-                    deferred(),
-                    async move {
-                        *report.lock().expect("slot") = Some(
-                            WHERE
-                                .try_with(Clone::clone)
-                                .unwrap_or_else(|_| "unset".to_string()),
-                        );
-                        settled("done")
-                    },
-                );
+                children
+                    .start(
+                        Some(&scope),
+                        "child".to_string(),
+                        None,
+                        Kind::Subagent,
+                        deferred(),
+                        async move {
+                            *report.lock().expect("slot") = Some(
+                                WHERE
+                                    .try_with(Clone::clone)
+                                    .unwrap_or_else(|_| "unset".to_string()),
+                            );
+                            settled("done")
+                        },
+                    )
+                    .expect("starts");
             })
             .await;
         children.join_all().await;
@@ -579,14 +644,16 @@ mod tests {
     async fn a_scope_that_drops_the_work_is_reported_not_awaited() {
         let children = Children::default();
         let scope: TaskScope = Arc::new(|_future| Box::pin(async {}));
-        children.start(
-            Some(&scope),
-            "dropped".to_string(),
-            None,
-            Kind::Subagent,
-            deferred(),
-            async { settled("never") },
-        );
+        children
+            .start(
+                Some(&scope),
+                "dropped".to_string(),
+                None,
+                Kind::Subagent,
+                deferred(),
+                async { settled("never") },
+            )
+            .expect("starts");
         let claimed = children.claim("dropped").expect("claims");
         let (_, _, _, settled) = claimed.settled().await;
         assert_eq!(

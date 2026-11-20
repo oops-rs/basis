@@ -670,3 +670,146 @@ async fn a_host_task_scope_carries_the_parents_locals_into_a_background_child() 
         );
     }
 }
+
+/// A remote agent that answers every message after `delay`, keeping what it
+/// was handed: the words, and the conversation each continued.
+struct Remote {
+    delay: Duration,
+    handed: Mutex<Vec<(String, Option<String>)>>,
+}
+
+impl Remote {
+    fn new(delay: Duration) -> Arc<Self> {
+        Arc::new(Self {
+            delay,
+            handed: Mutex::new(Vec::new()),
+        })
+    }
+
+    fn handed(&self) -> Vec<(String, Option<String>)> {
+        self.handed.lock().unwrap().clone()
+    }
+}
+
+#[async_trait]
+impl basis::Peer for Remote {
+    async fn exchange(
+        &self,
+        request: basis::Request,
+        _bounds: &basis::ExchangeBounds<'_>,
+    ) -> Result<basis::Outcome, basis::PeerError> {
+        let basis::Request::Send(message) = request else {
+            panic!("nothing here waits on a task: {request:?}");
+        };
+        let n = {
+            let mut handed = self.handed.lock().unwrap();
+            handed.push((message.text.clone(), message.context_id.clone()));
+            handed.len()
+        };
+        tokio::time::sleep(self.delay).await;
+        Ok(basis::Outcome::Finished {
+            task_id: format!("task-{n}"),
+            context_id: Some(
+                message
+                    .context_id
+                    .clone()
+                    .unwrap_or_else(|| format!("context-{n}")),
+            ),
+            text: format!("the answer to {}", message.text),
+            files: Vec::new(),
+        })
+    }
+
+    fn max_output_bytes(&self) -> usize {
+        64 * 1024
+    }
+}
+
+/// A host's resolver that knows one remote agent, `nous`.
+struct OneAgent(Arc<Remote>);
+
+#[async_trait]
+impl basis::AgentResolver for OneAgent {
+    async fn resolve(&self, name: &str) -> Result<basis::Resolved, basis::Unresolved> {
+        if name != "nous" {
+            return Err(basis::Unresolved::Unknown);
+        }
+        Ok(basis::Resolved::new(
+            Arc::clone(&self.0) as Arc<dyn basis::Peer>,
+            "nous",
+            "test://nous",
+        ))
+    }
+
+    fn route(&self, name: &str) -> basis::Route {
+        if name == "nous" {
+            basis::Route::Known
+        } else {
+            basis::Route::Unknown
+        }
+    }
+}
+
+#[tokio::test]
+async fn a_second_ask_to_a_remote_agent_still_working_in_the_background_is_refused() {
+    let router = Router::new(|seen| {
+        if seen.last_text == "go" {
+            return now(Turn::calling(
+                "call-1",
+                json!({ "input": "@nous about ludo", "background": true }),
+            ));
+        }
+        if seen.result_of("call-1").is_some() {
+            return now(Turn::calling(
+                "call-2",
+                json!({ "input": "@nous about lama", "background": true }),
+            ));
+        }
+        if seen.result_of("call-2").is_some() {
+            return now(Turn::calling(
+                "call-3",
+                json!({ "input": "@nous about yoki" }),
+            ));
+        }
+        if seen.result_of("call-3").is_some() {
+            return now(Turn::calling("call-4", json!({ "wait": ["nous"] })));
+        }
+        if seen.result_of("call-4").is_some() {
+            return now(Turn::saying("done"));
+        }
+        panic!("an unexpected request: {seen:?}");
+    });
+    let remote = Remote::new(Duration::from_millis(200));
+    let dir = tempfile::tempdir().unwrap();
+    let workspace = pinned(dir.path(), runtime(&router, None))
+        .with_agent_resolver(Arc::new(OneAgent(Arc::clone(&remote))))
+        .open()
+        .await
+        .expect("opens");
+
+    let (events, answer) = drive(&workspace).await;
+
+    let results = results(&events);
+    assert_eq!(results.len(), 4, "{results:?}");
+    assert!(!results[0].0, "{}", results[0].1);
+    for (failed, refusal) in &results[1..3] {
+        assert!(failed, "{refusal}");
+        assert!(
+            refusal.contains("`nous` is still working on the last task you handed it")
+                && refusal.contains("`@nous`"),
+            "the refusal names what to wait on: {refusal}"
+        );
+    }
+    let (failed, collected) = &results[3];
+    assert!(!failed, "{collected}");
+    assert!(
+        collected.ends_with("the answer to about ludo"),
+        "the first ask's answer is the one the wait collects: {collected}"
+    );
+    assert_eq!(answer, "done");
+    assert_eq!(
+        remote.handed(),
+        [("about ludo".to_string(), None)],
+        "nothing but the first ask reached the agent"
+    );
+}
