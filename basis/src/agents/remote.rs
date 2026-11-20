@@ -56,6 +56,8 @@ pub(crate) struct RemoteAgents {
     /// Asked in order; the first answer other than *unknown* stands.
     resolvers: Vec<Arc<dyn AgentResolver>>,
     conversations: conversation::Book,
+    /// Side conversations (ADR-0053), apart from the remembered ones.
+    sides: conversation::Sides,
     /// The hop the work behind these delegations arrived at in a chain of
     /// agents, from the runtime ([`crate::Runtime::hop`]); every message sent is the
     /// next one.
@@ -73,6 +75,7 @@ impl RemoteAgents {
         Self {
             resolvers,
             conversations: conversation::Book::new(remembered_in),
+            sides: conversation::Sides::default(),
             hop: 0,
         }
     }
@@ -172,6 +175,26 @@ impl RemoteAgents {
     ) -> std::io::Result<()> {
         self.conversations
             .record(caller, id, conversation, remembered)
+    }
+}
+
+impl RemoteAgents {
+    /// Opens the next side conversation `caller` has with the agent it names
+    /// `name` (ADR-0053) and returns its number, from 2.
+    pub(crate) fn open_side(&self, caller: &str, name: &str) -> u32 {
+        self.sides.open(caller, name)
+    }
+
+    /// Where `caller`'s side conversation `n` with `name` stands, or `None`
+    /// when it never opened one.
+    pub(crate) fn side(&self, caller: &str, name: &str, n: u32) -> Option<Conversation> {
+        self.sides.get(caller, name, n)
+    }
+
+    /// Records where `caller`'s side conversation `n` with `name` stands
+    /// now. In memory only: a side conversation is never resumed.
+    pub(crate) fn record_side(&self, caller: &str, name: &str, n: u32, next: Conversation) {
+        self.sides.record(caller, name, n, next);
     }
 }
 

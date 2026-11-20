@@ -73,6 +73,62 @@ pub(crate) enum Waiting {
     Input,
 }
 
+/// Every calling agent's side conversations (ADR-0053), by the name the
+/// agent was asked under: numbered from 2, never renumbered, in memory only.
+///
+/// Apart from [`Book`] on purpose: a remembered agent's record is written
+/// whole, and a side conversation must never ride along into that file.
+#[derive(Default)]
+pub(super) struct Sides {
+    by_caller: Mutex<HashMap<(String, String), Opened>>,
+}
+
+/// One calling agent's side conversations with one name.
+#[derive(Default)]
+struct Opened {
+    /// The highest number handed out, or 0 before the first.
+    last: u32,
+    open: HashMap<u32, Conversation>,
+}
+
+impl Sides {
+    fn lock(&self) -> std::sync::MutexGuard<'_, HashMap<(String, String), Opened>> {
+        self.by_caller
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+    }
+
+    /// Opens the next side conversation `caller` has with `name`, empty, and
+    /// returns its number.
+    pub(super) fn open(&self, caller: &str, name: &str) -> u32 {
+        let mut sides = self.lock();
+        let opened = sides
+            .entry((caller.to_string(), name.to_string()))
+            .or_default();
+        opened.last = opened.last.max(1) + 1;
+        opened.open.insert(opened.last, Conversation::default());
+        opened.last
+    }
+
+    /// Where side conversation `n` stands, or `None` when it was never
+    /// opened.
+    pub(super) fn get(&self, caller: &str, name: &str, n: u32) -> Option<Conversation> {
+        self.lock()
+            .get(&(caller.to_string(), name.to_string()))
+            .and_then(|opened| opened.open.get(&n))
+            .cloned()
+    }
+
+    /// Records where side conversation `n` stands now.
+    pub(super) fn record(&self, caller: &str, name: &str, n: u32, conversation: Conversation) {
+        self.lock()
+            .entry((caller.to_string(), name.to_string()))
+            .or_default()
+            .open
+            .insert(n, conversation);
+    }
+}
+
 /// Where a calling agent's conversations are kept.
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
 pub(crate) enum Remembered {

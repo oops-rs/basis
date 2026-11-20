@@ -209,6 +209,42 @@ fn a_name_may_be_namespaced_with_one_slash_between_parts() {
 }
 
 #[test]
+fn a_side_conversation_is_named_beside_the_target_never_in_it() {
+    // ADR-0053 §4: an approver's rule written against the target matches a
+    // side conversation as it matches the main one.
+    let spawn = parsed("@team/nous#3 and its tests?");
+    assert_eq!(spawn.target(), Some("team/nous"));
+    assert_eq!(spawn.side(), Some(3));
+    assert_eq!(spawn.handle().as_deref(), Some("team/nous#3"));
+    assert_eq!(spawn.body(), "and its tests?");
+
+    let main = parsed("@nous look");
+    assert_eq!(main.side(), None);
+    assert_eq!(main.handle().as_deref(), Some("nous"));
+
+    assert!(parsed("@nous#2").is_remote_wait());
+
+    assert!(refusal("@nous#1 look").contains("numbered from 2"));
+    for input in [
+        "@nous#02 look",
+        "@nous#+2 look",
+        "@nous#x look",
+        "@nous# look",
+    ] {
+        assert!(refusal(input).contains("`@<agent>#<n>`"), "{input}");
+    }
+}
+
+#[test]
+fn only_a_remote_agent_has_side_conversations() {
+    let (registry, _row) = ledger("agent-1");
+    let tool = SpawnTool::new().with_agents(registry);
+
+    let error = decided(&tool, "agent-1", call("@reviewer#2 look")).expect_err("no teammate side");
+    assert!(error.contains("only a remote agent has those"), "{error}");
+}
+
+#[test]
 fn a_namespaced_name_nobody_resolves_is_never_a_teammate() {
     let (registry, _row) = ledger("agent-1");
     let tool = SpawnTool::new().with_agents(registry);

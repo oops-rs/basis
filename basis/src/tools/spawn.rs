@@ -535,6 +535,41 @@ impl SpawnTool {
         }))
     }
 
+    /// Which conversation with the remote agent `name` this call is in
+    /// (ADR-0053): the side one it names, which must have been opened; a new
+    /// side one when it hands a task to an agent whose main conversation is
+    /// working in the background for this caller; else the main one.
+    ///
+    /// Decided when the call runs, never in the preview: opening a side
+    /// conversation hands out its number, and a preview decides twice.
+    fn line(
+        &self,
+        spawn: &Spawn,
+        agent_id: &str,
+        agents: &crate::agents::remote::RemoteAgents,
+        name: &str,
+    ) -> Result<remote::Line, String> {
+        if let Some(n) = spawn.side() {
+            if agents.side(agent_id, name, n).is_none() {
+                return Err(format!(
+                    "there is no side conversation `{}` with `{name}`; one opens when you hand \
+                     `@{name}` a task while it is still working on one you started in the \
+                     background",
+                    parse::side_handle(name, n)
+                ));
+            }
+            return Ok(remote::Line::Side(n));
+        }
+        let busy = !spawn.body().is_empty()
+            && self
+                .children_of(agent_id)
+                .is_some_and(|children| children.remote_running(name));
+        if busy {
+            return Ok(remote::Line::Side(agents.open_side(agent_id, name)));
+        }
+        Ok(remote::Line::Main(self.remembers.clone()))
+    }
+
     /// The refusal for `@<name>` under `reach: remote` when no resolver knows
     /// the name: the configured names when there are any, else that there is
     /// nowhere to send it.
@@ -562,6 +597,7 @@ impl SpawnTool {
         let mine = row.as_ref().and_then(|row| row.teammates.find(name));
 
         if reach != Reach::Remote
+            && spawn.side().is_none()
             && let Some(existing) = mine
         {
             // A bound name stays bound: a conversation in progress never
@@ -575,6 +611,12 @@ impl SpawnTool {
         }
         if reach == Reach::Remote {
             return Err(self.no_remote_agent(agent_id, name));
+        }
+        if let Some(handle) = spawn.handle().filter(|_| spawn.side().is_some()) {
+            return Err(format!(
+                "`@{handle}` names a side conversation, and only a remote agent has those; \
+                 `{name}` is not one here, so write `@{name} <task>`"
+            ));
         }
         if is_namespaced(name) {
             // A teammate's name is flat: `team/reviewer` is a resolver's
@@ -750,25 +792,26 @@ impl SpawnTool {
                     // name that is both a running teammate turn and a
                     // teammate is the same thing, and a remote agent's own
                     // outstanding task is what its background slot waits on.
+                    let handle = spawn.handle().unwrap_or_else(|| name.to_string());
                     if spawn.body().is_empty()
                         && let Some(children) = self.children_of(agent_id)
-                        && let Some(id) = children.find(name)
+                        && let Some(id) = children.find(&handle)
                     {
                         return Ok(SpawnDecision::Wait {
                             ids: vec![id],
                             any: false,
                         });
                     }
-                    // A remote agent working in the background for this
-                    // agent takes no second task until that one is
-                    // collected (ADR-0029 §5): the conversation record learns
-                    // of a task only once the agent names it, so asks made
-                    // in quick succession would otherwise all be sent.
+                    // A side conversation working in the background takes no
+                    // second task until that one is collected (ADR-0029 §5,
+                    // ADR-0053 §3). The main one busy the same way opens a
+                    // side conversation instead, when the call runs.
                     if !spawn.body().is_empty()
+                        && spawn.side().is_some()
                         && let Some(children) = self.children_of(agent_id)
-                        && children.remote_running(name)
+                        && children.remote_running(&handle)
                     {
-                        return Err(remote::busy(name));
+                        return Err(remote::busy(&handle));
                     }
                     return self.decide_named(spawn, agent_id, name, resolve_workspace);
                 }
@@ -949,6 +992,7 @@ impl ToolExecutor for SpawnTool {
                     metadata: spawn.metadata().cloned(),
                     files: sent.into_iter().map(|sent| sent.file).collect(),
                 };
+                let line = self.line(&spawn, &ctx.agent_id, &agents, &name)?;
                 if spawn.background() {
                     let children = execute::children_of(self, &ctx.agent_id)?;
                     return remote::delegate_in_background(
@@ -958,10 +1002,10 @@ impl ToolExecutor for SpawnTool {
                         agents,
                         &name,
                         task,
-                        self.remembers.clone(),
+                        line,
                     );
                 }
-                remote::delegate(ctx, &agents, &name, task, &self.remembers).await
+                remote::delegate(ctx, &agents, &name, task, &line).await
             }
             SpawnDecision::Agent { depth, spec, .. } => {
                 let body = files::named(spawn.body(), &sent);

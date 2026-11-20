@@ -26,6 +26,7 @@ use super::{
     describe::listed,
     execute::started,
     files, no_remote_agents,
+    parse::side_handle,
 };
 use crate::agents::{
     Attachment, ExchangeBounds, Failure, Message, Outcome, PeerError, Request, Resolved, Route,
@@ -140,19 +141,38 @@ struct Side<'a> {
 /// How a returned file is written: the file tools' policy, or the inbox.
 type Write<'a> = &'a (dyn Fn(&str, &[u8]) -> Result<PathBuf, String> + Sync);
 
-/// Hands `task` to the remote agent `name`, or — with an empty body — waits
-/// again on its outstanding task, and reports what came back.
-///
-/// `remembered` says where the calling agent's record is kept: on disk by
-/// agent for one a workspace minted or resumed, under a host's key for one
-/// bound to it, in memory for a delegated child (`crate::agents::remote`
-/// has the rule).
+/// Which conversation with a remote agent a call is in.
+#[derive(Debug, Clone)]
+pub(super) enum Line {
+    /// The main one, kept as [`Remembered`] says: on disk by agent for one a
+    /// workspace minted or resumed, under a host's key for one bound to it,
+    /// in memory for a delegated child (`crate::agents::remote` has the
+    /// rule).
+    Main(Remembered),
+    /// Side conversation `n` (ADR-0053), in memory only.
+    Side(u32),
+}
+
+impl Line {
+    /// The handle the model names this conversation by: the agent's name,
+    /// or `<name>#<n>` for a side one.
+    pub(super) fn handle(&self, name: &str) -> String {
+        match self {
+            Self::Main(_) => name.to_string(),
+            Self::Side(n) => side_handle(name, *n),
+        }
+    }
+}
+
+/// Hands `task` to the remote agent `name` in the conversation `line` names,
+/// or — with an empty body — waits again on its outstanding task, and
+/// reports what came back.
 pub(super) async fn delegate(
     ctx: ToolContext<'_>,
     agents: &RemoteAgents,
     name: &str,
     task: Task,
-    remembered: &Remembered,
+    line: &Line,
 ) -> ToolResult {
     let caller = ctx.agent_id.clone();
     // The run's own bounds — cancellation, stop, deadline — taken before the
@@ -170,7 +190,7 @@ pub(super) async fn delegate(
         agents,
         name,
         task,
-        remembered,
+        line,
         Side {
             caller,
             options,
@@ -183,9 +203,9 @@ pub(super) async fn delegate(
 }
 
 /// Hands `task` to the remote agent `name` on a task of its own and returns
-/// at once (ADR-0042). The handle is the agent's name: one task per remote
-/// agent at a time is already the rule (ADR-0029 §5), so the name is the
-/// conversation, and `@<name>` alone collects it as it always did.
+/// at once (ADR-0042). The handle is the conversation's (ADR-0053): the
+/// agent's name for the main one, `<name>#<n>` for a side one — one task at
+/// a time in each (ADR-0029 §5) — and `@<handle>` alone collects it.
 ///
 /// What comes back is left for the parent's next round as a plain note, the
 /// same words the blocking call would have returned, since a remote task
@@ -197,16 +217,18 @@ pub(super) fn delegate_in_background(
     agents: Arc<RemoteAgents>,
     name: &str,
     task: Task,
-    remembered: Remembered,
+    line: Line,
 ) -> ToolResult {
     let caller = ctx.agent_id.clone();
     let options = ctx.child_run_options();
     let root = ctx.resolve_working_directory(None)?;
     let agent = name.to_string();
+    let handle = line.handle(name);
+    let told = handle.clone();
     children.start(
         scope,
-        name.to_string(),
-        Some(name.to_string()),
+        handle.clone(),
+        Some(handle.clone()),
         Kind::Remote,
         ctx.deferred(),
         async move {
@@ -217,7 +239,7 @@ pub(super) fn delegate_in_background(
                 &agents,
                 &agent,
                 task,
-                &remembered,
+                &line,
                 Side {
                     caller,
                     options,
@@ -227,20 +249,20 @@ pub(super) fn delegate_in_background(
                 },
             )
             .await;
-            let (told, text) = match &outcome {
+            let (status, text) = match &outcome {
                 Ok(text) => ("finished", text.clone()),
                 Err(text) => ("failed", text.clone()),
             };
             Settled {
                 outcome,
                 items: vec![DeferredItem::Context(format!(
-                    "<delegation-result agent=\"{agent}\" status=\"{told}\">\n{text}\n\
+                    "<delegation-result agent=\"{handle}\" status=\"{status}\">\n{text}\n\
                      </delegation-result>"
                 ))],
             }
         },
     )?;
-    Ok(started(Kind::Remote, name, Some(name), false))
+    Ok(started(Kind::Remote, &told, Some(&told), false))
 }
 
 /// Writes `bytes` at `path` under `root` — the inbox path `files::save`
@@ -260,7 +282,7 @@ async fn run(
     agents: &RemoteAgents,
     name: &str,
     task: Task,
-    remembered: &Remembered,
+    line: &Line,
     side: Side<'_>,
 ) -> ToolResult {
     let Task {
@@ -288,22 +310,31 @@ async fn run(
         hop: agents.hop().saturating_add(1),
         deadline: options.deadline,
     };
-    let before = agents.conversation(caller, id, remembered);
-    let request = request(name, &body, &before, hop)?;
+    // What the model reads names the conversation, so "write `@<handle>`
+    // alone" leads back to this one; the resolver is asked by the name.
+    let handle = line.handle(name);
+    let before = match line {
+        Line::Main(remembered) => agents.conversation(caller, id, remembered),
+        Line::Side(n) => agents.side(caller, name, *n).unwrap_or_default(),
+    };
+    let request = request(&handle, &body, &before, hop)?;
     let request = match request {
         Request::Send(message) => Request::Send(message.with_metadata(metadata).with_files(files)),
         wait => wait,
     };
 
     let progress = |text: String| (side.progress)(text);
-    let save = |next: Conversation| {
+    let save = |next: Conversation| match line {
         // Reported, not raised: the exchange it describes happened, and a
         // failed tool call would invite the model to do the work again.
-        if let Err(error) = agents.record(caller, id, next, remembered) {
-            (side.progress)(format!(
-                "the conversation with `{name}` was not saved: {error}"
-            ));
+        Line::Main(remembered) => {
+            if let Err(error) = agents.record(caller, id, next, remembered) {
+                (side.progress)(format!(
+                    "the conversation with `{name}` was not saved: {error}"
+                ));
+            }
         }
+        Line::Side(n) => agents.record_side(caller, name, *n, next),
     };
     // Recorded before the peer waits, which is the whole point of being
     // told: a process that dies while this waits comes back knowing the task
@@ -341,7 +372,7 @@ async fn run(
         }
         Err(error) => (Err(error), None),
     };
-    let (next, result) = settle(name, before, outcome, &endpoint);
+    let (next, result) = settle(&handle, before, outcome, &endpoint);
     save(next);
     let Some((folder, files)) = returned else {
         return result;

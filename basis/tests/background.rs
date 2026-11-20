@@ -751,7 +751,7 @@ impl basis::AgentResolver for OneAgent {
 }
 
 #[tokio::test]
-async fn a_second_ask_to_a_remote_agent_still_working_in_the_background_is_refused() {
+async fn a_busy_remote_agent_is_asked_in_side_conversations_that_run_at_once() {
     let router = Router::new(|seen| {
         if seen.last_text == "go" {
             return now(Turn::calling(
@@ -768,13 +768,34 @@ async fn a_second_ask_to_a_remote_agent_still_working_in_the_background_is_refus
         if seen.result_of("call-2").is_some() {
             return now(Turn::calling(
                 "call-3",
-                json!({ "input": "@nous about yoki" }),
+                json!({ "input": "@nous about yoki", "background": true }),
             ));
         }
         if seen.result_of("call-3").is_some() {
-            return now(Turn::calling("call-4", json!({ "wait": ["nous"] })));
+            return now(Turn::calling(
+                "call-4",
+                json!({ "input": "@nous#2 and its tests?", "background": true }),
+            ));
         }
         if seen.result_of("call-4").is_some() {
+            return now(Turn::calling(
+                "call-5",
+                json!({ "wait": ["nous", "nous#2", "nous#3"] }),
+            ));
+        }
+        if seen.result_of("call-5").is_some() {
+            return now(Turn::calling(
+                "call-6",
+                json!({ "input": "@nous#2 and its tests?" }),
+            ));
+        }
+        if seen.result_of("call-6").is_some() {
+            return now(Turn::calling(
+                "call-7",
+                json!({ "input": "@nous and its docs?" }),
+            ));
+        }
+        if seen.result_of("call-7").is_some() {
             return now(Turn::saying("done"));
         }
         panic!("an unexpected request: {seen:?}");
@@ -790,26 +811,101 @@ async fn a_second_ask_to_a_remote_agent_still_working_in_the_background_is_refus
     let (events, answer) = drive(&workspace).await;
 
     let results = results(&events);
-    assert_eq!(results.len(), 4, "{results:?}");
-    assert!(!results[0].0, "{}", results[0].1);
-    for (failed, refusal) in &results[1..3] {
-        assert!(failed, "{refusal}");
+    assert_eq!(results.len(), 7, "{results:?}");
+    for (index, handle) in ["nous", "nous#2", "nous#3"].into_iter().enumerate() {
+        let (failed, started) = &results[index];
+        assert!(!failed, "{started}");
         assert!(
-            refusal.contains("`nous` is still working on the last task you handed it")
-                && refusal.contains("`@nous`"),
-            "the refusal names what to wait on: {refusal}"
+            started.starts_with(&format!("Remote agent `{handle}` is working on it")),
+            "each ask has a handle of its own: {started}"
         );
     }
-    let (failed, collected) = &results[3];
-    assert!(!failed, "{collected}");
+    let (failed, refusal) = &results[3];
+    assert!(failed, "{refusal}");
     assert!(
-        collected.ends_with("the answer to about ludo"),
-        "the first ask's answer is the one the wait collects: {collected}"
+        refusal.contains("`nous#2` is still working on the last task you handed it")
+            && refusal.contains("`@nous#2`"),
+        "a side conversation takes one task at a time too: {refusal}"
     );
+    assert!(!results[4].0, "{}", results[4].1);
+    let collected = router
+        .seen()
+        .iter()
+        .find_map(|seen| seen.result_of("call-5").map(str::to_string))
+        .expect("the model read the wait's result");
+    for (handle, topic) in [("nous", "ludo"), ("nous#2", "lama"), ("nous#3", "yoki")] {
+        assert!(
+            collected.contains(&format!(
+                "remote agent `{handle}` (id `{handle}`) finished:\n\nRemote agent `{handle}` \
+                 replied:\n\nthe answer to about {topic}"
+            )),
+            "every answer is collected under its own handle: {collected}"
+        );
+    }
+    assert!(!results[5].0, "{}", results[5].1);
+    assert!(!results[6].0, "{}", results[6].1);
     assert_eq!(answer, "done");
+
+    let handed = remote.handed();
+    assert_eq!(handed.len(), 5, "{handed:?}");
+    let mut first = handed[..3].to_vec();
+    first.sort();
     assert_eq!(
-        remote.handed(),
-        [("about ludo".to_string(), None)],
-        "nothing but the first ask reached the agent"
+        first,
+        [
+            ("about lama".to_string(), None),
+            ("about ludo".to_string(), None),
+            ("about yoki".to_string(), None),
+        ],
+        "the three questions went out at once, each in a conversation of its own"
     );
+    let context_of = |topic: &str| {
+        let n = handed
+            .iter()
+            .position(|(text, _)| text == topic)
+            .expect("handed")
+            + 1;
+        Some(format!("context-{n}"))
+    };
+    assert_eq!(
+        handed[3],
+        ("and its tests?".to_string(), context_of("about lama")),
+        "a follow-up to `nous#2` continues the side conversation it names"
+    );
+    assert_eq!(
+        handed[4],
+        ("and its docs?".to_string(), context_of("about ludo")),
+        "and a follow-up to `nous` continues the main one"
+    );
+}
+
+#[tokio::test]
+async fn a_side_conversation_never_opened_is_refused() {
+    let router = Router::new(|seen| {
+        if seen.last_text == "go" {
+            return now(Turn::calling("call-1", json!({ "input": "@nous#2 hello" })));
+        }
+        if seen.result_of("call-1").is_some() {
+            return now(Turn::saying("done"));
+        }
+        panic!("an unexpected request: {seen:?}");
+    });
+    let remote = Remote::new(Duration::ZERO);
+    let dir = tempfile::tempdir().unwrap();
+    let workspace = pinned(dir.path(), runtime(&router, None))
+        .with_agent_resolver(Arc::new(OneAgent(Arc::clone(&remote))))
+        .open()
+        .await
+        .expect("opens");
+
+    let (events, _) = drive(&workspace).await;
+
+    let results = results(&events);
+    let (failed, refusal) = &results[0];
+    assert!(failed, "{refusal}");
+    assert!(
+        refusal.contains("there is no side conversation `nous#2` with `nous`"),
+        "{refusal}"
+    );
+    assert!(remote.handed().is_empty(), "nothing was sent");
 }

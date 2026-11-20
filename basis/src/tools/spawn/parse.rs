@@ -121,6 +121,10 @@ pub struct Spawn {
     wait: Vec<String>,
     /// Whether a wait returns on the first handle to finish.
     any: bool,
+    /// Which side conversation with the remote agent `target` names this
+    /// continues — the `n` of `@<agent>#<n>` (ADR-0053) — or `None` for the
+    /// main one. Never part of `target`.
+    side: Option<u32>,
 }
 
 impl Spawn {
@@ -171,6 +175,24 @@ impl Spawn {
     /// reserved wire spelling for this process, not a name anything can take.
     pub fn target(&self) -> Option<&str> {
         self.target.as_deref()
+    }
+
+    /// The side conversation `@<agent>#<n>` names (ADR-0053), or `None` for
+    /// the agent's main conversation and for anything that is not a named
+    /// delegation.
+    pub const fn side(&self) -> Option<u32> {
+        self.side
+    }
+
+    /// The handle a named delegation is kept under in the background:
+    /// `<agent>` for the main conversation, `<agent>#<n>` for a side one
+    /// (ADR-0053). `None` with no target.
+    pub fn handle(&self) -> Option<String> {
+        let target = self.target.as_deref()?;
+        Some(match self.side {
+            Some(n) => side_handle(target, n),
+            None => target.to_string(),
+        })
     }
 
     /// Whether this is a delegation to a named agent that hands it nothing
@@ -321,6 +343,7 @@ fn wait_call(input: &Value) -> Result<Option<Spawn>, String> {
         background: false,
         wait: handles,
         any,
+        side: None,
     }))
 }
 
@@ -529,6 +552,7 @@ fn command(body: &str, target: Option<String>) -> Result<Spawn, String> {
         background: false,
         wait: Vec::new(),
         any: false,
+        side: None,
     })
 }
 
@@ -550,7 +574,8 @@ fn remote(rest: &str) -> Result<Spawn, String> {
         );
     }
 
-    let (name, body) = rest.split_once(char::is_whitespace).unwrap_or((rest, ""));
+    let (handle, body) = rest.split_once(char::is_whitespace).unwrap_or((rest, ""));
+    let (name, side) = split_side(handle)?;
 
     if !is_target_name(name) {
         return Err(format!(
@@ -579,7 +604,40 @@ fn remote(rest: &str) -> Result<Spawn, String> {
         background: false,
         wait: Vec::new(),
         any: false,
+        side,
     })
+}
+
+/// The handle of side conversation `n` with `agent` (ADR-0053).
+pub(crate) fn side_handle(agent: &str, n: u32) -> String {
+    format!("{agent}#{n}")
+}
+
+/// Splits `@<agent>#<n>` into the agent's name and the side conversation it
+/// names (ADR-0053). Side conversations are numbered from 2, the main one
+/// being the bare name, so `#1` and anything but digits after `#` are
+/// refused with the spelling that works.
+fn split_side(handle: &str) -> Result<(&str, Option<u32>), String> {
+    let Some((name, n)) = handle.split_once('#') else {
+        return Ok((handle, None));
+    };
+    // Digits as `u32` prints them, so one side conversation has one
+    // spelling: no sign, no leading zero.
+    let canonical = n
+        .parse::<u32>()
+        .ok()
+        .filter(|parsed| parsed.to_string() == n);
+    match canonical {
+        Some(n) if n >= 2 => Ok((name, Some(n))),
+        Some(1) => Err(format!(
+            "`{name}#1` is `@{name}`: side conversations are numbered from 2, and the bare \
+             name is the main one"
+        )),
+        _ => Err(format!(
+            "`{handle}` is not an agent's handle: write `@<agent>` for its main conversation or \
+             `@<agent>#<n>` for side conversation n, as `@{name}#2`"
+        )),
+    }
 }
 
 fn delegation(body: &str) -> Result<Spawn, String> {
@@ -601,5 +659,6 @@ fn delegation(body: &str) -> Result<Spawn, String> {
         background: false,
         wait: Vec::new(),
         any: false,
+        side: None,
     })
 }

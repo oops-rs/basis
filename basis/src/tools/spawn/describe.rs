@@ -132,15 +132,20 @@ pub(super) fn description(targets: &[String], names: &Names) -> String {
     }
     if let Some(width) = names.width {
         text.push_str("\n\n");
-        text.push_str(&background_paragraph(width, names.names_anyone()));
+        text.push_str(&background_paragraph(
+            width,
+            names.names_anyone(),
+            !names.remote.is_empty(),
+        ));
     }
     text
 }
 
 /// The background paragraph (ADR-0042): how to start a task without waiting,
 /// the three ways its answer comes back, and the width. Taught only where
-/// there is a ledger to keep the work on.
-fn background_paragraph(width: usize, names_anyone: bool) -> String {
+/// there is a ledger to keep the work on. Where there are remote agents, it
+/// also says that asking a busy one opens a side conversation (ADR-0053).
+fn background_paragraph(width: usize, names_anyone: bool, remote: bool) -> String {
     let handle = if names_anyone {
         "the subagent's id, or the name the task went to"
     } else {
@@ -156,6 +161,15 @@ fn background_paragraph(width: usize, names_anyone: bool) -> String {
          when you finish is waited for before your answer is final, so nothing started is \
          lost."
     );
+    if remote {
+        text.push_str(
+            " A remote agent works on one task at a time in a conversation, so a task for one \
+             that is still working on one you started in the background goes to a side \
+             conversation with it, under its own handle — `<agent>#2`, `<agent>#3`, … — and \
+             several questions to one agent can run at once that way. Write \
+             `@<agent>#<n> <text>` to continue a side conversation.",
+        );
+    }
     text.push_str(&match width {
         0 => " Nothing may run in the background here.".to_string(),
         1 => " One task may run in the background at a time.".to_string(),

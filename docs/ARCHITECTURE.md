@@ -447,6 +447,14 @@ flowchart LR
   basis's own round strategy joins them first and mentra runs one more round. Depth counts;
   width (`RuntimeBuilder::with_delegation_width`, four) bounds how many run at once. A child's
   remote conversations are its own, so two background children may each ask one remote agent.
+- **A busy remote agent is asked in a side conversation** (ADR-0053). A task for a remote agent
+  whose main conversation is working in the background for the same caller opens a fresh
+  conversation with it under its own handle, `<agent>#2`, `<agent>#3`, …, so one agent can be
+  asked several independent questions at once; `@<agent>#<n> <text>` continues side
+  conversation *n*, and one still working takes no second task. The suffix is not part of the
+  target: the preview's `target` stays the bare name. Side conversations go through the same
+  resolver and peer as the main one, and are kept in memory only, never on disk or under a
+  host's key.
 - **A turn carries locals its tools read** (ADR-0044). `TurnOptions::locals` (mentra's
   `RunLocals`, a map keyed by type) reaches every tool the turn calls as
   `ToolContext::run_local::<T>()`, and every child it delegates to through `RunOptions::child`;
