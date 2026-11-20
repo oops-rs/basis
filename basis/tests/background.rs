@@ -812,12 +812,21 @@ async fn a_busy_remote_agent_is_asked_in_side_conversations_that_run_at_once() {
 
     let results = results(&events);
     assert_eq!(results.len(), 7, "{results:?}");
-    for (index, handle) in ["nous", "nous#2", "nous#3"].into_iter().enumerate() {
+    let (failed, started) = &results[0];
+    assert!(!failed, "{started}");
+    assert!(
+        started.starts_with("Remote agent `nous` is working on it"),
+        "the first ask is the main conversation: {started}"
+    );
+    for (index, handle) in [(1, "nous#2"), (2, "nous#3")] {
         let (failed, started) = &results[index];
         assert!(!failed, "{started}");
         assert!(
-            started.starts_with(&format!("Remote agent `{handle}` is working on it")),
-            "each ask has a handle of its own: {started}"
+            started.starts_with(&format!(
+                "`nous` is still working on a task you started in the background, so this went \
+                 to a side conversation with it: its handle is `{handle}`, not `nous`."
+            )),
+            "a side conversation's start leads with its handle: {started}"
         );
     }
     let (failed, refusal) = &results[3];

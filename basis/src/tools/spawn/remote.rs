@@ -225,6 +225,7 @@ pub(super) fn delegate_in_background(
     let agent = name.to_string();
     let handle = line.handle(name);
     let told = handle.clone();
+    let side = matches!(line, Line::Side(_));
     children.start(
         scope,
         handle.clone(),
@@ -262,7 +263,17 @@ pub(super) fn delegate_in_background(
             }
         },
     )?;
-    Ok(started(Kind::Remote, &told, Some(&told), false))
+    let started = started(Kind::Remote, &told, Some(&told), false);
+    if !side {
+        return Ok(started);
+    }
+    // The handle is not the name the model wrote, so that comes first: a
+    // model that kept the bare name would wait on the main conversation's
+    // task instead of this one (ADR-0053).
+    Ok(format!(
+        "`{name}` is still working on a task you started in the background, so this went to a \
+         side conversation with it: its handle is `{told}`, not `{name}`. {started}"
+    ))
 }
 
 /// Writes `bytes` at `path` under `root` — the inbox path `files::save`
