@@ -5,6 +5,23 @@ All six crates — `basis`, `basis-host`, `basis-tasks`, `basis-acp`,
 live in `docs/adr/`; this file says what changed for someone upgrading.
 Releases before 0.15.0 are described by their tags and ADRs only.
 
+## 0.27.2 — 2026-11-20
+
+Additive. Requires Mentra 0.38.1.
+
+- A task for a remote agent that is still working on one this agent started
+  in the background goes to a side conversation with it: a fresh
+  conversation under its own handle, `<agent>#2`, `<agent>#3`, …, so one
+  agent can be asked several independent questions at once. Before, a second
+  background ask replaced the first one's handle and its answer was lost,
+  and asks made in quick succession all went into one conversation
+  ([ADR-0053](docs/adr/0053-a-busy-remote-agent-is-asked-in-a-side-conversation.md)).
+- `@<agent>#<n> <text>` continues side conversation *n*, and `@<agent>#<n>`
+  alone or `wait: ["<agent>#<n>"]` collects it. A side conversation still
+  working takes no second task. Side conversations are kept in memory only.
+- `Spawn::side()` reports the `#<n>`; `Spawn::target()` and the preview's
+  `target` stay the bare agent name, so approval rules match as before.
+
 ## 0.27.1 — 2026-11-19
 
 Additive. Requires Mentra 0.38.1.
