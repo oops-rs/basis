@@ -1,8 +1,9 @@
 //! A delegation that runs while the model keeps working (ADR-0042).
 //!
 //! `spawn` with `background: true` starts the work and returns its handle at
-//! once — the id the child already has, or the name of the remote agent it
-//! went to — instead of blocking the turn on the answer. What happens to the
+//! once — the id the child already has, or the remote agent's name, with
+//! `#<n>` for a side conversation (ADR-0053) — instead of blocking the turn
+//! on the answer. What happens to the
 //! answer is the whole of this module:
 //!
 //! - **It arrives on its own.** A child that finishes while the model is
