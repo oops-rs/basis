@@ -177,7 +177,7 @@ Add `basis` to your application's `Cargo.toml`:
 
 ```toml
 [dependencies]
-basis = "0.27.2"
+basis = "0.27.3"
 tokio = { version = "1", features = ["macros", "rt-multi-thread"] }
 ```
 

@@ -5,6 +5,24 @@ All six crates — `basis`, `basis-host`, `basis-tasks`, `basis-acp`,
 live in `docs/adr/`; this file says what changed for someone upgrading.
 Releases before 0.15.0 are described by their tags and ADRs only.
 
+## 0.27.3 — 2026-11-23
+
+Additive. Requires Mentra 0.38.1.
+
+- Agents started through `spawn` from a run with Code Mode get `code` too,
+  with that run's script time, and so do their own children. Each child's
+  roster decides whether it is offered: a child that inherits its parent's
+  roster sees it, a `ToolRoster::only` override sees it when it names
+  `code`, and `ToolRoster::hide(["code"])` opts a child out. A child's script
+  composes the child's own tools under the same approver
+  ([ADR-0051](docs/adr/0051-a-run-may-compose-its-tools-in-javascript.md)).
+- A background ask that goes to a side conversation now says first that the
+  agent was busy and that the handle is `<agent>#<n>`, so a model waits on
+  the right name.
+- The lockfile takes `url` 2.5.9 for RUSTSEC-2026-0592 (a stack overflow in
+  `Url::origin()` on nested `blob:` URLs), which `cargo install --locked
+  basis-cli` builds with.
+
 ## 0.27.2 — 2026-11-20
 
 Additive. Requires Mentra 0.38.1.
