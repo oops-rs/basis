@@ -541,6 +541,11 @@ async fn spawn_child(
 /// because a child is a conversation of its own — which is also what lets
 /// two children started in the background each hand the same remote agent a
 /// task: a conversation, and its one outstanding task, is per caller.
+///
+/// And `code`, when the parent's run offers it (ADR-0051), with that run's
+/// script time. The child's roster still decides whether its model sees it,
+/// and a script runs on the child's own turn, so it composes only the
+/// child's tools under the child's approvals.
 fn teach(tool: &SpawnTool, child: &mut mentra::agent::Agent, inherited: Option<&AgentTools>) {
     let Some(refresh) = tool.refresh.clone() else {
         // The runtime's own instance belongs to nobody and refreshes nothing;
@@ -548,6 +553,10 @@ fn teach(tool: &SpawnTool, child: &mut mentra::agent::Agent, inherited: Option<&
         // inherits.
         return;
     };
+    #[cfg(feature = "code-mode")]
+    if let Some(code) = inherited.and_then(|row| row.code) {
+        child.register_tool(code);
+    }
     let copy = tool.for_agent(child.id(), refresh);
     let copy = match inherited.and_then(|row| row.remote.as_ref()) {
         Some(remote) => copy.for_remote_agents(remote),

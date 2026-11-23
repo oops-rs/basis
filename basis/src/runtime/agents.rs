@@ -127,6 +127,14 @@ pub(crate) struct AgentTools {
     /// width guard counts. This agent's own, and gone with the row — which
     /// is gone with the run, so nothing outlives the turn that started it.
     pub(crate) background: crate::tools::spawn::Children,
+    /// The `code` tool the run that minted or resumed this agent offers
+    /// (ADR-0051), with that run's script time; `None` when it offers none.
+    ///
+    /// Read by `spawn`, which registers it on each child. A child inherits it with the rest of this row, so a child's
+    /// own delegations get `code` as well. Whether a model sees the tool is
+    /// still its roster's answer.
+    #[cfg(feature = "code-mode")]
+    pub(crate) code: Option<crate::tools::code_mode::CodeTool>,
 }
 
 impl AgentTools {
@@ -142,6 +150,8 @@ impl AgentTools {
             remote: self.remote.clone(),
             teammates: Default::default(),
             background: Default::default(),
+            #[cfg(feature = "code-mode")]
+            code: self.code,
         }
     }
 }
@@ -511,6 +521,8 @@ mod tests {
             remote: None,
             teammates: Default::default(),
             background: Default::default(),
+            #[cfg(feature = "code-mode")]
+            code: None,
         }
     }
 
@@ -531,6 +543,8 @@ mod tests {
                 remote: None,
                 teammates: Default::default(),
                 background: Default::default(),
+                #[cfg(feature = "code-mode")]
+                code: None,
             },
         );
         let _stranger = registry.record_for_workspace("stranger", tools(&[]));

@@ -118,6 +118,13 @@ impl RunProfile {
         }
     }
 
+    /// The `code` tool this run offers, if it offers one.
+    #[cfg(feature = "code-mode")]
+    pub(crate) fn code_tool(&self) -> Option<crate::tools::code_mode::CodeTool> {
+        self.code_mode
+            .then(|| crate::tools::code_mode::CodeTool::new(self.code_script_time))
+    }
+
     /// Replaces the 120 seconds of script time one `code` evaluation may
     /// use. Script time is the time a script spends with no tool call
     /// outstanding: running JavaScript, or waiting on something that is not a

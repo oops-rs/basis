@@ -294,7 +294,7 @@ impl Workspace {
         let model_id = model.id.clone();
         let agent = self.minted_agent(&spec.profile);
         let context_snapshot = agent.system.clone();
-        let tools = self.agent_tools(&agent);
+        let tools = self.agent_tools(&agent, &spec.profile);
         let mut session =
             self.runtime
                 .mint(spec.session_name.clone(), model, agent, &self.scope)?;
@@ -407,7 +407,7 @@ impl Workspace {
         let row = self
             .runtime
             .agents()
-            .record_for_workspace(agent_id, self.resumed_tools(&session));
+            .record_for_workspace(agent_id, self.resumed_tools(&session, &spec.profile));
         let remote_spawn = self.teach(&mut session, &spec.profile);
         let model = if let Some(model) = spec.profile.resolved_model() {
             session.set_model(model.clone())?;
@@ -738,7 +738,7 @@ impl Workspace {
     /// set `spawn` re-threads into a narrowed child is exactly the set the
     /// live parent was minted with — a second derivation could only be an
     /// opportunity for the two to disagree.
-    fn agent_tools(&self, agent: &AgentConfig) -> AgentTools {
+    fn agent_tools(&self, agent: &AgentConfig, _profile: &RunProfile) -> AgentTools {
         AgentTools {
             hidden: agent.tool_profile.hidden_tools.clone(),
             allowed: agent.tool_profile.allowed_tools.clone(),
@@ -748,6 +748,8 @@ impl Workspace {
             remote: Some(Arc::clone(&self.remote)),
             teammates: Default::default(),
             background: Default::default(),
+            #[cfg(feature = "code-mode")]
+            code: _profile.code_tool(),
         }
     }
 
@@ -760,7 +762,7 @@ impl Workspace {
     /// are foreign *now* — a sibling that opened while this conversation was
     /// on disk — and, for the same reason, the native tools such a sibling
     /// supplied.
-    fn resumed_tools(&self, session: &Session) -> AgentTools {
+    fn resumed_tools(&self, session: &Session, _profile: &RunProfile) -> AgentTools {
         let mut hidden = session.config().tool_profile.hidden_tools.clone();
 
         #[cfg(feature = "mcp")]
@@ -780,6 +782,8 @@ impl Workspace {
             remote: Some(Arc::clone(&self.remote)),
             teammates: Default::default(),
             background: Default::default(),
+            #[cfg(feature = "code-mode")]
+            code: _profile.code_tool(),
         }
     }
 
@@ -797,10 +801,8 @@ impl Workspace {
     /// register again bound to a host's key.
     fn teach(&self, session: &mut Session, _profile: &RunProfile) -> SpawnTool {
         #[cfg(feature = "code-mode")]
-        if _profile.code_mode {
-            session.register_tool(crate::tools::code_mode::CodeTool::new(
-                _profile.code_script_time,
-            ));
+        if let Some(code) = _profile.code_tool() {
+            session.register_tool(code);
         }
         let copy = self
             .runtime

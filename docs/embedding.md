@@ -266,6 +266,12 @@ The roster override in this example is optional. An explicit allow-list must
 include `code` and the tools the script needs. The registration belongs to the
 live agent. Pass the option again to `Workspace::resume` to offer it there.
 
+Agents that run delegates to through `spawn` get `code` too, with the run's
+script time. A child that inherits its parent's roster sees it. A
+`ChildSpec::with_roster(ToolRoster::only([...]))` child sees it only when the
+list names `code`, and `ToolRoster::hide(["code"])` opts a child out. A child's
+script composes the child's own tools, under the same approver.
+
 The model calls `code` with one string field, `source`, containing the body of
 an async function. This script reads the contribution guide only when the README links to it.
 

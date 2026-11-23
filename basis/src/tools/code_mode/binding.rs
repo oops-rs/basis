@@ -13,6 +13,7 @@ use mentra::tool::{
 use serde_json::{Value, json};
 use tokio::sync::mpsc;
 
+#[derive(Debug, Clone, Copy)]
 pub(crate) struct CodeTool {
     script_time: Duration,
 }

@@ -1219,3 +1219,148 @@ async fn a_childs_rounds_are_what_the_policy_said() {
         );
     }
 }
+
+/// The policy the code-mode tests share: each prompt prefix names one roster
+/// shape a host might give a child.
+#[cfg(feature = "code-mode")]
+fn roster_by_prefix(child: &ChildContext<'_>) -> ChildSpec {
+    let prompt = child.prompt();
+    if prompt.starts_with("reviewer:") {
+        ChildSpec::inherit().with_roster(ToolRoster::only(["code", "write"]))
+    } else if prompt.starts_with("narrow:") {
+        ChildSpec::inherit().with_roster(ToolRoster::only(["read"]))
+    } else if prompt.starts_with("opt-out:") {
+        ChildSpec::inherit().with_roster(ToolRoster::hide(["code"]))
+    } else {
+        ChildSpec::inherit()
+    }
+}
+
+/// Runs `turns` on one workspace whose runtime carries [`roster_by_prefix`],
+/// and returns every roster the provider was offered, sorted, in order, with
+/// what the approver was asked.
+#[cfg(feature = "code-mode")]
+async fn rosters_offered(
+    root: &Path,
+    turns: Vec<Turn>,
+    profile: basis::RunProfile,
+) -> (Vec<Vec<String>>, Vec<ApprovalRequest>) {
+    let (provider, asked) =
+        ScriptedProvider::new(BuiltinProvider::OpenAI, vec![parent_model()], turns);
+    let shared = Arc::new(
+        basis::Runtime::builder()
+            .with_provider_instance(provider)
+            .with_ephemeral_history()
+            .with_child_policy(roster_by_prefix)
+            .build()
+            .expect("builds offline"),
+    );
+    let workspace = offline_workspace(root, shared).open().await.expect("opens");
+    let seen = Arc::new(Mutex::new(Vec::new()));
+    tokio::time::timeout(
+        NOT_STUCK,
+        workspace
+            .prepare(basis::RunSpec::new("do the thing").with_profile(profile))
+            .expect("mints")
+            .execute_with_approver(
+                CollectingSink::new(),
+                Recording {
+                    seen: Arc::clone(&seen),
+                },
+            ),
+    )
+    .await
+    .expect("the run must not hang")
+    .expect("the run completes");
+
+    let rosters = asked
+        .lock()
+        .expect("not poisoned")
+        .iter()
+        .map(|request| {
+            let mut tools = request.tools.clone();
+            tools.sort();
+            tools
+        })
+        .collect();
+    let seen = seen.lock().expect("not poisoned").clone();
+    (rosters, seen)
+}
+
+#[cfg(feature = "code-mode")]
+#[tokio::test]
+async fn a_child_of_a_code_mode_run_gets_code_as_its_roster_allows() {
+    let root = tempfile::tempdir().expect("tempdir");
+    let script = "await tools.write({path: \"out.txt\", content: \"reviewed\"}); return \"ok\";";
+    let (rosters, asked) = rosters_offered(
+        root.path(),
+        vec![
+            Turn::calling("call-0", "inherit: delegate once more"),
+            Turn::calling("call-1", "inherit: the grandchild"),
+            Turn::saying("grandchild done"),
+            Turn::saying("child done"),
+            Turn::calling("call-2", "reviewer: write the verdict"),
+            Turn::calling_tool("script", "code", json!({ "source": script })),
+            Turn::saying("reviewer done"),
+            Turn::calling("call-3", "narrow: look without code"),
+            Turn::saying("narrow done"),
+            Turn::calling("call-4", "opt-out: look without code"),
+            Turn::saying("opt-out done"),
+            Turn::saying("parent done"),
+        ],
+        basis::RunProfile::new().with_code_mode(),
+    )
+    .await;
+
+    assert_eq!(rosters.len(), 12);
+    let offers_code = |index: usize| rosters[index].iter().any(|name| name == "code");
+    assert!(offers_code(0), "the parent's own run offers code");
+    assert!(offers_code(1), "an inheriting child gets it");
+    assert!(offers_code(2), "and so does that child's own child");
+    assert_eq!(rosters[5], ["code", "write"], "an allow-list naming code");
+    assert_eq!(rosters[8], ["read"], "an allow-list that leaves code out");
+    assert!(!offers_code(10), "a roster that hides code");
+    assert!(
+        rosters[10].iter().any(|name| name == SPAWN),
+        "hiding code hides nothing else"
+    );
+
+    // The reviewer's script ran its own `write`, through the approver.
+    assert_eq!(
+        std::fs::read_to_string(root.path().join("out.txt")).expect("written"),
+        "reviewed"
+    );
+    assert!(
+        asked.iter().any(|request| request.tool_name == "write"),
+        "the scripted write was put to the approver: {:?}",
+        asked.iter().map(|r| &r.tool_name).collect::<Vec<_>>()
+    );
+}
+
+#[cfg(feature = "code-mode")]
+#[tokio::test]
+async fn a_child_of_a_run_without_code_mode_gets_no_code() {
+    let root = tempfile::tempdir().expect("tempdir");
+    let (rosters, _) = rosters_offered(
+        root.path(),
+        vec![
+            Turn::calling("call-0", "reviewer: asks for code by name"),
+            Turn::saying("reviewer done"),
+            Turn::saying("parent done"),
+        ],
+        basis::RunProfile::new(),
+    )
+    .await;
+
+    assert_eq!(rosters.len(), 3);
+    assert!(
+        rosters
+            .iter()
+            .all(|tools| !tools.iter().any(|name| name == "code"))
+    );
+    assert_eq!(
+        rosters[1],
+        ["write"],
+        "naming code offers nothing to compose"
+    );
+}
