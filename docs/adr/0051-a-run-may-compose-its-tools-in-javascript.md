@@ -55,3 +55,14 @@ response. Calls a script starts in one synchronous stretch now reach mentra as
 one batch (`ToolContext::invoke_children`), which gives them the lanes of a
 response's calls. Exclusive tools, blocking delegation among them, still run
 one at a time. A run may also set its own script time.
+
+Amended 2026-11-23: `code` was registered on the run's own agent only, so a
+delegated subagent or teammate could never compose its tools, even when the
+policy that narrowed it named `code`. An agent `spawn` starts from a run that
+offers `code` now gets `code` too, with that run's script time, and so does
+any agent that child delegates to in turn. Whether the child's model sees
+`code` is still up to its roster, under the existing rule that a roster
+narrows a child and never widens it. An inherited roster keeps it, and an
+override such as `ToolRoster::only` offers it only when it names `code`, and
+only if the parent's own roster allowed it. A child's script runs on the
+child's turn, so it composes the child's tools under the child's approvals.
