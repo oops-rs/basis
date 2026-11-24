@@ -184,6 +184,22 @@ impl Standing {
         matches!(self, Self::Settled(_))
     }
 
+    /// Which status this is, as two observations compare it: equal exactly
+    /// when nothing a caller would be told about has changed. Two questions
+    /// in a row are two statuses, though both are `INPUT_REQUIRED`.
+    pub(crate) fn key(&self) -> String {
+        let state = serde_json::to_value(self.state())
+            .ok()
+            .and_then(|state| state.as_str().map(str::to_owned))
+            .unwrap_or_default();
+        match self {
+            Self::Asking(asked) => format!("{state}:{}", asked.call_id),
+            // A host's question has no id; what it asks stands in for one.
+            Self::HostAsking(parts) => format!("{state}:{:016x}", fingerprint(parts)),
+            _ => state,
+        }
+    }
+
     /// Terminal, or waiting on the caller: where a blocking send answers and
     /// a stream closes (spec §3.1.1, §11.7).
     pub(crate) fn is_interrupted_or_terminal(&self) -> bool {
@@ -377,6 +393,20 @@ pub(crate) fn handle_of(record: &Record) -> Result<&TaskHandle, A2AError> {
 pub(crate) fn internal(error: impl std::fmt::Display) -> A2AError {
     eprintln!("basis-a2a: {error}");
     A2AError::internal("the server could not complete the request")
+}
+
+/// A digest of a host's question, so two different questions in a row are
+/// two changes. Stable within one build, which is as long as a push store's
+/// last-seen status needs it to be compared against: a rebuilt server that
+/// sees a different digest for the same question sends it once more, which
+/// at-least-once delivery allows.
+fn fingerprint(parts: &[Part]) -> u64 {
+    use std::hash::{Hash, Hasher};
+    let mut hasher = std::collections::hash_map::DefaultHasher::new();
+    serde_json::to_string(parts)
+        .unwrap_or_default()
+        .hash(&mut hasher);
+    hasher.finish()
 }
 
 #[cfg(test)]

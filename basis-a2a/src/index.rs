@@ -78,6 +78,10 @@ pub(crate) struct Record {
     pub(crate) deadline_ms: Option<u64>,
     /// When this server saw the task settle. Absent while it runs.
     pub(crate) finished_ms: Option<u64>,
+    /// The status the task stands in while it runs, and when this server
+    /// first saw it stand there. Absent until the task leaves `SUBMITTED`,
+    /// whose time is `created_ms`, and on records from before it existed.
+    pub(crate) since: Option<Since>,
     /// The workflows the task was built with, in card order, on a server
     /// configured with them: what a later request about it must still be
     /// allowed. Absent on a server with none, and on a record from before
@@ -87,6 +91,16 @@ pub(crate) struct Record {
     /// was no longer allowed its caller. From then on the task is reported
     /// failed with this reason, whatever its backend says of it.
     pub(crate) withdrawn: Option<Withdrawn>,
+}
+
+/// A status a running task reached, and when.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub(crate) struct Since {
+    /// Which status: its state, and for a question the question it asks, so
+    /// a question asked again after a reply is a status reached again
+    /// ([`Standing::key`](crate::project::Standing::key)).
+    pub(crate) key: String,
+    pub(crate) at_ms: u64,
 }
 
 /// Why, and when, a task was stopped for a workflow withdrawn from its
@@ -123,6 +137,8 @@ struct Stored {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     finished_ms: Option<u64>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
+    since: Option<Since>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
     workflows: Option<Vec<String>>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     withdrawn: Option<Withdrawn>,
@@ -149,6 +165,7 @@ impl TryFrom<Stored> for Record {
             hop: stored.hop,
             deadline_ms: stored.deadline_ms,
             finished_ms: stored.finished_ms,
+            since: stored.since,
             workflows: stored.workflows,
             withdrawn: stored.withdrawn,
         })
@@ -174,6 +191,7 @@ impl From<Record> for Stored {
             hop: record.hop,
             deadline_ms: record.deadline_ms,
             finished_ms: record.finished_ms,
+            since: record.since,
             workflows: record.workflows,
             withdrawn: record.withdrawn,
         }
@@ -224,6 +242,7 @@ impl Record {
             deadline_ms: None,
             created_ms,
             finished_ms: None,
+            since: None,
             workflows: None,
             withdrawn: None,
         }
@@ -263,10 +282,13 @@ impl Record {
         }
     }
 
-    /// The moment the task's status last changed, as far as this server
-    /// knows: when it settled, else when it was accepted.
+    /// The moment the task reached the status it was last seen in: when it
+    /// settled, else when it reached the status it runs in, else when it
+    /// was accepted.
     pub(crate) fn status_ms(&self) -> u64 {
-        self.finished_ms.unwrap_or(self.created_ms)
+        self.finished_ms
+            .or(self.since.as_ref().map(|since| since.at_ms))
+            .unwrap_or(self.created_ms)
     }
 }
 
@@ -385,26 +407,66 @@ impl Index {
     /// Records that `id` settled at `finished_ms`. A record already marked
     /// keeps its first time.
     pub(crate) fn finish(&self, id: &str, finished_ms: u64) -> io::Result<()> {
-        let Some(mut record) = self.get(id) else {
-            return Ok(());
-        };
-        if record.finished_ms.is_some() {
-            return Ok(());
-        }
-        record.finished_ms = Some(finished_ms);
-        self.insert(record)
+        self.update(id, |record| {
+            if record.finished_ms.is_some() {
+                return false;
+            }
+            record.finished_ms = Some(finished_ms);
+            true
+        })
+        .map(drop)
+    }
+
+    /// Records that `id`'s running task stands in the status `key` names
+    /// since `at_ms`, unless that is already the status recorded; returns
+    /// the record as it then stands. A settled task's record is left alone:
+    /// its time is when it settled.
+    pub(crate) fn reached(&self, id: &str, key: &str, at_ms: u64) -> io::Result<Option<Record>> {
+        self.update(id, |record| {
+            if record.finished_ms.is_some()
+                || record.since.as_ref().is_some_and(|since| since.key == key)
+            {
+                return false;
+            }
+            record.since = Some(Since {
+                key: key.to_string(),
+                at_ms,
+            });
+            true
+        })
     }
 
     /// Records that `id` was stopped for `withdrawn`, and returns the record
     /// as it then stands. A record already marked keeps its first reason;
     /// `None` when there is no such record.
     pub(crate) fn withdraw(&self, id: &str, withdrawn: Withdrawn) -> io::Result<Option<Record>> {
-        let Some(mut record) = self.get(id) else {
+        self.update(id, |record| {
+            if record.withdrawn.is_some() {
+                return false;
+            }
+            record.withdrawn = Some(withdrawn);
+            true
+        })
+    }
+
+    /// Changes `id`'s record with `change`, which says whether it changed
+    /// anything, and returns the record as it then stands. Read, changed and
+    /// written under one hold of the map, so two changes to one record
+    /// cannot each write over the other: a status reached and a settling
+    /// recorded at the same moment both stand.
+    fn update(
+        &self,
+        id: &str,
+        change: impl FnOnce(&mut Record) -> bool,
+    ) -> io::Result<Option<Record>> {
+        let mut records = self.records();
+        let Some(record) = records.get(id) else {
             return Ok(None);
         };
-        if record.withdrawn.is_none() {
-            record.withdrawn = Some(withdrawn);
-            self.insert(record.clone())?;
+        let mut record = record.clone();
+        if change(&mut record) {
+            self.persist(&record)?;
+            records.insert(record.id.clone(), record.clone());
         }
         Ok(Some(record))
     }

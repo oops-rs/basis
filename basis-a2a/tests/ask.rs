@@ -547,3 +547,77 @@ async fn shutdown_fixture_finishes_only_after_the_approved_write() {
     let reply = scripted_model_reply(&model).await;
     assert!(reply.contains("\"content\":\"finished\""), "{reply}");
 }
+
+/// A status's time, as milliseconds since the epoch.
+fn status_ms(task: &Value) -> i64 {
+    let at = task["status"]["timestamp"]
+        .as_str()
+        .unwrap_or_else(|| panic!("{task}"));
+    chrono::DateTime::parse_from_rfc3339(at)
+        .unwrap()
+        .timestamp_millis()
+}
+
+#[tokio::test]
+async fn each_question_says_when_it_was_asked() {
+    let now = || chrono::Utc::now().timestamp_millis();
+    let served = asking(
+        Duration::from_secs(30),
+        vec![
+            Reply::ToolCall {
+                name: "write".to_string(),
+                arguments: json!({"path": "one.txt", "content": "1"}),
+            },
+            Reply::ToolCall {
+                name: "write".to_string(),
+                arguments: json!({"path": "two.txt", "content": "2"}),
+            },
+            Reply::Text("finished".to_string()),
+        ],
+    )
+    .await;
+    let sent_at = now();
+    let first = served
+        .result(
+            "SendMessage",
+            json!({"message": user_message("write twice", None)}),
+        )
+        .await["task"]
+        .clone();
+    let first_id = call_id(&first);
+    let first_ms = status_ms(&first);
+    assert!((sent_at..=now()).contains(&first_ms), "{first}");
+
+    // Read later, the question still says when it was asked.
+    tokio::time::sleep(Duration::from_millis(300)).await;
+    let later = served.result("GetTask", json!({"id": first["id"]})).await;
+    assert_eq!(status_ms(&later), first_ms, "{later}");
+
+    // Approved, the task works, then asks again: a second wait, with its
+    // own time.
+    let approved_at = now();
+    let second = served
+        .result(
+            "SendMessage",
+            reply(&first, json!([{"text": format!("approve {first_id}")}])),
+        )
+        .await["task"]
+        .clone();
+    let second_id = call_id(&second);
+    assert_ne!(second_id, first_id);
+    let second_ms = status_ms(&second);
+    assert!((approved_at..=now()).contains(&second_ms), "{second}");
+    tokio::time::sleep(Duration::from_millis(300)).await;
+    let later = served.result("GetTask", json!({"id": first["id"]})).await;
+    assert_eq!(status_ms(&later), second_ms, "{later}");
+
+    let done = served
+        .result(
+            "SendMessage",
+            reply(&first, json!([{"text": format!("approve {second_id}")}])),
+        )
+        .await["task"]
+        .clone();
+    assert_eq!(done["status"]["state"], "TASK_STATE_COMPLETED", "{done}");
+    assert!(status_ms(&done) > second_ms, "{done}");
+}

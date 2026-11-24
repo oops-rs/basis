@@ -400,6 +400,13 @@ flowchart LR
   ([`a2a/approval-v1.md`](a2a/approval-v1.md)): the caller answers by call id, a mismatched answer
   is refused, the deadline answers `deny`, a cancel cancels, and a restart asks again under a fresh
   id. Inbound runs have no shell unless granted.
+- **A status's time is when it was reached.** The index records when a running task reached the
+  status it stands in, and when it settled; a question is a status of its own, so a reply and a
+  question asked again is a new wait with a new time. The task's driver looks at where its task
+  stands every 100ms while it runs, so the time is recorded whether or not a caller is looking.
+  `GetTask`, `ListTasks`, a stream's status events and a push all read their `status.timestamp`
+  from that record, so they give one status one time; a stream's progress notes carry the moment
+  of the note.
 - **Push is durable** (ADR-0030 §4). A task's push configs live beside its index record; every
   status change is delivered to each at least once, retried with backoff and re-sent after a
   restart from the last undelivered state. A webhook must be `http` or `https` and resolve only

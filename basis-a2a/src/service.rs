@@ -409,14 +409,11 @@ impl A2aService {
         if !accepted.return_immediately {
             self.settled_or_asking(&accepted.record).await;
         }
-        let standing = self.standing(&accepted.record).await?;
+        let (record, standing) = self.observed(&accepted.record).await?;
         let view = View::full(accepted.history_length);
-        let hosted = self.hosted_artifacts(&accepted.record, view).await?;
+        let hosted = self.hosted_artifacts(&record, view).await?;
         Ok(SendMessageResponse::Task(project::task(
-            &accepted.record,
-            &standing,
-            hosted,
-            view,
+            &record, &standing, hosted, view,
         )))
     }
 
@@ -445,7 +442,7 @@ impl A2aService {
         // still allowed.
         let record = self.record(caller, &request.id)?;
         let record = self.held(caller, record)?;
-        let standing = self.standing(&record).await?;
+        let (record, standing) = self.observed(&record).await?;
         let view = View::full(history_length);
         let hosted = self.hosted_artifacts(&record, view).await?;
         Ok(project::task(&record, &standing, hosted, view))
@@ -493,12 +490,12 @@ impl A2aService {
             {
                 continue;
             }
+            let (record, standing) = self.observed(&record).await?;
             if after_ms
                 .is_some_and(|after| i64::try_from(record.status_ms()).unwrap_or(i64::MAX) <= after)
             {
                 continue;
             }
-            let standing = self.standing(&record).await?;
             if request
                 .status
                 .as_ref()
@@ -545,7 +542,7 @@ impl A2aService {
         // Never judged against the token's workflows: a cancel can only stop
         // work, and whoever started a task may always stop it.
         let record = self.record(caller, &request.id)?;
-        let standing = self.standing(&record).await?;
+        let (record, standing) = self.observed(&record).await?;
         if record.withdrawn.is_some() {
             // Already stopped for a workflow withdrawn from its caller:
             // answered with the task as it stands, which says why, rather
@@ -575,7 +572,7 @@ impl A2aService {
             Backend::Hosted(host) => host.cancel(host_id_of(&record)?).await.map_err(from_host)?,
         }
         let _ = tokio::time::timeout(CANCEL_GRACE, self.settled(&record.id)).await;
-        let standing = self.standing(&record).await?;
+        let (record, standing) = self.observed(&record).await?;
         let view = View::full(None);
         let hosted = self.hosted_artifacts(&record, view).await?;
         Ok(project::task(&record, &standing, hosted, view))
@@ -606,21 +603,40 @@ impl A2aService {
         &self,
         record: &Record,
     ) -> Result<(String, TaskStatusUpdateEvent), A2AError> {
+        let (record, standing) = self.observed(record).await?;
+        Ok((standing.key(), project::status_update(&record, &standing)))
+    }
+
+    /// Where `record`'s task stands, with the record as it then stands: the
+    /// status's time recorded when this is the first look at it. Every answer
+    /// that carries a status — `GetTask`, a list, a stream, a push — is
+    /// projected from what this returns, so all of them give one status one
+    /// time: when it was reached, not when it was read, nor when the task
+    /// was accepted.
+    pub(crate) async fn observed(&self, record: &Record) -> Result<(Record, Standing), A2AError> {
         let standing = self.standing(record).await?;
-        let update = project::status_update(record, &standing);
-        let state = serde_json::to_value(&update.status.state)
-            .ok()
-            .and_then(|state| state.as_str().map(str::to_owned))
-            .unwrap_or_default();
-        // Two questions in a row are two changes, though both are
-        // `INPUT_REQUIRED`.
-        let key = match &standing {
-            Standing::Asking(asked) => format!("{state}:{}", asked.call_id),
-            // A host's question has no id; what it asks stands in for one.
-            Standing::HostAsking(parts) => format!("{state}:{:016x}", fingerprint(parts)),
-            _ => state,
+        let record = match &standing {
+            Standing::Settled(_) => self.as_settled(record),
+            // Accepted is when a task stands submitted; a task cannot return
+            // to it.
+            Standing::Submitted => record.clone(),
+            _ => match self
+                .inner
+                .index
+                .reached(&record.id, &standing.key(), basis_tasks::now_ms())
+            {
+                Ok(Some(fresh)) => fresh,
+                Ok(None) => record.clone(),
+                Err(error) => {
+                    eprintln!(
+                        "basis-a2a: record task {} reaching a status: {error}",
+                        record.id
+                    );
+                    record.clone()
+                }
+            },
         };
-        Ok((key, update))
+        Ok((record, standing))
     }
 
     /// Where `record`'s task stands: what `basis-tasks` says, with the
@@ -701,20 +717,6 @@ impl A2aService {
             .owned(caller, id)
             .ok_or_else(|| A2AError::task_not_found(id))
     }
-}
-
-/// A digest of a host's question, so two different questions in a row are
-/// two changes. Stable within one build, which is as long as a push store's
-/// last-seen status needs it to be compared against: a rebuilt server that
-/// sees a different digest for the same question sends it once more, which
-/// at-least-once delivery allows.
-fn fingerprint(parts: &[a2a::Part]) -> u64 {
-    use std::hash::{Hash, Hasher};
-    let mut hasher = std::collections::hash_map::DefaultHasher::new();
-    serde_json::to_string(parts)
-        .unwrap_or_default()
-        .hash(&mut hasher);
-    hasher.finish()
 }
 
 /// Refuses, by name, each setting that configures a `basis-tasks` run on a

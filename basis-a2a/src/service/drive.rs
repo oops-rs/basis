@@ -168,11 +168,31 @@ impl A2aService {
             },
         );
         let service = self.clone();
+        let watching = self.clone().watch_status(record.clone());
         tokio::spawn(async move {
-            run.await;
+            // The watch ends with the run: a settled task's time is the
+            // run's to record.
+            tokio::select! {
+                () = run => {}
+                () = watching => {}
+            }
             service.drivers().remove(&id);
             let _ = done.send(true);
         });
+    }
+
+    /// Looks at where `record`'s task stands at the cadence a stream does,
+    /// for as long as it is driven, so the time each status is reached is
+    /// recorded when it is reached, whether or not anyone is looking: a
+    /// question's time is when the task began waiting on its caller, not
+    /// when a caller first asked after it.
+    async fn watch_status(self, record: Record) {
+        loop {
+            // A look that fails is tried again on the next beat; a host
+            // that cannot say where its task stands is not news every 100ms.
+            let _ = self.observed(&record).await;
+            tokio::time::sleep(POLL).await;
+        }
     }
 
     /// `record` as the index holds it once its task is seen settled, with

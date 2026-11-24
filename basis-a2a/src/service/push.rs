@@ -294,14 +294,12 @@ impl A2aService {
         let Some(push) = &self.inner.push else {
             return true;
         };
-        let (status, mut update) = match self.status_now(record).await {
+        // Stamped with when the status was reached, as `GetTask` says it.
+        let (status, update) = match self.status_now(record).await {
             Ok(now) => now,
             Err(_) => return true,
         };
         let settled = update.status.state.is_terminal();
-        // When this server saw the change, which is closer to when it
-        // happened than when the task was accepted.
-        update.status.timestamp = crate::project::timestamp(basis_tasks::now_ms());
         match push
             .store
             .record(&record.id, status, StreamResponse::StatusUpdate(update))

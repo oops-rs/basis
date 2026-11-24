@@ -1212,3 +1212,87 @@ async fn the_host_is_handed_what_the_authenticator_vouched_for_and_not_what_the_
         "metadata stays the caller's"
     );
 }
+
+/// A status's time, as milliseconds since the epoch.
+fn status_ms(task: &Value) -> i64 {
+    let at = task["status"]["timestamp"]
+        .as_str()
+        .unwrap_or_else(|| panic!("{task}"));
+    chrono::DateTime::parse_from_rfc3339(at)
+        .unwrap()
+        .timestamp_millis()
+}
+
+#[tokio::test]
+async fn input_required_says_when_the_waiting_began_and_again_after_a_reply() {
+    // Well above the server's 100ms watch, and the slack a status's time is
+    // allowed after the moment it was reached.
+    const QUIET: Duration = Duration::from_millis(400);
+    const SLACK: i64 = 300;
+    let now = || Utc::now().timestamp_millis();
+    let host = FakeHost::held();
+    let served = serve(&host, |config| config).await;
+    let accepted = served
+        .result("SendMessage", send("deploy it", None, true))
+        .await["task"]
+        .clone();
+    let id = accepted["id"].as_str().unwrap().to_string();
+    let context = accepted["contextId"].as_str().unwrap().to_string();
+    let run = host.started(0).await;
+
+    // Nobody looks while the task asks, and it is still the asking time.
+    tokio::time::sleep(QUIET).await;
+    let asked_at = now();
+    host.ask(&run, question());
+    tokio::time::sleep(QUIET).await;
+    let first = served.result("GetTask", json!({"id": id})).await;
+    assert_eq!(
+        first["status"]["state"], "TASK_STATE_INPUT_REQUIRED",
+        "{first}"
+    );
+    let first_ms = status_ms(&first);
+    assert!(
+        (asked_at..asked_at + SLACK).contains(&first_ms),
+        "asked at {asked_at}, stamped {first_ms}: {first}"
+    );
+
+    // A stream opened now says the same time.
+    let events = stream_while(&served, "SubscribeToTask", json!({"id": id}), async {}).await;
+    assert_eq!(
+        status_ms(&events[0]["result"]["task"]),
+        first_ms,
+        "{events:?}"
+    );
+
+    // A reply, the work it resumes, then the same question asked again: a
+    // second wait, with a time of its own.
+    let mut answering = reply(&id, &context, "main");
+    answering["configuration"] = json!({"returnImmediately": true});
+    let resumed = served.result("SendMessage", answering).await["task"].clone();
+    assert_eq!(
+        resumed["status"]["state"], "TASK_STATE_WORKING",
+        "{resumed}"
+    );
+    assert!(status_ms(&resumed) > first_ms, "{resumed}");
+    tokio::time::sleep(QUIET).await;
+    let asked_again_at = now();
+    host.ask(&run, question());
+    tokio::time::sleep(QUIET).await;
+    let second = served.result("GetTask", json!({"id": id})).await;
+    assert_eq!(
+        second["status"]["state"], "TASK_STATE_INPUT_REQUIRED",
+        "{second}"
+    );
+    let second_ms = status_ms(&second);
+    assert!(
+        (asked_again_at..asked_again_at + SLACK).contains(&second_ms),
+        "asked again at {asked_again_at}, stamped {second_ms}: {second}"
+    );
+
+    // Settling keeps its own time, as 0.27.4 fixed it.
+    host.complete(&run, answer());
+    let done = served.wait_for(&id, "TASK_STATE_COMPLETED").await;
+    assert!(status_ms(&done) >= second_ms, "{done}");
+    let again = served.result("GetTask", json!({"id": id})).await;
+    assert_eq!(status_ms(&again), status_ms(&done), "{again}");
+}

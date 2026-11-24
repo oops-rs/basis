@@ -90,7 +90,7 @@ pub(crate) async fn follow(
             }
         }
     };
-    let standing = service.standing(&record).await?;
+    let (record, standing) = service.observed(&record).await?;
     let view = View::full(history_length);
     let hosted = service.hosted_artifacts(&record, view).await?;
     let snapshot = StreamResponse::Task(project::task(&record, &standing, hosted, view));
@@ -157,13 +157,13 @@ async fn produce(
                 return;
             }
         }
-        let standing = match service.standing(&record).await {
-            Ok(standing) => standing,
+        // The record as it now stands, for the time the status was reached.
+        let (record, standing) = match service.observed(&record).await {
+            Ok(observed) => observed,
             Err(_) => return,
         };
         match standing {
             Standing::Settled(_) => {
-                let record = service.as_settled(&record);
                 for update in settle(&record, &standing, Vec::new()) {
                     if sender.send(update).await.is_err() {
                         return;

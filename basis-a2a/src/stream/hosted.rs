@@ -69,11 +69,11 @@ pub(super) async fn produce(
                 }
                 break;
             }
-            _ = tick.tick() => match service.standing(&record).await {
-                Ok(standing @ Standing::Working) if !announced_working => {
+            _ = tick.tick() => match service.observed(&record).await {
+                Ok((current, standing @ Standing::Working)) if !announced_working => {
                     announced_working = true;
                     let update =
-                        StreamResponse::StatusUpdate(project::status_update(&record, &standing));
+                        StreamResponse::StatusUpdate(project::status_update(&current, &standing));
                     if sender.send(update).await.is_err() {
                         return;
                     }
@@ -81,9 +81,9 @@ pub(super) async fn produce(
                 // Asking its caller (ADR-0034): the stream closes on the
                 // question, as a `basis-tasks` task's does; the caller
                 // replies, then subscribes again.
-                Ok(standing @ Standing::HostAsking(_)) => {
+                Ok((current, standing @ Standing::HostAsking(_))) => {
                     let update =
-                        StreamResponse::StatusUpdate(project::status_update(&record, &standing));
+                        StreamResponse::StatusUpdate(project::status_update(&current, &standing));
                     let _ = sender.send(update).await;
                     return;
                 }
@@ -93,7 +93,7 @@ pub(super) async fn produce(
     }
     // Settled — or the host could not say, and where it stands now is the
     // last thing this stream can tell.
-    let Ok(standing) = service.standing(&record).await else {
+    let Ok((record, standing)) = service.observed(&record).await else {
         return;
     };
     let updates = if standing.is_terminal() {
@@ -108,7 +108,7 @@ pub(super) async fn produce(
                 Vec::new()
             }
         };
-        settle(&service.as_settled(&record), &standing, hosted)
+        settle(&record, &standing, hosted)
     } else {
         vec![StreamResponse::StatusUpdate(project::status_update(
             &record, &standing,
