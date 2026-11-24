@@ -163,6 +163,7 @@ async fn produce(
         };
         match standing {
             Standing::Settled(_) => {
+                let record = service.as_settled(&record);
                 for update in settle(&record, &standing, Vec::new()) {
                     if sender.send(update).await.is_err() {
                         return;

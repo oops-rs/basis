@@ -175,6 +175,24 @@ impl A2aService {
         });
     }
 
+    /// `record` as the index holds it once its task is seen settled, with
+    /// the moment it settled recorded if nobody has yet.
+    ///
+    /// A stream reads its record when it opens, before the task settles, so
+    /// that copy has no finish time and its terminal status would say the
+    /// task's creation time. The driver records the finish when its run
+    /// returns, which may be after a stream polls and sees the task settled.
+    /// The first time recorded is kept, so recording it here makes the
+    /// stream's terminal status and `GetTask` say the same instant whoever
+    /// gets there first.
+    pub(crate) fn as_settled(&self, record: &Record) -> Record {
+        self.record_settled(&record.id);
+        self.inner
+            .index
+            .get(&record.id)
+            .unwrap_or_else(|| record.clone())
+    }
+
     /// Records that `id` settled, now.
     fn record_settled(&self, id: &str) {
         if let Err(error) = self.inner.index.finish(id, now_ms()) {

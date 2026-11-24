@@ -260,6 +260,15 @@ async fn a_stream_is_the_task_then_each_note_then_the_answer_then_its_state() {
     );
     assert_eq!(artifact, events.len() - 2, "the state closes the stream");
     assert_eq!(*final_state(&events), "TASK_STATE_COMPLETED");
+
+    // The state's time is when the task settled, as `GetTask` says it, not
+    // when it was accepted.
+    let id = events[0]["result"]["task"]["id"].as_str().unwrap();
+    let accepted = &events[0]["result"]["task"]["status"]["timestamp"];
+    let settled = &events.last().unwrap()["result"]["statusUpdate"]["status"]["timestamp"];
+    let task = served.result("GetTask", json!({"id": id})).await;
+    assert_eq!(*settled, task["status"]["timestamp"], "{events:?}");
+    assert_ne!(settled, accepted, "{events:?}");
 }
 
 #[tokio::test]

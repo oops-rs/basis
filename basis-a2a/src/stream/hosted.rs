@@ -108,7 +108,7 @@ pub(super) async fn produce(
                 Vec::new()
             }
         };
-        settle(&record, &standing, hosted)
+        settle(&service.as_settled(&record), &standing, hosted)
     } else {
         vec![StreamResponse::StatusUpdate(project::status_update(
             &record, &standing,

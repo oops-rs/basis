@@ -259,3 +259,52 @@ async fn a_principal_holds_at_most_its_stream_cap() {
         .unwrap();
     assert_ne!(reopened.status(), 400, "the place was given back");
 }
+
+#[tokio::test]
+async fn a_streams_terminal_status_says_when_the_task_settled() {
+    let served = Served::start_with(ScriptedEndpoint::start(true), |config| config).await;
+    let url = interface(&served).await;
+    let (_, sent) = rest(
+        &served,
+        Method::POST,
+        "/message:send",
+        Some(json!({
+            "message": user_message("slow", None),
+            "configuration": {"returnImmediately": true},
+        })),
+    )
+    .await;
+    let id = sent["task"]["id"].as_str().unwrap().to_string();
+    let accepted = sent["task"]["status"]["timestamp"]
+        .as_str()
+        .unwrap()
+        .to_string();
+
+    let subscription = served
+        .caller()
+        .request(Method::GET, &format!("{url}/tasks/{id}:subscribe"))
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(subscription.status(), 200);
+    // Long enough that a settling time cannot be mistaken for the
+    // accepting one at millisecond resolution.
+    tokio::time::sleep(std::time::Duration::from_millis(50)).await;
+    served.model.release();
+    let body = subscription.text().await.unwrap();
+    let events = sse_events(&body);
+    let last = &events.last().unwrap()["statusUpdate"]["status"];
+    assert_eq!(last["state"], "TASK_STATE_COMPLETED", "{body}");
+
+    let (status, task) = rest(&served, Method::GET, &format!("/tasks/{id}"), None).await;
+    assert_eq!(status, 200, "{task}");
+    assert_eq!(
+        last["timestamp"], task["status"]["timestamp"],
+        "the stream and GetTask name one settling instant: {body}"
+    );
+    assert_ne!(
+        last["timestamp"].as_str().unwrap(),
+        accepted,
+        "the terminal status is not the accepting one: {body}"
+    );
+}
