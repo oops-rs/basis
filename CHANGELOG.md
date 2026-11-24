@@ -5,6 +5,21 @@ All six crates — `basis`, `basis-host`, `basis-tasks`, `basis-acp`,
 live in `docs/adr/`; this file says what changed for someone upgrading.
 Releases before 0.15.0 are described by their tags and ADRs only.
 
+## 0.27.5 — 2026-11-24
+
+Fix. Requires Mentra 0.38.1.
+
+- A task's `status.timestamp` is when it reached that status, the same in
+  `GetTask`, `ListTasks`, stream status events and push. `WORKING` says when
+  the work began or resumed, and `INPUT_REQUIRED` says when the task began
+  waiting on its caller; a reply followed by another question is a new wait
+  with a new time. Before, a running task's status carried the time it was
+  accepted, and push stamped the time it noticed the change. The server
+  records each status when it is reached, whether or not anyone is looking.
+  A settled task keeps the time it settled (0.27.4). `ListTasks`'
+  `statusTimestampAfter` and its order follow the same times. Progress notes
+  in a stream still carry the moment of the note.
+
 ## 0.27.4 — 2026-11-24
 
 Fix. Requires Mentra 0.38.1.
