@@ -5,6 +5,17 @@ All six crates — `basis`, `basis-host`, `basis-tasks`, `basis-acp`,
 live in `docs/adr/`; this file says what changed for someone upgrading.
 Releases before 0.15.0 are described by their tags and ADRs only.
 
+## 0.27.4 — 2026-11-24
+
+Fix. Requires Mentra 0.38.1.
+
+- The last status event of a `SubscribeToTask` or `SendStreamingMessage`
+  stream (`COMPLETED`, `FAILED`, `CANCELED`) carries the time the task
+  settled, the same instant `GetTask` reports. Before, it carried the time
+  the task was accepted, because the stream reused the record it read when it
+  opened. Tasks run on `basis-tasks` and tasks run by a host had the same
+  bug.
+
 ## 0.27.3 — 2026-11-23
 
 Additive. Requires Mentra 0.38.1.
